@@ -109,6 +109,30 @@ private:
     std::string   what_;
 };
 
+// Moving vertices, as opposed to changing topology. Stores only the positions
+// that moved, so dragging a face on a heavy mesh costs a handful of vectors
+// rather than two full copies of it.
+class VertexCommand : public Command {
+public:
+    VertexCommand(ObjectId id, std::vector<Index> verts,
+                  std::vector<Vec3> before, std::vector<Vec3> after, std::string what)
+        : id_(id), verts_(std::move(verts)), before_(std::move(before)),
+          after_(std::move(after)), what_(std::move(what)) {}
+
+    void undo(Scene& scene) override { apply(scene, before_); }
+    void redo(Scene& scene) override { apply(scene, after_); }
+    std::string label() const override { return what_; }
+    bool mergeWith(const Command& other) override;
+
+private:
+    void apply(Scene& scene, const std::vector<Vec3>& positions);
+
+    ObjectId           id_;
+    std::vector<Index> verts_;
+    std::vector<Vec3>  before_, after_;
+    std::string        what_;
+};
+
 class UndoStack {
 public:
     // `merge` collapses this command into the previous one when they represent

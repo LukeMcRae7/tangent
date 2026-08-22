@@ -26,7 +26,12 @@ enum class Constraint {
     None,
     AxisX, AxisY, AxisZ,       // along one axis
     PlaneX, PlaneY, PlaneZ,    // within the plane perpendicular to that axis
+    Custom,                    // along an arbitrary axis, e.g. a face normal
 };
+
+// What the transform moves. Chosen automatically from what is selected: if
+// mesh elements are picked it moves their vertices, otherwise whole objects.
+enum class TransformTarget { Objects, Elements };
 
 class TransformTool {
 public:
@@ -38,6 +43,12 @@ public:
 
     // Pressing the axis already in force clears it, matching Blender.
     void setConstraint(Constraint c);
+
+    // Constrains to an arbitrary direction, used to push an extrusion along
+    // its own face normal rather than a world axis.
+    void setCustomAxis(Vec3 axis, const char* label);
+
+    TransformTarget target() const { return target_; }
 
     void typeCharacter(char c);   // digits, '.', '-' for exact entry
     void backspace();
@@ -64,6 +75,12 @@ private:
         Transform before;
     };
 
+    // Object-space vertex positions captured at the start of the gesture.
+    struct VertexEntry {
+        Index vertex;
+        Vec3  before;
+    };
+
     Vec3  constraintAxis() const;
     bool  isPlane() const;
     void  apply(Scene& scene, const Camera& camera, Vec2 mousePx, bool snap);
@@ -72,6 +89,13 @@ private:
     Constraint    constraint_ = Constraint::None;
 
     std::vector<Entry> entries_;
+
+    TransformTarget          target_ = TransformTarget::Objects;
+    ObjectId                 elementObject_ = kNoObject;
+    std::vector<VertexEntry> vertexEntries_;
+    Vec3                     customAxis_{0, 0, 1};
+    std::string              customLabel_;
+
     Vec3  pivot_;
     Vec2  startMouse_;
     Vec2  pivotPx_;

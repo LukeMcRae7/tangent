@@ -6,6 +6,7 @@
 
 #include <cstdio>
 #include <string>
+#include <vector>
 
 using namespace tg;
 
@@ -343,6 +344,129 @@ int main() {
         std::printf("[tool] mouse translate ok (moved %.2f mm, snapped %.2f)\n",
                     moved.x - start.x, snapped);
         tool.cancel(s);
+    }
+
+    // ---- Element transforms: move a face, not the object -------------------
+    {
+        Scene s;
+        Camera cam = makeCamera();
+        TransformTool tool;
+        const ObjectId id = s.addPrimitive(PrimitiveKind::Box);   // 20mm cube
+
+        // Top face, found by normal.
+        Index top = kInvalid;
+        for (Index f = 0; f < s.find(id)->mesh.faceCount(); ++f)
+            if (dot(s.find(id)->mesh.faceNormal(f), Vec3{0, 0, 1}) > 0.99f) top = f;
+        check(top != kInvalid, "found the top face");
+
+        s.selectElement({id, ElementKind::Face, top});
+        const Transform objBefore = s.find(id)->transform;
+
+        check(tool.begin(TransformMode::Translate, s, cam, {500, 400}), "element move begins");
+        check(tool.target() == TransformTarget::Elements,
+              "an element selection targets vertices, not the object");
+
+        tool.setConstraint(Constraint::AxisZ);
+        for (char ch : std::string("6")) tool.typeCharacter(ch);
+        tool.update(s, cam, {500, 400}, false);
+
+        const SceneObject* o = s.find(id);
+        check(o->transform.position == objBefore.position, "the object itself did not move");
+        // Moving the top face up 6mm turns the 20mm cube into a 20x20x26 box.
+        check(near(o->localBounds.size().z, 26.0f), "the mesh got 6mm taller");
+        check(near(o->localBounds.size().x, 20.0f), "and no wider");
+
+        auto cmd = tool.confirm(s);
+        check(cmd != nullptr, "confirm yields a command");
+        UndoStack u;
+        u.push(std::move(cmd));
+        u.undo(s);
+        check(near(s.find(id)->localBounds.size().z, 20.0f), "undo restores the mesh");
+        u.redo(s);
+        check(near(s.find(id)->localBounds.size().z, 26.0f), "redo re-applies");
+        std::printf("[element] face move + undo ok\n");
+    }
+
+    // Cancelling an element move must restore the vertices exactly.
+    {
+        Scene s;
+        Camera cam = makeCamera();
+        TransformTool tool;
+        const ObjectId id = s.addPrimitive(PrimitiveKind::Box);
+        s.selectElement({id, ElementKind::Face, 0});
+
+        const AABB before = s.find(id)->localBounds;
+        tool.begin(TransformMode::Translate, s, cam, {400, 300});
+        tool.update(s, cam, {700, 520}, false);
+        check(!nearV(s.find(id)->localBounds.size(), before.size()), "the drag changed the mesh");
+        tool.cancel(s);
+        check(nearV(s.find(id)->localBounds.min, before.min), "cancel restores exactly");
+        check(nearV(s.find(id)->localBounds.max, before.max), "cancel restores exactly");
+        std::printf("[element] cancel ok\n");
+    }
+
+    // The gesture is resolved in world space, so it stays correct when the
+    // object carries a rotation and a non-uniform scale.
+    {
+        Scene s;
+        Camera cam = makeCamera();
+        TransformTool tool;
+        const ObjectId id = s.addPrimitive(PrimitiveKind::Box);
+        SceneObject* o = s.find(id);
+        o->transform.rotation = Quat::fromAxisAngle({0, 0, 1}, radians(90.0f));
+        o->transform.scale = {2.0f, 1.0f, 1.0f};
+
+        Index top = kInvalid;
+        for (Index f = 0; f < o->mesh.faceCount(); ++f)
+            if (dot(o->mesh.faceNormal(f), Vec3{0, 0, 1}) > 0.99f) top = f;
+        s.selectElement({id, ElementKind::Face, top});
+
+        tool.begin(TransformMode::Translate, s, cam, {500, 400});
+        tool.setConstraint(Constraint::AxisZ);
+        for (char ch : std::string("10")) tool.typeCharacter(ch);
+        tool.update(s, cam, {500, 400}, false);
+
+        // Z is unaffected by a Z-rotation or an X-scale, so a 10mm world move
+        // must show up as exactly 10mm of extra local height.
+        check(near(s.find(id)->localBounds.size().z, 30.0f),
+              "world-space move is correct through rotation and scale");
+        tool.cancel(s);
+        std::printf("[element] correct under object rotation and scale ok\n");
+    }
+
+    // An edge drag moves only its two vertices.
+    {
+        Scene s;
+        Camera cam = makeCamera();
+        TransformTool tool;
+        const ObjectId id = s.addPrimitive(PrimitiveKind::Box);
+        const int vertsBefore = s.find(id)->mesh.vertexCount();
+
+        // Snapshot every position rather than testing a coordinate threshold:
+        // which end of the box half-edge 0 happens to lie on is an internal
+        // detail of the generator, not something the test should assume.
+        std::vector<Vec3> original;
+        for (Index v = 0; v < vertsBefore; ++v)
+            original.push_back(s.find(id)->mesh.verts[v].position);
+
+        s.selectElement({id, ElementKind::Edge, 0});
+        tool.begin(TransformMode::Translate, s, cam, {500, 400});
+        tool.setConstraint(Constraint::AxisZ);
+        for (char ch : std::string("5")) tool.typeCharacter(ch);
+        tool.update(s, cam, {500, 400}, false);
+
+        check(s.find(id)->mesh.vertexCount() == vertsBefore, "no vertices added");
+        int moved = 0;
+        for (Index v = 0; v < vertsBefore; ++v) {
+            const Vec3 now = s.find(id)->mesh.verts[v].position;
+            if (now != original[v]) {
+                ++moved;
+                check(near(now.z - original[v].z, 5.0f), "moved exactly 5mm along Z");
+            }
+        }
+        check(moved == 2, "exactly the edge's two vertices moved");
+        tool.cancel(s);
+        std::printf("[element] edge drag moves two vertices ok\n");
     }
 
     std::printf("\n%s (%d failures)\n", failures ? "FAILED" : "ALL PASS", failures);

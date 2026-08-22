@@ -59,6 +59,14 @@ struct SceneObject {
     uint32_t meshVersion = 1;
 
     Mat4 modelMatrix() const { return transform.matrix(); }
+
+    // Recomputes everything derived from `mesh` and marks the GPU copy stale.
+    // Any code that edits vertex positions must call this.
+    void refreshDerived() {
+        mesh.buildRenderMesh(render);
+        localBounds = mesh.bounds();
+        ++meshVersion;
+    }
     AABB worldBounds() const;
     void markMeshChanged() { ++meshVersion; }
 };

@@ -68,7 +68,7 @@ public:
     // selection highlight and the mesh operations reproducible in a capture,
     // which a click cannot be.
     void setPickFace(int index) { pickFace_ = index; }
-    void setAutoExtrude() { autoExtrude_ = true; }
+    void setAutoExtrude(float mm) { autoExtrude_ = true; autoExtrudeMm_ = mm; }
 
     // Writes the viewport to a PPM after `afterFrames` frames. Reads back this
     // process's own GL framebuffer rather than going through the compositor, so
@@ -89,6 +89,11 @@ private:
     void drawSelectionHighlights();
     void extrudeSelection();
     void bevelActiveObject();
+
+    // Single exit points for a modal transform, so the extrude-drag's extra
+    // bookkeeping cannot be forgotten at one of the several call sites.
+    void commitTransform();
+    void abortTransform();
     void applyActions();
     void buildUi();
     void drawFrame();
@@ -134,8 +139,16 @@ private:
     int         screenshotFrame_ = -1;
     bool        fixedCamera_ = false;
     bool        startEmpty_ = false;
+    // Set while a transform is finishing an operation that also changed
+    // topology, so commit records one undo entry covering both.
+    ObjectId      pendingMeshObject_ = kNoObject;
+    Mesh          pendingMeshBefore_;
+    PrimitiveSpec pendingSpecBefore_;
+    std::string   pendingLabel_;
+
     int         pickFace_ = -1;
     bool        autoExtrude_ = false;
+    float       autoExtrudeMm_ = 10.0f;
 
     double meanViewportLuminance() const;
     void   readViewport(std::vector<unsigned char>& out) const;

@@ -90,6 +90,22 @@ bool ParameterCommand::mergeWith(const Command& other) {
 }
 
 // ---------------------------------------------------------------------------
+void VertexCommand::apply(Scene& scene, const std::vector<Vec3>& positions) {
+    SceneObject* o = scene.find(id_);
+    if (!o) return;
+    for (size_t i = 0; i < verts_.size() && i < positions.size(); ++i)
+        if (verts_[i] < o->mesh.vertexCount()) o->mesh.verts[verts_[i]].position = positions[i];
+    o->refreshDerived();
+}
+
+bool VertexCommand::mergeWith(const Command& other) {
+    const auto* rhs = dynamic_cast<const VertexCommand*>(&other);
+    if (!rhs || rhs->id_ != id_ || rhs->verts_ != verts_) return false;
+    after_ = rhs->after_;
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 void MeshCommand::apply(Scene& scene, const Mesh& mesh, const PrimitiveSpec& spec) {
     SceneObject* o = scene.find(id_);
     if (!o) return;

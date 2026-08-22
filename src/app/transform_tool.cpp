@@ -64,9 +64,17 @@ Vec3 TransformTool::constraintAxis() const {
         case Constraint::AxisX: case Constraint::PlaneX: return {1, 0, 0};
         case Constraint::AxisY: case Constraint::PlaneY: return {0, 1, 0};
         case Constraint::AxisZ: case Constraint::PlaneZ: return {0, 0, 1};
+        case Constraint::Custom: return customAxis_;
         case Constraint::None:  return {};
     }
     return {};
+}
+
+void TransformTool::setCustomAxis(Vec3 axis, const char* label) {
+    if (lengthSq(axis) < 1e-12f) return;
+    customAxis_ = normalize(axis);
+    customLabel_ = label ? label : "";
+    constraint_ = Constraint::Custom;
 }
 
 bool TransformTool::isPlane() const {
@@ -78,12 +86,63 @@ bool TransformTool::isPlane() const {
 // ---------------------------------------------------------------------------
 bool TransformTool::begin(TransformMode mode, Scene& scene, const Camera& camera,
                           Vec2 mousePx) {
-    if (scene.selection().empty()) return false;
-
     entries_.clear();
-    for (ObjectId id : scene.selection())
-        if (const SceneObject* o = scene.find(id)) entries_.push_back({id, o->transform});
-    if (entries_.empty()) return false;
+    vertexEntries_.clear();
+    elementObject_ = kNoObject;
+    customLabel_.clear();
+    Vec3 pivot{};
+
+    if (!scene.elementSelection().empty()) {
+        // Element mode: gather the union of vertices behind every picked
+        // element. A face contributes its whole loop, an edge its two ends.
+        target_ = TransformTarget::Elements;
+        elementObject_ = scene.elementSelection().front().object;
+        const SceneObject* obj = scene.find(elementObject_);
+        if (!obj) return false;
+
+        std::vector<bool> seen(static_cast<size_t>(obj->mesh.vertexCount()), false);
+        auto take = [&](Index v) {
+            if (v < 0 || v >= obj->mesh.vertexCount() || seen[v]) return;
+            seen[v] = true;
+            vertexEntries_.push_back({v, obj->mesh.verts[v].position});
+        };
+
+        for (const ElementRef& e : scene.elementSelection()) {
+            // Elements on other objects are ignored: one gesture edits one mesh.
+            if (e.object != elementObject_) continue;
+            switch (e.kind) {
+            case ElementKind::Vertex: take(e.index); break;
+            case ElementKind::Edge:
+                if (e.index < obj->mesh.halfedgeCount()) {
+                    take(obj->mesh.fromVertex(e.index));
+                    take(obj->mesh.halfedges[e.index].vertex);
+                }
+                break;
+            case ElementKind::Face:
+                if (e.index < obj->mesh.faceCount()) {
+                    std::vector<Index> verts;
+                    obj->mesh.faceVertices(e.index, verts);
+                    for (Index v : verts) take(v);
+                }
+                break;
+            case ElementKind::None: break;
+            }
+        }
+        if (vertexEntries_.empty()) return false;
+
+        // Pivot is the centroid of the moving vertices, in world space.
+        Vec3 acc{};
+        for (const VertexEntry& v : vertexEntries_) acc += v.before;
+        pivot = transformPoint(obj->modelMatrix(),
+                               acc / static_cast<float>(vertexEntries_.size()));
+    } else {
+        if (scene.selection().empty()) return false;
+        target_ = TransformTarget::Objects;
+        for (ObjectId id : scene.selection())
+            if (const SceneObject* o = scene.find(id)) entries_.push_back({id, o->transform});
+        if (entries_.empty()) return false;
+        pivot = scene.selectionCenter();
+    }
 
     mode_ = mode;
     constraint_ = Constraint::None;
@@ -91,7 +150,7 @@ bool TransformTool::begin(TransformMode mode, Scene& scene, const Camera& camera
     amount_ = 0.0f;
     delta_ = Vec3{};
 
-    pivot_ = scene.selectionCenter();
+    pivot_ = pivot;
     startMouse_ = mousePx;
     if (!camera.projectToPixel(pivot_, pivotPx_)) pivotPx_ = mousePx;
 
@@ -135,17 +194,22 @@ void TransformTool::apply(Scene& scene, const Camera& camera, Vec2 mousePx, bool
     const float step = snapStepFor(camera, pivot_);
     snapStep_ = snap ? step : 0.0f;
 
+    // The gesture is resolved once, in world space, and then applied to either
+    // object transforms or mesh vertices. Keeping that split at the end means
+    // the two targets can never drift apart in how they interpret a drag.
+    Vec3 delta{};
+    Quat rot{};
+    Vec3 scl{1.0f, 1.0f, 1.0f};
+
     switch (mode_) {
     // ---------------------------------------------------------------- move --
     case TransformMode::Translate: {
-        Vec3 delta{};
-
+        const bool axisLocked = constraint_ != Constraint::None && !isPlane();
         if (typedValue) {
             // An exact distance needs an axis to travel along; without one
             // there is no defined direction, so the entry simply waits.
-            if (constraint_ != Constraint::None && !isPlane())
-                delta = constraintAxis() * typedNum;
-        } else if (constraint_ != Constraint::None && !isPlane()) {
+            if (axisLocked) delta = constraintAxis() * typedNum;
+        } else if (axisLocked) {
             const Vec3 axis = constraintAxis();
             float s0 = 0.0f, s1 = 0.0f;
             if (closestOnLine(rayStart, pivot_, axis, s0) &&
@@ -166,12 +230,8 @@ void TransformTool::apply(Scene& scene, const Camera& camera, Vec2 mousePx, bool
                                    snapTo(delta.z, step)};
             }
         }
-
         delta_ = delta;
         amount_ = length(delta);
-        for (const Entry& e : entries_)
-            if (SceneObject* o = scene.find(e.id))
-                o->transform.position = e.before.position + delta;
         break;
     }
 
@@ -186,24 +246,17 @@ void TransformTool::apply(Scene& scene, const Camera& camera, Vec2 mousePx, bool
             angle = radians(typedNum);
         } else {
             const float now = std::atan2(mousePx.y - pivotPx_.y, mousePx.x - pivotPx_.x);
-            float step = now - rotateLast_;
+            float delta2 = now - rotateLast_;
             // Unwrap so a sweep through the +/-pi seam keeps accumulating.
-            while (step >  kPi) step -= kTwoPi;
-            while (step < -kPi) step += kTwoPi;
+            while (delta2 >  kPi) delta2 -= kTwoPi;
+            while (delta2 < -kPi) delta2 += kTwoPi;
             rotateLast_ = now;
-            rotateAccum_ += step;
+            rotateAccum_ += delta2;
             angle = -rotateAccum_;   // screen Y grows downward
             if (snap) angle = radians(snapTo(degrees(angle), 5.0f));
         }
-
         amount_ = degrees(angle);
-        const Quat q = Quat::fromAxisAngle(axis, angle);
-        for (const Entry& e : entries_) {
-            SceneObject* o = scene.find(e.id);
-            if (!o) continue;
-            o->transform.rotation = normalize(q * e.before.rotation);
-            o->transform.position = pivot_ + rotate(q, e.before.position - pivot_);
-        }
+        rot = Quat::fromAxisAngle(axis, angle);
         break;
     }
 
@@ -218,24 +271,68 @@ void TransformTool::apply(Scene& scene, const Camera& camera, Vec2 mousePx, bool
             factor = d0 > 1e-3f ? d1 / d0 : 1.0f;
             if (snap) factor = snapTo(factor, 0.1f);
         }
-
         // Per-axis factors: uniform, one axis, or the two axes of a plane.
-        Vec3 s{factor, factor, factor};
         switch (constraint_) {
-            case Constraint::AxisX: s = {factor, 1, 1}; break;
-            case Constraint::AxisY: s = {1, factor, 1}; break;
-            case Constraint::AxisZ: s = {1, 1, factor}; break;
-            case Constraint::PlaneX: s = {1, factor, factor}; break;
-            case Constraint::PlaneY: s = {factor, 1, factor}; break;
-            case Constraint::PlaneZ: s = {factor, factor, 1}; break;
-            case Constraint::None: break;
+            case Constraint::AxisX: scl = {factor, 1, 1}; break;
+            case Constraint::AxisY: scl = {1, factor, 1}; break;
+            case Constraint::AxisZ: scl = {1, 1, factor}; break;
+            case Constraint::PlaneX: scl = {1, factor, factor}; break;
+            case Constraint::PlaneY: scl = {factor, 1, factor}; break;
+            case Constraint::PlaneZ: scl = {factor, factor, 1}; break;
+            case Constraint::Custom:
+            case Constraint::None: scl = {factor, factor, factor}; break;
         }
-
         amount_ = factor;
-        for (const Entry& e : entries_) {
-            SceneObject* o = scene.find(e.id);
-            if (!o) continue;
-            Vec3 next = e.before.scale * s;
+        break;
+    }
+
+    case TransformMode::None:
+        return;
+    }
+
+    // How the gesture moves an arbitrary world point.
+    auto mapWorld = [&](Vec3 p) -> Vec3 {
+        switch (mode_) {
+            case TransformMode::Translate: return p + delta;
+            case TransformMode::Rotate:    return pivot_ + rotate(rot, p - pivot_);
+            case TransformMode::Scale:     return pivot_ + (p - pivot_) * scl;
+            case TransformMode::None:      return p;
+        }
+        return p;
+    };
+
+    if (target_ == TransformTarget::Elements) {
+        SceneObject* obj = scene.find(elementObject_);
+        if (!obj) return;
+
+        // Vertices live in object space, so each one round-trips through the
+        // model matrix. Doing the gesture in world space keeps it correct under
+        // rotation and non-uniform scale, which a naive local-space delta would
+        // not be.
+        const Mat4 model = obj->modelMatrix();
+        const Mat4 inv = inverse(model);
+        for (const VertexEntry& ve : vertexEntries_) {
+            if (ve.vertex >= obj->mesh.vertexCount()) continue;
+            const Vec3 world = transformPoint(model, ve.before);
+            obj->mesh.verts[ve.vertex].position = transformPoint(inv, mapWorld(world));
+        }
+        obj->refreshDerived();
+        return;
+    }
+
+    for (const Entry& e : entries_) {
+        SceneObject* o = scene.find(e.id);
+        if (!o) continue;
+        switch (mode_) {
+        case TransformMode::Translate:
+            o->transform.position = e.before.position + delta;
+            break;
+        case TransformMode::Rotate:
+            o->transform.rotation = normalize(rot * e.before.rotation);
+            o->transform.position = pivot_ + rotate(rot, e.before.position - pivot_);
+            break;
+        case TransformMode::Scale: {
+            Vec3 next = e.before.scale * scl;
             // A scale of exactly zero makes the model matrix singular, which
             // silently breaks picking and normals. Keep a hair of thickness.
             constexpr float kMinScale = 1e-4f;
@@ -243,19 +340,46 @@ void TransformTool::apply(Scene& scene, const Camera& camera, Vec2 mousePx, bool
                 if (std::fabs(next[i]) < kMinScale)
                     next[i] = next[i] < 0.0f ? -kMinScale : kMinScale;
             o->transform.scale = next;
-            o->transform.position = pivot_ + (e.before.position - pivot_) * s;
+            o->transform.position = pivot_ + (e.before.position - pivot_) * scl;
+            break;
         }
-        break;
-    }
-
-    case TransformMode::None:
-        break;
+        case TransformMode::None:
+            break;
+        }
     }
 }
 
 // ---------------------------------------------------------------------------
 std::unique_ptr<Command> TransformTool::confirm(Scene& scene) {
     if (!active()) return nullptr;
+
+    if (target_ == TransformTarget::Elements) {
+        const std::string what = transformModeName(mode_);
+        const ObjectId id = elementObject_;
+        std::vector<VertexEntry> moved = std::move(vertexEntries_);
+
+        mode_ = TransformMode::None;
+        vertexEntries_.clear();
+        entries_.clear();
+        typed_.clear();
+
+        const SceneObject* obj = scene.find(id);
+        if (!obj) return nullptr;
+
+        std::vector<Index> verts;
+        std::vector<Vec3> before, after;
+        for (const VertexEntry& ve : moved) {
+            if (ve.vertex >= obj->mesh.vertexCount()) continue;
+            const Vec3 now = obj->mesh.verts[ve.vertex].position;
+            if (now == ve.before) continue;
+            verts.push_back(ve.vertex);
+            before.push_back(ve.before);
+            after.push_back(now);
+        }
+        if (verts.empty()) return nullptr;   // a click that did not move anything
+        return std::make_unique<VertexCommand>(id, std::move(verts), std::move(before),
+                                               std::move(after), what);
+    }
 
     std::vector<TransformCommand::Entry> changed;
     for (const Entry& e : entries_) {
@@ -279,10 +403,20 @@ std::unique_ptr<Command> TransformTool::confirm(Scene& scene) {
 }
 
 void TransformTool::cancel(Scene& scene) {
-    for (const Entry& e : entries_)
-        if (SceneObject* o = scene.find(e.id)) o->transform = e.before;
+    if (target_ == TransformTarget::Elements) {
+        if (SceneObject* obj = scene.find(elementObject_)) {
+            for (const VertexEntry& ve : vertexEntries_)
+                if (ve.vertex < obj->mesh.vertexCount())
+                    obj->mesh.verts[ve.vertex].position = ve.before;
+            obj->refreshDerived();
+        }
+    } else {
+        for (const Entry& e : entries_)
+            if (SceneObject* o = scene.find(e.id)) o->transform = e.before;
+    }
     mode_ = TransformMode::None;
     entries_.clear();
+    vertexEntries_.clear();
     typed_.clear();
 }
 
@@ -290,6 +424,7 @@ void TransformTool::cancel(Scene& scene) {
 std::string TransformTool::statusText() const {
     if (!active()) return {};
 
+    std::string customName = customLabel_.empty() ? "" : (" " + customLabel_);
     const char* axisName = "";
     switch (constraint_) {
         case Constraint::AxisX: axisName = " X"; break;
@@ -298,6 +433,7 @@ std::string TransformTool::statusText() const {
         case Constraint::PlaneX: axisName = " YZ"; break;
         case Constraint::PlaneY: axisName = " XZ"; break;
         case Constraint::PlaneZ: axisName = " XY"; break;
+        case Constraint::Custom: axisName = customName.c_str(); break;
         case Constraint::None: break;
     }
 

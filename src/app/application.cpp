@@ -109,7 +109,15 @@ bool Application::init() {
         const ObjectId id = scene_.objects().front()->id;
         scene_.clearSelection();
         scene_.selectElement({id, ElementKind::Face, static_cast<Index>(pickFace_)});
-        if (autoExtrude_) extrudeSelection();
+        if (autoExtrude_) {
+            // Drive the real interactive path: extrude, type a distance, commit.
+            extrudeSelection();
+            char buf[32];
+            std::snprintf(buf, sizeof(buf), "%g", static_cast<double>(autoExtrudeMm_));
+            for (const char* p = buf; *p; ++p) tool_.typeCharacter(*p);
+            tool_.update(scene_, camera_, Vec2{0.0f, 0.0f}, false);
+            commitTransform();
+        }
     }
 
     if (!fixedCamera_) {
@@ -188,10 +196,8 @@ void Application::handleViewportMouse() {
     if (tool_.active()) {
         tool_.update(scene_, camera_, mouseInViewport(), io.KeyCtrl);
         if (!io.WantCaptureMouse) {
-            if (ImGui::IsMouseClicked(ImGuiMouseButton_Left))
-                undo_.push(tool_.confirm(scene_));
-            else if (ImGui::IsMouseClicked(ImGuiMouseButton_Right))
-                tool_.cancel(scene_);
+            if (ImGui::IsMouseClicked(ImGuiMouseButton_Left))       commitTransform();
+            else if (ImGui::IsMouseClicked(ImGuiMouseButton_Right))  abortTransform();
         }
         return;
     }
@@ -311,10 +317,10 @@ void Application::drawSelectionHighlights() {
 void Application::handleTransformKeys() {
     ImGuiIO& io = ImGui::GetIO();
 
-    if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) { tool_.cancel(scene_); return; }
+    if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) { abortTransform(); return; }
     if (ImGui::IsKeyPressed(ImGuiKey_Enter, false) ||
         ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false)) {
-        undo_.push(tool_.confirm(scene_));
+        commitTransform();
         return;
     }
 
@@ -426,18 +432,16 @@ void Application::addPrimitiveAtCursor(PrimitiveKind kind) {
     }
 }
 
-namespace {
-// One snap step at the current zoom, reused so a keyboard mesh edit moves by
-// the same increment a snapped drag would.
-float editStep(const Camera& camera, Vec3 at) {
-    return niceStep(camera.pixelWorldSize(at) * 42.0f);
-}
-} // namespace
-
 // Runs a mesh operation on the active object and records it for undo. The
 // operation is given a scratch copy, so a rejected edit (a bevel too wide for
 // the geometry, an inset that would invert a face) leaves the object alone.
+// Extrudes the selected faces and immediately hands the user a drag along the
+// new faces' own normal, rather than committing a fixed distance. The extrusion
+// starts at a hair above zero so the side walls are valid geometry from the
+// first frame; the drag supplies the real height.
 void Application::extrudeSelection() {
+    if (tool_.active()) return;
+
     const ObjectId id = scene_.elementSelection().empty()
                         ? kNoObject : scene_.elementSelection().front().object;
     SceneObject* obj = scene_.find(id);
@@ -446,23 +450,77 @@ void Application::extrudeSelection() {
     const std::vector<Index> faces = scene_.selectedFaces(id);
     if (faces.empty()) return;
 
-    const bool inward = ImGui::GetIO().KeyShift;
-    const float step = editStep(camera_, obj->worldBounds().center());
+    // Direction to push, taken before the mesh changes underneath us.
+    Vec3 normal{};
+    for (Index f : faces) normal += obj->mesh.faceNormal(f) * obj->mesh.faceArea(f);
+    if (lengthSq(normal) < 1e-12f) return;
+    normal = normalize(normal);
+    const Vec3 worldNormal = normalize(transformVector(normalMatrix(obj->modelMatrix()), normal));
 
+    Mesh before = obj->mesh;
+    const PrimitiveSpec specBefore = obj->spec;
+
+    constexpr float kSeed = 0.01f;   // mm
     Mesh next = obj->mesh;
-    if (!extrudeFaces(next, faces, inward ? -step : step, nullptr)) return;
+    std::vector<Index> newFaces;
+    if (!extrudeFaces(next, faces, kSeed, &newFaces)) return;
 
-    PrimitiveSpec after = obj->spec;
-    after.kind = PrimitiveKind::Custom;   // no longer describable by parameters
+    obj->mesh = std::move(next);
+    obj->refreshDerived();
+    obj->spec.kind = PrimitiveKind::Custom;   // no longer describable by parameters
 
-    // Apply through the command's own redo, so the path that performs the edit
-    // is exactly the path that replays it. (Pushing first would not work:
-    // push() clears the redo stack, so a redo() afterwards is a no-op.)
-    auto cmd = std::make_unique<MeshCommand>(id, obj->mesh, std::move(next),
-                                             obj->spec, after,
-                                             inward ? "Extrude Inward" : "Extrude");
-    cmd->redo(scene_);
+    // The moved faces stay selected, so the drag acts on them and so the user
+    // can extrude again straight away.
+    scene_.clearElementSelection();
+    for (Index f : newFaces) scene_.selectElement({id, ElementKind::Face, f}, true);
+
+    if (!tool_.begin(TransformMode::Translate, scene_, camera_, mouseInViewport())) {
+        obj->mesh = std::move(before);
+        obj->refreshDerived();
+        obj->spec = specBefore;
+        return;
+    }
+    tool_.setCustomAxis(worldNormal, "N");
+
+    pendingMeshObject_ = id;
+    pendingMeshBefore_ = std::move(before);
+    pendingSpecBefore_ = specBefore;
+    pendingLabel_ = "Extrude";
+}
+
+void Application::commitTransform() {
+    std::unique_ptr<Command> cmd = tool_.confirm(scene_);
+
+    if (pendingMeshObject_ != kNoObject) {
+        // Topology changed as well as positions, so the vertex-level command
+        // the tool produced cannot describe the edit. Record the whole mesh
+        // instead, covering the operation and the drag as one step.
+        SceneObject* obj = scene_.find(pendingMeshObject_);
+        if (obj) {
+            undo_.push(std::make_unique<MeshCommand>(
+                pendingMeshObject_, std::move(pendingMeshBefore_), obj->mesh,
+                pendingSpecBefore_, obj->spec, pendingLabel_));
+        }
+        pendingMeshObject_ = kNoObject;
+        pendingMeshBefore_ = Mesh{};
+        return;
+    }
     undo_.push(std::move(cmd));
+}
+
+void Application::abortTransform() {
+    tool_.cancel(scene_);
+
+    if (pendingMeshObject_ != kNoObject) {
+        if (SceneObject* obj = scene_.find(pendingMeshObject_)) {
+            obj->mesh = std::move(pendingMeshBefore_);
+            obj->refreshDerived();
+            obj->spec = pendingSpecBefore_;
+            scene_.clearElementSelection();
+        }
+        pendingMeshObject_ = kNoObject;
+        pendingMeshBefore_ = Mesh{};
+    }
 }
 
 void Application::bevelActiveObject() {

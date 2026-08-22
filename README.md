@@ -71,13 +71,13 @@ save, so you can edit them while the app runs.
 | Click | Select the edge, face or vertex under the cursor |
 | Ctrl + click | Select the whole object (as clicking its outliner row) |
 | Shift + click | Extend either selection |
-| E / Shift + E | Extrude selected faces outward / inward |
+| E | Extrude selected faces, then drag to set the height |
 | Ctrl + B | Bevel all edges of the active object |
 | Numpad 1 / 3 / 7 | Front / Right / Top (Ctrl for opposite) |
 | Numpad 4 / 6 / 8 / 2 | Orbit in 15° steps |
 | Numpad 5 | Perspective / orthographic |
 | Numpad . / Home | Frame selection / frame all |
-| G / R / S | Move / rotate / scale the selection |
+| G / R / S | Move / rotate / scale — the object, or the selected faces/edges/vertices |
 | X / Y / Z | *(during a transform)* constrain to an axis |
 | Shift + X/Y/Z | *(during a transform)* constrain to a plane |
 | type a number | *(during a transform)* exact value |

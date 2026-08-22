@@ -31,8 +31,8 @@ int main(int argc, char** argv) {
             app.setGridAlign(y0, y1, steps);
         } else if (std::strcmp(argv[i], "--select-face") == 0 && i + 1 < argc) {
             app.setPickFace(std::atoi(argv[++i]));
-        } else if (std::strcmp(argv[i], "--auto-extrude") == 0) {
-            app.setAutoExtrude();
+        } else if (std::strcmp(argv[i], "--auto-extrude") == 0 && i + 1 < argc) {
+            app.setAutoExtrude(static_cast<float>(std::atof(argv[++i])));
         } else if (std::strcmp(argv[i], "--help") == 0) {
             std::printf("tangent - 3D modelling for print design\n"
                         "  --smoke-test [frames]   render N frames and exit\n"
