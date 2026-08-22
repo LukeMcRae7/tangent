@@ -111,7 +111,11 @@ Narrowing to float32 happens in exactly two places, both at the GPU boundary:
   round numbers; free positioning is the exception. The increment is relative
   to zoom — one step is always about the same distance on screen — and rounded
   to a value you would actually pick (0.5, 1, 2, 5, 10 mm...). It is shown in
-  the status bar while you drag.
+  the status bar while you drag. How coarse it feels is one constant —
+  `kSnapPixels` in [`src/app/transform_tool.cpp`](src/app/transform_tool.cpp),
+  roughly how many pixels one step covers on screen. Lower is finer; because
+  the result is rounded to the 1/2/5 ladder it moves in increments rather than
+  smoothly.
 - **An edit either produces valid geometry or it does not happen.** A drag that
   would make the model self-intersect is refused and reverted, not accepted and
   flagged. Numeric entry is always available during any transform.

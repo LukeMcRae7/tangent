@@ -33,6 +33,13 @@ bool Renderer::init(const std::string& dir) {
                           reinterpret_cast<void*>(offsetof(LineVert, color)));
     glBindVertexArray(0);
 
+    // The vertex format above must match LineVert exactly, or the GPU reads
+    // nonsense. Checked here so a future change to the struct fails loudly.
+    static_assert(sizeof(LineVert) == 7 * sizeof(float),
+                  "LineVert must stay 7 tightly packed floats");
+    static_assert(offsetof(LineVert, color) == 3 * sizeof(float),
+                  "LineVert colour must follow three position floats");
+
     // Same vertex layout as the line batch, drawn as triangles.
     glGenVertexArrays(1, &triVao_);
     glGenBuffers(1, &triVbo_);
@@ -96,14 +103,14 @@ void Renderer::pruneCache() {
 }
 
 void Renderer::addLine(Vec3 a, Vec3 b, Vec4 color) {
-    lineVerts_.push_back({a, color});
-    lineVerts_.push_back({b, color});
+    lineVerts_.push_back(makeVert(a, color));
+    lineVerts_.push_back(makeVert(b, color));
 }
 
 void Renderer::addTriangle(Vec3 a, Vec3 b, Vec3 c, Vec4 color) {
-    triVerts_.push_back({a, color});
-    triVerts_.push_back({b, color});
-    triVerts_.push_back({c, color});
+    triVerts_.push_back(makeVert(a, color));
+    triVerts_.push_back(makeVert(b, color));
+    triVerts_.push_back(makeVert(c, color));
 }
 
 void Renderer::addBox(const AABB& box, Vec4 color) {

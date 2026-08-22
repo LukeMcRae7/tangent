@@ -79,7 +79,23 @@ private:
         uint32_t version = 0;
         uint64_t lastSeen = 0;   // frame this object was last drawn
     };
-    struct LineVert { Vec3 pos; Vec4 color; };
+    // Explicitly float32, and explicitly NOT Vec3/Vec4.
+    //
+    // This struct is uploaded to the GPU verbatim, so its layout must match the
+    // GL_FLOAT attributes declared for it. Holding Vec3/Vec4 here silently
+    // broke the moment geometry moved to double: the struct doubled in size
+    // while the vertex format kept saying float, and the GPU read the bit
+    // patterns as garbage.
+    struct LineVert {
+        float pos[3];
+        float color[4];
+    };
+
+    static LineVert makeVert(Vec3 p, Vec4 c) {
+        return {{static_cast<float>(p.x), static_cast<float>(p.y), static_cast<float>(p.z)},
+                {static_cast<float>(c.x), static_cast<float>(c.y),
+                 static_cast<float>(c.z), static_cast<float>(c.w)}};
+    }
 
     const GpuMesh& syncObject(const SceneObject& obj);
     void drawGrid(const Camera& camera, const ViewOptions& opts);
