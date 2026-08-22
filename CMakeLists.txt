@@ -45,6 +45,8 @@ add_executable(tangent
   src/main.cpp
   src/app/application.cpp
   src/app/camera.cpp
+  src/app/transform_tool.cpp
+  src/app/undo.cpp
   src/mesh/halfedge.cpp
   src/mesh/primitives.cpp
   src/scene/scene.cpp
@@ -78,3 +80,14 @@ add_executable(test_scene tests/test_scene.cpp
 target_include_directories(test_scene PRIVATE src)
 target_compile_options(test_scene PRIVATE -Wall -Wextra)
 add_test(NAME scene COMMAND test_scene)
+
+# Links the renderer only because TransformTool::drawOverlay references it; the
+# test never creates a GL context or issues a draw.
+add_executable(test_transform tests/test_transform.cpp
+  src/app/transform_tool.cpp src/app/undo.cpp src/app/camera.cpp
+  src/scene/scene.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp
+  src/render/renderer.cpp src/render/shader.cpp src/render/gpu_mesh.cpp)
+target_include_directories(test_transform PRIVATE src)
+target_link_libraries(test_transform PRIVATE PkgConfig::EPOXY)
+target_compile_options(test_transform PRIVATE -Wall -Wextra -Wno-unused-parameter)
+add_test(NAME transform COMMAND test_transform)

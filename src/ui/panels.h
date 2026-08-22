@@ -9,6 +9,8 @@
 #include "scene/scene.h"
 #include "app/camera.h"
 
+#include <string>
+
 namespace tg {
 
 struct UiActions {
@@ -23,8 +25,17 @@ struct UiActions {
     bool quit              = false;
 
     // Set when an inspector field changed the object's parameters and the
-    // geometry has to be regenerated.
-    ObjectId rebuildObject = kNoObject;
+    // geometry has to be regenerated. The previous spec travels with it so the
+    // edit can be pushed onto the undo stack.
+    ObjectId      rebuildObject = kNoObject;
+    PrimitiveSpec specBefore;
+
+    // Set when an inspector transform field was dragged.
+    ObjectId  transformEdited = kNoObject;
+    Transform transformBefore;
+
+    bool undo = false;
+    bool redo = false;
 };
 
 struct UiStats {
@@ -34,6 +45,11 @@ struct UiStats {
 };
 
 struct UiContext {
+    // Text for the active modal operation, shown in the status bar.
+    std::string  toolStatus;
+    bool         canUndo = false;
+    bool         canRedo = false;
+
     Scene*       scene  = nullptr;
     Camera*      camera = nullptr;
     ViewOptions* view   = nullptr;

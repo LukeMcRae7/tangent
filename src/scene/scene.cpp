@@ -122,6 +122,25 @@ ObjectId Scene::duplicateObject(ObjectId id) {
     return newId;
 }
 
+std::unique_ptr<SceneObject> Scene::takeObject(ObjectId id) {
+    auto it = std::find_if(objects_.begin(), objects_.end(),
+                           [&](const auto& o) { return o->id == id; });
+    if (it == objects_.end()) return nullptr;
+
+    std::unique_ptr<SceneObject> out = std::move(*it);
+    objects_.erase(it);
+    selection_.erase(std::remove(selection_.begin(), selection_.end(), id), selection_.end());
+    return out;
+}
+
+void Scene::insertObject(std::unique_ptr<SceneObject> obj) {
+    if (!obj) return;
+    // Keep the id allocator ahead of anything restored, so a later create
+    // cannot collide with an object that undo brought back.
+    if (obj->id >= nextId_) nextId_ = obj->id + 1;
+    objects_.push_back(std::move(obj));
+}
+
 SceneObject* Scene::find(ObjectId id) {
     for (auto& o : objects_) if (o->id == id) return o.get();
     return nullptr;

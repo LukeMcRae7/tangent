@@ -2,11 +2,14 @@
 #pragma once
 
 #include "app/camera.h"
+#include "app/transform_tool.h"
+#include "app/undo.h"
 #include "render/renderer.h"
 #include "scene/scene.h"
 #include "ui/panels.h"
 
 #include <string>
+#include <vector>
 
 struct SDL_Window;
 union SDL_Event;
@@ -32,6 +35,21 @@ public:
         fixedCamera_ = true;
     }
 
+    // Starts with no objects, so a measurement sees only the grid.
+    void setStartEmpty() { startEmpty_ = true; }
+    void setNoGrid() { view_.showGrid = false; }
+
+    // Sweeps the camera through a yaw range, printing the mean luminance of
+    // the viewport at each step. A grid that is stable under rotation produces
+    // a smooth curve; popping or breathing lines show up as high-frequency
+    // steps, which tests/grid_stability.py checks for numerically.
+    void setGridProbe(float yaw0Deg, float yaw1Deg, int steps) {
+        probeYaw0_ = yaw0Deg;
+        probeYaw1_ = yaw1Deg;
+        probeSteps_ = steps > 1 ? steps : 2;
+        probeActive_ = true;
+    }
+
     // Writes the viewport to a PPM after `afterFrames` frames. Reads back this
     // process's own GL framebuffer rather than going through the compositor, so
     // it captures only Tangent and works regardless of what else is on screen.
@@ -44,6 +62,9 @@ private:
     void handleEvent(const SDL_Event& e);
     void handleViewportMouse();
     void handleShortcuts();
+    void handleTransformKeys();
+    Vec2 mouseInViewport() const;
+    void beginTransform(TransformMode mode);
     void applyActions();
     void buildUi();
     void drawFrame();
@@ -62,7 +83,9 @@ private:
     void*       glCtx_   = nullptr;
     std::string shaderDir_;
 
-    Scene       scene_;
+    Scene         scene_;
+    UndoStack     undo_;
+    TransformTool tool_;
     Camera      camera_;
     Renderer    renderer_;
     ViewOptions view_;
@@ -83,6 +106,15 @@ private:
     std::string screenshotPath_;
     int         screenshotFrame_ = -1;
     bool        fixedCamera_ = false;
+    bool        startEmpty_ = false;
+
+    double meanViewportLuminance() const;
+    void   readViewport(std::vector<unsigned char>& out) const;
+    std::vector<unsigned char> probePrev_;
+    PixelRect lastViewportPx_;
+    bool  probeActive_ = false;
+    float probeYaw0_ = 0.0f, probeYaw1_ = 90.0f;
+    int   probeSteps_ = 2, probeIndex_ = 0, probeSettle_ = 0;
 };
 
 } // namespace tg

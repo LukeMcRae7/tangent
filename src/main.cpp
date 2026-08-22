@@ -17,11 +17,21 @@ int main(int argc, char** argv) {
             float yaw = 0, pitch = 0, dist = 0;
             std::sscanf(argv[++i], "%f,%f,%f", &yaw, &pitch, &dist);
             app.setCamera(yaw, pitch, dist);
+        } else if (std::strcmp(argv[i], "--empty") == 0) {
+            app.setStartEmpty();
+        } else if (std::strcmp(argv[i], "--no-grid") == 0) {
+            app.setNoGrid();
+        } else if (std::strcmp(argv[i], "--grid-probe") == 0 && i + 1 < argc) {
+            float y0 = 0, y1 = 90; int steps = 181;
+            std::sscanf(argv[++i], "%f,%f,%d", &y0, &y1, &steps);
+            app.setGridProbe(y0, y1, steps);
         } else if (std::strcmp(argv[i], "--help") == 0) {
             std::printf("tangent - 3D modelling for print design\n"
                         "  --smoke-test [frames]   render N frames and exit\n"
                         "  --screenshot <out.ppm>  capture the window to a PPM\n"
-                        "  --camera y,p,d          place the camera (degrees, mm)\n");
+                        "  --camera y,p,d          place the camera (degrees, mm)\n"
+                        "  --empty                 start with an empty scene\n"
+                        "  --grid-probe y0,y1,n    sweep yaw, printing viewport luminance\n");
             return 0;
         }
     }

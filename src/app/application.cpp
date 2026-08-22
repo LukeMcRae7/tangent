@@ -12,6 +12,7 @@
 #include "backends/imgui_impl_opengl3.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <vector>
 
 namespace tg {
@@ -98,9 +99,11 @@ bool Application::init() {
     ui_.view   = &view_;
 
     // Start with a cube on the origin, so the viewport is never a blank void.
-    const ObjectId startup = scene_.addPrimitive(PrimitiveKind::Box);
-    placeOnBuildPlate(startup);
-    scene_.select(startup);
+    if (!startEmpty_) {
+        const ObjectId startup = scene_.addPrimitive(PrimitiveKind::Box);
+        placeOnBuildPlate(startup);
+        scene_.select(startup);
+    }
     if (!fixedCamera_) {
         camera_.frame(scene_.bounds());
         camera_.snapToGoal();
@@ -137,6 +140,17 @@ void Application::handleEvent(const SDL_Event& e) {
     }
 }
 
+Vec2 Application::mouseInViewport() const {
+    const ImVec2 m = ImGui::GetIO().MousePos;
+    return {m.x - viewRect_.x, m.y - viewRect_.y};
+}
+
+void Application::beginTransform(TransformMode mode) {
+    // begin() declines when nothing is selected; there is simply no transform
+    // to start, so this is not an error worth reporting.
+    tool_.begin(mode, scene_, camera_, mouseInViewport());
+}
+
 // Blender-style navigation. ImGui gets first refusal on every input, so
 // dragging a slider never also orbits the camera.
 void Application::handleViewportMouse() {
@@ -162,6 +176,19 @@ void Application::handleViewportMouse() {
         }
     }
 
+    // Navigation stays live during a transform (orbiting mid-move is useful),
+    // but clicks mean commit/cancel rather than select.
+    if (tool_.active()) {
+        tool_.update(scene_, camera_, mouseInViewport(), io.KeyCtrl);
+        if (!io.WantCaptureMouse) {
+            if (ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+                undo_.push(tool_.confirm(scene_));
+            else if (ImGui::IsMouseClicked(ImGuiMouseButton_Right))
+                tool_.cancel(scene_);
+        }
+        return;
+    }
+
     if (io.WantCaptureMouse || !overViewport) return;
 
     if (io.MouseWheel != 0.0f) camera_.dolly(io.MouseWheel);
@@ -182,15 +209,64 @@ void Application::handleViewportMouse() {
     }
 }
 
+void Application::handleTransformKeys() {
+    ImGuiIO& io = ImGui::GetIO();
+
+    if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) { tool_.cancel(scene_); return; }
+    if (ImGui::IsKeyPressed(ImGuiKey_Enter, false) ||
+        ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false)) {
+        undo_.push(tool_.confirm(scene_));
+        return;
+    }
+
+    // Shift picks the plane perpendicular to the axis instead of the axis.
+    const bool plane = io.KeyShift;
+    if (ImGui::IsKeyPressed(ImGuiKey_X, false))
+        tool_.setConstraint(plane ? Constraint::PlaneX : Constraint::AxisX);
+    if (ImGui::IsKeyPressed(ImGuiKey_Y, false))
+        tool_.setConstraint(plane ? Constraint::PlaneY : Constraint::AxisY);
+    if (ImGui::IsKeyPressed(ImGuiKey_Z, false))
+        tool_.setConstraint(plane ? Constraint::PlaneZ : Constraint::AxisZ);
+
+    // Exact numeric entry.
+    for (int d = 0; d <= 9; ++d) {
+        if (ImGui::IsKeyPressed(static_cast<ImGuiKey>(ImGuiKey_0 + d), false) ||
+            ImGui::IsKeyPressed(static_cast<ImGuiKey>(ImGuiKey_Keypad0 + d), false))
+            tool_.typeCharacter(static_cast<char>('0' + d));
+    }
+    if (ImGui::IsKeyPressed(ImGuiKey_Period, false) ||
+        ImGui::IsKeyPressed(ImGuiKey_KeypadDecimal, false)) tool_.typeCharacter('.');
+    if (ImGui::IsKeyPressed(ImGuiKey_Minus, false) ||
+        ImGui::IsKeyPressed(ImGuiKey_KeypadSubtract, false)) tool_.typeCharacter('-');
+    if (ImGui::IsKeyPressed(ImGuiKey_Backspace, false)) tool_.backspace();
+}
+
 void Application::handleShortcuts() {
     ImGuiIO& io = ImGui::GetIO();
     if (io.WantCaptureKeyboard) return;   // a text field has focus
+
+    // A running transform owns the keyboard: X must constrain to an axis, not
+    // delete the thing being moved.
+    if (tool_.active()) { handleTransformKeys(); return; }
 
     const bool ctrl  = io.KeyCtrl;
     const bool shift = io.KeyShift;
     const bool alt   = io.KeyAlt;
 
     if (ctrl && ImGui::IsKeyPressed(ImGuiKey_Q, false)) ui_.actions.quit = true;
+
+    if (ctrl && ImGui::IsKeyPressed(ImGuiKey_Z, false)) {
+        if (shift) ui_.actions.redo = true;
+        else       ui_.actions.undo = true;
+    }
+
+    // Modal transforms, Blender's G / R / S.
+    if (!ctrl && !alt) {
+        if (ImGui::IsKeyPressed(ImGuiKey_G, false)) beginTransform(TransformMode::Translate);
+        if (ImGui::IsKeyPressed(ImGuiKey_R, false)) beginTransform(TransformMode::Rotate);
+        if (ImGui::IsKeyPressed(ImGuiKey_S, false) && !shift)
+            beginTransform(TransformMode::Scale);
+    }
 
     // Add menu at the cursor.
     if (shift && ImGui::IsKeyPressed(ImGuiKey_A, false)) openAddMenu_ = true;
@@ -201,7 +277,7 @@ void Application::handleShortcuts() {
         ui_.actions.deleteSelected = true;
     if (shift && ImGui::IsKeyPressed(ImGuiKey_D, false))
         ui_.actions.duplicateSelected = true;
-    if (ImGui::IsKeyPressed(ImGuiKey_Z, false) && !ctrl)
+    if (ImGui::IsKeyPressed(ImGuiKey_Z, false) && !ctrl && !shift)
         view_.showWireframe = !view_.showWireframe;
 
     // Numpad view shortcuts; Ctrl gives the opposite side, as in Blender.
@@ -252,27 +328,60 @@ void Application::applyActions() {
 
     if (a.quit) running_ = false;
 
-    if (a.addRequested) addPrimitiveAtCursor(a.addKind);
+    if (a.undo) undo_.undo(scene_);
+    if (a.redo) undo_.redo(scene_);
+
+    if (a.addRequested) {
+        const size_t before = scene_.objectCount();
+        addPrimitiveAtCursor(a.addKind);
+        if (scene_.objectCount() > before)
+            undo_.push(ExistenceCommand::forCreate(scene_, {scene_.activeObject()}));
+    }
 
     if (a.duplicateSelected) {
         const std::vector<ObjectId> sel = scene_.selection();
+        std::vector<ObjectId> copies;
         scene_.clearSelection();
         for (ObjectId id : sel) {
             const ObjectId copy = scene_.duplicateObject(id);
-            if (copy != kNoObject) scene_.select(copy, true);
+            if (copy != kNoObject) { copies.push_back(copy); scene_.select(copy, true); }
         }
+        if (!copies.empty()) undo_.push(ExistenceCommand::forCreate(scene_, copies));
     }
 
     if (a.deleteSelected) {
         const std::vector<ObjectId> sel = scene_.selection();
-        for (ObjectId id : sel) {
-            renderer_.tangentt(id);
-            scene_.removeObject(id);
+        if (!sel.empty()) {
+            for (ObjectId id : sel) renderer_.forget(id);
+            // forDelete does the removal itself, so the objects survive inside
+            // the command and can be restored intact.
+            undo_.push(ExistenceCommand::forDelete(scene_, sel));
+            scene_.clearSelection();
         }
-        scene_.clearSelection();
     }
 
-    if (a.rebuildObject != kNoObject) scene_.rebuild(a.rebuildObject);
+    if (a.rebuildObject != kNoObject) {
+        SceneObject* o = scene_.find(a.rebuildObject);
+        if (o) {
+            const PrimitiveSpec after = o->spec;
+            scene_.rebuild(a.rebuildObject);
+            // Merged so that dragging a parameter slider is one undo step
+            // rather than one per frame.
+            undo_.push(std::make_unique<ParameterCommand>(a.rebuildObject,
+                                                          a.specBefore, after),
+                       /*merge=*/true);
+        }
+    }
+
+    if (a.transformEdited != kNoObject) {
+        SceneObject* o = scene_.find(a.transformEdited);
+        if (o) {
+            std::vector<TransformCommand::Entry> e{
+                {a.transformEdited, a.transformBefore, o->transform}};
+            undo_.push(std::make_unique<TransformCommand>(std::move(e), "Transform"),
+                       /*merge=*/true);
+        }
+    }
 
     if (a.frameSelected) {
         const AABB b = scene_.selection().empty() ? scene_.bounds() : scene_.selectionBounds();
@@ -379,7 +488,34 @@ void Application::drawFrame() {
     // GL's origin is bottom-left, ImGui's is top-left.
     rect.y = pixelH - static_cast<int>(viewRect_.y * pixelScaleY_) - rect.h;
 
+    lastViewportPx_ = rect;
     renderer_.render(scene_, camera_, view_, rect, pixelW, pixelH);
+}
+
+void Application::readViewport(std::vector<unsigned char>& out) const {
+    const PixelRect& r = lastViewportPx_;
+    if (!r.valid()) { out.clear(); return; }
+    out.resize(static_cast<size_t>(r.w) * r.h * 3);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadBuffer(GL_BACK);
+    glReadPixels(r.x, r.y, r.w, r.h, GL_RGB, GL_UNSIGNED_BYTE, out.data());
+}
+
+double Application::meanViewportLuminance() const {
+    const PixelRect& r = lastViewportPx_;
+    if (!r.valid()) return 0.0;
+
+    std::vector<unsigned char> px(static_cast<size_t>(r.w) * r.h * 3);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadBuffer(GL_BACK);
+    glReadPixels(r.x, r.y, r.w, r.h, GL_RGB, GL_UNSIGNED_BYTE, px.data());
+
+    // Rec. 709 luma, averaged. Any change in how much ink the grid lays down
+    // moves this number, which is what makes it a usable stability signal.
+    double sum = 0.0;
+    for (size_t i = 0; i < px.size(); i += 3)
+        sum += 0.2126 * px[i] + 0.7152 * px[i + 1] + 0.0722 * px[i + 2];
+    return sum / (static_cast<double>(r.w) * r.h);
 }
 
 void Application::captureFramebuffer(int width, int height) const {
@@ -421,6 +557,13 @@ int Application::run() {
         previous = now;
         frameMs_ = frameMs_ * 0.9f + dt * 1000.0f * 0.1f;   // smoothed readout
 
+        if (probeActive_) {
+            const float u = static_cast<float>(probeIndex_) /
+                            static_cast<float>(probeSteps_ - 1);
+            camera_.yaw = radians(probeYaw0_ + (probeYaw1_ - probeYaw0_) * u);
+            camera_.snapToGoal();
+        }
+
         renderer_.reloadShadersIfChanged();
 
         ImGui_ImplOpenGL3_NewFrame();
@@ -430,6 +573,9 @@ int Application::run() {
         // Stats are gathered before the panels that display them.
         ui_.stats = UiStats{};
         ui_.stats.frameMs = frameMs_;
+        ui_.toolStatus = tool_.statusText();
+        ui_.canUndo = undo_.canUndo();
+        ui_.canRedo = undo_.canRedo();
         for (const auto& o : scene_.objects()) {
             ui_.stats.triangles += o->render.triangles.size() / 3;
             ui_.stats.vertices  += static_cast<size_t>(o->mesh.vertexCount());
@@ -440,11 +586,51 @@ int Application::run() {
         handleShortcuts();
         applyActions();
 
+        // Queued before the frame is drawn; the renderer flushes overlay lines
+        // at the end of its pass.
+        tool_.drawOverlay(renderer_, camera_);
+
         camera_.update(dt);
 
         ImGui::Render();
         drawFrame();
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+
+        if (probeActive_) {
+            // Let the first couple of frames settle before sampling.
+            // Render each angle twice and sample the second. The first render
+            // after a camera change can carry a single-frame transient from
+            // the swap chain, which shows up as an isolated pair of large
+            // differences that standalone renders of the very same angles do
+            // not reproduce. Sampling steady state measures the shading rather
+            // than the buffer.
+            if (frame >= 2 && ++probeSettle_ >= 2) {
+                probeSettle_ = 0;
+                std::vector<unsigned char> cur;
+                readViewport(cur);
+
+                // Mean absolute per-pixel change since the previous step. With
+                // a sub-pixel rotation between steps, a stable image barely
+                // changes; lines that breathe in width or levels that pop
+                // produce a much larger difference.
+                double diff = 0.0;
+                if (probePrev_.size() == cur.size() && !cur.empty()) {
+                    long long acc = 0;
+                    for (size_t i = 0; i < cur.size(); ++i)
+                        acc += std::abs(static_cast<int>(cur[i]) -
+                                        static_cast<int>(probePrev_[i]));
+                    diff = static_cast<double>(acc) / static_cast<double>(cur.size());
+                }
+                probePrev_ = std::move(cur);
+
+                std::printf("%.5f %.6f %.6f\n",
+                            probeYaw0_ + (probeYaw1_ - probeYaw0_) *
+                                (static_cast<float>(probeIndex_) /
+                                 static_cast<float>(probeSteps_ - 1)),
+                            meanViewportLuminance(), diff);
+                if (++probeIndex_ >= probeSteps_) { std::fflush(stdout); running_ = false; }
+            }
+        }
 
         if (screenshotFrame_ >= 0 && frame >= screenshotFrame_ && !screenshotPath_.empty()) {
             int pw = 0, ph = 0;
@@ -455,7 +641,8 @@ int Application::run() {
 
         SDL_GL_SwapWindow(window_);
 
-        if (smokeFrames_ > 0 && ++frame >= smokeFrames_) {
+        ++frame;
+        if (!probeActive_ && smokeFrames_ > 0 && frame >= smokeFrames_) {
             std::fprintf(stderr, "[app] smoke test: %d frames rendered cleanly\n", frame);
             running_ = false;
         }

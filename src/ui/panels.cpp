@@ -144,8 +144,8 @@ void drawMenuBar(UiContext& ctx) {
     }
 
     if (ImGui::BeginMenu("Edit")) {
-        ImGui::MenuItem("Undo", "Ctrl+Z", false, false);
-        ImGui::MenuItem("Redo", "Ctrl+Shift+Z", false, false);
+        if (ImGui::MenuItem("Undo", "Ctrl+Z", false, ctx.canUndo)) ctx.actions.undo = true;
+        if (ImGui::MenuItem("Redo", "Ctrl+Shift+Z", false, ctx.canRedo)) ctx.actions.redo = true;
         ImGui::Separator();
         const bool has = !ctx.scene->selection().empty();
         if (ImGui::MenuItem("Duplicate", "Shift+D", false, has))
@@ -159,6 +159,20 @@ void drawMenuBar(UiContext& ctx) {
     }
 
     if (ImGui::BeginMenu("Add")) { drawAddMenuItems(ctx); ImGui::EndMenu(); }
+
+    if (ImGui::BeginMenu("Transform")) {
+        const bool has = !ctx.scene->selection().empty();
+        ImGui::MenuItem("Move", "G", false, has);
+        ImGui::MenuItem("Rotate", "R", false, has);
+        ImGui::MenuItem("Scale", "S", false, has);
+        ImGui::Separator();
+        ImGui::TextColored(kDim, "During a transform:");
+        ImGui::TextColored(kDim, "  X / Y / Z      constrain to an axis");
+        ImGui::TextColored(kDim, "  Shift + axis   constrain to a plane");
+        ImGui::TextColored(kDim, "  type a number  exact value");
+        ImGui::TextColored(kDim, "  Ctrl           snap to increments");
+        ImGui::EndMenu();
+    }
 
     if (ImGui::BeginMenu("View")) {
         if (ImGui::MenuItem("Frame Selected", "Numpad .")) ctx.actions.frameSelected = true;
@@ -244,6 +258,11 @@ void drawInspector(UiContext& ctx) {
         return;
     }
 
+    // Snapshot before any widget runs, so a changed value can be paired with
+    // what it replaced and pushed onto the undo stack.
+    const Transform  transformBefore = obj->transform;
+    const PrimitiveSpec specBefore = obj->spec;
+
     // Name.
     char nameBuf[128];
     std::snprintf(nameBuf, sizeof(nameBuf), "%s", obj->name.c_str());
@@ -266,7 +285,22 @@ void drawInspector(UiContext& ctx) {
     if (ImGui::SmallButton("Reset Transform")) obj->transform = Transform{};
 
     sectionLabel("GEOMETRY");
-    if (drawPrimitiveParams(*obj)) ctx.actions.rebuildObject = obj->id;
+    if (drawPrimitiveParams(*obj)) {
+        ctx.actions.rebuildObject = obj->id;
+        ctx.actions.specBefore = specBefore;
+    }
+
+    // Any transform field that moved becomes one undo entry per drag.
+    const Transform& tNow = obj->transform;
+    if (tNow.position != transformBefore.position ||
+        tNow.scale != transformBefore.scale ||
+        tNow.rotation.x != transformBefore.rotation.x ||
+        tNow.rotation.y != transformBefore.rotation.y ||
+        tNow.rotation.z != transformBefore.rotation.z ||
+        tNow.rotation.w != transformBefore.rotation.w) {
+        ctx.actions.transformEdited = obj->id;
+        ctx.actions.transformBefore = transformBefore;
+    }
 
     sectionLabel("STATISTICS");
     const AABB b = obj->localBounds;
@@ -295,6 +329,20 @@ void drawStatusBar(UiContext& ctx) {
         ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNav;
 
     if (ImGui::Begin("##statusbar", nullptr, flags)) {
+        if (!ctx.toolStatus.empty()) {
+            // While a modal transform runs, the readout is the only thing that
+            // matters -- show it in the accent colour and drop the scene stats.
+            ImGui::TextColored(kAccent, "%s", ctx.toolStatus.c_str());
+            const char* keys = "X/Y/Z axis   Shift+axis plane   type a number   "
+                               "Ctrl snap   Enter confirm   Esc cancel";
+            const float kw = ImGui::CalcTextSize(keys).x;
+            ImGui::SameLine(ImGui::GetWindowWidth() - kw - 14.0f);
+            ImGui::TextColored(kDim, "%s", keys);
+            ImGui::End();
+            ImGui::PopStyleVar(2);
+            return;
+        }
+
         const Scene& scene = *ctx.scene;
         ImGui::TextColored(kDim, "%zu object%s", scene.objectCount(),
                            scene.objectCount() == 1 ? "" : "s");
@@ -305,7 +353,7 @@ void drawStatusBar(UiContext& ctx) {
         ImGui::SameLine(0, 18);
         ImGui::TextColored(kDim, "mm");
 
-        const char* hint = "MMB orbit   Shift+MMB pan   Wheel zoom   Shift+A add   X delete";
+        const char* hint = "MMB orbit   Shift+MMB pan   Wheel zoom   G move   R rotate   S scale   Shift+A add";
         const float tw = ImGui::CalcTextSize(hint).x;
         ImGui::SameLine(ImGui::GetWindowWidth() - tw - 14.0f);
         ImGui::TextColored(kDim, "%s", hint);

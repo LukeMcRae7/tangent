@@ -7,8 +7,8 @@ dependencies beyond the system GL stack, starts instantly, and holds a smooth
 frame rate on modest hardware. Navigation follows Blender; editing shortcuts
 follow Fusion 360.
 
-**Status:** early. The viewport, parametric primitives and selection work.
-Transform tools are next — see [Roadmap](#roadmap).
+**Status:** early. Viewport, parametric primitives, selection, modal
+move/rotate/scale and undo all work — see [Roadmap](#roadmap).
 
 ## Build
 
@@ -27,6 +27,15 @@ Run the tests (headless — no GL context required):
 ctest --test-dir build --output-on-failure
 ```
 
+`tests/grid_stability.py` is separate because it needs a GL context: it orbits
+the camera in sub-pixel steps and measures how much the rendered image changes
+between them, catching grid levels that pop or lines that breathe under
+rotation.
+
+```sh
+python3 tests/grid_stability.py
+```
+
 ### Command-line flags
 
 | Flag | Purpose |
@@ -34,6 +43,9 @@ ctest --test-dir build --output-on-failure
 | `--smoke-test N` | Render N frames and exit |
 | `--screenshot out.ppm` | Capture the window to a PPM |
 | `--camera yaw,pitch,dist` | Place the camera (degrees, mm) |
+| `--empty` | Start with an empty scene |
+| `--no-grid` | Hide the ground grid |
+| `--grid-probe y0,y1,n` | Sweep yaw, printing viewport stability samples |
 
 `TANGENT_FONT` overrides the UI font (or `default` for the built-in one) and
 `TANGENT_SHADER_DIR` points at an alternate shader directory. Shaders reload on
@@ -57,6 +69,14 @@ save, so you can edit them while the app runs.
 | Numpad 4 / 6 / 8 / 2 | Orbit in 15° steps |
 | Numpad 5 | Perspective / orthographic |
 | Numpad . / Home | Frame selection / frame all |
+| G / R / S | Move / rotate / scale the selection |
+| X / Y / Z | *(during a transform)* constrain to an axis |
+| Shift + X/Y/Z | *(during a transform)* constrain to a plane |
+| type a number | *(during a transform)* exact value |
+| Ctrl | *(during a transform)* snap to 1 mm / 5° / 0.1 |
+| Enter or click | Confirm transform |
+| Esc or right click | Cancel transform |
+| Ctrl + Z / Ctrl + Shift + Z | Undo / redo |
 | Shift + A | Add object |
 | A / Alt + A | Select all / deselect all |
 | Shift + D | Duplicate |
@@ -73,7 +93,7 @@ src/core/     math and colour palette (header only)
 src/mesh/     half-edge kernel, parametric primitive generators
 src/scene/    scene graph, transforms, selection, ray picking
 src/render/   shader and buffer wrappers, viewport renderer
-src/app/      SDL3 shell, orbit camera, input dispatch
+src/app/      SDL3 shell, orbit camera, input dispatch, transform tool, undo
 src/ui/       theme and panels
 shaders/      GLSL 330, hot-reloaded
 tests/        headless kernel and scene tests
@@ -105,8 +125,12 @@ inline constexpr Rgb kBrand = hex(0xFF4B33);
 
 1. ~~Viewport and object creation~~ — grid, orbit camera, six parametric
    primitives, selection, outliner and inspector
-2. **Transforms** — move/rotate/scale gizmos, G/R/S with axis constraints, undo
+2. ~~Transforms~~ — modal move/rotate/scale with axis and plane constraints,
+   exact numeric entry, snapping, and command-based undo/redo.
+   *Draggable on-screen gizmo handles are not implemented yet; transforms are
+   driven by the modal G/R/S grammar.*
 3. **Face editing** — extrude, move face, fillet, full parametric history
+   *(next)*
 4. **Multi-object** — booleans, split
 5. **Project files** — save/load, STL and 3MF export
 

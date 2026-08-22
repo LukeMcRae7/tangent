@@ -80,6 +80,12 @@ public:
     bool     removeObject(ObjectId id);
     ObjectId duplicateObject(ObjectId id);
 
+    // Detach / re-attach preserving the object's id. Undo needs an object to
+    // come back as the same object -- selections, and later feature references,
+    // are held by id, so re-adding under a fresh id would silently break them.
+    std::unique_ptr<SceneObject> takeObject(ObjectId id);
+    void insertObject(std::unique_ptr<SceneObject> obj);
+
     SceneObject*       find(ObjectId id);
     const SceneObject* find(ObjectId id) const;
 

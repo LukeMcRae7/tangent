@@ -57,7 +57,7 @@ public:
     void reloadShadersIfChanged();
 
     // Discards the cached buffers for an object that no longer exists.
-    void tangentt(ObjectId id) { cache_.erase(id); }
+    void forget(ObjectId id) { cache_.erase(id); }
 
     // Queued world-space line segments, flushed at the end of the frame.
     // Gizmos and measurement overlays draw through this.
