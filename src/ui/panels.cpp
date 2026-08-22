@@ -183,6 +183,15 @@ void drawMenuBar(UiContext& ctx) {
         ImGui::EndMenu();
     }
 
+    if (ImGui::BeginMenu("Measure")) {
+        ImGui::MenuItem("Measure", "D", ctx.measuring);
+        ImGui::Separator();
+        ImGui::TextColored(kDim, "Click one entity for its own size,");
+        ImGui::TextColored(kDim, "two for the distance between them.");
+        ImGui::TextColored(kDim, "Distances are true minimums.");
+        ImGui::EndMenu();
+    }
+
     if (ImGui::BeginMenu("Transform")) {
         const bool has = !ctx.scene->selection().empty();
         ImGui::MenuItem("Move", "G", false, has);
@@ -442,6 +451,66 @@ void drawHistory(UiContext& ctx) {
     ImGui::Spacing();
     ImGui::TextColored(kDim, "%zu feature%s", obj->features.size(),
                        obj->features.size() == 1 ? "" : "s");
+    ImGui::End();
+}
+
+// ---------------------------------------------------------------------------
+void drawMeasurePanel(UiContext& ctx) {
+    if (!ctx.measuring) return;
+
+    ImGuiViewport* vp = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + 16.0f, vp->WorkPos.y + 44.0f),
+                            ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(228.0f, 0.0f));
+    ImGui::SetNextWindowBgAlpha(0.94f);
+
+    const ImGuiWindowFlags flags = ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+                                   ImGuiWindowFlags_NoCollapse |
+                                   ImGuiWindowFlags_NoSavedSettings |
+                                   ImGuiWindowFlags_NoDocking |
+                                   ImGuiWindowFlags_AlwaysAutoResize;
+
+    if (ImGui::Begin("Measure", nullptr, flags)) {
+        const MeasureResult& m = ctx.measurement;
+        if (!m.valid) {
+            ImGui::TextColored(kDim, "Click a vertex, edge or face.");
+            ImGui::TextColored(kDim, "Click a second to measure between.");
+        } else {
+            if (m.hasLength) {
+                ImGui::TextColored(kDim, "Length");
+                ImGui::SameLine(96.0f);
+                ImGui::TextColored(kAccent, "%.4f mm", m.length);
+            }
+            if (m.hasArea) {
+                ImGui::TextColored(kDim, "Area");
+                ImGui::SameLine(96.0f);
+                ImGui::TextColored(kAccent, "%.4f mm2", m.area);
+                ImGui::TextColored(kDim, "Perimeter");
+                ImGui::SameLine(96.0f);
+                ImGui::Text("%.4f mm", m.perimeter);
+            }
+            if (ctx.measurePicks == 2 || m.hasLength) {
+                if (ctx.measurePicks == 2) {
+                    ImGui::TextColored(kDim, "Distance");
+                    ImGui::SameLine(96.0f);
+                    ImGui::TextColored(kAccent, "%.4f mm", m.distance);
+                }
+                ImGui::TextColored(kDim, "dX");
+                ImGui::SameLine(96.0f); ImGui::Text("%.4f mm", m.delta.x);
+                ImGui::TextColored(kDim, "dY");
+                ImGui::SameLine(96.0f); ImGui::Text("%.4f mm", m.delta.y);
+                ImGui::TextColored(kDim, "dZ");
+                ImGui::SameLine(96.0f); ImGui::Text("%.4f mm", m.delta.z);
+            }
+            if (m.hasAngle) {
+                ImGui::TextColored(kDim, "Angle");
+                ImGui::SameLine(96.0f);
+                ImGui::TextColored(kAccent, "%.3f deg", m.angleDeg);
+            }
+        }
+        ImGui::Separator();
+        ImGui::TextColored(kDim, "Esc clears   D exits");
+    }
     ImGui::End();
 }
 

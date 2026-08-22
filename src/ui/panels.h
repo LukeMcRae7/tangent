@@ -8,6 +8,7 @@
 #include "render/renderer.h"
 #include "scene/scene.h"
 #include "app/camera.h"
+#include "app/measure.h"
 
 #include <string>
 #include <vector>
@@ -56,6 +57,11 @@ struct UiContext {
     // Text for the active modal operation, shown in the status bar.
     std::string  toolStatus;
     std::string  notice;
+
+    // Live measurement, shown while the measure tool is active.
+    bool          measuring = false;
+    MeasureResult measurement;
+    size_t        measurePicks = 0;
     bool         canUndo = false;
     bool         canRedo = false;
 
@@ -71,6 +77,7 @@ void drawOutliner(UiContext& ctx);
 void drawInspector(UiContext& ctx);
 void drawHistory(UiContext& ctx);
 void drawStatusBar(UiContext& ctx);
+void drawMeasurePanel(UiContext& ctx);
 
 // Body of the add-object menu, shared by the menu bar and the Shift+A popup.
 void drawAddMenuItems(UiContext& ctx);

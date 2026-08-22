@@ -22,12 +22,17 @@ namespace tg {
 // Shader::set for uniforms and GpuMesh::upload for vertex data.
 using Real = double;
 
-inline constexpr Real kPi      = 3.14159265358979323846f;
-inline constexpr Real kTwoPi   = 6.28318530717958647692f;
-inline constexpr Real kHalfPi  = 1.57079632679489661923f;
-inline constexpr Real kDeg2Rad = kPi / 180.0f;
-inline constexpr Real kRad2Deg = 180.0f / kPi;
-inline constexpr Real kEps     = 1e-6f;
+// No `f` suffixes here. These are Real (double); an `f` literal is rounded to
+// float32 first and the extra digits are gone before the constant is ever
+// used. That made pi wrong by 8.7e-08, so degrees(acos(0)) came out as
+// 89.99999749 rather than 90 -- quietly throwing away most of what double
+// precision was adopted for.
+inline constexpr Real kPi      = 3.14159265358979323846;
+inline constexpr Real kTwoPi   = 6.28318530717958647692;
+inline constexpr Real kHalfPi  = 1.57079632679489661923;
+inline constexpr Real kDeg2Rad = kPi / 180.0;
+inline constexpr Real kRad2Deg = 180.0 / kPi;
+inline constexpr Real kEps     = 1e-9;
 
 inline Real radians(Real d) { return d * kDeg2Rad; }
 inline Real degrees(Real r) { return r * kRad2Deg; }

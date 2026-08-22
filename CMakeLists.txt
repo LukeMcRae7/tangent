@@ -46,6 +46,7 @@ add_executable(tangent
   src/app/application.cpp
   src/app/camera.cpp
   src/app/transform_tool.cpp
+  src/app/measure.cpp
   src/app/undo.cpp
   src/mesh/halfedge.cpp
   src/mesh/primitives.cpp
@@ -122,6 +123,17 @@ add_executable(test_boolean tests/test_boolean.cpp
 target_include_directories(test_boolean PRIVATE src)
 target_compile_options(test_boolean PRIVATE -Wall -Wextra)
 add_test(NAME boolean COMMAND test_boolean)
+
+# Links the renderer only because MeasureTool::drawOverlay references it; no GL
+# context is created.
+add_executable(test_measure tests/test_measure.cpp
+  src/app/measure.cpp src/app/camera.cpp src/scene/scene.cpp src/scene/feature.cpp
+  src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp
+  src/render/renderer.cpp src/render/shader.cpp src/render/gpu_mesh.cpp)
+target_include_directories(test_measure PRIVATE src)
+target_link_libraries(test_measure PRIVATE PkgConfig::EPOXY)
+target_compile_options(test_measure PRIVATE -Wall -Wextra -Wno-unused-parameter)
+add_test(NAME measure COMMAND test_measure)
 
 # Not a test: a stopwatch for the heavy paths. Run it by hand.
 add_executable(bench EXCLUDE_FROM_ALL tests/bench.cpp

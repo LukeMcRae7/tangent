@@ -120,6 +120,19 @@ bool Application::init() {
         }
     }
 
+    if (measureDemo_ && !scene_.objects().empty()) {
+        const ObjectId id = scene_.objects().front()->id;
+        const Mesh& m = scene_.find(id)->mesh;
+        Index top = 0, bottom = 0;
+        for (Index f = 0; f < m.faceCount(); ++f) {
+            if (dot(m.faceNormal(f), Vec3{0, 0, 1}) > 0.99) top = f;
+            if (dot(m.faceNormal(f), Vec3{0, 0, -1}) > 0.99) bottom = f;
+        }
+        measure_.begin();
+        measure_.pick({id, ElementKind::Face, top});
+        measure_.pick({id, ElementKind::Face, bottom});
+    }
+
     if (!fixedCamera_) {
         camera_.frame(scene_.bounds());
         camera_.snapToGoal();
@@ -162,6 +175,8 @@ Vec2 Application::mouseInViewport() const {
 }
 
 void Application::beginTransform(TransformMode mode) {
+    measure_.end();
+
     if (const SceneObject* o = scene_.find(scene_.contextObject()))
         preEditSolid_ = o->healthVersion == o->meshVersion && o->health.solid();
     else
@@ -229,6 +244,16 @@ void Application::handleViewportClick(bool shift, bool ctrl) {
     const Vec2 cursor = mouseInViewport();
     const Ray ray = camera_.rayThroughPixel(cursor.x, cursor.y);
 
+    // While measuring, a click chooses what to measure rather than what to
+    // edit, so the current selection is left alone.
+    if (measure_.active()) {
+        const ElementHit hit = scene_.pickElement(ray, camera_.viewProjection(),
+                                                  camera_.viewportW, camera_.viewportH,
+                                                  cursor);
+        measure_.pick(hit.ref);
+        return;
+    }
+
     if (ctrl) {
         const RayHit hit = scene_.raycast(ray);
         scene_.clearElementSelection();
@@ -254,6 +279,25 @@ void Application::handleViewportClick(bool shift, bool ctrl) {
         scene_.clearElementSelection();
         scene_.clearSelection();
     }
+}
+
+void Application::drawMeasureLabel() {
+    if (!measure_.active() || !measureResult_.valid) return;
+
+    // Anchored at the midpoint of the measured span, in the foreground list so
+    // it is never hidden by geometry.
+    const Vec3 mid = (measureResult_.from + measureResult_.to) * 0.5;
+    Vec2 px;
+    if (!camera_.projectToPixel(mid, px)) return;
+
+    const ImVec2 at(static_cast<float>(px.x) + viewRect_.x + 14.0f,
+                    static_cast<float>(px.y) + viewRect_.y - 10.0f);
+    ImDrawList* dl = ImGui::GetForegroundDrawList();
+    const ImVec2 size = ImGui::CalcTextSize(measureResult_.summary.c_str());
+    dl->AddRectFilled(ImVec2(at.x - 6, at.y - 4),
+                      ImVec2(at.x + size.x + 6, at.y + size.y + 4),
+                      IM_COL32(20, 20, 23, 220), 4.0f);
+    dl->AddText(at, IM_COL32(255, 75, 51, 255), measureResult_.summary.c_str());
 }
 
 void Application::drawSelectionHighlights() {
@@ -392,6 +436,17 @@ void Application::handleShortcuts() {
         ui_.actions.duplicateSelected = true;
     if (ImGui::IsKeyPressed(ImGuiKey_Z, false) && !ctrl && !shift)
         view_.showWireframe = !view_.showWireframe;
+
+    // Measure. D for distance, and reachable without moving the left hand.
+    if (!ctrl && !alt && !shift && ImGui::IsKeyPressed(ImGuiKey_D, false)) {
+        if (measure_.active()) measure_.end();
+        else                   measure_.begin();
+    }
+    if (measure_.active() && ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+        // First Escape clears the picks, a second leaves the tool.
+        if (measure_.picks().empty()) measure_.end();
+        else                          measure_.clearPicks();
+    }
 
     // Mesh edits act on the selected faces. Shift+E cuts inward.
     if (!ctrl && !alt && ImGui::IsKeyPressed(ImGuiKey_E, false)) ui_.actions.extrude = true;
@@ -793,6 +848,8 @@ void Application::buildUi() {
     drawHistory(ui_);
     drawStatusBar(ui_);
     drawViewportOverlay(ui_, viewRect_.x, viewRect_.y, viewRect_.w, viewRect_.h);
+    drawMeasurePanel(ui_);
+    drawMeasureLabel();
 
     if (openAddMenu_) {
         ImGui::OpenPopup("##addmenu");
@@ -995,7 +1052,18 @@ int Application::run() {
         if (noticeAge_ > 4.0f) notice_.clear();
         ui_.notice = notice_;
 
+        ui_.measuring = measure_.active();
+        ui_.measurement = measureResult_;
+        ui_.measurePicks = measure_.picks().size();
+
         ui_.toolStatus = tool_.statusText();
+        if (measure_.active() && ui_.toolStatus.empty()) {
+            const size_t n = measure_.picks().size();
+            ui_.toolStatus = n == 0 ? "Measure: click a vertex, edge or face"
+                           : n == 1 ? "Measure: " + measureResult_.summary +
+                                      "   -   click another to measure between them"
+                                    : "Measure: " + measureResult_.summary;
+        }
         ui_.canUndo = undo_.canUndo();
         ui_.canRedo = undo_.canRedo();
         for (const auto& o : scene_.objects()) {
@@ -1011,6 +1079,8 @@ int Application::run() {
         // Queued before the frame is drawn; the renderer flushes overlay lines
         // at the end of its pass.
         drawSelectionHighlights();
+        measureResult_ = measure_.active() ? measure_.compute(scene_) : MeasureResult{};
+        measure_.drawOverlay(renderer_, camera_, measureResult_);
         tool_.drawOverlay(renderer_, camera_);
 
         camera_.update(dt);

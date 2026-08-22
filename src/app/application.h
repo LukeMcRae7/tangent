@@ -2,6 +2,7 @@
 #pragma once
 
 #include "app/camera.h"
+#include "app/measure.h"
 #include "app/transform_tool.h"
 #include "mesh/operations.h"
 #include "app/undo.h"
@@ -68,6 +69,7 @@ public:
     // selection highlight and the mesh operations reproducible in a capture,
     // which a click cannot be.
     void setPickFace(int index) { pickFace_ = index; }
+    void setMeasureDemo() { measureDemo_ = true; }
     void setAutoExtrude(float mm) { autoExtrude_ = true; autoExtrudeMm_ = mm; }
 
     // Writes the viewport to a PPM after `afterFrames` frames. Reads back this
@@ -87,6 +89,7 @@ private:
     void beginTransform(TransformMode mode);
     void handleViewportClick(bool shift, bool ctrl);
     void drawSelectionHighlights();
+    void drawMeasureLabel();
     void extrudeSelection();
     void bevelActiveObject();
 
@@ -115,6 +118,8 @@ private:
     Scene         scene_;
     UndoStack     undo_;
     TransformTool tool_;
+    MeasureTool   measure_;
+    MeasureResult measureResult_;
     Camera      camera_;
     Renderer    renderer_;
     ViewOptions view_;
@@ -167,6 +172,7 @@ private:
     std::string          pendingLabel_;
 
     int         pickFace_ = -1;
+    bool        measureDemo_ = false;
     bool        autoExtrude_ = false;
     float       autoExtrudeMm_ = 10.0f;
 
