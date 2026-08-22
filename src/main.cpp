@@ -25,6 +25,10 @@ int main(int argc, char** argv) {
             float y0 = 0, y1 = 90; int steps = 181;
             std::sscanf(argv[++i], "%f,%f,%d", &y0, &y1, &steps);
             app.setGridProbe(y0, y1, steps);
+        } else if (std::strcmp(argv[i], "--grid-align") == 0 && i + 1 < argc) {
+            float y0 = 0, y1 = 90; int steps = 91;
+            std::sscanf(argv[++i], "%f,%f,%d", &y0, &y1, &steps);
+            app.setGridAlign(y0, y1, steps);
         } else if (std::strcmp(argv[i], "--help") == 0) {
             std::printf("tangent - 3D modelling for print design\n"
                         "  --smoke-test [frames]   render N frames and exit\n"

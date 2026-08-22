@@ -116,6 +116,59 @@ int main() {
         std::printf("[undo] merge ok\n");
     }
 
+    // ---- Merging must not span separate gestures ---------------------------
+    {
+        Scene s;
+        UndoStack u;
+        const ObjectId id = s.addPrimitive(PrimitiveKind::Box);
+        const Transform t0 = s.find(id)->transform;
+
+        Transform t1 = t0; t1.position = {5, 0, 0};
+        u.push(std::make_unique<TransformCommand>(
+            std::vector<TransformCommand::Entry>{{id, t0, t1}}, "Transform"), true);
+
+        // Releasing the mouse ends the gesture; the next drag is its own entry.
+        u.breakMergeChain();
+        Transform t2 = t1; t2.position = {9, 0, 0};
+        u.push(std::make_unique<TransformCommand>(
+            std::vector<TransformCommand::Entry>{{id, t1, t2}}, "Transform"), true);
+        s.find(id)->transform = t2;
+
+        u.undo(s);
+        check(nearV(s.find(id)->transform.position, t1.position),
+              "second gesture undoes to the end of the first, not past it");
+        check(u.canUndo(), "the first gesture is still on the stack");
+        u.undo(s);
+        check(nearV(s.find(id)->transform.position, t0.position), "first gesture undoes");
+        std::printf("[undo] gestures stay separate ok\n");
+    }
+
+    // ---- An edit after an undo must not merge across it --------------------
+    {
+        Scene s;
+        UndoStack u;
+        const ObjectId id = s.addPrimitive(PrimitiveKind::Box);
+        const PrimitiveSpec s0 = s.find(id)->spec;
+
+        PrimitiveSpec s1 = s0; s1.box.width = 40.0f;
+        u.push(std::make_unique<ParameterCommand>(id, s0, s1), true);
+        s.find(id)->spec = s1; s.rebuild(id);
+
+        u.undo(s);   // back to 20 mm
+        check(near(s.find(id)->localBounds.size().x, 20.0f), "undo returned to 20 mm");
+
+        // A new edit here must start a fresh entry rather than fold into the
+        // command that was just undone.
+        PrimitiveSpec s2 = s0; s2.box.width = 80.0f;
+        u.push(std::make_unique<ParameterCommand>(id, s0, s2), true);
+        s.find(id)->spec = s2; s.rebuild(id);
+
+        u.undo(s);
+        check(near(s.find(id)->localBounds.size().x, 20.0f),
+              "undo after a post-undo edit returns to the pre-edit state");
+        std::printf("[undo] no merging across an undo ok\n");
+    }
+
     // ---- Parameter changes -------------------------------------------------
     {
         Scene s;

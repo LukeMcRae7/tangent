@@ -49,14 +49,29 @@ void main() {
     // brightness as it sweeps through 45 degrees -- the jitter. The true
     // screen-space rate of change of a scalar field is the length of its
     // gradient, which is isotropic and so invariant under rotation.
-    vec2 grad = vec2(length(vec2(dFdx(P.x), dFdy(P.x))),
-                     length(vec2(dFdx(P.y), dFdy(P.y))));
+    vec3 dPdx = dFdx(P);
+    vec3 dPdy = dFdy(P);
+    vec2 grad = vec2(length(vec2(dPdx.x, dPdy.x)),
+                     length(vec2(dPdx.y, dPdy.y)));
 
     // Choose the level so the finest drawn cell stays at least kPixelsPerCell
     // wide. That means rounding the level *up* (ceil): floor would select the
     // next level finer, which is below the density we can actually resolve.
     const float kPixelsPerCell = 12.0;
-    float cell = max(grad.x, grad.y);
+
+    // The scale measure must not depend on which way the camera is facing.
+    // max(grad.x, grad.y) does: those are the screen densities of the two line
+    // families, and how they compare depends entirely on how the world axes
+    // happen to lie relative to the view. Over one orbit that swings the
+    // chosen level by up to sqrt(2), which fades the fine lines in and out as
+    // the view turns -- the grid appears to change scale while the geometry
+    // stands still.
+    //
+    // The area of a pixel's footprint on the ground plane has no such
+    // dependence: orbiting rotates that footprint but does not resize it. Its
+    // square root is the characteristic world length per pixel, and it is
+    // invariant under rotation about the plane normal.
+    float cell = sqrt(max(length(cross(dPdx, dPdy)), 1e-16));
     float lodF = log2(max(cell * kPixelsPerCell / uSpacing, 1e-8)) / log2(uSubdivide);
     float lod  = max(ceil(lodF), -1.0);
     float k    = clamp(lod - lodF, 0.0, 1.0);   // 0 = just resolvable, 1 = about to subdivide

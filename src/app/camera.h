@@ -68,14 +68,21 @@ public:
     float pixelWorldSize(Vec3 atPoint) const;
 
     // ---- Smoothing -------------------------------------------------------
-    // Navigation writes the goal; update() eases the live values toward it.
+    // Only view *snaps* animate. Orbit, pan and dolly are applied immediately:
+    // easing direct manipulation puts the view behind the cursor by the
+    // smoothing time constant, which reads as floaty and imprecise. Animation
+    // is for jumps the user did not drag out by hand.
     void snapToGoal();
     void update(float dt);
+    bool animating() const { return animating_; }
 
 private:
     struct Goal { Vec3 target; float distance; float yaw, pitch; };
     Goal goal_{target, distance, yaw, pitch};
     bool hasGoal_ = false;
+    bool animating_ = false;
+
+    void syncGoal() { goal_ = {target, distance, yaw, pitch}; hasGoal_ = true; }
 };
 
 } // namespace tg

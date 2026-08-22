@@ -30,7 +30,8 @@ ctest --test-dir build --output-on-failure
 `tests/grid_stability.py` is separate because it needs a GL context: it orbits
 the camera in sub-pixel steps and measures how much the rendered image changes
 between them, catching grid levels that pop or lines that breathe under
-rotation.
+rotation. `--grid-align` is a companion diagnostic that checks grid lines are
+drawn at the world coordinates they belong to.
 
 ```sh
 python3 tests/grid_stability.py

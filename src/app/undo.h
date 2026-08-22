@@ -92,6 +92,12 @@ public:
     // one continuous gesture.
     void push(std::unique_ptr<Command> cmd, bool merge = false);
 
+    // Ends the current gesture, so the next push starts a fresh entry even if
+    // it asks to merge. Without this, releasing a slider and dragging it again
+    // would fold both drags into one undo step -- and an edit made after an
+    // undo could merge into a command from before it.
+    void breakMergeChain() { mergeBarrier_ = true; }
+
     bool undo(Scene& scene);
     bool redo(Scene& scene);
 
@@ -106,6 +112,7 @@ private:
 
     std::vector<std::unique_ptr<Command>> done_;
     std::vector<std::unique_ptr<Command>> undone_;
+    bool mergeBarrier_ = false;
 };
 
 } // namespace tg

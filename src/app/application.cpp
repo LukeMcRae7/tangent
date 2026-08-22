@@ -12,6 +12,7 @@
 #include "backends/imgui_impl_opengl3.h"
 
 #include <cstdio>
+#include <algorithm>
 #include <cstdlib>
 #include <vector>
 
@@ -162,13 +163,12 @@ void Application::handleViewportMouse() {
 
     // Middle-drag navigation: capture continues even if the cursor leaves the
     // viewport, which is what makes a long orbit feel unbounded.
-    static bool navigating = false;
     if (ImGui::IsMouseClicked(ImGuiMouseButton_Middle) && overViewport && !io.WantCaptureMouse)
-        navigating = true;
+        navigating_ = true;
     if (!ImGui::IsMouseDown(ImGuiMouseButton_Middle))
-        navigating = false;
+        navigating_ = false;
 
-    if (navigating) {
+    if (navigating_) {
         const ImVec2 d = io.MouseDelta;
         if (d.x != 0.0f || d.y != 0.0f) {
             if (io.KeyShift) camera_.pan(d.x, d.y);
@@ -383,6 +383,10 @@ void Application::applyActions() {
         }
     }
 
+    // A released mouse button ends any inspector drag, so the next one starts
+    // its own undo entry.
+    if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) undo_.breakMergeChain();
+
     if (a.frameSelected) {
         const AABB b = scene_.selection().empty() ? scene_.bounds() : scene_.selectionBounds();
         camera_.frame(b);
@@ -499,6 +503,68 @@ void Application::readViewport(std::vector<unsigned char>& out) const {
     glPixelStorei(GL_PACK_ALIGNMENT, 1);
     glReadBuffer(GL_BACK);
     glReadPixels(r.x, r.y, r.w, r.h, GL_RGB, GL_UNSIGNED_BYTE, out.data());
+}
+
+// Luminance at a world point, read back from the rendered viewport.
+// Returns -1 if the point is behind the camera or outside the viewport.
+static float sampleAt(const std::vector<unsigned char>& px, const PixelRect& r,
+                      const Camera& cam, float sx, float sy, Vec3 world) {
+    Vec2 logical;
+    if (!cam.projectToPixel(world, logical)) return -1.0f;
+
+    const int cx = static_cast<int>(logical.x * sx);
+    // projectToPixel measures Y downward from the top; the readback rows run
+    // upward from the bottom of the rectangle.
+    const int cy = r.h - 1 - static_cast<int>(logical.y * sy);
+
+    // Brightest pixel in a 3x3 window. The projected position is rounded to a
+    // whole pixel and a grid line is only about a pixel wide, so sampling a
+    // single pixel misses the line whenever the rounding goes the wrong way --
+    // which depends on sub-pixel phase and therefore looks like a failure at
+    // scattered, arbitrary angles.
+    float best = -1.0f;
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            const int fx = cx + dx, fy = cy + dy;
+            if (fx < 0 || fx >= r.w || fy < 0 || fy >= r.h) continue;
+            const size_t i = (static_cast<size_t>(fy) * r.w + fx) * 3;
+            if (i + 2 >= px.size()) continue;
+            const float lum = 0.2126f * px[i] + 0.7152f * px[i + 1] + 0.0722f * px[i + 2];
+            best = std::max(best, lum);
+        }
+    }
+    return best;
+}
+
+void Application::sampleGridAlignment(float& onLine, float& offLine) const {
+    onLine = offLine = 0.0f;
+    const PixelRect& r = lastViewportPx_;
+    if (!r.valid()) return;
+
+    std::vector<unsigned char> px;
+    readViewport(px);
+
+    // Points on the x = k*10 and y = k*10 major lines, sampled away from any
+    // perpendicular line so only the line under test contributes. Controls sit
+    // half a millimetre off, the furthest possible from every line at the
+    // finest level the grid draws.
+    double on = 0.0, off = 0.0;
+    int onN = 0, offN = 0;
+    for (int k = -4; k <= 4; ++k) {
+        const float g = static_cast<float>(k) * 10.0f;
+        const Vec3 probes[4] = {{g, 3.7f, 0.0f}, {3.7f, g, 0.0f},
+                                {g, -6.3f, 0.0f}, {-6.3f, g, 0.0f}};
+        const Vec3 ctrls[4]  = {{g + 0.5f, 3.5f, 0.0f}, {3.5f, g + 0.5f, 0.0f},
+                                {g + 0.5f, -6.5f, 0.0f}, {-6.5f, g + 0.5f, 0.0f}};
+        for (int i = 0; i < 4; ++i) {
+            const float a = sampleAt(px, r, camera_, pixelScaleX_, pixelScaleY_, probes[i]);
+            if (a >= 0.0f) { on += a; ++onN; }
+            const float b = sampleAt(px, r, camera_, pixelScaleX_, pixelScaleY_, ctrls[i]);
+            if (b >= 0.0f) { off += b; ++offN; }
+        }
+    }
+    if (onN)  onLine  = static_cast<float>(on / onN);
+    if (offN) offLine = static_cast<float>(off / offN);
 }
 
 double Application::meanViewportLuminance() const {
@@ -623,11 +689,16 @@ int Application::run() {
                 }
                 probePrev_ = std::move(cur);
 
-                std::printf("%.5f %.6f %.6f\n",
-                            probeYaw0_ + (probeYaw1_ - probeYaw0_) *
-                                (static_cast<float>(probeIndex_) /
-                                 static_cast<float>(probeSteps_ - 1)),
-                            meanViewportLuminance(), diff);
+                const float yawNow = probeYaw0_ + (probeYaw1_ - probeYaw0_) *
+                                     (static_cast<float>(probeIndex_) /
+                                      static_cast<float>(probeSteps_ - 1));
+                if (alignProbe_) {
+                    float on = 0.0f, off = 0.0f;
+                    sampleGridAlignment(on, off);
+                    std::printf("%.5f %.4f %.4f\n", yawNow, on, off);
+                } else {
+                    std::printf("%.5f %.6f %.6f\n", yawNow, meanViewportLuminance(), diff);
+                }
                 if (++probeIndex_ >= probeSteps_) { std::fflush(stdout); running_ = false; }
             }
         }

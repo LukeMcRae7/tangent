@@ -50,6 +50,19 @@ public:
         probeActive_ = true;
     }
 
+    // Checks that grid lines are drawn at the world coordinates they belong to.
+    // Samples the rendered image at points known to lie exactly on a major grid
+    // line, and at control points deliberately off every line, for each yaw in
+    // a sweep. A grid anchored to the world keeps the on-line samples bright at
+    // every angle; one whose phase drifts with the camera does not.
+    void setGridAlign(float yaw0Deg, float yaw1Deg, int steps) {
+        probeYaw0_ = yaw0Deg;
+        probeYaw1_ = yaw1Deg;
+        probeSteps_ = steps > 1 ? steps : 2;
+        probeActive_ = true;
+        alignProbe_ = true;
+    }
+
     // Writes the viewport to a PPM after `afterFrames` frames. Reads back this
     // process's own GL framebuffer rather than going through the compositor, so
     // it captures only Tangent and works regardless of what else is on screen.
@@ -102,6 +115,9 @@ private:
     // Set for one frame when Shift+A asks for the add menu at the cursor.
     bool  openAddMenu_ = false;
 
+    // True while a middle-drag navigation gesture is in progress.
+    bool  navigating_ = false;
+
     void captureFramebuffer(int width, int height) const;
     std::string screenshotPath_;
     int         screenshotFrame_ = -1;
@@ -115,6 +131,8 @@ private:
     bool  probeActive_ = false;
     float probeYaw0_ = 0.0f, probeYaw1_ = 90.0f;
     int   probeSteps_ = 2, probeIndex_ = 0, probeSettle_ = 0;
+    bool  alignProbe_ = false;
+    void  sampleGridAlignment(float& onLine, float& offLine) const;
 };
 
 } // namespace tg

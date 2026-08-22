@@ -222,7 +222,14 @@ void TransformTool::apply(Scene& scene, const Camera& camera, Vec2 mousePx, bool
         for (const Entry& e : entries_) {
             SceneObject* o = scene.find(e.id);
             if (!o) continue;
-            o->transform.scale = e.before.scale * s;
+            Vec3 next = e.before.scale * s;
+            // A scale of exactly zero makes the model matrix singular, which
+            // silently breaks picking and normals. Keep a hair of thickness.
+            constexpr float kMinScale = 1e-4f;
+            for (int i = 0; i < 3; ++i)
+                if (std::fabs(next[i]) < kMinScale)
+                    next[i] = next[i] < 0.0f ? -kMinScale : kMinScale;
+            o->transform.scale = next;
             o->transform.position = pivot_ + (e.before.position - pivot_) * s;
         }
         break;

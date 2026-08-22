@@ -68,6 +68,7 @@ private:
     struct CacheEntry {
         GpuMesh  gpu;
         uint32_t version = 0;
+        uint64_t lastSeen = 0;   // frame this object was last drawn
     };
     struct LineVert { Vec3 pos; Vec4 color; };
 
@@ -80,6 +81,12 @@ private:
     uint32_t lineVao_ = 0, lineVbo_ = 0;
     std::vector<LineVert> lineVerts_;
     std::unordered_map<ObjectId, CacheEntry> cache_;
+
+    // Objects can leave the scene without passing through forget(): undo lifts
+    // a created object straight out via Scene::takeObject. Sweeping by last-use
+    // reclaims those buffers without every caller having to remember.
+    void pruneCache();
+    uint64_t frameIndex_ = 0;
 };
 
 } // namespace tg

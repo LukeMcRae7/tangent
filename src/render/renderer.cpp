@@ -61,7 +61,22 @@ const GpuMesh& Renderer::syncObject(const SceneObject& obj) {
         e.gpu.upload(obj.render);
         e.version = obj.meshVersion;
     }
+    e.lastSeen = frameIndex_;
     return e.gpu;
+}
+
+void Renderer::pruneCache() {
+    // A generous grace period: an object hidden for a moment, or restored by
+    // undo shortly after being removed, keeps its buffers and re-appears
+    // without a re-upload.
+    constexpr uint64_t kGraceFrames = 240;
+    if (frameIndex_ < kGraceFrames) return;
+
+    const uint64_t cutoff = frameIndex_ - kGraceFrames;
+    for (auto it = cache_.begin(); it != cache_.end(); ) {
+        if (it->second.lastSeen < cutoff) it = cache_.erase(it);
+        else ++it;
+    }
 }
 
 void Renderer::addLine(Vec3 a, Vec3 b, Vec4 color) {
@@ -229,6 +244,9 @@ void Renderer::render(const Scene& scene, const Camera& camera, const ViewOption
     glDisable(GL_BLEND);
     glDisable(GL_LINE_SMOOTH);
     glDisable(GL_SCISSOR_TEST);
+
+    ++frameIndex_;
+    if ((frameIndex_ % 120) == 0) pruneCache();
 }
 
 } // namespace tg

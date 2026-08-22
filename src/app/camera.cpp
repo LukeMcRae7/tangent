@@ -42,32 +42,36 @@ Mat4 Camera::projection() const {
 }
 
 void Camera::orbit(float dxPixels, float dyPixels) {
-    if (!hasGoal_) { goal_ = {target, distance, yaw, pitch}; hasGoal_ = true; }
-
     const float dx = dxPixels * (invertOrbitX ? -1.0f : 1.0f);
     const float dy = dyPixels * (invertOrbitY ? -1.0f : 1.0f);
 
-    goal_.yaw   -= dx * kOrbitRadiansPerPixel;
-    goal_.pitch = clampf(goal_.pitch + dy * kOrbitRadiansPerPixel,
-                         -kPitchLimit, kPitchLimit);
+    // Applied straight to the live camera: the view must sit exactly where the
+    // drag has put it, this frame.
+    yaw   -= dx * kOrbitRadiansPerPixel;
+    pitch = clampf(pitch + dy * kOrbitRadiansPerPixel, -kPitchLimit, kPitchLimit);
+    animating_ = false;
+    syncGoal();
 }
 
 void Camera::pan(float dxPixels, float dyPixels) {
-    if (!hasGoal_) { goal_ = {target, distance, yaw, pitch}; hasGoal_ = true; }
     // Match cursor movement one-to-one at the target plane.
     const float worldPerPixel = orthoHeight() / static_cast<float>(viewportH > 0 ? viewportH : 1);
-    goal_.target -= right() * (dxPixels * worldPerPixel);
-    goal_.target += up()    * (dyPixels * worldPerPixel);
+    target -= right() * (dxPixels * worldPerPixel);
+    target += up()    * (dyPixels * worldPerPixel);
+    animating_ = false;
+    syncGoal();
 }
 
 void Camera::dolly(float steps) {
-    if (!hasGoal_) { goal_ = {target, distance, yaw, pitch}; hasGoal_ = true; }
     // Multiplicative, so each notch feels the same at any zoom level.
-    goal_.distance = clampf(goal_.distance * std::pow(0.85f, steps), kMinDistance, kMaxDistance);
+    distance = clampf(distance * std::pow(0.85f, steps), kMinDistance, kMaxDistance);
+    animating_ = false;
+    syncGoal();
 }
 
 void Camera::setStandardView(StandardView v) {
-    if (!hasGoal_) { goal_ = {target, distance, yaw, pitch}; hasGoal_ = true; }
+    syncGoal();
+    animating_ = true;
     switch (v) {
         case StandardView::Front:  goal_.yaw = 0.0f;          goal_.pitch = 0.0f; break;
         case StandardView::Back:   goal_.yaw = kPi;           goal_.pitch = 0.0f; break;
@@ -79,8 +83,9 @@ void Camera::setStandardView(StandardView v) {
 }
 
 void Camera::frame(const AABB& box) {
-    if (!hasGoal_) { goal_ = {target, distance, yaw, pitch}; hasGoal_ = true; }
     if (!box.valid()) return;
+    syncGoal();
+    animating_ = true;
 
     goal_.target = box.center();
     const float radius = std::max(box.radius(), 0.5f);
@@ -126,10 +131,20 @@ void Camera::snapToGoal() {
     if (!hasGoal_) return;
     target = goal_.target; distance = goal_.distance;
     yaw = goal_.yaw; pitch = goal_.pitch;
+    animating_ = false;
 }
 
 void Camera::update(float dt) {
-    if (!hasGoal_) return;
+    if (!hasGoal_ || !animating_) return;
+
+    // Close enough to be indistinguishable: land exactly and stop, so the
+    // camera is not perpetually creeping by fractions of a pixel.
+    if (std::fabs(yaw - goal_.yaw) < 1e-5f && std::fabs(pitch - goal_.pitch) < 1e-5f &&
+        std::fabs(distance - goal_.distance) < 1e-4f &&
+        lengthSq(target - goal_.target) < 1e-8f) {
+        snapToGoal();
+        return;
+    }
     // Exponential ease that is frame-rate independent: the same fraction of
     // the remaining distance is covered per unit time, not per frame.
     const float k = 1.0f - std::exp(-22.0f * clampf(dt, 0.0f, 0.1f));

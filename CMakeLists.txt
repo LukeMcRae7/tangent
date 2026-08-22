@@ -49,6 +49,7 @@ add_executable(tangent
   src/app/undo.cpp
   src/mesh/halfedge.cpp
   src/mesh/primitives.cpp
+  src/mesh/operations.cpp
   src/scene/scene.cpp
   src/render/shader.cpp
   src/render/gpu_mesh.cpp
@@ -91,3 +92,9 @@ target_include_directories(test_transform PRIVATE src)
 target_link_libraries(test_transform PRIVATE PkgConfig::EPOXY)
 target_compile_options(test_transform PRIVATE -Wall -Wextra -Wno-unused-parameter)
 add_test(NAME transform COMMAND test_transform)
+
+add_executable(test_operations tests/test_operations.cpp
+  src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp)
+target_include_directories(test_operations PRIVATE src)
+target_compile_options(test_operations PRIVATE -Wall -Wextra)
+add_test(NAME operations COMMAND test_operations)
