@@ -51,6 +51,7 @@ add_executable(tangent
   src/mesh/primitives.cpp
   src/mesh/operations.cpp
   src/mesh/health.cpp
+  src/mesh/boolean.cpp
   src/scene/scene.cpp
   src/scene/feature.cpp
   src/render/shader.cpp
@@ -115,6 +116,12 @@ add_executable(test_health tests/test_health.cpp
 target_include_directories(test_health PRIVATE src)
 target_compile_options(test_health PRIVATE -Wall -Wextra)
 add_test(NAME health COMMAND test_health)
+
+add_executable(test_boolean tests/test_boolean.cpp
+  src/mesh/boolean.cpp src/mesh/health.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp)
+target_include_directories(test_boolean PRIVATE src)
+target_compile_options(test_boolean PRIVATE -Wall -Wextra)
+add_test(NAME boolean COMMAND test_boolean)
 
 # Not a test: a stopwatch for the heavy paths. Run it by hand.
 add_executable(bench EXCLUDE_FROM_ALL tests/bench.cpp

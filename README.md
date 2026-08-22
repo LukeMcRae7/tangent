@@ -203,7 +203,9 @@ inline constexpr Rgb kBrand = hex(0xFF4B33);
    driven by the modal G/R/S grammar.*
 3. **Face editing** — extrude, move face, fillet, full parametric history
    *(next)*
-4. **Multi-object** *(next)* — booleans, split
+4. **Multi-object** *(in progress)* — the boolean kernel is done and tested
+   (union, difference, intersection, with exact volume assertions). Still to
+   do: wiring it to the UI as a two-object operation, and split.
 5. **Project files** — save/load, STL and 3MF export
 
 ## Licence
