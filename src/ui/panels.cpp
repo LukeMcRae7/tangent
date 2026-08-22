@@ -11,6 +11,11 @@
 namespace tg {
 namespace {
 
+inline ImVec4 im(Rgb c, float a = 1.0f) {
+    return ImVec4(static_cast<float>(c.r), static_cast<float>(c.g),
+                  static_cast<float>(c.b), a);
+}
+
 const ImVec4 kAccent(palette::kBrand.r, palette::kBrand.g, palette::kBrand.b, 1.0f);
 const ImVec4 kDim(palette::kTextDim.r, palette::kTextDim.g, palette::kTextDim.b, 1.0f);
 
@@ -337,27 +342,29 @@ void drawInspector(UiContext& ctx) {
     sectionLabel("PRINTABILITY");
     {
         const MeshHealth& h = obj->health;
-        const bool stale = obj->healthVersion != obj->meshVersion;
-        if (stale) {
+        if (obj->healthVersion != obj->meshVersion) {
+            // Stale: the geometry moved and the check has not caught up. Show
+            // nothing but that, rather than last edit's numbers dressed up as
+            // this one's.
             ImGui::TextColored(kDim, "Checking...");
-        } else if (h.solid()) {
-            ImGui::TextColored(ImVec4(0.45f, 0.78f, 0.42f, 1.0f), "Solid - ready to print");
         } else {
-            ImGui::TextColored(kAccent, "Not a printable solid");
+            if (h.solid()) ImGui::TextColored(im(palette::kValid), "Solid - ready to print");
+            else           ImGui::TextColored(kAccent, "Not a printable solid");
+
+            if (!h.watertight)
+                ImGui::TextColored(kDim, "  %d open edge%s", h.boundaryEdges,
+                                   h.boundaryEdges == 1 ? "" : "s");
+            if (h.degenerateFaces > 0)
+                ImGui::TextColored(kDim, "  %d zero-area face%s", h.degenerateFaces,
+                                   h.degenerateFaces == 1 ? "" : "s");
+            if (h.selfIntersections > 0)
+                ImGui::TextColored(kDim, "  %d self-intersection%s", h.selfIntersections,
+                                   h.selfIntersections == 1 ? "" : "s");
+            if (h.volume < 0.0) ImGui::TextColored(kDim, "  inside out");
+
+            ImGui::TextColored(kDim, "Volume  %.2f cm3", h.volume / 1000.0);
+            if (h.shells > 1) ImGui::TextColored(kDim, "Bodies  %d", h.shells);
         }
-        if (!h.watertight)
-            ImGui::TextColored(kDim, "  %d open edge%s", h.boundaryEdges,
-                               h.boundaryEdges == 1 ? "" : "s");
-        if (h.degenerateFaces > 0)
-            ImGui::TextColored(kDim, "  %d zero-area face%s", h.degenerateFaces,
-                               h.degenerateFaces == 1 ? "" : "s");
-        if (h.selfIntersections > 0)
-            ImGui::TextColored(kDim, "  %d self-intersection%s", h.selfIntersections,
-                               h.selfIntersections == 1 ? "" : "s");
-        if (h.volume < 0.0)
-            ImGui::TextColored(kDim, "  inside out");
-        ImGui::TextColored(kDim, "Volume  %.2f cm3", h.volume / 1000.0);
-        if (h.shells > 1) ImGui::TextColored(kDim, "Bodies  %d", h.shells);
     }
 
     sectionLabel("STATISTICS");
@@ -570,7 +577,7 @@ void drawStatusBar(UiContext& ctx) {
             if (ctxObj->healthVersion != ctxObj->meshVersion)
                 ImGui::TextColored(kDim, "checking");
             else if (ctxObj->health.solid())
-                ImGui::TextColored(ImVec4(0.45f, 0.78f, 0.42f, 1.0f), "solid");
+                ImGui::TextColored(im(palette::kValid), "solid");
             else
                 ImGui::TextColored(kAccent, "not solid");
         }

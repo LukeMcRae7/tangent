@@ -294,10 +294,16 @@ void Application::drawMeasureLabel() {
                     static_cast<float>(px.y) + viewRect_.y - 10.0f);
     ImDrawList* dl = ImGui::GetForegroundDrawList();
     const ImVec2 size = ImGui::CalcTextSize(measureResult_.summary.c_str());
+    // Colours come from the palette, not from literals, so the label follows
+    // a theme change like everything else.
+    auto u8 = [](Real v) { return static_cast<int>(clampf(v, 0.0, 1.0) * 255.0 + 0.5); };
+    const Rgb& bg = palette::kMenuBar;
+    const Rgb& fg = palette::kBrand;
     dl->AddRectFilled(ImVec2(at.x - 6, at.y - 4),
                       ImVec2(at.x + size.x + 6, at.y + size.y + 4),
-                      IM_COL32(20, 20, 23, 220), 4.0f);
-    dl->AddText(at, IM_COL32(255, 75, 51, 255), measureResult_.summary.c_str());
+                      IM_COL32(u8(bg.r), u8(bg.g), u8(bg.b), 224), 4.0f);
+    dl->AddText(at, IM_COL32(u8(fg.r), u8(fg.g), u8(fg.b), 255),
+                measureResult_.summary.c_str());
 }
 
 void Application::drawSelectionHighlights() {

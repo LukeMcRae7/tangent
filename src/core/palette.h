@@ -35,39 +35,45 @@ constexpr Rgb mix(Rgb a, Rgb b, float t) {
 namespace palette {
 
 // ---- The one knob -----------------------------------------------------
-inline constexpr Rgb kBrand = hex(0xFF4B33);
+inline constexpr Rgb kBrand = hex(0xF34425);
 
 // ---- Surfaces ---------------------------------------------------------
-// Warm-leaning neutrals. A blue-cast grey next to a warm coral accent reads
-// cold and corporate; nudging the greys warm keeps the interface friendly
-// without tinting anything enough to disturb colour judgement.
-inline constexpr Rgb kBackground  = hex(0x1A1A1D);
-inline constexpr Rgb kPanel       = hex(0x1F1F22);
-inline constexpr Rgb kRaised      = hex(0x27272B);
-inline constexpr Rgb kHover       = hex(0x313136);
-inline constexpr Rgb kActive      = hex(0x3B3B41);
-inline constexpr Rgb kBorder      = hex(0x2E2E33);
-inline constexpr Rgb kMenuBar     = hex(0x161619);
+// Neutral greys stepped from kBackground, which is the same tone the logo
+// sits on. Every step keeps the same hue so the accent is the only colour in
+// the interface with any saturation to it.
+inline constexpr Rgb kBackground  = hex(0x1D1D1E);
+inline constexpr Rgb kPanel       = hex(0x222223);
+inline constexpr Rgb kRaised      = hex(0x2A2A2B);
+inline constexpr Rgb kHover       = hex(0x343436);
+inline constexpr Rgb kActive      = hex(0x3E3E40);
+inline constexpr Rgb kBorder      = hex(0x313133);
+inline constexpr Rgb kMenuBar     = hex(0x161617);
 
 // ---- Text -------------------------------------------------------------
-inline constexpr Rgb kText        = hex(0xC9C7C4);
-inline constexpr Rgb kTextDim     = hex(0x7A7772);
+inline constexpr Rgb kText        = hex(0xF5F5F5);
+inline constexpr Rgb kTextDim     = hex(0x86868A);
 
 // ---- Viewport ---------------------------------------------------------
-inline constexpr Rgb kViewport    = hex(0x1C1C1F);
-// Deliberately near-neutral: the shaded surface is what the user reads form
-// from, so it must not carry the brand hue.
-inline constexpr Rgb kSurface     = hex(0xB8B6B2);
-inline constexpr Rgb kEdge        = hex(0x0E0E10);
+inline constexpr Rgb kViewport    = hex(0x1D1D1E);
+// Deliberately neutral, and deliberately not the light anchor: the shaded
+// surface needs room to brighten under the key light, so it starts mid-light
+// and reaches near-white only where the light actually falls.
+inline constexpr Rgb kSurface     = hex(0xBDBDBE);
+inline constexpr Rgb kEdge        = hex(0x0F0F10);
 // Muted on purpose. The brand is itself a warm red, so saturated axes would
 // compete with the selection colour; ground reference must never outrank the
 // thing the user has selected.
-inline constexpr Rgb kGridAxisX   = hex(0x9E4238);
+inline constexpr Rgb kGridAxisX   = hex(0x8E3A2A);
 inline constexpr Rgb kGridAxisY   = hex(0x5E8A3C);
 
 // Selection reuses the brand directly, so a selected outliner row and a
 // selected object in the viewport are visibly the same colour.
 inline constexpr Rgb kSelection   = kBrand;
+
+// The one other saturated colour: a model that is ready to print. Kept well
+// away from the brand hue so "solid" and "selected" never read as the same
+// signal.
+inline constexpr Rgb kValid       = hex(0x5FB350);
 
 } // namespace palette
 } // namespace tg
