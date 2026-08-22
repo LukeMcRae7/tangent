@@ -130,10 +130,18 @@ bool Application::init() {
         for (Index f = 0; f < m.faceCount(); ++f)
             if (dot(m.faceNormal(f), Vec3{0, 0, 1}) > 0.99) top = f;
         scene_.clearElementSelection();
-        Index h = m.faces[top].halfedge;
-        for (int i = 0; i < filletDemoEdges_; ++i) {
-            scene_.selectElement({id, ElementKind::Edge, h}, true);
-            h = m.halfedges[h].next;
+        if (filletDemoEdges_ <= 0) {
+            // Every edge, not a walk around one face -- which only ever
+            // reaches that face's own edges.
+            for (Index e = 0; e < m.halfedgeCount(); ++e)
+                if (e < m.halfedges[e].twin)
+                    scene_.selectElement({id, ElementKind::Edge, e}, true);
+        } else {
+            Index h = m.faces[top].halfedge;
+            for (int i = 0; i < filletDemoEdges_; ++i) {
+                scene_.selectElement({id, ElementKind::Edge, h}, true);
+                h = m.halfedges[h].next;
+            }
         }
         view_.bevelWidth = 4.0;
         view_.bevelSegments = filletDemoSegments_;

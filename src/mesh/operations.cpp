@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <map>
+#include <limits>
 #include <unordered_map>
 #include <utility>
 #include <unordered_set>
@@ -487,14 +488,28 @@ bool bevelEdges(Mesh& mesh, const std::vector<Index>& edges, Real width, int seg
         return posOf(mesh.halfedges[h].vertex) - posOf(mesh.fromVertex(h));
     };
 
-    // The displacement a face's corner takes at the start of half-edge h.
-    auto cornerAt = [&](Index h, Vec3& d) {
+    // Where a face's corner sits when *both* its edges there are pulled back.
+    //
+    // Always the symmetric offset, even when only one of the two edges is
+    // actually being filleted. That point is the fillet's true cross-section:
+    // offset by the radius from the edge, and set back along it by the same
+    // amount, which is where the corner blend takes over from the cylinder.
+    // Using the one-sided offset instead leaves the cross-section skewed --
+    // its two ends at different positions along the edge -- and because a
+    // strip is ruled between its two end sections, that skew corrupts the
+    // fillet along the entire edge, not just near the corner.
+    auto symmetricAt = [&](Index h, Vec3& d) {
         const Index p = mesh.halfedges[h].prev;
         const Vec3 v = posOf(mesh.fromVertex(h));
         return cornerOffset(faceNormals[mesh.halfedges[h].face],
                             v - posOf(mesh.fromVertex(p)), dirOf(h),
-                            beveled[p] ? width : 0.0,
-                            beveled[h] ? width : 0.0, d);
+                            width, width, d);
+    };
+
+    // True when either edge at this corner is being filleted, so the corner
+    // has a cross-section point at all.
+    auto cornerActive = [&](Index h) {
+        return beveled[h] || beveled[mesh.halfedges[h].prev];
     };
 
     // How far back an *unbeveled* edge is cut at each of its ends.
@@ -511,25 +526,64 @@ bool bevelEdges(Mesh& mesh, const std::vector<Index>& edges, Real width, int seg
         const Vec3 dir = normalize(dirOf(h));
         Real t = 0.0;
 
-        // The face on this side: its other edge at the vertex is prev(h).
-        if (beveled[mesh.halfedges[h].prev]) {
+        // Both faces meeting along this edge get a say; the deeper cut wins,
+        // because the corner has to clear every fillet arriving at it.
+        if (cornerActive(h)) {
             Vec3 d;
-            if (!cornerAt(h, d)) return bail("corner offset is undefined");
+            if (!symmetricAt(h, d)) return bail("corner offset is undefined");
             t = std::max(t, dot(d, dir));
         }
-        // The face across. Its corner at this vertex sits between the twin of
-        // h and the half-edge after it, so *that* is its other edge -- not h's
-        // own previous edge, and not this edge itself.
         const Index across = mesh.halfedges[mesh.halfedges[h].twin].next;
-        if (beveled[across]) {
+        if (cornerActive(across)) {
             Vec3 d;
-            if (!cornerAt(across, d)) return bail("corner offset is undefined");
-            // Projected onto this edge, which is the direction the corner is
-            // free to slide along.
+            if (!symmetricAt(across, d)) return bail("corner offset is undefined");
             t = std::max(t, dot(d, dir));
         }
         cutBack[h] = std::max(t, 0.0);
     }
+
+    // A vertex is convex when every neighbour lies on the inner side of every
+    // face meeting there. At such a vertex a fillet can only ever remove
+    // material, so anything generated near it that ends up outside one of
+    // those faces is an artefact and can be pushed back onto the plane. At a
+    // concave vertex the opposite is true -- the fillet fills the notch and
+    // legitimately lies outside the original surface -- so this must not be
+    // applied there.
+    std::vector<bool> convexVertex(static_cast<size_t>(mesh.vertexCount()), true);
+    for (Index v = 0; v < mesh.vertexCount(); ++v) {
+        const Index start = mesh.verts[v].halfedge;
+        if (start == kInvalid) continue;
+        Index h = start;
+        do {
+            const Index f = mesh.halfedges[h].face;
+            const Vec3 n = faceNormals[f];
+            const Vec3 base = posOf(mesh.fromVertex(h));
+            Index g = start;
+            do {
+                if (dot(posOf(mesh.halfedges[g].vertex) - base, n) > 1e-9) {
+                    convexVertex[v] = false;
+                    break;
+                }
+                g = mesh.halfedges[mesh.halfedges[g].twin].next;
+            } while (g != start);
+            if (!convexVertex[v]) break;
+            h = mesh.halfedges[mesh.halfedges[h].twin].next;
+        } while (h != start);
+    }
+
+    auto keepInside = [&](Vec3 p, Index v) {
+        if (!convexVertex[v]) return p;
+        const Index start = mesh.verts[v].halfedge;
+        if (start == kInvalid) return p;
+        Index h = start;
+        do {
+            const Vec3 n = faceNormals[mesh.halfedges[h].face];
+            const Real d = dot(p - posOf(v), n);
+            if (d > 0.0) p -= n * d;      // back onto the face plane
+            h = mesh.halfedges[mesh.halfedges[h].twin].next;
+        } while (h != start);
+        return p;
+    };
 
     Soup soup;
 
@@ -561,6 +615,13 @@ bool bevelEdges(Mesh& mesh, const std::vector<Index>& edges, Real width, int seg
     std::vector<uint32_t> corner(static_cast<size_t>(heCount), 0u);
     std::vector<Vec3> cornerPos(static_cast<size_t>(heCount));
 
+    // The cross-section point face(h) contributes at fromVertex(h), kept apart
+    // from corner[] because a corner can now carry both a cross-section and a
+    // cut-back point, and the vertex patch has to walk both.
+    std::vector<uint32_t> crossIdx(static_cast<size_t>(heCount), 0u);
+    std::vector<Vec3> crossPos(static_cast<size_t>(heCount));
+    std::vector<bool> hasCross(static_cast<size_t>(heCount), false);
+
     for (Index f = 0; f < mesh.faceCount(); ++f) {
         const Index start = mesh.faces[f].halfedge;
 
@@ -575,43 +636,40 @@ bool bevelEdges(Mesh& mesh, const std::vector<Index>& edges, Real width, int seg
 
             poly.push_back(posOf(v));
 
-            if (bevPrev && bevNext) {
+            // Boundary order runs from the previous edge round to the next
+            // one. An unfilleted edge contributes the point it was cut back
+            // to; a filleted one contributes the cross-section, which both of
+            // them share when both are filleted.
+            if (!bevPrev) loop.push_back(edgePoint(mesh.halfedges[p].twin));
+
+            if (bevPrev || bevNext) {
                 Vec3 d;
-                if (!cornerAt(h, d)) return bail("corner offset is undefined");
+                if (!symmetricAt(h, d)) return bail("corner offset is undefined");
                 const Vec3 pt = posOf(v) + d;
                 const uint32_t idx = soup.vertex(pt);
-                loop.push_back(idx);
+                if (loop.empty() || loop.back() != idx) loop.push_back(idx);
+                crossIdx[h] = idx;
+                crossPos[h] = pt;
+                hasCross[h] = true;
                 corner[h] = idx;
                 cornerPos[h] = pt;
                 moved.push_back(pt);
-            } else if (bevPrev) {
-                // Cut back along the next edge only.
-                const uint32_t idx = edgePoint(h);
-                loop.push_back(idx);
-                corner[h] = idx;
-                cornerPos[h] = soup.positions[idx];
-                moved.push_back(cornerPos[h]);
-            } else if (bevNext) {
-                // Cut back along the previous edge, which runs from v toward
-                // the previous vertex -- that is the twin of prev.
-                const uint32_t idx = edgePoint(mesh.halfedges[p].twin);
-                loop.push_back(idx);
-                corner[h] = idx;
-                cornerPos[h] = soup.positions[idx];
-                moved.push_back(cornerPos[h]);
             } else {
-                // Neither edge is beveled. The corner still splits if a bevel
-                // further round the vertex pulled either edge back.
-                const uint32_t a = edgePoint(mesh.halfedges[p].twin);
-                const uint32_t b = edgePoint(h);
-                loop.push_back(a);
-                if (b != a) loop.push_back(b);
-                corner[h] = b;
-                cornerPos[h] = soup.positions[b];
-                moved.push_back(soup.positions[a]);
+                moved.push_back(soup.positions[edgePoint(mesh.halfedges[p].twin)]);
             }
+
+            if (!bevNext) {
+                const uint32_t idx = edgePoint(h);
+                if (loop.empty() || loop.back() != idx) loop.push_back(idx);
+                corner[h] = idx;
+                cornerPos[h] = soup.positions[idx];
+            }
+
             h = mesh.halfedges[h].next;
         } while (h != start);
+
+        // The walk can close on the point it started from.
+        while (loop.size() > 1 && loop.front() == loop.back()) loop.pop_back();
 
         if (loop.size() < 3) return bail("face collapsed");
         if (!insetIsValid(poly, moved, faceNormals[f]))
@@ -633,10 +691,14 @@ bool bevelEdges(Mesh& mesh, const std::vector<Index>& edges, Real width, int seg
         const Index f0 = mesh.halfedges[h].face;
         const Index f1 = mesh.halfedges[tw].face;
 
-        // At fromVertex(h): face(h)'s corner is corner[h]; the other face's
-        // corner at the same vertex is corner[next(twin)].
-        const Vec3 p0 = cornerPos[h];
-        const Vec3 p1 = cornerPos[mesh.halfedges[tw].next];
+        // Both ends of the cross-section must be the *cross-section* points,
+        // not whatever else those corners carry. The far face's corner can now
+        // also hold a cut-back point for an unfilleted edge, and attaching the
+        // strip to that is what skews the section.
+        const Index far = mesh.halfedges[tw].next;
+        if (!hasCross[h] || !hasCross[far]) return bail("edge has no cross-section");
+        const Vec3 p0 = crossPos[h];
+        const Vec3 p1 = crossPos[far];
         const Vec3 axis = normalize(mesh.verts[mesh.halfedges[h].vertex].position -
                                     mesh.verts[mesh.fromVertex(h)].position);
 
@@ -646,10 +708,12 @@ bool bevelEdges(Mesh& mesh, const std::vector<Index>& edges, Real width, int seg
         std::vector<Vec3> pts;
         sampleArc(arc, p0, p1, axis, segments, pts);
 
+        const Index atVertex = mesh.fromVertex(h);
         std::vector<uint32_t>& ring = ringAt[h];
-        ring.push_back(corner[h]);
-        for (size_t i = 1; i + 1 < pts.size(); ++i) ring.push_back(soup.vertex(pts[i]));
-        ring.push_back(corner[mesh.halfedges[tw].next]);
+        ring.push_back(crossIdx[h]);
+        for (size_t i = 1; i + 1 < pts.size(); ++i)
+            ring.push_back(soup.vertex(keepInside(pts[i], atVertex)));
+        ring.push_back(crossIdx[far]);
     }
 
     // One strip per beveled edge, emitted once per twin pair.
@@ -691,6 +755,7 @@ bool bevelEdges(Mesh& mesh, const std::vector<Index>& edges, Real width, int seg
         std::vector<uint32_t> loop;
         std::vector<Vec3> loopPos;
         std::vector<Vec3> centres;
+        std::vector<size_t> cornerSlots;   // where the face corners sit in `loop`
 
         auto push = [&](uint32_t idx) {
             if (!loop.empty() && loop.back() == idx) return;   // corners can coincide
@@ -701,8 +766,14 @@ bool bevelEdges(Mesh& mesh, const std::vector<Index>& edges, Real width, int seg
         h = start;
         do {
             const Index p = mesh.halfedges[h].prev;
+            // Mirrors how the face boundary was emitted, so the patch closes
+            // against it exactly.
             if (!beveled[p]) push(edgePoint(mesh.halfedges[p].twin));
-            push(corner[h]);
+            if (hasCross[h]) {
+                cornerSlots.push_back(loop.size());
+                push(crossIdx[h]);
+            }
+            if (!beveled[h]) push(edgePoint(h));
             if (beveled[h]) {
                 const std::vector<uint32_t>& ring = ringAt[h];
                 for (size_t i = 1; i + 1 < ring.size(); ++i) push(ring[i]);
@@ -721,31 +792,175 @@ bool bevelEdges(Mesh& mesh, const std::vector<Index>& edges, Real width, int seg
         std::reverse(loopPos.begin(), loopPos.end());
         if (loop.size() < 3) continue;
 
-        if (loop.size() <= 4 || centres.empty()) {
+        // A chamfer's corner really is a flat facet, so leave it as one
+        // polygon. Only a rounded fillet needs a curved patch.
+        if (segments == 1 || loop.size() <= 3 || centres.empty()) {
             soup.face(loop);
             continue;
         }
 
-        // A rounded corner's patch is not planar, and fanning a non-planar
-        // n-gon from one of its own corners gives a lopsided, sometimes folded
-        // result. Add a centre that sits on the same sphere the edge arcs do,
-        // and fan from that instead.
+        // Rolling-ball model, which is what a CAD kernel implements: a ball of
+        // the fillet radius rolls touching both faces, sweeping a cylinder
+        // along an edge, and at a vertex it pivots in place and sweeps part of
+        // a sphere. Every edge arc meeting here was solved about that same
+        // centre, so the patch interior belongs on the sphere. Fanning it flat
+        // from a hub is what made the corner read as a cut facet rather than a
+        // blend.
         Vec3 c{};
         for (const Vec3& p : centres) c += p;
         c = c / static_cast<Real>(centres.size());
 
-        Vec3 ringMid{};
-        Real radius = 0.0;
-        for (const Vec3& p : loopPos) { ringMid += p; radius += length(p - c); }
-        ringMid = ringMid / static_cast<Real>(loopPos.size());
-        radius /= static_cast<Real>(loopPos.size());
+        std::vector<Vec3> dirs(loopPos.size());
+        std::vector<Real> radii(loopPos.size());
+        Vec3 poleDir{};
+        Real poleRadius = 0.0;
+        bool degenerate = false;
 
-        const Vec3 dir = ringMid - c;
-        if (lengthSq(dir) < 1e-18) { soup.face(loop); continue; }
+        poleRadius = std::numeric_limits<Real>::max();
+        for (size_t i = 0; i < loopPos.size(); ++i) {
+            const Vec3 d = loopPos[i] - c;
+            const Real len = length(d);
+            if (len < 1e-12) { degenerate = true; break; }
+            dirs[i] = d / len;
+            radii[i] = len;
+            poleDir += dirs[i];
+            // The smallest, not the average.
+            //
+            // The rolling ball's sphere has exactly the fillet radius, and the
+            // arc points sit on it. Boundary points that do not -- a corner cut
+            // back along an edge that was left sharp lands at r*sqrt(2) -- are
+            // further out, and averaging them in lifts the whole patch off the
+            // sphere and outside the original solid. Filleting a convex box was
+            // *adding* 107mm^3 and pushing 160 vertices past the faces they
+            // should sit inside.
+            poleRadius = std::min(poleRadius, len);
+        }
+        if (degenerate || lengthSq(poleDir) < 1e-18) { soup.face(loop); continue; }
+        poleDir = normalize(poleDir);
 
-        const uint32_t hub = soup.vertex(c + normalize(dir) * radius);
-        for (size_t i = 0; i < loop.size(); ++i)
-            soup.face({hub, loop[i], loop[(i + 1) % loop.size()]});
+        // Three arcs meeting at three tangent points is the ordinary corner --
+        // a box corner, and most corners on a real part. The patch there is a
+        // spherical triangle, and it can be tessellated as a triangular
+        // lattice with no pole at all, which is what a CAD kernel shows. The
+        // ring scheme below is the general fallback for every other valence.
+        if (cornerSlots.size() == 3 && loop.size() == static_cast<size_t>(3 * segments)) {
+            const Vec3 A = loopPos[cornerSlots[0]];
+            const Vec3 B = loopPos[cornerSlots[1]];
+            const Vec3 C3 = loopPos[cornerSlots[2]];
+
+            // Great-circle step about the corner sphere. The edge arcs were
+            // swept about axes through this same centre, so they *are* great
+            // circles here and the lattice boundary lands exactly on them.
+            auto slerpSphere = [&](Vec3 p, Vec3 q, Real t) {
+                const Vec3 u = p - c, v = q - c;
+                const Real ru = length(u), rv = length(v);
+                if (ru < 1e-12 || rv < 1e-12) return lerp(p, q, t);
+                const Vec3 un = u / ru, vn = v / rv;
+                const Real ang = std::acos(clampf(dot(un, vn), -1.0, 1.0));
+                const Vec3 ax = cross(un, vn);
+                if (ang < 1e-9 || lengthSq(ax) < 1e-18) return lerp(p, q, t);
+                return c + rotate(Quat::fromAxisAngle(normalize(ax), ang * t), un)
+                         * lerpf(ru, rv, t);
+            };
+
+            // Spherical barycentric: slerp in from each corner toward the
+            // opposite edge, then average. On any edge two of the three agree
+            // with the third, so the boundary reduces to a plain slerp and
+            // meets the strips exactly.
+            auto patchPoint = [&](Real wa, Real wb, Real wg) {
+                Vec3 acc{};
+                int n = 0;
+                if (wb + wg > 1e-12) { acc += slerpSphere(A,  slerpSphere(B, C3, wg / (wb + wg)), wb + wg); ++n; }
+                if (wg + wa > 1e-12) { acc += slerpSphere(B,  slerpSphere(C3, A, wa / (wg + wa)), wg + wa); ++n; }
+                if (wa + wb > 1e-12) { acc += slerpSphere(C3, slerpSphere(A, B,  wb / (wa + wb)), wa + wb); ++n; }
+                if (n == 0) return A;
+                const Vec3 avg = acc / static_cast<Real>(n);
+                const Vec3 d = avg - c;
+                if (lengthSq(d) < 1e-18) return avg;
+                const Real rad = wa * length(A - c) + wb * length(B - c) + wg * length(C3 - c);
+                return c + normalize(d) * rad;
+            };
+
+            // Lattice indexed by (i, j) with i down from corner A and j across.
+            // Row i has i+1 points; the boundary rows reuse the vertices the
+            // strips already created so nothing has to be welded afterwards.
+            const int N = segments;
+            std::vector<std::vector<uint32_t>> rows(static_cast<size_t>(N) + 1);
+            auto boundary = [&](size_t slotFrom, int step) {
+                return loop[(cornerSlots[slotFrom] + static_cast<size_t>(step)) % loop.size()];
+            };
+
+            rows[0].push_back(loop[cornerSlots[0]]);
+            for (int i = 1; i <= N; ++i) {
+                std::vector<uint32_t>& row = rows[static_cast<size_t>(i)];
+                row.reserve(static_cast<size_t>(i) + 1);
+                for (int j = 0; j <= i; ++j) {
+                    if (j == 0)      { row.push_back(boundary(0, i)); continue; }      // arc A->B
+                    if (j == i && i < N) { row.push_back(boundary(2, N - i)); continue; }  // arc C->A
+                    if (i == N)      { row.push_back(boundary(1, j)); continue; }      // arc B->C
+                    const Real wa = static_cast<Real>(N - i) / N;
+                    const Real wb = static_cast<Real>(i - j) / N;
+                    const Real wg = static_cast<Real>(j) / N;
+                    row.push_back(soup.vertex(keepInside(patchPoint(wa, wb, wg), v)));
+                }
+            }
+
+            for (int i = 0; i < N; ++i) {
+                const std::vector<uint32_t>& up = rows[static_cast<size_t>(i)];
+                const std::vector<uint32_t>& lo2 = rows[static_cast<size_t>(i) + 1];
+                for (int j = 0; j <= i; ++j) {
+                    soup.face({up[static_cast<size_t>(j)], lo2[static_cast<size_t>(j)],
+                               lo2[static_cast<size_t>(j) + 1]});
+                    if (j < i)
+                        soup.face({up[static_cast<size_t>(j)], lo2[static_cast<size_t>(j) + 1],
+                                   up[static_cast<size_t>(j) + 1]});
+                }
+            }
+            continue;
+        }
+
+        // Radius is carried per boundary point rather than fixed at the
+        // fillet's. Where only some edges at a vertex are rounded, part of the
+        // boundary sits on the sphere and part does not -- a corner cut back
+        // along an unrounded edge is further out -- and interpolating both the
+        // direction and the radius blends between them instead of tearing the
+        // patch away from geometry it has to meet.
+        // Bulging outward is only correct when the whole boundary already sits
+        // on the sphere -- an all-rounded corner of any valence. Where it does
+        // not, curving the patch out pushes it through faces of the original
+        // solid, so interpolate straight instead: both ends are inside a convex
+        // body, so every point on the segment is too. Slightly less round, and
+        // never wrong.
+        Real widest = 0.0;
+        for (Real rad : radii) widest = std::max(widest, rad);
+        const bool onSphere = widest <= poleRadius * 1.02;
+
+        const int rings = std::max(1, (segments + 1) / 2);
+        const size_t n = loop.size();
+        const Vec3 poleAt = c + poleDir * poleRadius;
+
+        std::vector<uint32_t> prev = loop;
+        for (int j = 1; j < rings; ++j) {
+            const Real t = static_cast<Real>(j) / static_cast<Real>(rings);
+            std::vector<uint32_t> ring;
+            ring.reserve(n);
+            for (size_t i = 0; i < n; ++i) {
+                const Vec3 p = onSphere
+                             ? c + normalize(lerp(dirs[i], poleDir, t)) *
+                                   lerpf(radii[i], poleRadius, t)
+                             : lerp(loopPos[i], poleAt, t);
+                ring.push_back(soup.vertex(keepInside(p, v)));
+            }
+            for (size_t i = 0; i < n; ++i) {
+                const size_t k = (i + 1) % n;
+                soup.face({prev[i], prev[k], ring[k], ring[i]});
+            }
+            prev.swap(ring);
+        }
+
+        const uint32_t pole = soup.vertex(keepInside(poleAt, v));
+        for (size_t i = 0; i < prev.size(); ++i)
+            soup.face({prev[i], prev[(i + 1) % prev.size()], pole});
     }
 
     if (!soup.commit(mesh)) {

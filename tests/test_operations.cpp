@@ -221,10 +221,21 @@ int main() {
         // their areas must match. The old implementation chamfered the chamfer
         // with a decaying width, which made each ring a different size -- the
         // non-uniformity this pins down.
+        // Strips run the length of an edge, so they have one long side; the
+        // corner patches are small in both directions. Selecting on that keeps
+        // the two apart without depending on face ordering.
         Real lo = 1e30, hi = 0.0;
         int strips = 0;
+        std::vector<Index> fv;
         for (Index f = 0; f < round4.faceCount(); ++f) {
             if (round4.faceDegree(f) != 4) continue;
+            round4.faceVertices(f, fv);
+            Real longest = 0.0;
+            for (size_t i = 0; i < fv.size(); ++i)
+                longest = std::max(longest,
+                    length(round4.verts[fv[(i + 1) % fv.size()]].position -
+                           round4.verts[fv[i]].position));
+            if (longest < 5.0) continue;         // a corner-patch quad
             const Real area = round4.faceArea(f);
             if (area > 100.0) continue;          // the six inset faces are ~196
             lo = std::min(lo, area);
@@ -235,6 +246,25 @@ int main() {
         check(hi / lo < 1.001, "every segment is the same size");
         std::printf("[bevel] segment areas: %d strips, %.4f to %.4f (ratio %.5f)\n",
                     strips, lo, hi, hi / lo);
+
+        // The shape itself, checked exactly. A box filleted at radius r is the
+        // set of points exactly r from an inner core box inset by r -- that is
+        // what "a ball of radius r rolled over it" means. So every vertex of
+        // the result, on a flat, on a cylinder or on a corner sphere alike,
+        // must sit exactly r from that core. This catches a corner patch that
+        // is flat, dented or bulging, which a volume total can hide.
+        {
+            const Real h = a / 2 - r;
+            Real worst = 0.0;
+            for (Index v = 0; v < round8.vertexCount(); ++v) {
+                const Vec3 p = round8.verts[v].position;
+                const Vec3 nearest{clampf(p.x, -h, h), clampf(p.y, -h, h),
+                                   clampf(p.z, -h, h)};
+                worst = std::max(worst, std::fabs(length(p - nearest) - r));
+            }
+            check(worst < 1e-9, "every vertex lies exactly r from the core box");
+            std::printf("[bevel] rolling-ball check: worst deviation %.3e mm\n", worst);
+        }
     }
 
     // Over-wide bevel must fail without damaging the mesh.
@@ -307,6 +337,75 @@ int main() {
         expectSolid(m, "two adjacent edges filleted");
         std::printf("[bevel] adjacent edges: %d faces, volume %.1f\n",
                     m.faceCount(), volumeOf(m));
+    }
+
+    // Filleting part of a convex solid must only ever remove material. A
+    // corner blend that bulges is still watertight and still manifold, so
+    // nothing else here would catch it -- but it puts surface outside the
+    // shape the user drew.
+    {
+        const Real w = 4.0;
+        for (int count : {1, 2, 4}) {
+            Mesh m;
+            makeBox(m);
+            const Index top = faceFacing(m, {0, 0, 1});
+            std::vector<Index> edges;
+            Index h = m.faces[top].halfedge;
+            for (int i = 0; i < count; ++i) {
+                edges.push_back(std::min(h, m.halfedges[h].twin));
+                h = m.halfedges[h].next;
+            }
+            check(bevelEdges(m, edges, w, 8), "partial fillet succeeds");
+            expectSolid(m, "partial fillet");
+
+            int outside = 0;
+            for (Index v = 0; v < m.vertexCount(); ++v) {
+                const Vec3 p = m.verts[v].position;
+                if (std::fabs(p.x) > 10.0 + 1e-9 || std::fabs(p.y) > 10.0 + 1e-9 ||
+                    std::fabs(p.z) > 10.0 + 1e-9) ++outside;
+            }
+            check(outside == 0, "no vertex escapes the original box");
+            check(volumeOf(m) < 8000.0, "material was removed, not added");
+        }
+        std::printf("[bevel] partial fillets stay inside the solid\n");
+    }
+
+    // The radius has to be right along the whole edge, not just near the
+    // corners. A strip is ruled between its two end sections, so an end
+    // section that is skewed -- its two sides at different positions along the
+    // edge -- deforms the fillet everywhere, which a containment check misses.
+    {
+        const Real w = 4.0;
+        Mesh m;
+        makeBox(m);
+        const Index top = faceFacing(m, {0, 0, 1});
+        std::vector<Index> edges;
+        Index h = m.faces[top].halfedge;
+        for (int i = 0; i < 4; ++i) {
+            edges.push_back(std::min(h, m.halfedges[h].twin));
+            h = m.halfedges[h].next;
+        }
+        check(bevelEdges(m, edges, w, 8), "rim fillet");
+
+        // Along the +X top edge the fillet is a quarter cylinder about
+        // (10-w, y, 10-w). Away from the corners its vertices must sit on it.
+        Real best = 0.0;
+        int sampled = 0;
+        for (Index v = 0; v < m.vertexCount(); ++v) {
+            const Vec3 p = m.verts[v].position;
+            if (p.x < 10.0 - w - 1e-6 || p.z < 10.0 - w - 1e-6) continue;
+            // The strip's cross-sections sit exactly at the setback, so the
+            // band has to include that position rather than stop short of it.
+            if (std::fabs(p.y) > 10.0 - w + 1e-6) continue;      // beyond is corner
+            const Real r = std::sqrt((p.x - (10 - w)) * (p.x - (10 - w)) +
+                                     (p.z - (10 - w)) * (p.z - (10 - w)));
+            best = std::max(best, r);
+            ++sampled;
+        }
+        check(sampled > 0, "found fillet vertices along the edge");
+        check(near(best, w, 1e-9), "the fillet reaches its full radius");
+        std::printf("[bevel] rim fillet radius along the edge: %.6f (asked %.1f)\n",
+                    best, w);
     }
 
     // An out-of-range edge is rejected rather than silently ignored.
