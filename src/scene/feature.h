@@ -16,6 +16,7 @@
 // shows which step gave up rather than silently producing wrong geometry.
 #pragma once
 
+#include "mesh/boolean.h"
 #include "mesh/primitives.h"
 
 #include <string>
@@ -23,7 +24,15 @@
 
 namespace tg {
 
-enum class FeatureKind { Primitive, Extrude, Inset, Bevel, VertexEdit };
+enum class FeatureKind {
+    Primitive,   // chain root: a parametric shape
+    BaseMesh,    // chain root: geometry that has no parameters (a split body)
+    Extrude,
+    Inset,
+    Bevel,
+    VertexEdit,
+    Boolean,     // combine with a baked copy of another body
+};
 
 const char* featureKindName(FeatureKind k);
 
@@ -36,12 +45,21 @@ struct Feature {
 
     // Extrude / Inset: which faces, as numbered at this point in the chain.
     std::vector<Index> faces;
-    Real distance = 5.0f;   // Extrude, signed
-    Real amount   = 2.0f;   // Inset
+    Real distance = 5.0;    // Extrude, signed
+    Real amount   = 2.0;    // Inset
 
     // Bevel.
-    Real width    = 1.0f;
-    int   segments = 1;
+    Real width    = 1.0;
+    int  segments = 1;
+
+    // Boolean: how to combine, and the other body baked into this object's
+    // local space. Baked rather than referenced because a live reference would
+    // need the other object to stay alive and re-evaluate first -- a dependency
+    // graph rather than a list, which is a bigger change than this milestone.
+    BooleanOp booleanOp = BooleanOp::Difference;
+
+    // Boolean's tool body, or BaseMesh's geometry.
+    Mesh bakedMesh;
 
     // VertexEdit: a free-form drag, recorded as explicit offsets. Not
     // parametric in any meaningful sense, but it has to live in the chain so

@@ -163,6 +163,27 @@ private:
     std::string          what_;
 };
 
+// Several commands that must move together. A boolean edits one object's chain
+// and removes another; undoing half of that would leave the scene inconsistent.
+class CompositeCommand : public Command {
+public:
+    CompositeCommand(std::vector<std::unique_ptr<Command>> parts, std::string what)
+        : parts_(std::move(parts)), what_(std::move(what)) {}
+
+    void undo(Scene& scene) override {
+        // Reverse order: the last thing done is the first thing undone.
+        for (auto it = parts_.rbegin(); it != parts_.rend(); ++it) (*it)->undo(scene);
+    }
+    void redo(Scene& scene) override {
+        for (auto& p : parts_) p->redo(scene);
+    }
+    std::string label() const override { return what_; }
+
+private:
+    std::vector<std::unique_ptr<Command>> parts_;
+    std::string what_;
+};
+
 class UndoStack {
 public:
     // `merge` collapses this command into the previous one when they represent

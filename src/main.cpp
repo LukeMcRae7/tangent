@@ -31,6 +31,8 @@ int main(int argc, char** argv) {
             app.setGridAlign(y0, y1, steps);
         } else if (std::strcmp(argv[i], "--select-face") == 0 && i + 1 < argc) {
             app.setPickFace(std::atoi(argv[++i]));
+        } else if (std::strcmp(argv[i], "--boolean-demo") == 0 && i + 1 < argc) {
+            app.setBooleanDemo(std::atoi(argv[++i]));
         } else if (std::strcmp(argv[i], "--measure-demo") == 0) {
             app.setMeasureDemo();
         } else if (std::strcmp(argv[i], "--auto-extrude") == 0 && i + 1 < argc) {

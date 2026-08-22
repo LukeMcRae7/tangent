@@ -70,6 +70,7 @@ public:
     // which a click cannot be.
     void setPickFace(int index) { pickFace_ = index; }
     void setMeasureDemo() { measureDemo_ = true; }
+    void setBooleanDemo(int op) { booleanDemo_ = op; }
     void setAutoExtrude(float mm) { autoExtrude_ = true; autoExtrudeMm_ = mm; }
 
     // Writes the viewport to a PPM after `afterFrames` frames. Reads back this
@@ -92,6 +93,13 @@ private:
     void drawMeasureLabel();
     void extrudeSelection();
     void bevelActiveObject();
+
+    // Combines the two selected objects. The first selected is kept and
+    // becomes the result; the second is consumed as the tool.
+    void applyBoolean(BooleanOp op);
+
+    // Breaks the active object into its separate bodies.
+    void splitActiveObject();
 
     // Single exit points for a modal transform, so the extrude-drag's extra
     // bookkeeping cannot be forgotten at one of the several call sites.
@@ -173,6 +181,7 @@ private:
 
     int         pickFace_ = -1;
     bool        measureDemo_ = false;
+    int         booleanDemo_ = -1;
     bool        autoExtrude_ = false;
     float       autoExtrudeMm_ = 10.0f;
 

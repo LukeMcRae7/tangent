@@ -1,6 +1,7 @@
 #include "mesh/operations.h"
 
 #include <algorithm>
+#include <algorithm>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -273,6 +274,53 @@ bool moveFaces(Mesh& mesh, const std::vector<Index>& faces, Vec3 delta) {
     // positions move.
     for (Index v : touched) mesh.verts[v].position += delta;
     return true;
+}
+
+// ---------------------------------------------------------------------------
+size_t splitShells(const Mesh& mesh, std::vector<Mesh>& out) {
+    out.clear();
+    if (mesh.empty()) return 0;
+
+    // Flood fill across shared edges to label each face with its body.
+    std::vector<int> shell(static_cast<size_t>(mesh.faceCount()), -1);
+    std::vector<Index> stack;
+    int count = 0;
+
+    for (Index f = 0; f < mesh.faceCount(); ++f) {
+        if (shell[f] >= 0) continue;
+        const int id = count++;
+        stack.push_back(f);
+        shell[f] = id;
+        while (!stack.empty()) {
+            const Index cur = stack.back();
+            stack.pop_back();
+            const Index start = mesh.faces[cur].halfedge;
+            Index he = start;
+            do {
+                const Index nf = mesh.halfedges[mesh.halfedges[he].twin].face;
+                if (nf != kInvalid && shell[nf] < 0) { shell[nf] = id; stack.push_back(nf); }
+                he = mesh.halfedges[he].next;
+            } while (he != start);
+        }
+    }
+
+    for (int id = 0; id < count; ++id) {
+        Soup soup;
+        // Vertices are re-indexed per body; Soup::compact drops the rest.
+        soup.positions.reserve(mesh.verts.size());
+        for (const MeshVertex& v : mesh.verts) soup.vertex(v.position);
+        for (Index f = 0; f < mesh.faceCount(); ++f)
+            if (shell[f] == id) soup.face(faceLoop(mesh, f));
+
+        Mesh piece;
+        if (soup.commit(piece)) out.push_back(std::move(piece));
+    }
+
+    // Largest first: the biggest body is the one the user thinks of as "the
+    // part", so it should keep the original object.
+    std::sort(out.begin(), out.end(),
+              [](const Mesh& a, const Mesh& b) { return a.faceCount() > b.faceCount(); });
+    return out.size();
 }
 
 // ---------------------------------------------------------------------------

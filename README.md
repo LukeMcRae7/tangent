@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/logo.svg" alt="Project Logo" width="300" height="auto">
+  <img src="assets/logo.png" alt="Project Logo" width="300" height="auto">
 </p>
 Meet tangent, a Linux-based 3D modeling software built for the ergonomics of Blender with the precision of Fusion360. Built for 3D printing purposes, this mesh-based modeling tool natively exports to .stl and rejects invalid operations immediately. It's fast, accurate, and just works. Tangent is C++ on OpenGL 3.3, targeting Linux/Wayland, and has no runtime
 dependencies beyond the system GL stack.<br><br>
@@ -53,6 +53,8 @@ Unlike Blender, tangent rejects non-manifold edges, open surfaces, and other inv
 | Shift + click | Extend either selection |
 | E | Extrude selected faces, then drag to set the height |
 | Ctrl + B | Bevel all edges of the active object |
+| Ctrl + Shift + U / D / I | Union / difference / intersect the two selected objects |
+| D | Measure — one entity for its own size, two for the distance between |
 | Numpad 1 / 3 / 7 | Front / Right / Top (Ctrl for opposite) |
 | Numpad 4 / 6 / 8 / 2 | Orbit in 15° steps |
 | Numpad 5 | Perspective / orthographic |

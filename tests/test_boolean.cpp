@@ -148,6 +148,31 @@ int main() {
                     volumeOf(drilled), 8000.0 - area * 20.0);
     }
 
+    // Tangency is the same degenerate family as coincident planes: a tool that
+    // touches a wall exactly, rather than crossing it or clearing it, gives the
+    // classification nothing to decide on. Asserted so the boundary is known
+    // rather than discovered mid-model.
+    {
+        Mesh cyl, out;
+        CylinderParams cp; cp.radius = 6.0; cp.height = 40.0; cp.segments = 24;
+        makeCylinder(cyl, cp);
+        Mesh clear_ = cyl, tangent = cyl;
+        for (MeshVertex& v : clear_.verts)  v.position += Vec3{3, 3, 0};   // 3+6 = 9 < 10
+        for (MeshVertex& v : tangent.verts) v.position += Vec3{4, 4, 0};   // 4+6 = 10 exactly
+
+        check(meshBoolean(a, clear_, BooleanOp::Difference, out),
+              "a bore clear of the walls works");
+        expectSolid(out, "offset bore");
+
+        Mesh untouched = boxAt({0, 0, 0}, 5.0);
+        const double before = volumeOf(untouched);
+        const bool ok = meshBoolean(a, tangent, BooleanOp::Difference, untouched);
+        if (!ok) check(near(volumeOf(untouched), before, 1e-9),
+                       "a refused tangent cut leaves the output alone");
+        std::printf("[bool] bore clear of walls: OK;  exactly tangent: %s\n",
+                    ok ? "also OK" : "refused (known limit)");
+    }
+
     // ---- Open input is refused ----------------------------------------------
     {
         Mesh plane, out;

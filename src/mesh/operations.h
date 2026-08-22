@@ -45,6 +45,15 @@ bool moveFaces(Mesh& mesh, const std::vector<Index>& faces, Vec3 delta);
 // -- that is, if any face would invert.
 bool bevelAllEdges(Mesh& mesh, Real width, int segments = 1);
 
+// Splits a mesh into its connected bodies, in descending order of face count.
+// Returns the number produced; a mesh that is already one piece yields itself,
+// so a caller can always use the result.
+//
+// Booleans routinely produce several bodies -- subtracting a bar across the
+// middle of a block leaves two -- and a slicer treats those as separate parts,
+// so being able to pull them apart matters.
+size_t splitShells(const Mesh& mesh, std::vector<Mesh>& out);
+
 // Largest bevel width the mesh can take before a face collapses. Useful for
 // clamping a UI slider to a range that always produces valid geometry.
 Real maxBevelWidth(const Mesh& mesh);

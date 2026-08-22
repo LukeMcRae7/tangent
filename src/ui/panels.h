@@ -9,6 +9,7 @@
 #include "scene/scene.h"
 #include "app/camera.h"
 #include "app/measure.h"
+#include "mesh/boolean.h"
 
 #include <string>
 #include <vector>
@@ -40,6 +41,10 @@ struct UiActions {
     bool redo = false;
     bool extrude = false;
     bool bevel = false;
+    bool split = false;
+
+    bool      booleanRequested = false;
+    BooleanOp booleanOp = BooleanOp::Difference;
 
     // Set when the timeline changed a feature: the chain as it was, so the
     // edit can be re-evaluated and recorded.

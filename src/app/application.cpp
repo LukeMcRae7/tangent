@@ -120,6 +120,26 @@ bool Application::init() {
         }
     }
 
+    if (booleanDemo_ >= 0 && !scene_.objects().empty()) {
+        // Drop a cylinder through the startup box and combine them, exercising
+        // the same path the menu uses.
+        const ObjectId target = scene_.objects().front()->id;
+        PrimitiveSpec spec;
+        spec.kind = PrimitiveKind::Cylinder;
+        spec.cylinder.radius = 6.0;
+        spec.cylinder.height = 40.0;
+        spec.cylinder.segments = 32;
+        // Offset clear of tangency: at radius 6 an offset of 4 would put the
+        // cylinder exactly against the box's x = 10 and y = 10 faces, which is
+        // the degenerate case the boolean refuses.
+        const ObjectId tool = scene_.addPrimitive(PrimitiveKind::Cylinder, spec,
+                                                  Vec3{3, 3, 10});
+        scene_.clearSelection();
+        scene_.select(target);
+        scene_.select(tool, true);
+        applyBoolean(static_cast<BooleanOp>(booleanDemo_));
+    }
+
     if (measureDemo_ && !scene_.objects().empty()) {
         const ObjectId id = scene_.objects().front()->id;
         const Mesh& m = scene_.find(id)->mesh;
@@ -456,7 +476,23 @@ void Application::handleShortcuts() {
 
     // Mesh edits act on the selected faces. Shift+E cuts inward.
     if (!ctrl && !alt && ImGui::IsKeyPressed(ImGuiKey_E, false)) ui_.actions.extrude = true;
-    if (ctrl && ImGui::IsKeyPressed(ImGuiKey_B, false))          ui_.actions.bevel = true;
+    if (ctrl && !shift && ImGui::IsKeyPressed(ImGuiKey_B, false)) ui_.actions.bevel = true;
+
+    // Booleans. Ctrl+Shift keeps them clear of the single-key edit commands.
+    if (ctrl && shift) {
+        if (ImGui::IsKeyPressed(ImGuiKey_U, false)) {
+            ui_.actions.booleanRequested = true;
+            ui_.actions.booleanOp = BooleanOp::Union;
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_D, false)) {
+            ui_.actions.booleanRequested = true;
+            ui_.actions.booleanOp = BooleanOp::Difference;
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_I, false)) {
+            ui_.actions.booleanRequested = true;
+            ui_.actions.booleanOp = BooleanOp::Intersection;
+        }
+    }
 
     // Numpad view shortcuts; Ctrl gives the opposite side, as in Blender.
     if (ImGui::IsKeyPressed(ImGuiKey_Keypad1, false))
@@ -692,6 +728,94 @@ void Application::bevelActiveObject() {
                                                 obj->features, "Bevel"));
 }
 
+void Application::applyBoolean(BooleanOp op) {
+    const std::vector<ObjectId>& sel = scene_.selection();
+    if (sel.size() != 2) {
+        setNotice("Select two objects: Ctrl+click one, then Shift+Ctrl+click the other");
+        return;
+    }
+
+    // First picked is the target, last picked is the tool. That ordering is
+    // what makes difference mean what the user expects.
+    const ObjectId targetId = sel.front();
+    const ObjectId toolId = sel.back();
+    SceneObject* target = scene_.find(targetId);
+    SceneObject* tool = scene_.find(toolId);
+    if (!target || !tool || targetId == toolId) return;
+
+    // Bake the tool into the target's local space. The two objects have their
+    // own transforms, and the boolean is defined on geometry, so they have to
+    // be brought into one frame first.
+    const Mat4 toLocal = inverse(target->modelMatrix()) * tool->modelMatrix();
+    Mesh baked = tool->mesh;
+    for (MeshVertex& v : baked.verts) v.position = transformPoint(toLocal, v.position);
+
+    Feature f;
+    f.kind = FeatureKind::Boolean;
+    f.booleanOp = op;
+    f.bakedMesh = std::move(baked);
+
+    std::vector<Feature> chainBefore = target->features;
+    if (!scene_.addFeature(targetId, std::move(f))) {
+        setNotice(std::string(booleanOpName(op)) + " produced no valid solid");
+        return;
+    }
+
+    // One undo entry covering both halves.
+    std::vector<std::unique_ptr<Command>> parts;
+    parts.push_back(std::make_unique<FeatureCommand>(
+        targetId, std::move(chainBefore), target->features, booleanOpName(op)));
+    renderer_.forget(toolId);
+    parts.push_back(ExistenceCommand::forDelete(scene_, {toolId}));
+
+    undo_.push(std::make_unique<CompositeCommand>(std::move(parts), booleanOpName(op)));
+    scene_.select(targetId);
+}
+
+void Application::splitActiveObject() {
+    const ObjectId id = scene_.contextObject();
+    SceneObject* obj = scene_.find(id);
+    if (!obj) return;
+
+    std::vector<Mesh> bodies;
+    if (splitShells(obj->mesh, bodies) < 2) {
+        setNotice("This object is already a single body");
+        return;
+    }
+
+    // The largest body keeps the original object; the rest become new ones.
+    // All of them lose their parametric history: the pieces are geometry, and
+    // no primitive describes them any more.
+    std::vector<Feature> chainBefore = obj->features;
+
+    std::vector<Feature> chain;
+    Feature base;
+    base.kind = FeatureKind::BaseMesh;
+    base.bakedMesh = bodies.front();
+    chain.push_back(std::move(base));
+    obj->features = std::move(chain);
+    scene_.reevaluate(id);
+
+    std::vector<ObjectId> created;
+    for (size_t i = 1; i < bodies.size(); ++i) {
+        const ObjectId copy = scene_.duplicateObject(id);
+        if (copy == kNoObject) continue;
+        SceneObject* piece = scene_.find(copy);
+        piece->features.front().bakedMesh = bodies[i];
+        scene_.reevaluate(copy);
+        created.push_back(copy);
+    }
+
+    std::vector<std::unique_ptr<Command>> parts;
+    parts.push_back(std::make_unique<FeatureCommand>(
+        id, std::move(chainBefore), obj->features, "Split"));
+    if (!created.empty())
+        parts.push_back(ExistenceCommand::forCreate(scene_, created));
+
+    undo_.push(std::make_unique<CompositeCommand>(std::move(parts), "Split"));
+    setNotice("Split into " + std::to_string(bodies.size()) + " bodies");
+}
+
 void Application::applyActions() {
     UiActions& a = ui_.actions;
 
@@ -746,6 +870,8 @@ void Application::applyActions() {
 
     if (a.extrude) extrudeSelection();
     if (a.bevel)   bevelActiveObject();
+    if (a.split)   splitActiveObject();
+    if (a.booleanRequested) applyBoolean(a.booleanOp);
 
     if (a.rebuildObject != kNoObject) {
         SceneObject* o = scene_.find(a.rebuildObject);

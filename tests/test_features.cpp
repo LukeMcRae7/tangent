@@ -1,6 +1,7 @@
 // Parametric feature history: does editing an earlier step re-apply the later
 // ones, and does a step whose references have gone stale fail visibly rather
 // than producing wrong geometry?
+#include "mesh/operations.h"
 #include "scene/scene.h"
 
 #include <cstdio>
@@ -193,6 +194,123 @@ int main() {
                    static_cast<float>(volumeOf(s.find(id)->mesh)), 1e-1f),
               "and evaluates the same");
         std::printf("[features] duplicate copies history\n");
+    }
+
+    // ---- Boolean as a feature ----------------------------------------------
+    {
+        Scene s;
+        const ObjectId a = s.addPrimitive(PrimitiveKind::Box);            // 20mm at origin
+        const ObjectId b = s.addPrimitive(PrimitiveKind::Box, {}, Vec3{10, 0, 0});
+
+        // Bake B into A's local space, the way the application does.
+        SceneObject* A = s.find(a);
+        SceneObject* B = s.find(b);
+        const Mat4 toLocal = inverse(A->modelMatrix()) * B->modelMatrix();
+        Mesh baked = B->mesh;
+        for (MeshVertex& v : baked.verts) v.position = transformPoint(toLocal, v.position);
+
+        Feature f;
+        f.kind = FeatureKind::Boolean;
+        f.booleanOp = BooleanOp::Difference;
+        f.bakedMesh = baked;
+        check(s.addFeature(a, f), "boolean feature applied");
+        check(near(static_cast<Real>(volumeOf(A->mesh)), 4000.0, 1e-2),
+              "A minus B leaves 4000");
+
+        // And it re-evaluates: widen the base and the cut re-applies.
+        A->spec.box.width = 30.0f;
+        check(s.rebuild(a), "re-evaluated after a base change");
+        check(!A->features[1].errored, "the boolean survived");
+        // Base now x in [-15,15]; the tool still occupies x in [0,20].
+        check(near(static_cast<Real>(volumeOf(A->mesh)), 15.0 * 20.0 * 20.0, 1e-2),
+              "cut re-applied to the wider base");
+        std::printf("[features] boolean re-evaluates: %.1f mm3\n", volumeOf(A->mesh));
+    }
+
+    // The tool's own transform has to be taken into account, not just its mesh.
+    {
+        Scene s;
+        const ObjectId a = s.addPrimitive(PrimitiveKind::Box);
+        const ObjectId b = s.addPrimitive(PrimitiveKind::Box);
+        s.find(b)->transform.position = {10, 0, 0};   // moved by transform only
+
+        SceneObject* A = s.find(a);
+        SceneObject* B = s.find(b);
+        const Mat4 toLocal = inverse(A->modelMatrix()) * B->modelMatrix();
+        Mesh baked = B->mesh;
+        for (MeshVertex& v : baked.verts) v.position = transformPoint(toLocal, v.position);
+
+        Feature f;
+        f.kind = FeatureKind::Boolean;
+        f.booleanOp = BooleanOp::Difference;
+        f.bakedMesh = baked;
+        check(s.addFeature(a, f), "boolean with a transformed tool");
+        check(near(static_cast<Real>(volumeOf(A->mesh)), 4000.0, 1e-2),
+              "transform folded into the bake");
+        std::printf("[features] transformed tool: %.1f mm3\n", volumeOf(A->mesh));
+    }
+
+    // A boolean that cannot produce a solid is refused, chain untouched.
+    {
+        Scene s;
+        const ObjectId a = s.addPrimitive(PrimitiveKind::Box);
+        Mesh far;
+        BoxParams p;
+        makeBox(far, p);
+        for (MeshVertex& v : far.verts) v.position += Vec3{500, 0, 0};
+
+        Feature f;
+        f.kind = FeatureKind::Boolean;
+        f.booleanOp = BooleanOp::Intersection;   // nothing in common
+        f.bakedMesh = far;
+        check(!s.addFeature(a, f), "impossible boolean is refused");
+        check(s.find(a)->features.size() == 1, "and leaves no dead feature");
+        check(near(static_cast<Real>(volumeOf(s.find(a)->mesh)), 8000.0, 1e-2),
+              "geometry untouched");
+        std::printf("[features] impossible boolean refused\n");
+    }
+
+    // ---- Split into bodies ---------------------------------------------------
+    {
+        // One box either side of a gap, joined into a single mesh by a union.
+        Mesh left, right, both;
+        BoxParams p;
+        makeBox(left, p);
+        makeBox(right, p);
+        for (MeshVertex& v : right.verts) v.position += Vec3{100, 0, 0};
+        check(meshBoolean(left, right, BooleanOp::Union, both), "union of two disjoint boxes");
+
+        std::vector<Mesh> bodies;
+        check(splitShells(both, bodies) == 2, "splits into two bodies");
+        check(bodies.size() == 2, "two meshes out");
+        for (const Mesh& m2 : bodies) {
+            std::string err;
+            check(m2.validate(&err), std::string("body is valid: ") + err);
+            check(near(static_cast<Real>(volumeOf(m2)), 8000.0, 1e-2), "each body is 8000");
+        }
+        std::printf("[features] split: %zu bodies of %.0f mm3 each\n",
+                    bodies.size(), volumeOf(bodies[0]));
+
+        // A single body splits to itself, so a caller can always use the result.
+        std::vector<Mesh> one;
+        check(splitShells(left, one) == 1, "one body stays one");
+        check(near(static_cast<Real>(volumeOf(one[0])), 8000.0, 1e-2), "and is unchanged");
+    }
+
+    // A BaseMesh chain root carries geometry that has no parameters.
+    {
+        Scene s;
+        const ObjectId id = s.addPrimitive(PrimitiveKind::Box);
+        Mesh sphere;
+        makeSphere(sphere);
+
+        Feature base;
+        base.kind = FeatureKind::BaseMesh;
+        base.bakedMesh = sphere;
+        s.find(id)->features = {base};
+        check(s.reevaluate(id), "BaseMesh evaluates");
+        check(s.find(id)->mesh.faceCount() == sphere.faceCount(), "geometry came through");
+        std::printf("[features] BaseMesh root: %d faces\n", s.find(id)->mesh.faceCount());
     }
 
     std::printf("\n%s (%d failures)\n", failures ? "FAILED" : "ALL PASS", failures);

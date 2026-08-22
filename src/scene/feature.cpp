@@ -9,6 +9,8 @@ namespace tg {
 const char* featureKindName(FeatureKind k) {
     switch (k) {
         case FeatureKind::Primitive:  return "Primitive";
+        case FeatureKind::BaseMesh:   return "Mesh";
+        case FeatureKind::Boolean:    return "Boolean";
         case FeatureKind::Extrude:    return "Extrude";
         case FeatureKind::Inset:      return "Inset";
         case FeatureKind::Bevel:      return "Bevel";
@@ -22,6 +24,13 @@ std::string Feature::summary() const {
     switch (kind) {
         case FeatureKind::Primitive:
             std::snprintf(buf, sizeof(buf), "%s", primitiveName(primitive.kind));
+            break;
+        case FeatureKind::BaseMesh:
+            std::snprintf(buf, sizeof(buf), "Mesh  (%d faces)", bakedMesh.faceCount());
+            break;
+        case FeatureKind::Boolean:
+            std::snprintf(buf, sizeof(buf), "%s  (%d faces)",
+                          booleanOpName(booleanOp), bakedMesh.faceCount());
             break;
         case FeatureKind::Extrude:
             std::snprintf(buf, sizeof(buf), "Extrude  %.2f mm  (%zu face%s)",
@@ -114,6 +123,22 @@ bool evaluateFrom(std::vector<Feature>& features, size_t from,
             if (mesh.empty()) fail("nothing to bevel");
             else if (!bevelAllEdges(mesh, f.width, f.segments)) fail("width too large");
             break;
+
+        case FeatureKind::BaseMesh:
+            if (f.bakedMesh.empty()) fail("no geometry");
+            else { mesh = f.bakedMesh; any = true; }
+            break;
+
+        case FeatureKind::Boolean: {
+            if (mesh.empty()) { fail("nothing to combine with"); break; }
+            if (f.bakedMesh.empty()) { fail("tool body is missing"); break; }
+            Mesh combined;
+            if (!meshBoolean(mesh, f.bakedMesh, f.booleanOp, combined))
+                fail("boolean produced no valid solid");
+            else
+                mesh = std::move(combined);
+            break;
+        }
 
         case FeatureKind::VertexEdit: {
             if (mesh.empty()) { fail("nothing to edit"); break; }

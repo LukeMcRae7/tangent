@@ -188,6 +188,35 @@ void drawMenuBar(UiContext& ctx) {
         ImGui::EndMenu();
     }
 
+    if (ImGui::BeginMenu("Combine")) {
+        const size_t n = ctx.scene->selection().size();
+        const bool pair = n == 2;
+
+        if (ImGui::MenuItem("Union", "Ctrl+Shift+U", false, pair)) {
+            ctx.actions.booleanRequested = true;
+            ctx.actions.booleanOp = BooleanOp::Union;
+        }
+        if (ImGui::MenuItem("Difference", "Ctrl+Shift+D", false, pair)) {
+            ctx.actions.booleanRequested = true;
+            ctx.actions.booleanOp = BooleanOp::Difference;
+        }
+        if (ImGui::MenuItem("Intersect", "Ctrl+Shift+I", false, pair)) {
+            ctx.actions.booleanRequested = true;
+            ctx.actions.booleanOp = BooleanOp::Intersection;
+        }
+        if (!pair)
+            ImGui::TextColored(kDim, "  Select two objects (%zu selected)", n);
+        else
+            ImGui::TextColored(kDim, "  First selected is kept, second is the tool");
+
+        ImGui::Separator();
+        if (ImGui::MenuItem("Split Into Bodies", nullptr, false,
+                            ctx.scene->contextObject() != kNoObject))
+            ctx.actions.split = true;
+        ImGui::TextColored(kDim, "  Separates disconnected pieces");
+        ImGui::EndMenu();
+    }
+
     if (ImGui::BeginMenu("Measure")) {
         ImGui::MenuItem("Measure", "D", ctx.measuring);
         ImGui::Separator();
