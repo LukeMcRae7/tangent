@@ -127,6 +127,23 @@ private:
     bool  firstLayout_ = true;
     int   smokeFrames_ = 0;
     float frameMs_     = 0.0f;
+    float lastDt_      = 0.0f;
+
+    // Seconds the geometry has been unchanged. The printability check is far
+    // too expensive to run mid-drag, so it waits for things to settle.
+    float healthIdle_  = 0.0f;
+
+    // Was the object a clean solid when the current gesture started? An edit
+    // is only refused for breaking something that was not already broken.
+    bool  preEditSolid_ = false;
+
+    // Transient message shown in the status bar, e.g. a refused edit.
+    std::string notice_;
+    float       noticeAge_ = 0.0f;
+    void setNotice(const std::string& text) { notice_ = text; noticeAge_ = 0.0f; }
+
+    // Reverts a just-applied edit that would leave the model unprintable.
+    bool editKeepsSolid(ObjectId id);
 
     // Set for one frame when Shift+A asks for the add menu at the cursor.
     bool  openAddMenu_ = false;

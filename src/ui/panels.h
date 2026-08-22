@@ -55,6 +55,7 @@ struct UiStats {
 struct UiContext {
     // Text for the active modal operation, shown in the status bar.
     std::string  toolStatus;
+    std::string  notice;
     bool         canUndo = false;
     bool         canRedo = false;
 

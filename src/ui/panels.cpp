@@ -322,7 +322,10 @@ void drawInspector(UiContext& ctx) {
     sectionLabel("PRINTABILITY");
     {
         const MeshHealth& h = obj->health;
-        if (h.solid()) {
+        const bool stale = obj->healthVersion != obj->meshVersion;
+        if (stale) {
+            ImGui::TextColored(kDim, "Checking...");
+        } else if (h.solid()) {
             ImGui::TextColored(ImVec4(0.45f, 0.78f, 0.42f, 1.0f), "Solid - ready to print");
         } else {
             ImGui::TextColored(kAccent, "Not a printable solid");
@@ -452,12 +455,18 @@ void drawStatusBar(UiContext& ctx) {
         ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNav;
 
     if (ImGui::Begin("##statusbar", nullptr, flags)) {
+        if (!ctx.notice.empty() && ctx.toolStatus.empty()) {
+            ImGui::TextColored(kAccent, "%s", ctx.notice.c_str());
+            ImGui::End();
+            ImGui::PopStyleVar(2);
+            return;
+        }
         if (!ctx.toolStatus.empty()) {
             // While a modal transform runs, the readout is the only thing that
             // matters -- show it in the accent colour and drop the scene stats.
             ImGui::TextColored(kAccent, "%s", ctx.toolStatus.c_str());
             const char* keys = "X/Y/Z axis   Shift+axis plane   type a number   "
-                               "Ctrl snap   Enter confirm   Esc cancel";
+                               "Ctrl free (snap is on)   Enter confirm   Esc cancel";
             const float kw = ImGui::CalcTextSize(keys).x;
             ImGui::SameLine(ImGui::GetWindowWidth() - kw - 14.0f);
             ImGui::TextColored(kDim, "%s", keys);
@@ -483,7 +492,9 @@ void drawStatusBar(UiContext& ctx) {
         ImGui::TextColored(kDim, "%zu tris", ctx.stats.triangles);
         if (const SceneObject* ctxObj = scene.find(scene.contextObject())) {
             ImGui::SameLine(0, 18);
-            if (ctxObj->health.solid())
+            if (ctxObj->healthVersion != ctxObj->meshVersion)
+                ImGui::TextColored(kDim, "checking");
+            else if (ctxObj->health.solid())
                 ImGui::TextColored(ImVec4(0.45f, 0.78f, 0.42f, 1.0f), "solid");
             else
                 ImGui::TextColored(kAccent, "not solid");

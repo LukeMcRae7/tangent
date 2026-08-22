@@ -8,11 +8,6 @@
 namespace tg {
 namespace {
 
-inline uint64_t edgeKey(Index from, Index to) {
-    return (static_cast<uint64_t>(static_cast<uint32_t>(from)) << 32) |
-            static_cast<uint32_t>(to);
-}
-
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -27,10 +22,12 @@ bool Mesh::build(const std::vector<Vec3>& positions,
     const Index nVerts = static_cast<Index>(positions.size());
     faces.reserve(faceSizes.size());
 
-    // (from, to) -> half-edge. A duplicate key means two faces walk the same
-    // directed edge, i.e. the surface is non-manifold or inconsistently wound.
-    std::unordered_map<uint64_t, Index> directed;
-    directed.reserve(faceIndices.size() * 2);
+    // Twin pairing runs off per-vertex buckets rather than a hash of the whole
+    // edge set. Hashing 200k directed edges dominated build time, and build
+    // runs inside every mesh operation; bucketing is a linear pass plus a scan
+    // of one vertex's handful of neighbours.
+    std::vector<Index> heFrom;
+    heFrom.reserve(faceIndices.size());
 
     size_t cursor = 0;
     for (uint32_t degree : faceSizes) {
@@ -47,14 +44,13 @@ bool Mesh::build(const std::vector<Vec3>& positions,
             }
 
             const Index he = static_cast<Index>(halfedges.size());
-            if (!directed.emplace(edgeKey(from, to), he).second) { clear(); return false; }
-
             HalfEdge h;
             h.vertex = to;
             h.face   = faceId;
             h.next   = firstHe + static_cast<Index>((k + 1) % degree);
             h.prev   = firstHe + static_cast<Index>((k + degree - 1) % degree);
             halfedges.push_back(h);
+            heFrom.push_back(from);
 
             // Provisional; boundary half-edges take priority in the pass below.
             if (verts[from].halfedge == kInvalid) verts[from].halfedge = he;
@@ -65,16 +61,40 @@ bool Mesh::build(const std::vector<Vec3>& positions,
     }
     if (cursor != faceIndices.size()) { clear(); return false; }
 
-    // Pair interior twins.
     const Index interiorCount = static_cast<Index>(halfedges.size());
+
+    // Bucket half-edges by their originating vertex (counting sort into CSR).
+    std::vector<Index> bucketStart(static_cast<size_t>(nVerts) + 1, 0);
+    for (Index he = 0; he < interiorCount; ++he) ++bucketStart[heFrom[he] + 1];
+    for (Index v = 0; v < nVerts; ++v) bucketStart[v + 1] += bucketStart[v];
+
+    std::vector<Index> bucket(static_cast<size_t>(interiorCount));
+    {
+        std::vector<Index> fill(bucketStart.begin(), bucketStart.end() - 1);
+        for (Index he = 0; he < interiorCount; ++he) bucket[fill[heFrom[he]]++] = he;
+    }
+
+    // Two faces walking the same directed edge means the surface is
+    // non-manifold or inconsistently wound.
+    for (Index v = 0; v < nVerts; ++v) {
+        for (Index i = bucketStart[v]; i < bucketStart[v + 1]; ++i)
+            for (Index j = i + 1; j < bucketStart[v + 1]; ++j)
+                if (halfedges[bucket[i]].vertex == halfedges[bucket[j]].vertex) {
+                    clear(); return false;
+                }
+    }
+
+    // Pair interior twins: for u -> v, look through v's bucket for v -> u.
     for (Index he = 0; he < interiorCount; ++he) {
         if (halfedges[he].twin != kInvalid) continue;
-        const Index from = fromVertex(he);
+        const Index from = heFrom[he];
         const Index to   = halfedges[he].vertex;
-        auto it = directed.find(edgeKey(to, from));
-        if (it != directed.end()) {
-            halfedges[he].twin = it->second;
-            halfedges[it->second].twin = he;
+        for (Index i = bucketStart[to]; i < bucketStart[to + 1]; ++i) {
+            const Index cand = bucket[i];
+            if (halfedges[cand].vertex != from) continue;
+            halfedges[he].twin = cand;
+            halfedges[cand].twin = he;
+            break;
         }
     }
 

@@ -70,11 +70,20 @@ bool facesResolve(const std::vector<Index>& faces, const Mesh& mesh) {
 
 } // namespace
 
-bool evaluateFeatures(std::vector<Feature>& features, Mesh& out) {
-    Mesh mesh;
-    bool any = false;
+bool evaluateFrom(std::vector<Feature>& features, size_t from,
+                  std::vector<Mesh>& cache, Mesh& out) {
+    // The cache must actually hold the requested starting point; anything else
+    // (a freshly loaded object, a chain that shrank) means starting over.
+    if (from > 0 && (cache.size() < from || from > features.size())) from = 0;
 
-    for (Feature& f : features) {
+    Mesh mesh;
+    if (from > 0) mesh = cache[from - 1];
+
+    cache.resize(features.size());
+    bool any = from > 0 || false;
+
+    for (size_t i = from; i < features.size(); ++i) {
+        Feature& f = features[i];
         f.errored = false;
         f.error.clear();
         if (!f.enabled) continue;
@@ -118,11 +127,19 @@ bool evaluateFeatures(std::vector<Feature>& features, Mesh& out) {
             break;
         }
         }
+
+        // Snapshot after each step so a later edit can resume from here.
+        cache[i] = mesh;
     }
 
     if (!any || mesh.empty()) return false;
     out = std::move(mesh);
     return true;
+}
+
+bool evaluateFeatures(std::vector<Feature>& features, Mesh& out) {
+    std::vector<Mesh> scratch;
+    return evaluateFrom(features, 0, scratch, out);
 }
 
 } // namespace tg

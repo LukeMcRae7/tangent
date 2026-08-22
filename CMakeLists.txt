@@ -115,3 +115,9 @@ add_executable(test_health tests/test_health.cpp
 target_include_directories(test_health PRIVATE src)
 target_compile_options(test_health PRIVATE -Wall -Wextra)
 add_test(NAME health COMMAND test_health)
+
+# Not a test: a stopwatch for the heavy paths. Run it by hand.
+add_executable(bench EXCLUDE_FROM_ALL tests/bench.cpp
+  src/scene/scene.cpp src/scene/feature.cpp src/mesh/health.cpp
+  src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp)
+target_include_directories(bench PRIVATE src)

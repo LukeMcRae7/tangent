@@ -62,4 +62,15 @@ struct Feature {
 // only if nothing at all could be produced.
 bool evaluateFeatures(std::vector<Feature>& features, Mesh& out);
 
+// Re-runs the chain from `from` onward, reusing `cache[from - 1]` as the
+// starting point. `cache[i]` holds the mesh as it stood after feature i.
+//
+// This is what keeps editing responsive on a heavy model: adding a bevel to a
+// 100k-triangle part, or dragging the distance slider on the last feature,
+// should cost that one operation rather than rebuilding the primitive and
+// every step since. Falls back to a full evaluation if the cache cannot
+// supply the requested starting point.
+bool evaluateFrom(std::vector<Feature>& features, size_t from,
+                  std::vector<Mesh>& cache, Mesh& out);
+
 } // namespace tg

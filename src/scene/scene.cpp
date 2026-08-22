@@ -90,7 +90,9 @@ ObjectId Scene::duplicateObject(ObjectId id) {
 
     auto obj = std::make_unique<SceneObject>();
     obj->spec        = src->spec;
-    obj->features    = src->features;
+    obj->features    = src->features;   // cache is left cold: copying every
+                                        // intermediate mesh would cost more
+                                        // than re-running the chain once
     obj->transform   = src->transform;
     obj->mesh        = src->mesh;
     obj->render      = src->render;
@@ -160,14 +162,14 @@ bool Scene::rebuild(ObjectId id) {
     return reevaluate(id);
 }
 
-bool Scene::reevaluate(ObjectId id) {
+bool Scene::reevaluateFrom(ObjectId id, size_t fromFeature) {
     SceneObject* obj = find(id);
     if (!obj) return false;
 
     // Evaluate into a scratch mesh: a chain that produces nothing must not
     // destroy the geometry the user can still see.
     Mesh next;
-    if (!evaluateFeatures(obj->features, next)) return false;
+    if (!evaluateFrom(obj->features, fromFeature, obj->featureCache, next)) return false;
 
     obj->mesh = std::move(next);
     obj->refreshDerived();
@@ -182,8 +184,10 @@ bool Scene::addFeature(ObjectId id, Feature feature) {
 
     obj->features.push_back(std::move(feature));
 
+    // Only the new feature needs running; everything before it is cached.
     Mesh next;
-    if (!evaluateFeatures(obj->features, next)) {
+    if (!evaluateFrom(obj->features, obj->features.size() - 1,
+                      obj->featureCache, next)) {
         obj->features.pop_back();
         return false;
     }
@@ -191,6 +195,7 @@ bool Scene::addFeature(ObjectId id, Feature feature) {
     // a step in the timeline that has no effect and cannot be fixed.
     if (obj->features.back().errored) {
         obj->features.pop_back();
+        obj->featureCache.resize(obj->features.size());
         return false;
     }
 

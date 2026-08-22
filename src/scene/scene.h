@@ -38,6 +38,10 @@ struct SceneObject {
     // primitive; later entries are operations applied in order.
     std::vector<Feature> features;
 
+    // featureCache[i] is the mesh as it stood after feature i, so an edit only
+    // has to re-run from the feature it touched.
+    std::vector<Mesh> featureCache;
+
     Mesh       mesh;
     RenderMesh render;
     AABB       localBounds;
@@ -131,7 +135,11 @@ public:
     // Re-runs an object's chain as it stands. rebuild() pushes the inspector's
     // spec into the base feature first; this does not, which is what undo
     // needs when restoring a whole chain.
-    bool reevaluate(ObjectId id);
+    bool reevaluate(ObjectId id) { return reevaluateFrom(id, 0); }
+
+    // Re-runs only from `fromFeature` onward, reusing the cached intermediate
+    // before it. Pass 0 to rebuild everything.
+    bool reevaluateFrom(ObjectId id, size_t fromFeature);
 
     // ---- Selection -------------------------------------------------------
     const std::vector<ObjectId>& selection() const { return selection_; }

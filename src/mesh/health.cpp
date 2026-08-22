@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 namespace tg {
@@ -153,23 +152,32 @@ MeshHealth checkHealth(const Mesh& mesh, bool checkIntersections) {
                     grid[key(x, y, z)].push_back(i);
     }
 
-    std::unordered_set<uint64_t> counted;
-    for (const auto& [k, bucket] : grid) {
-        (void)k;
+    // A pair of triangles can share several cells, so each pair must be tested
+    // once. Recording every tested pair in a hash set is the obvious way and
+    // was by far the dominant cost -- millions of insertions. Instead, test a
+    // pair only in the one cell that is canonical for it: the minimum corner
+    // of the overlap between their two boxes. That is O(1) to compute and
+    // needs no memory.
+    for (const auto& entry : grid) {
+        const int64_t cellX = static_cast<int64_t>(entry.first & 0xFFFFF);
+        (void)cellX;
+        const std::vector<uint32_t>& bucket = entry.second;
         for (size_t i = 0; i < bucket.size(); ++i) {
             for (size_t j = i + 1; j < bucket.size(); ++j) {
-                const uint32_t a = std::min(bucket[i], bucket[j]);
-                const uint32_t b = std::max(bucket[i], bucket[j]);
-                const uint64_t pair = (static_cast<uint64_t>(a) << 32) | b;
-                // A pair can share several cells; count it once.
-                if (!counted.insert(pair).second) continue;
-
-                // Cheap reject before the six segment tests.
+                const uint32_t a = bucket[i], b = bucket[j];
                 const AABB& ba = tris[a].box;
                 const AABB& bb = tris[b].box;
+
+                // Cheap reject before the six segment tests.
                 if (ba.max.x < bb.min.x || bb.max.x < ba.min.x ||
                     ba.max.y < bb.min.y || bb.max.y < ba.min.y ||
                     ba.max.z < bb.min.z || bb.max.z < ba.min.z) continue;
+
+                // Canonical cell for this pair: where their overlap starts.
+                const int ox = static_cast<int>(std::floor(std::max(ba.min.x, bb.min.x) / cell));
+                const int oy = static_cast<int>(std::floor(std::max(ba.min.y, bb.min.y) / cell));
+                const int oz = static_cast<int>(std::floor(std::max(ba.min.z, bb.min.z) / cell));
+                if (key(ox, oy, oz) != entry.first) continue;
 
                 if (trianglesCross(tris[a], tris[b])) ++h.selfIntersections;
             }

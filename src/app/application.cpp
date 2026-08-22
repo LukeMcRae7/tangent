@@ -162,6 +162,11 @@ Vec2 Application::mouseInViewport() const {
 }
 
 void Application::beginTransform(TransformMode mode) {
+    if (const SceneObject* o = scene_.find(scene_.contextObject()))
+        preEditSolid_ = o->healthVersion == o->meshVersion && o->health.solid();
+    else
+        preEditSolid_ = false;
+
     // begin() declines when nothing is selected; there is simply no transform
     // to start, so this is not an error worth reporting.
     tool_.begin(mode, scene_, camera_, mouseInViewport());
@@ -194,7 +199,10 @@ void Application::handleViewportMouse() {
     // Navigation stays live during a transform (orbiting mid-move is useful),
     // but clicks mean commit/cancel rather than select.
     if (tool_.active()) {
-        tool_.update(scene_, camera_, mouseInViewport(), io.KeyCtrl);
+        // Snapping is the default, not the modifier. A CAD part is designed in
+        // round numbers; free positioning is the exception, so Ctrl releases
+        // the snap rather than engaging it.
+        tool_.update(scene_, camera_, mouseInViewport(), !io.KeyCtrl);
         if (!io.WantCaptureMouse) {
             if (ImGui::IsMouseClicked(ImGuiMouseButton_Left))       commitTransform();
             else if (ImGui::IsMouseClicked(ImGuiMouseButton_Right))  abortTransform();
@@ -442,6 +450,9 @@ void Application::addPrimitiveAtCursor(PrimitiveKind kind) {
 void Application::extrudeSelection() {
     if (tool_.active()) return;
 
+    if (const SceneObject* o = scene_.find(scene_.contextObject()))
+        preEditSolid_ = o->healthVersion == o->meshVersion && o->health.solid();
+
     const ObjectId id = scene_.elementSelection().empty()
                         ? kNoObject : scene_.elementSelection().front().object;
     SceneObject* obj = scene_.find(id);
@@ -492,6 +503,21 @@ void Application::extrudeSelection() {
     pendingLabel_ = "Extrude";
 }
 
+bool Application::editKeepsSolid(ObjectId id) {
+    SceneObject* obj = scene_.find(id);
+    if (!obj) return true;
+
+    const MeshHealth after = checkHealth(obj->mesh);
+    obj->health = after;
+    obj->healthVersion = obj->meshVersion;
+
+    // Only refuse an edit that broke something that was previously sound. If
+    // the model was already open or self-intersecting, blocking further edits
+    // would leave the user unable to fix it.
+    if (preEditSolid_ && !after.solid()) return false;
+    return true;
+}
+
 void Application::commitTransform() {
     std::unique_ptr<Command> cmd = tool_.confirm(scene_);
 
@@ -518,12 +544,13 @@ void Application::commitTransform() {
             // the result, so the mesh is always something the history can
             // reproduce.
             obj->features = pendingChainBefore_;
-            if (scene_.addFeature(id, f)) {
+            if (scene_.addFeature(id, f) && editKeepsSolid(id)) {
                 undo_.push(std::make_unique<FeatureCommand>(
                     id, pendingChainBefore_, obj->features, pendingLabel_));
             } else {
-                obj->mesh = pendingMeshBefore_;
-                obj->refreshDerived();
+                obj->features = pendingChainBefore_;
+                scene_.reevaluate(id);
+                setNotice("Extrude refused: it would make the model self-intersect");
             }
         }
         pendingMeshBefore_ = Mesh{};
@@ -536,7 +563,14 @@ void Application::commitTransform() {
     // A free-form drag of vertices is recorded as a feature too. It is not
     // parametric, but it has to live in the chain: otherwise re-evaluating an
     // earlier feature would silently discard it.
-    if (const auto* vc = dynamic_cast<VertexCommand*>(cmd.get())) {
+    if (auto* vc = dynamic_cast<VertexCommand*>(cmd.get())) {
+        if (!editKeepsSolid(vc->object())) {
+            // Put it back. This is the CAD contract: an edit either produces
+            // valid geometry or it does not happen.
+            vc->undo(scene_);
+            setNotice("Edit refused: it would make the model self-intersect");
+            return;
+        }
         SceneObject* obj = scene_.find(vc->object());
         if (obj) {
             Feature f;
@@ -922,6 +956,7 @@ int Application::run() {
         const float dt = static_cast<float>((now - previous) / freq);
         previous = now;
         frameMs_ = frameMs_ * 0.9f + dt * 1000.0f * 0.1f;   // smoothed readout
+        lastDt_ = dt;
 
         if (probeActive_) {
             const float u = static_cast<float>(probeIndex_) /
@@ -939,14 +974,26 @@ int Application::run() {
         // Stats are gathered before the panels that display them.
         ui_.stats = UiStats{};
         ui_.stats.frameMs = frameMs_;
-        // Refresh the printability report for the object on show, and only
-        // when its geometry actually changed.
+        // Refresh the printability report only once the geometry has settled.
+        // Self-intersection testing costs hundreds of milliseconds on a heavy
+        // mesh; running it per frame during a drag would make editing
+        // unusable, and the answer mid-drag is not interesting anyway.
         if (SceneObject* ctxObj = scene_.find(scene_.contextObject())) {
             if (ctxObj->healthVersion != ctxObj->meshVersion) {
-                ctxObj->health = checkHealth(ctxObj->mesh);
-                ctxObj->healthVersion = ctxObj->meshVersion;
+                const bool interacting = tool_.active() ||
+                                         ImGui::IsMouseDown(ImGuiMouseButton_Left);
+                healthIdle_ = interacting ? 0.0f : healthIdle_ + lastDt_;
+                if (healthIdle_ > 0.25f) {
+                    ctxObj->health = checkHealth(ctxObj->mesh);
+                    ctxObj->healthVersion = ctxObj->meshVersion;
+                    healthIdle_ = 0.0f;
+                }
             }
         }
+
+        noticeAge_ += lastDt_;
+        if (noticeAge_ > 4.0f) notice_.clear();
+        ui_.notice = notice_;
 
         ui_.toolStatus = tool_.statusText();
         ui_.canUndo = undo_.canUndo();

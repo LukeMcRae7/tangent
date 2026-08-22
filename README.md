@@ -10,6 +10,22 @@ follow Fusion 360.
 **Status:** early. Viewport, parametric primitives, selection, modal
 move/rotate/scale and undo all work — see [Roadmap](#roadmap).
 
+## Performance
+
+Editing stays interactive on heavy models. Measured on a 101,760-triangle mesh
+(`cmake --build build --target bench && ./build/bench`):
+
+| | before | now |
+|---|---|---|
+| Dragging a parameter slider | 122 ms | 27 ms |
+| Half-edge construction | 23 ms | 10 ms |
+| Full printability check | 409 ms | 77 ms |
+
+Three things get that: the feature chain is evaluated **incrementally**, so
+editing the last step re-runs that step rather than the whole history; twin
+pairing uses per-vertex buckets instead of hashing every directed edge; and the
+printability check is debounced, so it never runs mid-drag.
+
 ## Build
 
 Requires a C++20 compiler, CMake ≥ 3.24, SDL3 and libepoxy. Dear ImGui is
@@ -69,18 +85,24 @@ Tangent takes the opposite position, because the output is a printed part:
   that same check and only commits if it validates. A bevel too wide for the
   geometry leaves your model exactly as it was.
 - What remains possible is geometry that is manifold but still not a solid —
-  an open surface, a zero-area face, or a mesh that passes through itself after
-  a free-form vertex drag. Those are reported continuously: the status bar says
-  `solid` or `not solid`, and the Inspector lists exactly what is wrong.
+  an open surface, a zero-area face, or a mesh that passes through itself.
+  Direct edits are **validated on commit and refused** if they would break a
+  model that was sound. The status bar shows `solid` / `not solid` and the
+  Inspector lists exactly what is wrong.
 
 ## Conventions
 
 - **Millimetres**, **+Z up** — matching Fusion 360 and Blender.
 - New objects are placed **on the build plate** (z = 0), not centred through it.
 - The grid subdivides by powers of ten as you zoom, down to 0.1 mm.
-- Snapping is relative to zoom: one step is always about the same distance on
-  screen, rounded to a value you would actually pick (0.5, 1, 2, 5, 10 mm...).
-  The active increment is shown in the status bar while you drag.
+- **Snapping is on by default**, and Ctrl releases it. A part is designed in
+  round numbers; free positioning is the exception. The increment is relative
+  to zoom — one step is always about the same distance on screen — and rounded
+  to a value you would actually pick (0.5, 1, 2, 5, 10 mm...). It is shown in
+  the status bar while you drag.
+- **An edit either produces valid geometry or it does not happen.** A drag that
+  would make the model self-intersect is refused and reverted, not accepted and
+  flagged. Numeric entry is always available during any transform.
 
 ## Controls
 
@@ -102,7 +124,7 @@ Tangent takes the opposite position, because the output is a printed part:
 | X / Y / Z | *(during a transform)* constrain to an axis |
 | Shift + X/Y/Z | *(during a transform)* constrain to a plane |
 | type a number | *(during a transform)* exact value |
-| Ctrl | *(during a transform)* snap to a round increment |
+| Ctrl | *(during a transform)* release the snap for free positioning |
 | Enter or click | Confirm transform |
 | Esc or right click | Cancel transform |
 | Ctrl + Z / Ctrl + Shift + Z | Undo / redo |
