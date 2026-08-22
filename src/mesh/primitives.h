@@ -1,0 +1,60 @@
+// Tangent - parametric primitive generators.
+//
+// World units are millimetres and the up axis is +Z, matching both Fusion 360
+// and Blender. Every generator takes a plain parameter struct so that once the
+// feature history lands, a primitive can be re-evaluated from its parameters
+// instead of being frozen at creation time.
+#pragma once
+
+#include "mesh/halfedge.h"
+
+namespace tg {
+
+struct BoxParams {
+    float width  = 20.0f;  // X
+    float depth  = 20.0f;  // Y
+    float height = 20.0f;  // Z
+};
+
+struct CylinderParams {
+    float radius   = 10.0f;
+    float height   = 20.0f;
+    int   segments = 32;
+};
+
+struct SphereParams {
+    float radius   = 10.0f;
+    int   segments = 32;   // around Z
+    int   rings    = 16;   // pole to pole
+};
+
+struct ConeParams {
+    float bottomRadius = 10.0f;
+    float topRadius    = 0.0f;   // 0 gives a true apex
+    float height       = 20.0f;
+    int   segments     = 32;
+};
+
+struct TorusParams {
+    float majorRadius = 12.0f;
+    float minorRadius = 4.0f;
+    int   majorSegments = 40;
+    int   minorSegments = 20;
+};
+
+struct PlaneParams {
+    float width = 20.0f;
+    float depth = 20.0f;
+};
+
+// Each builds a closed, outward-wound, manifold mesh centred on the origin
+// (the plane being the one open surface). All return false only if the
+// parameters are degenerate.
+bool makeBox     (Mesh& out, const BoxParams&      p = {});
+bool makeCylinder(Mesh& out, const CylinderParams& p = {});
+bool makeSphere  (Mesh& out, const SphereParams&   p = {});
+bool makeCone    (Mesh& out, const ConeParams&     p = {});
+bool makeTorus   (Mesh& out, const TorusParams&    p = {});
+bool makePlane   (Mesh& out, const PlaneParams&    p = {});
+
+} // namespace tg

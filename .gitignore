@@ -1,0 +1,5 @@
+build/
+tangent.ini
+*.ppm
+*.o
+compile_commands.json
