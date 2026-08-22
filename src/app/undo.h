@@ -199,6 +199,11 @@ public:
     bool undo(Scene& scene);
     bool redo(Scene& scene);
 
+    // Bumped by anything that changes the model, so the application can tell
+    // whether there is unsaved work without threading a dirty flag through
+    // every edit path.
+    size_t revision() const { return revision_; }
+
     bool canUndo() const { return !done_.empty(); }
     bool canRedo() const { return !undone_.empty(); }
     std::string undoLabel() const { return done_.empty() ? "" : done_.back()->label(); }
@@ -211,6 +216,7 @@ private:
     std::vector<std::unique_ptr<Command>> done_;
     std::vector<std::unique_ptr<Command>> undone_;
     bool mergeBarrier_ = false;
+    size_t revision_ = 0;
 };
 
 } // namespace tg

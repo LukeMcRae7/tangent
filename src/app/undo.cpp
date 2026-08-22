@@ -147,6 +147,7 @@ void MeshCommand::redo(Scene& scene) { apply(scene, after_, specAfter_); }
 void UndoStack::push(std::unique_ptr<Command> cmd, bool merge) {
     if (!cmd) return;
 
+    ++revision_;
     if (merge && !mergeBarrier_ && !done_.empty() && done_.back()->mergeWith(*cmd)) {
         // Folded into the previous step; a new branch still invalidates redo.
         undone_.clear();
@@ -164,6 +165,7 @@ void UndoStack::push(std::unique_ptr<Command> cmd, bool merge) {
 bool UndoStack::undo(Scene& scene) {
     // Stepping through history ends any gesture in progress.
     mergeBarrier_ = true;
+    ++revision_;
     if (done_.empty()) return false;
     std::unique_ptr<Command> cmd = std::move(done_.back());
     done_.pop_back();
@@ -174,6 +176,7 @@ bool UndoStack::undo(Scene& scene) {
 
 bool UndoStack::redo(Scene& scene) {
     mergeBarrier_ = true;
+    ++revision_;
     if (undone_.empty()) return false;
     std::unique_ptr<Command> cmd = std::move(undone_.back());
     undone_.pop_back();

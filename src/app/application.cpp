@@ -175,6 +175,12 @@ bool Application::init() {
         measure_.pick({id, ElementKind::Face, bottom});
     }
 
+    if (!headlessExport_.empty()) {
+        runFileOperation(FileMode::ExportStl, headlessExport_);
+        std::fprintf(stderr, "[app] %s\n", notice_.c_str());
+    }
+    if (fileDemo_ >= 0) beginFilePrompt(static_cast<FileMode>(fileDemo_));
+
     if (!fixedCamera_) {
         camera_.frame(scene_.bounds());
         camera_.snapToGoal();
@@ -201,10 +207,12 @@ void Application::handleEvent(const SDL_Event& e) {
 
     switch (e.type) {
         case SDL_EVENT_QUIT:
-            running_ = false;
+            ui_.actions.quit = true;
             break;
         case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
-            if (e.window.windowID == SDL_GetWindowID(window_)) running_ = false;
+            // Routed through the action so closing the window gets the same
+            // unsaved-work check as Ctrl+Q.
+            if (e.window.windowID == SDL_GetWindowID(window_)) ui_.actions.quit = true;
             break;
         default:
             break;
@@ -488,6 +496,13 @@ void Application::handleShortcuts() {
     const bool alt   = io.KeyAlt;
 
     if (ctrl && ImGui::IsKeyPressed(ImGuiKey_Q, false)) ui_.actions.quit = true;
+
+    if (ctrl && !shift) {
+        if (ImGui::IsKeyPressed(ImGuiKey_N, false)) ui_.actions.newProject = true;
+        if (ImGui::IsKeyPressed(ImGuiKey_O, false)) ui_.actions.openProject = true;
+        if (ImGui::IsKeyPressed(ImGuiKey_S, false)) ui_.actions.saveProject = true;
+        if (ImGui::IsKeyPressed(ImGuiKey_E, false)) ui_.actions.exportStl = true;
+    }
 
     if (ctrl && ImGui::IsKeyPressed(ImGuiKey_Z, false)) {
         if (shift) ui_.actions.redo = true;
@@ -904,10 +919,194 @@ void Application::splitActiveObject() {
     setNotice("Split into " + std::to_string(bodies.size()) + " bodies");
 }
 
+// Returns true when the caller may proceed immediately. Otherwise a prompt is
+// raised and the action is replayed once the user answers.
+bool Application::confirmDiscard(PendingAction next) {
+    if (!dirty()) return true;
+    pending_ = next;
+    return false;
+}
+
+void Application::drawUnsavedPrompt() {
+    if (pending_ == PendingAction::None) return;
+
+    ImGui::OpenPopup("Unsaved Changes");
+    ImGuiViewport* vp = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(ImVec2(vp->GetCenter().x, vp->GetCenter().y),
+                            ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+
+    if (ImGui::BeginPopupModal("Unsaved Changes", nullptr,
+                               ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::TextUnformatted("This project has unsaved changes.");
+        ImGui::Spacing();
+
+        const PendingAction next = pending_;
+        auto finish = [&](bool proceed) {
+            pending_ = PendingAction::None;
+            ImGui::CloseCurrentPopup();
+            if (!proceed) return;
+            // Treat it as saved so the replayed action is not blocked again.
+            savedRevision_ = undo_.revision();
+            switch (next) {
+                case PendingAction::New:  newProject(); break;
+                case PendingAction::Open: beginFilePrompt(FileMode::Open); break;
+                case PendingAction::Quit: running_ = false; break;
+                case PendingAction::None: break;
+            }
+        };
+
+        if (ImGui::Button("Save First", ImVec2(110, 0))) {
+            pending_ = PendingAction::None;
+            ImGui::CloseCurrentPopup();
+            if (projectPath_.empty()) beginFilePrompt(FileMode::Save);
+            else                      runFileOperation(FileMode::Save, projectPath_);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Discard", ImVec2(110, 0))) finish(true);
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(110, 0)) ||
+            ImGui::IsKeyPressed(ImGuiKey_Escape, false)) finish(false);
+
+        ImGui::EndPopup();
+    }
+}
+
+void Application::newProject() {
+    scene_.clear();
+    undo_.clear();
+    projectPath_.clear();
+    savedRevision_ = undo_.revision();
+    const ObjectId startup = scene_.addPrimitive(PrimitiveKind::Box);
+    placeOnBuildPlate(startup);
+    scene_.select(startup);
+    camera_.frame(scene_.bounds());
+    setNotice("New project");
+}
+
+void Application::beginFilePrompt(FileMode mode) {
+    fileMode_ = mode;
+
+    // Seed with something sensible: the current project, or a default name
+    // beside it, so the common case is one keystroke.
+    std::string seed = projectPath_;
+    if (mode == FileMode::ExportStl) {
+        if (seed.empty()) seed = "model.stl";
+        else {
+            const size_t dot = seed.find_last_of('.');
+            seed = (dot == std::string::npos ? seed : seed.substr(0, dot)) + ".stl";
+        }
+    } else if (seed.empty()) {
+        seed = "untitled.tangent";
+    }
+    std::snprintf(pathField_, sizeof(pathField_), "%s", seed.c_str());
+}
+
+void Application::runFileOperation(FileMode mode, const std::string& path) {
+    if (path.empty()) return;
+
+    switch (mode) {
+    case FileMode::Save: {
+        const ProjectResult r = saveProject(scene_, path);
+        if (r.ok) {
+            projectPath_ = path;
+            savedRevision_ = undo_.revision();
+            setNotice("Saved " + path);
+        }
+        else      setNotice("Save failed: " + r.error);
+        break;
+    }
+    case FileMode::Open: {
+        const ProjectResult r = loadProject(scene_, path);
+        if (r.ok) {
+            projectPath_ = path;
+            // History from the previous project cannot apply to this one.
+            undo_.clear();
+            savedRevision_ = undo_.revision();
+            camera_.frame(scene_.bounds());
+            setNotice("Opened " + path + " (" + std::to_string(r.objects) + " objects)");
+        } else {
+            setNotice("Open failed: " + r.error);
+        }
+        break;
+    }
+    case FileMode::ExportStl: {
+        StlOptions opt;
+        opt.binary = exportBinaryStl_;
+        opt.selectionOnly = exportSelectionOnly_;
+        const StlResult r = exportStl(scene_, path, opt);
+        if (r.ok)
+            setNotice("Exported " + std::to_string(r.triangles) + " triangles to " + path);
+        else
+            setNotice("Export failed: " + r.error);
+        break;
+    }
+    case FileMode::None:
+        break;
+    }
+}
+
+void Application::drawFilePrompt() {
+    if (fileMode_ == FileMode::None) return;
+
+    const char* title = fileMode_ == FileMode::Open   ? "Open Project"
+                      : fileMode_ == FileMode::Save   ? "Save Project"
+                                                      : "Export STL";
+    ImGui::OpenPopup(title);
+
+    ImGuiViewport* vp = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(ImVec2(vp->GetCenter().x, vp->GetCenter().y),
+                            ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(460.0f, 0.0f));
+
+    if (ImGui::BeginPopupModal(title, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::TextUnformatted("Path");
+        ImGui::SetNextItemWidth(-1.0f);
+        // Focused on open, and Enter confirms, so the whole thing is keyboard
+        // driven without reaching for the mouse.
+        if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
+        const bool entered = ImGui::InputText("##path", pathField_, sizeof(pathField_),
+                                              ImGuiInputTextFlags_EnterReturnsTrue);
+
+        if (fileMode_ == FileMode::ExportStl) {
+            ImGui::Spacing();
+            ImGui::Checkbox("Binary", &exportBinaryStl_);
+            ImGui::SameLine();
+            ImGui::Checkbox("Selection only", &exportSelectionOnly_);
+        }
+
+        ImGui::Spacing();
+        const bool confirm = ImGui::Button("OK", ImVec2(90, 0)) || entered;
+        ImGui::SameLine();
+        const bool cancel = ImGui::Button("Cancel", ImVec2(90, 0)) ||
+                            ImGui::IsKeyPressed(ImGuiKey_Escape, false);
+
+        if (confirm) {
+            const FileMode mode = fileMode_;
+            fileMode_ = FileMode::None;
+            ImGui::CloseCurrentPopup();
+            runFileOperation(mode, pathField_);
+        } else if (cancel) {
+            fileMode_ = FileMode::None;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+}
+
 void Application::applyActions() {
     UiActions& a = ui_.actions;
 
-    if (a.quit) running_ = false;
+    if (a.quit && confirmDiscard(PendingAction::Quit)) running_ = false;
+
+    if (a.newProject && confirmDiscard(PendingAction::New))   newProject();
+    if (a.openProject && confirmDiscard(PendingAction::Open)) beginFilePrompt(FileMode::Open);
+    if (a.saveProjectAs) beginFilePrompt(FileMode::Save);
+    if (a.exportStl)     beginFilePrompt(FileMode::ExportStl);
+    if (a.saveProject) {
+        // Save straight over the current file; prompt only the first time.
+        if (projectPath_.empty()) beginFilePrompt(FileMode::Save);
+        else                      runFileOperation(FileMode::Save, projectPath_);
+    }
 
     if (a.undo) undo_.undo(scene_);
     if (a.redo) undo_.redo(scene_);
@@ -1069,6 +1268,8 @@ void Application::buildUi() {
     drawHistory(ui_);
     drawStatusBar(ui_);
     drawViewportOverlay(ui_, viewRect_.x, viewRect_.y, viewRect_.w, viewRect_.h);
+    drawFilePrompt();
+    drawUnsavedPrompt();
     drawMeasurePanel(ui_);
     drawMeasureLabel();
     drawTransformReadout();

@@ -39,6 +39,13 @@ struct UiActions {
 
     bool undo = false;
     bool redo = false;
+
+    // File operations. The application owns the prompt and the current path.
+    bool newProject = false;
+    bool openProject = false;
+    bool saveProject = false;
+    bool saveProjectAs = false;
+    bool exportStl = false;
     bool extrude = false;
     bool bevel = false;
     bool split = false;

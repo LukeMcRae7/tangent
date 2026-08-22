@@ -53,8 +53,10 @@ add_executable(tangent
   src/mesh/operations.cpp
   src/mesh/health.cpp
   src/mesh/boolean.cpp
+  src/mesh/export_stl.cpp
   src/scene/scene.cpp
   src/scene/feature.cpp
+  src/scene/serialize.cpp
   src/render/shader.cpp
   src/render/gpu_mesh.cpp
   src/render/renderer.cpp
@@ -134,6 +136,14 @@ target_include_directories(test_measure PRIVATE src)
 target_link_libraries(test_measure PRIVATE PkgConfig::EPOXY)
 target_compile_options(test_measure PRIVATE -Wall -Wextra -Wno-unused-parameter)
 add_test(NAME measure COMMAND test_measure)
+
+add_executable(test_io tests/test_io.cpp
+  src/mesh/export_stl.cpp src/scene/serialize.cpp
+  src/scene/scene.cpp src/scene/feature.cpp src/mesh/boolean.cpp
+  src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp)
+target_include_directories(test_io PRIVATE src)
+target_compile_options(test_io PRIVATE -Wall -Wextra)
+add_test(NAME io COMMAND test_io)
 
 # Not a test: a stopwatch for the heavy paths. Run it by hand.
 add_executable(bench EXCLUDE_FROM_ALL tests/bench.cpp

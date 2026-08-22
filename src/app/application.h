@@ -3,6 +3,8 @@
 
 #include "app/camera.h"
 #include "app/measure.h"
+#include "mesh/export_stl.h"
+#include "scene/serialize.h"
 #include "app/transform_tool.h"
 #include "mesh/operations.h"
 #include "app/undo.h"
@@ -70,6 +72,8 @@ public:
     // which a click cannot be.
     void setPickFace(int index) { pickFace_ = index; }
     void setMeasureDemo() { measureDemo_ = true; }
+    void setFileDemo(int mode) { fileDemo_ = mode; }
+    void setHeadlessExport(const std::string& p) { headlessExport_ = p; }
     void setBooleanDemo(int op) { booleanDemo_ = op; }
     void setFilletDemo(int segments, int edges) {
         filletDemoSegments_ = segments; filletDemoEdges_ = edges;
@@ -100,6 +104,29 @@ private:
     void drawReadout(const std::string& text, float px, float py, bool emphasise);
     void drawMeasureLabel();
     void drawTransformReadout();
+
+    // File handling. There is no native dialog to call on Wayland without
+    // taking a dependency, so the prompt is an in-app path field.
+    enum class FileMode { None, Open, Save, ExportStl };
+    void drawFilePrompt();
+    void beginFilePrompt(FileMode mode);
+    void runFileOperation(FileMode mode, const std::string& path);
+    void newProject();
+
+    // What to do once the user has answered the unsaved-work prompt.
+    enum class PendingAction { None, New, Open, Quit };
+    void drawUnsavedPrompt();
+    bool confirmDiscard(PendingAction next);
+
+    PendingAction pending_ = PendingAction::None;
+    size_t        savedRevision_ = 0;
+    bool          dirty() const { return undo_.revision() != savedRevision_; }
+
+    FileMode    fileMode_ = FileMode::None;
+    std::string projectPath_;
+    char        pathField_[512] = {};
+    bool        exportBinaryStl_ = true;
+    bool        exportSelectionOnly_ = false;
     void extrudeSelection();
     void bevelActiveObject();
 
@@ -193,6 +220,8 @@ private:
 
     int         pickFace_ = -1;
     bool        measureDemo_ = false;
+    int         fileDemo_ = -1;
+    std::string headlessExport_;
     int         booleanDemo_ = -1;
     int         filletDemoSegments_ = 0;
     int         filletDemoEdges_ = 1;

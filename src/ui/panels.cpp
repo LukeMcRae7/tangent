@@ -144,10 +144,12 @@ void drawMenuBar(UiContext& ctx) {
     ImGui::Spacing();
 
     if (ImGui::BeginMenu("File")) {
-        ImGui::MenuItem("New", "Ctrl+N", false, false);
-        ImGui::MenuItem("Open...", "Ctrl+O", false, false);
-        ImGui::MenuItem("Save", "Ctrl+S", false, false);
-        ImGui::MenuItem("Export STL...", "Ctrl+E", false, false);
+        if (ImGui::MenuItem("New", "Ctrl+N"))          ctx.actions.newProject = true;
+        if (ImGui::MenuItem("Open...", "Ctrl+O"))      ctx.actions.openProject = true;
+        if (ImGui::MenuItem("Save", "Ctrl+S"))         ctx.actions.saveProject = true;
+        if (ImGui::MenuItem("Save As..."))             ctx.actions.saveProjectAs = true;
+        ImGui::Separator();
+        if (ImGui::MenuItem("Export STL...", "Ctrl+E")) ctx.actions.exportStl = true;
         ImGui::Separator();
         if (ImGui::MenuItem("Quit", "Ctrl+Q")) ctx.actions.quit = true;
         ImGui::EndMenu();

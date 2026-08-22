@@ -73,6 +73,8 @@ Unlike Blender, tangent rejects non-manifold edges, open surfaces, and other inv
 | Shift + D | Duplicate |
 | X or Delete | Delete |
 | Z | Toggle wireframe |
+| Ctrl + N / O / S | New / open / save project |
+| Ctrl + E | Export STL |
 | Ctrl + Q | Quit |
 
 ## Project Structure
