@@ -33,6 +33,8 @@ int main(int argc, char** argv) {
             app.setPickFace(std::atoi(argv[++i]));
         } else if (std::strcmp(argv[i], "--boolean-demo") == 0 && i + 1 < argc) {
             app.setBooleanDemo(std::atoi(argv[++i]));
+        } else if (std::strcmp(argv[i], "--hold-transform") == 0) {
+            app.setHoldTransform();
         } else if (std::strcmp(argv[i], "--measure-demo") == 0) {
             app.setMeasureDemo();
         } else if (std::strcmp(argv[i], "--auto-extrude") == 0 && i + 1 < argc) {

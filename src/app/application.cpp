@@ -115,8 +115,9 @@ bool Application::init() {
             char buf[32];
             std::snprintf(buf, sizeof(buf), "%g", static_cast<double>(autoExtrudeMm_));
             for (const char* p = buf; *p; ++p) tool_.typeCharacter(*p);
-            tool_.update(scene_, camera_, Vec2{0.0f, 0.0f}, false);
-            commitTransform();
+            tool_.update(scene_, camera_, Vec2{0.0, 0.0}, false);
+            // Held open so the live readout can be captured mid-gesture.
+            if (!holdTransform_) commitTransform();
         }
     }
 
@@ -301,29 +302,58 @@ void Application::handleViewportClick(bool shift, bool ctrl) {
     }
 }
 
+void Application::drawReadout(const std::string& text, float px, float py,
+                              bool emphasise) {
+    if (text.empty()) return;
+
+    auto u8 = [](Real v) { return static_cast<int>(clampf(v, 0.0, 1.0) * 255.0 + 0.5); };
+    const Rgb& bg = palette::kMenuBar;
+    const Rgb& border = emphasise ? palette::kBrand : palette::kBorder;
+    const Rgb& fg = emphasise ? palette::kBrand : palette::kText;
+
+    ImDrawList* dl = ImGui::GetForegroundDrawList();
+    const ImVec2 size = ImGui::CalcTextSize(text.c_str());
+    const ImVec2 a(px, py);
+    const ImVec2 b(px + size.x + 14.0f, py + size.y + 8.0f);
+
+    dl->AddRectFilled(a, b, IM_COL32(u8(bg.r), u8(bg.g), u8(bg.b), 236), 4.0f);
+    dl->AddRect(a, b, IM_COL32(u8(border.r), u8(border.g), u8(border.b), 255), 4.0f);
+    dl->AddText(ImVec2(px + 7.0f, py + 4.0f),
+                IM_COL32(u8(fg.r), u8(fg.g), u8(fg.b), 255), text.c_str());
+}
+
+// The live value sits next to the cursor rather than only in the status bar.
+// During a drag the eye is on the geometry, and a number at the bottom of the
+// window is somewhere the user is not looking.
+void Application::drawTransformReadout() {
+    if (!tool_.active()) return;
+    const std::string text = tool_.statusText();
+    if (text.empty()) return;
+
+    // If the cursor has never entered the window ImGui reports a sentinel
+    // position, and the box would be drawn off-screen. Fall back to the
+    // viewport centre so the value is never simply missing.
+    ImVec2 at(viewRect_.x + viewRect_.w * 0.5f, viewRect_.y + viewRect_.h * 0.5f);
+    if (ImGui::IsMousePosValid()) {
+        const ImVec2 m = ImGui::GetIO().MousePos;
+        at = ImVec2(m.x + 20.0f, m.y - 34.0f);
+    }
+    drawReadout(text, at.x, at.y, /*emphasise=*/true);
+}
+
 void Application::drawMeasureLabel() {
     if (!measure_.active() || !measureResult_.valid) return;
 
-    // Anchored at the midpoint of the measured span, in the foreground list so
-    // it is never hidden by geometry.
+    // Anchored to the measured span rather than the cursor: a measurement
+    // belongs to the geometry it describes, and stays readable once the mouse
+    // has moved away.
     const Vec3 mid = (measureResult_.from + measureResult_.to) * 0.5;
     Vec2 px;
     if (!camera_.projectToPixel(mid, px)) return;
 
-    const ImVec2 at(static_cast<float>(px.x) + viewRect_.x + 14.0f,
-                    static_cast<float>(px.y) + viewRect_.y - 10.0f);
-    ImDrawList* dl = ImGui::GetForegroundDrawList();
-    const ImVec2 size = ImGui::CalcTextSize(measureResult_.summary.c_str());
-    // Colours come from the palette, not from literals, so the label follows
-    // a theme change like everything else.
-    auto u8 = [](Real v) { return static_cast<int>(clampf(v, 0.0, 1.0) * 255.0 + 0.5); };
-    const Rgb& bg = palette::kMenuBar;
-    const Rgb& fg = palette::kBrand;
-    dl->AddRectFilled(ImVec2(at.x - 6, at.y - 4),
-                      ImVec2(at.x + size.x + 6, at.y + size.y + 4),
-                      IM_COL32(u8(bg.r), u8(bg.g), u8(bg.b), 224), 4.0f);
-    dl->AddText(at, IM_COL32(u8(fg.r), u8(fg.g), u8(fg.b), 255),
-                measureResult_.summary.c_str());
+    drawReadout(measureResult_.summary,
+                static_cast<float>(px.x) + viewRect_.x + 14.0f,
+                static_cast<float>(px.y) + viewRect_.y - 12.0f, /*emphasise=*/true);
 }
 
 void Application::drawSelectionHighlights() {
@@ -982,6 +1012,7 @@ void Application::buildUi() {
     drawViewportOverlay(ui_, viewRect_.x, viewRect_.y, viewRect_.w, viewRect_.h);
     drawMeasurePanel(ui_);
     drawMeasureLabel();
+    drawTransformReadout();
 
     if (openAddMenu_) {
         ImGui::OpenPopup("##addmenu");

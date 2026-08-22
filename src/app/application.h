@@ -72,6 +72,7 @@ public:
     void setMeasureDemo() { measureDemo_ = true; }
     void setBooleanDemo(int op) { booleanDemo_ = op; }
     void setAutoExtrude(float mm) { autoExtrude_ = true; autoExtrudeMm_ = mm; }
+    void setHoldTransform() { holdTransform_ = true; }
 
     // Writes the viewport to a PPM after `afterFrames` frames. Reads back this
     // process's own GL framebuffer rather than going through the compositor, so
@@ -90,7 +91,12 @@ private:
     void beginTransform(TransformMode mode);
     void handleViewportClick(bool shift, bool ctrl);
     void drawSelectionHighlights();
+    // A small value box drawn in the foreground, at a position given in
+    // window pixels. Both the transform readout and the measure label use it,
+    // so they always look like the same piece of interface.
+    void drawReadout(const std::string& text, float px, float py, bool emphasise);
     void drawMeasureLabel();
+    void drawTransformReadout();
     void extrudeSelection();
     void bevelActiveObject();
 
@@ -184,6 +190,7 @@ private:
     int         booleanDemo_ = -1;
     bool        autoExtrude_ = false;
     float       autoExtrudeMm_ = 10.0f;
+    bool        holdTransform_ = false;
 
     double meanViewportLuminance() const;
     void   readViewport(std::vector<unsigned char>& out) const;

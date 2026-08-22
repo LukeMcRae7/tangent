@@ -441,7 +441,9 @@ std::string TransformTool::statusText() const {
     if (!typed_.empty()) {
         const bool needsAxis = mode_ == TransformMode::Translate &&
                                (constraint_ == Constraint::None || isPlane());
-        std::snprintf(buf, sizeof(buf), "%s%s  %s%s%s",
+        // A caret makes it obvious the value is being typed rather than
+        // dragged, which is otherwise ambiguous from the number alone.
+        std::snprintf(buf, sizeof(buf), "%s%s  %s|%s%s",
                       transformModeName(mode_), axisName, typed_.c_str(),
                       mode_ == TransformMode::Rotate ? " deg" :
                       mode_ == TransformMode::Translate ? " mm" : "",
