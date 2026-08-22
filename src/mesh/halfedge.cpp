@@ -3,6 +3,7 @@
 #include <cassert>
 #include <cstdio>
 #include <unordered_map>
+#include <vector>
 
 namespace tg {
 namespace {
@@ -107,6 +108,35 @@ bool Mesh::build(const std::vector<Vec3>& positions,
     // Prefer a boundary-adjacent outgoing half-edge so one full circulation
     // from verts[v].halfedge visits the entire fan on open surfaces.
     for (auto& [start, b] : boundaryFrom) verts[start].halfedge = b;
+
+    // Reject non-manifold vertices.
+    //
+    // The duplicate-directed-edge check above catches an edge shared by more
+    // than two faces, but not two surface sheets meeting at a single point --
+    // two tetrahedra joined at one apex, say. Every directed edge there is
+    // still unique. What gives it away is that circulating around the vertex
+    // reaches only one of the fans, so the walk visits fewer half-edges than
+    // actually start at that vertex. Such a vertex has no single well-defined
+    // neighbourhood, and it is unprintable: a slicer cannot decide what is
+    // inside at that point.
+    {
+        std::vector<int> outgoing(verts.size(), 0);
+        for (const HalfEdge& h : halfedges) {
+            const Index from = halfedges[h.prev].vertex;
+            if (from >= 0 && from < static_cast<Index>(verts.size())) ++outgoing[from];
+        }
+        for (Index v = 0; v < vertexCount(); ++v) {
+            const Index start = verts[v].halfedge;
+            if (start == kInvalid) continue;
+            int reached = 0;
+            Index he = start;
+            do {
+                ++reached;
+                he = halfedges[halfedges[he].twin].next;
+            } while (he != start && reached <= outgoing[v]);
+            if (reached != outgoing[v]) { clear(); return false; }
+        }
+    }
 
     return true;
 }
@@ -352,11 +382,25 @@ bool Mesh::validate(std::string* err) const {
         if (faceDegree(f) < 3)                                return fail("degenerate face");
     }
 
+    std::vector<int> outgoing(verts.size(), 0);
+    for (Index he = 0; he < nh; ++he) ++outgoing[fromVertex(he)];
+
     for (Index v = 0; v < vertexCount(); ++v) {
         const Index he = verts[v].halfedge;
         if (he == kInvalid) continue;                 // isolated vertex is allowed
         if (he < 0 || he >= nh)     return fail("vertex has a bad half-edge");
         if (fromVertex(he) != v)    return fail("vertex half-edge does not originate there");
+
+        // One circulation must reach every half-edge at the vertex; falling
+        // short means two separate fans meet here.
+        int reached = 0;
+        Index cur = he;
+        do {
+            ++reached;
+            cur = halfedges[halfedges[cur].twin].next;
+        } while (cur != he && reached <= outgoing[v]);
+        if (reached != outgoing[v])
+            return fail("non-manifold vertex " + std::to_string(v));
     }
     return true;
 }

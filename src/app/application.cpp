@@ -939,6 +939,15 @@ int Application::run() {
         // Stats are gathered before the panels that display them.
         ui_.stats = UiStats{};
         ui_.stats.frameMs = frameMs_;
+        // Refresh the printability report for the object on show, and only
+        // when its geometry actually changed.
+        if (SceneObject* ctxObj = scene_.find(scene_.contextObject())) {
+            if (ctxObj->healthVersion != ctxObj->meshVersion) {
+                ctxObj->health = checkHealth(ctxObj->mesh);
+                ctxObj->healthVersion = ctxObj->meshVersion;
+            }
+        }
+
         ui_.toolStatus = tool_.statusText();
         ui_.canUndo = undo_.canUndo();
         ui_.canRedo = undo_.canRedo();

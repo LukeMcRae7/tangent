@@ -319,6 +319,29 @@ void drawInspector(UiContext& ctx) {
         ctx.actions.transformBefore = transformBefore;
     }
 
+    sectionLabel("PRINTABILITY");
+    {
+        const MeshHealth& h = obj->health;
+        if (h.solid()) {
+            ImGui::TextColored(ImVec4(0.45f, 0.78f, 0.42f, 1.0f), "Solid - ready to print");
+        } else {
+            ImGui::TextColored(kAccent, "Not a printable solid");
+        }
+        if (!h.watertight)
+            ImGui::TextColored(kDim, "  %d open edge%s", h.boundaryEdges,
+                               h.boundaryEdges == 1 ? "" : "s");
+        if (h.degenerateFaces > 0)
+            ImGui::TextColored(kDim, "  %d zero-area face%s", h.degenerateFaces,
+                               h.degenerateFaces == 1 ? "" : "s");
+        if (h.selfIntersections > 0)
+            ImGui::TextColored(kDim, "  %d self-intersection%s", h.selfIntersections,
+                               h.selfIntersections == 1 ? "" : "s");
+        if (h.volume < 0.0)
+            ImGui::TextColored(kDim, "  inside out");
+        ImGui::TextColored(kDim, "Volume  %.2f cm3", h.volume / 1000.0);
+        if (h.shells > 1) ImGui::TextColored(kDim, "Bodies  %d", h.shells);
+    }
+
     sectionLabel("STATISTICS");
     const AABB b = obj->localBounds;
     const Vec3 size = b.valid() ? b.size() : Vec3{};
@@ -458,6 +481,13 @@ void drawStatusBar(UiContext& ctx) {
         }
         ImGui::SameLine(0, 18);
         ImGui::TextColored(kDim, "%zu tris", ctx.stats.triangles);
+        if (const SceneObject* ctxObj = scene.find(scene.contextObject())) {
+            ImGui::SameLine(0, 18);
+            if (ctxObj->health.solid())
+                ImGui::TextColored(ImVec4(0.45f, 0.78f, 0.42f, 1.0f), "solid");
+            else
+                ImGui::TextColored(kAccent, "not solid");
+        }
         ImGui::SameLine(0, 18);
         ImGui::TextColored(kDim, "mm");
 

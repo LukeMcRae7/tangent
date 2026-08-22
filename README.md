@@ -52,6 +52,27 @@ python3 tests/grid_stability.py
 `TANGENT_SHADER_DIR` points at an alternate shader directory. Shaders reload on
 save, so you can edit them while the app runs.
 
+## Solids, not soup
+
+The usual complaint about mesh modelling is that you end up with non-manifold
+geometry and only find out in the slicer. That is a consequence of how
+general-purpose modellers are built, not of meshes: they permit non-manifold
+topology on purpose, because floating edges and open surfaces are useful while
+modelling.
+
+Tangent takes the opposite position, because the output is a printed part:
+
+- `Mesh::build` **rejects** non-manifold input — an edge shared by more than
+  two faces, or two surface sheets meeting at a single vertex. There is no way
+  to construct such a mesh.
+- Every operation is **transactional**: it rebuilds into a scratch mesh through
+  that same check and only commits if it validates. A bevel too wide for the
+  geometry leaves your model exactly as it was.
+- What remains possible is geometry that is manifold but still not a solid —
+  an open surface, a zero-area face, or a mesh that passes through itself after
+  a free-form vertex drag. Those are reported continuously: the status bar says
+  `solid` or `not solid`, and the Inspector lists exactly what is wrong.
+
 ## Conventions
 
 - **Millimetres**, **+Z up** — matching Fusion 360 and Blender.
@@ -98,7 +119,7 @@ Orbit direction can be inverted per axis under **View → Invert Orbit**.
 
 ```
 src/core/     math and colour palette (header only)
-src/mesh/     half-edge kernel, parametric primitive generators
+src/mesh/     half-edge kernel, primitives, operations, printability checks
 src/scene/    scene graph, feature history, selection, ray picking
 src/render/   shader and buffer wrappers, viewport renderer
 src/app/      SDL3 shell, orbit camera, input dispatch, transform tool, undo

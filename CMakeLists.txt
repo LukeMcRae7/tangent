@@ -50,6 +50,7 @@ add_executable(tangent
   src/mesh/halfedge.cpp
   src/mesh/primitives.cpp
   src/mesh/operations.cpp
+  src/mesh/health.cpp
   src/scene/scene.cpp
   src/scene/feature.cpp
   src/render/shader.cpp
@@ -108,3 +109,9 @@ add_executable(test_features tests/test_features.cpp
 target_include_directories(test_features PRIVATE src)
 target_compile_options(test_features PRIVATE -Wall -Wextra)
 add_test(NAME features COMMAND test_features)
+
+add_executable(test_health tests/test_health.cpp
+  src/mesh/health.cpp src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp)
+target_include_directories(test_health PRIVATE src)
+target_compile_options(test_health PRIVATE -Wall -Wextra)
+add_test(NAME health COMMAND test_health)

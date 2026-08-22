@@ -6,6 +6,7 @@
 // tells the renderer its cached buffers went stale.
 #pragma once
 
+#include "mesh/health.h"
 #include "scene/feature.h"
 
 #include <memory>
@@ -45,6 +46,11 @@ struct SceneObject {
     // Bumped on every geometry change; the renderer re-uploads when it differs
     // from the version it last saw.
     uint32_t meshVersion = 1;
+
+    // Cached printability report. Self-intersection testing is too costly to
+    // repeat every frame, so it is refreshed only when the geometry changes.
+    MeshHealth health;
+    uint32_t   healthVersion = 0;
 
     Mat4 modelMatrix() const { return transform.matrix(); }
 
