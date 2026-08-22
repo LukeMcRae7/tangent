@@ -121,6 +121,27 @@ bool Application::init() {
         }
     }
 
+    if (filletDemoSegments_ > 0 && !scene_.objects().empty()) {
+        const ObjectId id = scene_.objects().front()->id;
+        const Mesh& m = scene_.find(id)->mesh;
+        // Edges of the top face, so the demo covers both a lone edge and a
+        // loop whose corners have to be patched.
+        Index top = 0;
+        for (Index f = 0; f < m.faceCount(); ++f)
+            if (dot(m.faceNormal(f), Vec3{0, 0, 1}) > 0.99) top = f;
+        scene_.clearElementSelection();
+        Index h = m.faces[top].halfedge;
+        for (int i = 0; i < filletDemoEdges_; ++i) {
+            scene_.selectElement({id, ElementKind::Edge, h}, true);
+            h = m.halfedges[h].next;
+        }
+        view_.bevelWidth = 4.0;
+        view_.bevelSegments = filletDemoSegments_;
+        filletSelectedEdges();
+        scene_.clearElementSelection();
+        scene_.select(id);
+    }
+
     if (booleanDemo_ >= 0 && !scene_.objects().empty()) {
         // Drop a cylinder through the startup box and combine them, exercising
         // the same path the menu uses.
@@ -508,6 +529,11 @@ void Application::handleShortcuts() {
     if (!ctrl && !alt && ImGui::IsKeyPressed(ImGuiKey_E, false)) ui_.actions.extrude = true;
     if (ctrl && !shift && ImGui::IsKeyPressed(ImGuiKey_B, false)) ui_.actions.bevel = true;
 
+    // Fillet the selected edges. F, as in Fusion, and reachable by the left
+    // hand next to the other edit keys.
+    if (!ctrl && !alt && !shift && ImGui::IsKeyPressed(ImGuiKey_F, false))
+        ui_.actions.fillet = true;
+
     // Booleans. Ctrl+Shift keeps them clear of the single-key edit commands.
     if (ctrl && shift) {
         if (ImGui::IsKeyPressed(ImGuiKey_U, false)) {
@@ -758,6 +784,38 @@ void Application::bevelActiveObject() {
                                                 obj->features, "Bevel"));
 }
 
+void Application::filletSelectedEdges() {
+    const ObjectId id = scene_.contextObject();
+    SceneObject* obj = scene_.find(id);
+    if (!obj) return;
+
+    const std::vector<Index> edges = scene_.selectedEdges(id);
+    if (edges.empty()) {
+        setNotice("Select one or more edges to fillet");
+        return;
+    }
+
+    // Clamp to what the geometry can take, so the slider cannot ask for a
+    // radius that inverts a face.
+    const Real limit = maxBevelWidth(obj->mesh);
+    const Real width = std::min(view_.bevelWidth, limit * Real(0.95));
+    if (width <= 1e-4) { setNotice("No room for a fillet at this size"); return; }
+
+    Feature f;
+    f.kind = FeatureKind::Bevel;
+    f.edges = edges;
+    f.width = width;
+    f.segments = view_.bevelSegments;
+
+    std::vector<Feature> chainBefore = obj->features;
+    if (!scene_.addFeature(id, std::move(f))) {
+        setNotice("Fillet refused: radius too large for these edges");
+        return;
+    }
+    undo_.push(std::make_unique<FeatureCommand>(id, std::move(chainBefore),
+                                                obj->features, "Fillet"));
+}
+
 void Application::applyBoolean(BooleanOp op) {
     const std::vector<ObjectId>& sel = scene_.selection();
     if (sel.size() != 2) {
@@ -901,6 +959,7 @@ void Application::applyActions() {
     if (a.extrude) extrudeSelection();
     if (a.bevel)   bevelActiveObject();
     if (a.split)   splitActiveObject();
+    if (a.fillet)  filletSelectedEdges();
     if (a.booleanRequested) applyBoolean(a.booleanOp);
 
     if (a.rebuildObject != kNoObject) {

@@ -48,7 +48,9 @@ struct Feature {
     Real distance = 5.0;    // Extrude, signed
     Real amount   = 2.0;    // Inset
 
-    // Bevel.
+    // Bevel / fillet. `edges` empty means every edge of the body; otherwise
+    // just those, named by half-edge as numbered at this point in the chain.
+    std::vector<Index> edges;
     Real width    = 1.0;
     int  segments = 1;
 

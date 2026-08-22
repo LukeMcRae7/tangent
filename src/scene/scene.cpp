@@ -361,6 +361,20 @@ std::vector<Index> Scene::selectedFaces(ObjectId id) const {
     return out;
 }
 
+std::vector<Index> Scene::selectedEdges(ObjectId id) const {
+    std::vector<Index> out;
+    const SceneObject* o = find(id);
+    if (!o) return out;
+    for (const ElementRef& e : elements_) {
+        if (e.object != id || e.kind != ElementKind::Edge) continue;
+        if (e.index < 0 || e.index >= o->mesh.halfedgeCount()) continue;
+        const Index canonical = std::min(e.index, o->mesh.halfedges[e.index].twin);
+        if (std::find(out.begin(), out.end(), canonical) == out.end())
+            out.push_back(canonical);
+    }
+    return out;
+}
+
 void Scene::pruneElementSelection() {
     elements_.erase(std::remove_if(elements_.begin(), elements_.end(),
         [this](const ElementRef& e) {

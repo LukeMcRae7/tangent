@@ -71,6 +71,9 @@ public:
     void setPickFace(int index) { pickFace_ = index; }
     void setMeasureDemo() { measureDemo_ = true; }
     void setBooleanDemo(int op) { booleanDemo_ = op; }
+    void setFilletDemo(int segments, int edges) {
+        filletDemoSegments_ = segments; filletDemoEdges_ = edges;
+    }
     void setAutoExtrude(float mm) { autoExtrude_ = true; autoExtrudeMm_ = mm; }
     void setHoldTransform() { holdTransform_ = true; }
 
@@ -99,6 +102,9 @@ private:
     void drawTransformReadout();
     void extrudeSelection();
     void bevelActiveObject();
+
+    // Rounds the selected edges only, the way F does in Fusion.
+    void filletSelectedEdges();
 
     // Combines the two selected objects. The first selected is kept and
     // becomes the result; the second is consumed as the tool.
@@ -188,6 +194,8 @@ private:
     int         pickFace_ = -1;
     bool        measureDemo_ = false;
     int         booleanDemo_ = -1;
+    int         filletDemoSegments_ = 0;
+    int         filletDemoEdges_ = 1;
     bool        autoExtrude_ = false;
     float       autoExtrudeMm_ = 10.0f;
     bool        holdTransform_ = false;

@@ -181,10 +181,19 @@ void drawMenuBar(UiContext& ctx) {
                            0.05f, nullptr, nullptr, "%.2f mm");
         ImGui::SetNextItemWidth(140.0f);
         ImGui::DragInt("Segments", &ctx.view->bevelSegments, 0.1f, 1, 6);
+        const size_t edgeCount = ctx.scene->selectedEdges(ctx.scene->contextObject()).size();
+        if (ImGui::MenuItem("Fillet Selected Edges", "F", false, edgeCount > 0))
+            ctx.actions.fillet = true;
+        if (edgeCount > 0)
+            ImGui::TextColored(kDim, "  %zu edge%s selected", edgeCount,
+                               edgeCount == 1 ? "" : "s");
+        else
+            ImGui::TextColored(kDim, "  click an edge in the viewport first");
+
         if (ImGui::MenuItem("Bevel All Edges", "Ctrl+B", false,
                             ctx.scene->contextObject() != kNoObject))
             ctx.actions.bevel = true;
-        ImGui::TextColored(kDim, "  more segments round the edge further");
+        ImGui::TextColored(kDim, "  segments 1 = chamfer, more = round");
         ImGui::EndMenu();
     }
 

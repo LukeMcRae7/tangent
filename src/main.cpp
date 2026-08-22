@@ -35,6 +35,9 @@ int main(int argc, char** argv) {
             app.setBooleanDemo(std::atoi(argv[++i]));
         } else if (std::strcmp(argv[i], "--hold-transform") == 0) {
             app.setHoldTransform();
+        } else if (std::strcmp(argv[i], "--fillet-demo") == 0 && i + 2 < argc) {
+            const int segs = std::atoi(argv[++i]);
+            app.setFilletDemo(segs, std::atoi(argv[++i]));
         } else if (std::strcmp(argv[i], "--measure-demo") == 0) {
             app.setMeasureDemo();
         } else if (std::strcmp(argv[i], "--auto-extrude") == 0 && i + 1 < argc) {

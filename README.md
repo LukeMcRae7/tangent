@@ -52,6 +52,7 @@ Unlike Blender, tangent rejects non-manifold edges, open surfaces, and other inv
 | Ctrl + click | Select the whole object (as clicking its outliner row) |
 | Shift + click | Extend either selection |
 | E | Extrude selected faces, then drag to set the height |
+| F | Fillet the selected edges |
 | Ctrl + B | Bevel all edges of the active object |
 | Ctrl + Shift + U / D / I | Union / difference / intersect the two selected objects |
 | D | Measure — one entity for its own size, two for the distance between |

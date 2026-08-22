@@ -31,18 +31,24 @@ bool insetFaces(Mesh& mesh, const std::vector<Index>& faces, Real amount,
 // this is cheap: no rebuild is required.
 bool moveFaces(Mesh& mesh, const std::vector<Index>& faces, Vec3 delta);
 
-// Replaces every edge with a flat chamfer of the given width, and every vertex
-// with a face closing the corner.
+// Rounds the given edges, pulling each adjacent face back by `width` and
+// bridging the gap.
 //
-// `segments` > 1 rounds the edge further by chamfering the chamfer. Note that
-// this is an approximation, not an exact fillet: a true fillet arc is tangent
-// to both original faces and bulges *outward* past the chamfer chord, whereas
-// successive chamfers cut inward from it. The result is a rounded edge that
-// removes slightly more material than a fillet of the same nominal radius, and
-// `width` is the first cut's width rather than an exact radius.
+// `segments` == 1 gives a flat chamfer. Above that the bridge follows a true
+// circular arc, tangent to both faces, swept in equal angular steps -- so the
+// segments are uniform and the surface is an actual fillet rather than a
+// progressively cut corner. The arc centre is solved from the two face planes,
+// which makes it correct for concave edges as well as convex ones.
+//
+// Edges are named by either of their half-edges. Vertices where beveled edges
+// meet get a patch closing the corner.
 //
 // Fails without modifying the mesh if the width is too large for the geometry
 // -- that is, if any face would invert.
+bool bevelEdges(Mesh& mesh, const std::vector<Index>& edges, Real width,
+                int segments = 1);
+
+// Every edge at once. This is the whole-part rounding pass.
 bool bevelAllEdges(Mesh& mesh, Real width, int segments = 1);
 
 // Splits a mesh into its connected bodies, in descending order of face count.

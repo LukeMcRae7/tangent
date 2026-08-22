@@ -42,6 +42,7 @@ struct UiActions {
     bool extrude = false;
     bool bevel = false;
     bool split = false;
+    bool fillet = false;
 
     bool      booleanRequested = false;
     BooleanOp booleanOp = BooleanOp::Difference;

@@ -14,6 +14,7 @@ static int failures = 0;
 static void check(bool ok, const std::string& what) {
     if (!ok) { std::printf("  FAIL: %s\n", what.c_str()); ++failures; }
 }
+static bool near(double a, double b, double eps = 1e-6) { return std::fabs(a - b) < eps; }
 
 static double volumeOf(const Mesh& m) {
     RenderMesh rm;
@@ -182,33 +183,58 @@ int main() {
                     m.faceCount(), m.vertexCount(), v, maxW);
     }
 
-    // Rounded bevel. Each extra segment chamfers the previous chamfer, so the
-    // edge gets rounder and the surface moves further inward -- unlike a true
-    // fillet, whose arc bulges outward past the chamfer chord and therefore
-    // keeps *more* material. Asserting the real behaviour rather than the
-    // behaviour a proper fillet would have.
+    // Rounded bevel. With a real fillet the arc is tangent to both faces and
+    // bulges outward past the chamfer chord, so more segments keep MORE
+    // material, converging on the analytic rounded cube from below.
     {
-        Mesh flat, round2, round4;
-        makeBox(flat); makeBox(round2); makeBox(round4);
-        check(bevelAllEdges(flat, 3.0f, 1), "chamfer");
-        check(bevelAllEdges(round2, 3.0f, 2), "2-segment rounding");
-        check(bevelAllEdges(round4, 3.0f, 4), "4-segment rounding");
-        expectSolid(round2, "2-segment rounding");
-        expectSolid(round4, "4-segment rounding");
+        Mesh flat, round2, round4, round8;
+        makeBox(flat); makeBox(round2); makeBox(round4); makeBox(round8);
+        const Real w = 3.0;
+        check(bevelAllEdges(flat, w, 1), "chamfer");
+        check(bevelAllEdges(round2, w, 2), "2-segment fillet");
+        check(bevelAllEdges(round4, w, 4), "4-segment fillet");
+        check(bevelAllEdges(round8, w, 8), "8-segment fillet");
+        expectSolid(round2, "2-segment fillet");
+        expectSolid(round4, "4-segment fillet");
+        expectSolid(round8, "8-segment fillet");
 
-        const double vf = volumeOf(flat), v2 = volumeOf(round2), v4 = volumeOf(round4);
-        check(v2 < vf, "each pass cuts further in than the flat chamfer");
-        check(v4 < v2, "and further again with more passes");
-        // Converging, not running away: the extra passes take ever less.
-        check((v2 - v4) < (vf - v2), "successive passes remove diminishing amounts");
-        check(v4 > 6000.0, "converges rather than eating the solid");
+        const double vf = volumeOf(flat), v2 = volumeOf(round2);
+        const double v4 = volumeOf(round4), v8 = volumeOf(round8);
 
-        check(round2.faceCount() > flat.faceCount(), "rounding adds faces");
-        check(round4.faceCount() > round2.faceCount(), "and more with more passes");
-        std::printf("[bevel] rounding: chamfer %.1f (%d f), 2-seg %.1f (%d f), "
-                    "4-seg %.1f (%d f)\n",
-                    vf, flat.faceCount(), v2, round2.faceCount(),
-                    v4, round4.faceCount());
+        // A 20mm cube with every edge rounded to radius r decomposes exactly
+        // into a core box, six slabs, twelve quarter-cylinders and one sphere.
+        const double PI = 3.14159265358979;
+        const double a = 20.0, r = w, core = a - 2 * r;
+        const double exact = core * core * core
+                           + 6 * core * core * r
+                           + 12 * core * (PI * r * r / 4.0)
+                           + (4.0 / 3.0) * PI * r * r * r;
+
+        check(v2 > vf && v4 > v2 && v8 > v4, "more segments keep more material");
+        check(v8 < exact, "and stay inscribed in the true rounded cube");
+        check((exact - v8) / exact < 0.01, "8 segments is within 1% of exact");
+        std::printf("[bevel] fillet volumes: 1seg %.1f  2seg %.1f  4seg %.1f  8seg %.1f"
+                    "  (exact %.1f)\n", vf, v2, v4, v8, exact);
+
+        // Uniformity. Every edge of a cube is equivalent and every segment
+        // subtends the same angle, so all the strip quads are congruent and
+        // their areas must match. The old implementation chamfered the chamfer
+        // with a decaying width, which made each ring a different size -- the
+        // non-uniformity this pins down.
+        Real lo = 1e30, hi = 0.0;
+        int strips = 0;
+        for (Index f = 0; f < round4.faceCount(); ++f) {
+            if (round4.faceDegree(f) != 4) continue;
+            const Real area = round4.faceArea(f);
+            if (area > 100.0) continue;          // the six inset faces are ~196
+            lo = std::min(lo, area);
+            hi = std::max(hi, area);
+            ++strips;
+        }
+        check(strips == 12 * 4, "twelve edges times four segments");
+        check(hi / lo < 1.001, "every segment is the same size");
+        std::printf("[bevel] segment areas: %d strips, %.4f to %.4f (ratio %.5f)\n",
+                    strips, lo, hi, hi / lo);
     }
 
     // Over-wide bevel must fail without damaging the mesh.
@@ -229,6 +255,67 @@ int main() {
         check(bevelAllEdges(m, 1.0f, 1), "chamfer a cylinder");
         expectSolid(m, "chamfered cylinder");
         std::printf("[bevel] cylinder -> %d faces\n", m.faceCount());
+    }
+
+    // ---- Beveling a subset of edges -----------------------------------------
+    {
+        Mesh one;
+        makeBox(one);
+        // Any single edge. Faces either side pull back; the rest stay sharp.
+        check(bevelEdges(one, {0}, 3.0, 1), "bevel a single edge");
+        expectSolid(one, "single-edge chamfer");
+
+        const double v = volumeOf(one);
+        // Chamfering one edge of a box removes exactly a triangular prism:
+        // legs of `width` along a 20mm edge. Nothing is taken from the ends,
+        // because the faces meeting there are square to the cut.
+        check(near(v, 8000.0 - 0.5 * 3.0 * 3.0 * 20.0, 1e-6),
+              "removes exactly one triangular prism");
+
+        Mesh all;
+        makeBox(all);
+        check(bevelAllEdges(all, 3.0, 1), "bevel every edge");
+        check(volumeOf(one) > volumeOf(all),
+              "one edge removes far less than all twelve");
+        std::printf("[bevel] single edge %.1f vs all edges %.1f (from 8000)\n",
+                    v, volumeOf(all));
+    }
+
+    // A single edge rounded with segments is still a solid, and rounding keeps
+    // more material than the flat chamfer here too.
+    {
+        Mesh flat, round;
+        makeBox(flat); makeBox(round);
+        check(bevelEdges(flat, {0}, 2.5, 1), "single-edge chamfer");
+        check(bevelEdges(round, {0}, 2.5, 6), "single-edge fillet");
+        expectSolid(round, "single-edge fillet");
+        check(volumeOf(round) > volumeOf(flat), "the arc bulges outward");
+        std::printf("[bevel] single edge: chamfer %.2f, 6-segment fillet %.2f\n",
+                    volumeOf(flat), volumeOf(round));
+    }
+
+    // Two edges sharing a vertex: the corner between them has to be closed by
+    // a patch, which is the case a naive per-edge bevel gets wrong.
+    {
+        Mesh m;
+        makeBox(m);
+        // Find two edges of the top face that meet at a corner.
+        const Index top = faceFacing(m, {0, 0, 1});
+        const Index h0 = m.faces[top].halfedge;
+        const Index h1 = m.halfedges[h0].next;
+        check(bevelEdges(m, {h0, h1}, 2.0, 3), "bevel two edges at a shared corner");
+        expectSolid(m, "two adjacent edges filleted");
+        std::printf("[bevel] adjacent edges: %d faces, volume %.1f\n",
+                    m.faceCount(), volumeOf(m));
+    }
+
+    // An out-of-range edge is rejected rather than silently ignored.
+    {
+        Mesh m;
+        makeBox(m);
+        check(!bevelEdges(m, {9999}, 1.0, 1), "bad edge index is refused");
+        check(m.faceCount() == 6, "mesh untouched");
+        check(!bevelEdges(m, {}, 1.0, 1), "an empty selection is refused");
     }
 
     // Bevel refuses open surfaces: a boundary edge has no second face to

@@ -2,7 +2,11 @@
 
 #include <algorithm>
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
+#include <map>
 #include <unordered_map>
+#include <utility>
 #include <unordered_set>
 
 namespace tg {
@@ -358,114 +362,421 @@ Real maxBevelWidth(const Mesh& mesh) {
 // ---------------------------------------------------------------------------
 namespace {
 
-// One flat chamfer pass: every face shrinks inward by `width`, every edge
-// becomes a quad spanning the two shrunken faces, and every vertex becomes a
-// face closing the corner. (This is the Conway truncation operator.)
-bool chamferOnce(Mesh& mesh, Real width) {
-    if (mesh.empty() || width <= 0.0f) return false;
+// Canonical name for an edge: the lower of its two half-edge indices.
+inline Index edgeOf(const Mesh& m, Index h) { return std::min(h, m.halfedges[h].twin); }
 
-    const Index faceCount = mesh.faceCount();
-    const Index heCount = mesh.halfedgeCount();
+// Where a face's corner moves when one or both of its edges there is pulled
+// back. Generalises insetPolygon to unequal offsets, which is what lets a
+// single edge be beveled without disturbing the rest of the face.
+//
+// Writing n0 and n1 for the inward normals of the two edges meeting at the
+// corner, we want the displacement d with dot(d,n0) = a0 and dot(d,n1) = a1.
+// In the basis {n0, n1} that is a 2x2 solve.
+bool cornerOffset(Vec3 normal, Vec3 ePrev, Vec3 eNext, Real a0, Real a1, Vec3& out) {
+    if (lengthSq(ePrev) < 1e-18 || lengthSq(eNext) < 1e-18) return false;
 
-    // Open surfaces have boundary half-edges with no second face to chamfer
-    // against, so there is no well-defined corner to cut.
-    for (Index h = 0; h < heCount; ++h)
-        if (mesh.halfedges[h].face == kInvalid) return false;
+    const Vec3 n0 = normalize(cross(normal, ePrev));
+    const Vec3 n1 = normalize(cross(normal, eNext));
+    const Real c = dot(n0, n1);
 
-    Soup soup;
+    if (c > 1.0 - 1e-12) {
+        // Collinear edges: one constraint, and it is only satisfiable if both
+        // ask for the same offset.
+        if (std::fabs(a0 - a1) > 1e-9) return false;
+        out = n0 * a0;
+        return true;
+    }
+    if (c < -1.0 + 1e-12) return false;   // edges double back; no finite corner
 
-    // corner[h] is the inset vertex at fromVertex(h) within face(h). All three
-    // families of output face are expressed in terms of those corners.
-    std::vector<uint32_t> corner(static_cast<size_t>(heCount), 0u);
+    const Real denom = 1.0 - c * c;
+    const Real alpha = (a0 - c * a1) / denom;
+    const Real beta  = (a1 - c * a0) / denom;
+    out = n0 * alpha + n1 * beta;
+    return true;
+}
 
-    for (Index f = 0; f < faceCount; ++f) {
-        std::vector<Index> verts;
-        mesh.faceVertices(f, verts);
+// The circular arc bridging one beveled edge at one of its ends.
+//
+// The centre is the point equidistant from both face planes, found by walking
+// from p0 along face 0's inward normal until the distance to face 1's plane
+// matches how far we have walked. Solving it this way rather than from the
+// dihedral angle keeps it correct for concave edges, where the centre lands on
+// the other side and the arc bulges into the material instead of out of it.
+struct Arc {
+    Vec3 centre;
+    bool circular = false;   // false when the faces are parallel; then it is a chord
+};
 
-        std::vector<Vec3> poly;
-        poly.reserve(verts.size());
-        for (Index v : verts) poly.push_back(mesh.verts[v].position);
+Arc solveArc(Vec3 p0, Vec3 p1, Vec3 inward0, Vec3 inward1) {
+    Arc a;
+    const Real denom = 1.0 - dot(inward0, inward1);
+    if (std::fabs(denom) < 1e-9) return a;          // parallel faces: flat edge
 
-        const Vec3 nrm = mesh.faceNormal(f);
-        std::vector<Vec3> inner;
-        if (!insetPolygon(poly, nrm, width, inner)) return false;
-        if (!insetIsValid(poly, inner, nrm)) return false;
+    const Real t = dot(p0 - p1, inward1) / denom;
+    if (!std::isfinite(t) || std::fabs(t) < 1e-12) return a;
 
-        std::vector<uint32_t> loop;
-        loop.reserve(inner.size());
-        for (const Vec3& p : inner) loop.push_back(soup.vertex(p));
+    a.centre = p0 + inward0 * t;
+    a.circular = true;
+    return a;
+}
 
-        size_t k = 0;
-        const Index start = mesh.faces[f].halfedge;
-        Index h = start;
-        do { corner[h] = loop[k++]; h = mesh.halfedges[h].next; } while (h != start);
+// Points along the arc from p0 to p1, inclusive, in equal angular steps.
+// Falls back to a straight chord when there is no well-defined centre.
+void sampleArc(const Arc& arc, Vec3 p0, Vec3 p1, Vec3 axis, int segments,
+               std::vector<Vec3>& out) {
+    out.clear();
+    out.push_back(p0);
 
-        soup.face(loop);
+    if (!arc.circular || segments < 2) {
+        for (int s = 1; s < segments; ++s)
+            out.push_back(lerp(p0, p1, static_cast<Real>(s) / segments));
+        out.push_back(p1);
+        return;
     }
 
-    // One quad per edge, emitted once per twin pair. Running from the twin's
-    // corners to this half-edge's corners is the order that winds it outward.
-    for (Index h = 0; h < heCount; ++h) {
-        const Index tw = mesh.halfedges[h].twin;
-        if (tw < h) continue;
-        soup.face({corner[mesh.halfedges[tw].next], corner[tw],
-                   corner[mesh.halfedges[h].next],  corner[h]});
+    const Vec3 u = p0 - arc.centre;
+    const Vec3 v = p1 - arc.centre;
+    const Real r0 = length(u), r1 = length(v);
+
+    // Signed sweep about the edge, so the arc turns the short way round the
+    // material rather than the long way round the outside.
+    const Real sweep = std::atan2(dot(cross(u, v), axis), dot(u, v));
+
+    for (int s = 1; s < segments; ++s) {
+        const Real f = static_cast<Real>(s) / segments;
+        const Quat q = Quat::fromAxisAngle(axis, sweep * f);
+        Vec3 dir = rotate(q, u);
+        const Real len = length(dir);
+        if (len < 1e-12) { out.push_back(lerp(p0, p1, f)); continue; }
+        // Radii should match; interpolating guards against small asymmetry in
+        // the two offset corners.
+        out.push_back(arc.centre + dir * (lerpf(r0, r1, f) / len));
     }
-
-    // One face per original vertex. Circulating outgoing half-edges visits the
-    // surrounding faces in order; the loop needs reversing to wind outward.
-    for (Index v = 0; v < mesh.vertexCount(); ++v) {
-        const Index start = mesh.verts[v].halfedge;
-        if (start == kInvalid) continue;
-
-        std::vector<uint32_t> loop;
-        Index h = start;
-        do {
-            loop.push_back(corner[h]);
-            h = mesh.halfedges[mesh.halfedges[h].twin].next;
-        } while (h != start && loop.size() < 256);
-
-        std::reverse(loop.begin(), loop.end());
-        soup.face(loop);
-    }
-
-    return soup.commit(mesh);
+    out.push_back(p1);
 }
 
 } // namespace
 
-bool bevelAllEdges(Mesh& mesh, Real width, int segments) {
-    if (mesh.empty() || width <= 0.0f || segments < 1) return false;
+bool bevelEdges(Mesh& mesh, const std::vector<Index>& edges, Real width, int segments) {
+    const bool dbg = std::getenv("TANGENT_BEVEL_DEBUG") != nullptr;
+    auto bail = [&](const char* why) { if (dbg) std::fprintf(stderr, "[bevel] %s\n", why); return false; };
+    if (mesh.empty() || width <= 0.0 || segments < 1) return bail("bad arguments");
 
-    // Work on a copy so a failure part-way through leaves the caller's mesh
-    // exactly as it was.
-    Mesh work = mesh;
-    if (!chamferOnce(work, width)) return false;
+    const Index heCount = mesh.halfedgeCount();
 
-    // Rounding by subdividing the edge strip does not work: the strip can be
-    // cut into an arc easily enough, but the vertex corners would then need
-    // spherical patches to meet it, and without them the surface is left with
-    // holes. Chamfering the chamfer instead rounds edges *and* corners, and
-    // every pass is a complete, validated manifold operation, so the result
-    // cannot be malformed.
+    // An open boundary has no second face to bevel against.
+    for (Index h = 0; h < heCount; ++h)
+        if (mesh.halfedges[h].face == kInvalid) return bail("open surface");
+
+    std::vector<bool> beveled(static_cast<size_t>(heCount), false);
+    size_t chosen = 0;
+    for (Index e : edges) {
+        if (e < 0 || e >= heCount) return bail("edge index out of range");
+        const Index tw = mesh.halfedges[e].twin;
+        if (!beveled[e]) ++chosen;
+        beveled[e] = true;
+        beveled[tw] = true;
+    }
+    if (chosen == 0) return bail("no edges chosen");
+
+    std::vector<Vec3> faceNormals(static_cast<size_t>(mesh.faceCount()));
+    for (Index f = 0; f < mesh.faceCount(); ++f) faceNormals[f] = mesh.faceNormal(f);
+
+    auto posOf = [&](Index v) { return mesh.verts[v].position; };
+    auto dirOf = [&](Index h) {
+        return posOf(mesh.halfedges[h].vertex) - posOf(mesh.fromVertex(h));
+    };
+
+    // The displacement a face's corner takes at the start of half-edge h.
+    auto cornerAt = [&](Index h, Vec3& d) {
+        const Index p = mesh.halfedges[h].prev;
+        const Vec3 v = posOf(mesh.fromVertex(h));
+        return cornerOffset(faceNormals[mesh.halfedges[h].face],
+                            v - posOf(mesh.fromVertex(p)), dirOf(h),
+                            beveled[p] ? width : 0.0,
+                            beveled[h] ? width : 0.0, d);
+    };
+
+    // How far back an *unbeveled* edge is cut at each of its ends.
     //
-    // The trade-off is that `width` is the first cut's width rather than an
-    // exact fillet radius, so this approximates a fillet rather than producing
-    // one analytically.
-    Real w = width * 0.42f;
-    for (int i = 1; i < segments; ++i) {
-        // Never cut deeper than the new, smaller faces can take.
-        const Real limit = maxBevelWidth(work) * 0.7f;
-        const Real step = std::min(w, limit);
-        if (step <= 1e-5f) break;
-        // Stop refining rather than fail: the caller asked for a rounder edge
-        // and a slightly less round one is a better answer than none.
-        if (!chamferOnce(work, step)) break;
-        w *= 0.42f;
+    // This is what a naive per-edge bevel misses. Pulling one face back leaves
+    // its neighbour across an unbeveled edge still meeting the original vertex,
+    // so the shared edge becomes two edges and the surface is no longer closed.
+    // Both faces have to agree on a point along that edge, and the distance is
+    // set by whichever side is adjacent to a bevel. Where both sides demand
+    // one, the larger wins: the corner has to clear both cuts.
+    std::vector<Real> cutBack(static_cast<size_t>(heCount), 0.0);
+    for (Index h = 0; h < heCount; ++h) {
+        if (beveled[h]) continue;
+        const Vec3 dir = normalize(dirOf(h));
+        Real t = 0.0;
+
+        // The face on this side: its other edge at the vertex is prev(h).
+        if (beveled[mesh.halfedges[h].prev]) {
+            Vec3 d;
+            if (!cornerAt(h, d)) return bail("corner offset is undefined");
+            t = std::max(t, dot(d, dir));
+        }
+        // The face across. Its corner at this vertex sits between the twin of
+        // h and the half-edge after it, so *that* is its other edge -- not h's
+        // own previous edge, and not this edge itself.
+        const Index across = mesh.halfedges[mesh.halfedges[h].twin].next;
+        if (beveled[across]) {
+            Vec3 d;
+            if (!cornerAt(across, d)) return bail("corner offset is undefined");
+            // Projected onto this edge, which is the direction the corner is
+            // free to slide along.
+            t = std::max(t, dot(d, dir));
+        }
+        cutBack[h] = std::max(t, 0.0);
     }
 
-    mesh = std::move(work);
+    Soup soup;
+
+    // One vertex per original vertex, used wherever nothing pulled it back.
+    // Sharing it matters: two faces that both leave the corner alone must
+    // reference the same vertex or the edge between them will not pair.
+    std::vector<uint32_t> baseIdx(static_cast<size_t>(mesh.vertexCount()));
+    std::vector<bool> baseUsed(static_cast<size_t>(mesh.vertexCount()), false);
+    auto baseVertex = [&](Index v) {
+        if (!baseUsed[v]) { baseIdx[v] = soup.vertex(posOf(v)); baseUsed[v] = true; }
+        return baseIdx[v];
+    };
+
+    // One shared vertex per (unbeveled edge, end), referenced from both faces.
+    std::vector<uint32_t> sharedPt(static_cast<size_t>(heCount), 0u);
+    std::vector<bool> sharedSet(static_cast<size_t>(heCount), false);
+    auto edgePoint = [&](Index h) {
+        if (sharedSet[h]) return sharedPt[h];
+        const Index v = mesh.fromVertex(h);
+        sharedPt[h] = cutBack[h] <= 1e-12
+                    ? baseVertex(v)
+                    : soup.vertex(posOf(v) + normalize(dirOf(h)) * cutBack[h]);
+        sharedSet[h] = true;
+        return sharedPt[h];
+    };
+
+    // corner[h] is the point face(h) contributes on the *next* side of its
+    // corner at fromVertex(h) -- the one the strip along edge(h) attaches to.
+    std::vector<uint32_t> corner(static_cast<size_t>(heCount), 0u);
+    std::vector<Vec3> cornerPos(static_cast<size_t>(heCount));
+
+    for (Index f = 0; f < mesh.faceCount(); ++f) {
+        const Index start = mesh.faces[f].halfedge;
+
+        std::vector<uint32_t> loop;
+        std::vector<Vec3> poly, moved;
+
+        Index h = start;
+        do {
+            const Index p = mesh.halfedges[h].prev;
+            const Index v = mesh.fromVertex(h);
+            const bool bevPrev = beveled[p], bevNext = beveled[h];
+
+            poly.push_back(posOf(v));
+
+            if (bevPrev && bevNext) {
+                Vec3 d;
+                if (!cornerAt(h, d)) return bail("corner offset is undefined");
+                const Vec3 pt = posOf(v) + d;
+                const uint32_t idx = soup.vertex(pt);
+                loop.push_back(idx);
+                corner[h] = idx;
+                cornerPos[h] = pt;
+                moved.push_back(pt);
+            } else if (bevPrev) {
+                // Cut back along the next edge only.
+                const uint32_t idx = edgePoint(h);
+                loop.push_back(idx);
+                corner[h] = idx;
+                cornerPos[h] = soup.positions[idx];
+                moved.push_back(cornerPos[h]);
+            } else if (bevNext) {
+                // Cut back along the previous edge, which runs from v toward
+                // the previous vertex -- that is the twin of prev.
+                const uint32_t idx = edgePoint(mesh.halfedges[p].twin);
+                loop.push_back(idx);
+                corner[h] = idx;
+                cornerPos[h] = soup.positions[idx];
+                moved.push_back(cornerPos[h]);
+            } else {
+                // Neither edge is beveled. The corner still splits if a bevel
+                // further round the vertex pulled either edge back.
+                const uint32_t a = edgePoint(mesh.halfedges[p].twin);
+                const uint32_t b = edgePoint(h);
+                loop.push_back(a);
+                if (b != a) loop.push_back(b);
+                corner[h] = b;
+                cornerPos[h] = soup.positions[b];
+                moved.push_back(soup.positions[a]);
+            }
+            h = mesh.halfedges[h].next;
+        } while (h != start);
+
+        if (loop.size() < 3) return bail("face collapsed");
+        if (!insetIsValid(poly, moved, faceNormals[f]))
+            return bail("face inverts at this width");
+
+        soup.face(loop);
+    }
+
+    // Arc points along each beveled edge, at both ends, keyed by half-edge so
+    // the vertex patches can pick them up in the right order.
+    // ringAt[h] runs from face(h)'s corner to face(twin(h))'s corner, at
+    // fromVertex(h).
+    std::vector<std::vector<uint32_t>> ringAt(static_cast<size_t>(heCount));
+    std::vector<Arc> arcAt(static_cast<size_t>(heCount));
+
+    for (Index h = 0; h < heCount; ++h) {
+        if (!beveled[h]) continue;
+        const Index tw = mesh.halfedges[h].twin;
+        const Index f0 = mesh.halfedges[h].face;
+        const Index f1 = mesh.halfedges[tw].face;
+
+        // At fromVertex(h): face(h)'s corner is corner[h]; the other face's
+        // corner at the same vertex is corner[next(twin)].
+        const Vec3 p0 = cornerPos[h];
+        const Vec3 p1 = cornerPos[mesh.halfedges[tw].next];
+        const Vec3 axis = normalize(mesh.verts[mesh.halfedges[h].vertex].position -
+                                    mesh.verts[mesh.fromVertex(h)].position);
+
+        const Arc arc = solveArc(p0, p1, -faceNormals[f0], -faceNormals[f1]);
+        arcAt[h] = arc;
+
+        std::vector<Vec3> pts;
+        sampleArc(arc, p0, p1, axis, segments, pts);
+
+        std::vector<uint32_t>& ring = ringAt[h];
+        ring.push_back(corner[h]);
+        for (size_t i = 1; i + 1 < pts.size(); ++i) ring.push_back(soup.vertex(pts[i]));
+        ring.push_back(corner[mesh.halfedges[tw].next]);
+    }
+
+    // One strip per beveled edge, emitted once per twin pair.
+    for (Index h = 0; h < heCount; ++h) {
+        if (!beveled[h]) continue;
+        const Index tw = mesh.halfedges[h].twin;
+        if (tw < h) continue;
+
+        // Ring at the far end, reversed so both rings run the same way across
+        // the strip.
+        const std::vector<uint32_t>& a = ringAt[h];         // at fromVertex(h)
+        std::vector<uint32_t> b = ringAt[tw];               // at toVertex(h)
+        std::reverse(b.begin(), b.end());
+        if (a.size() != b.size() || a.size() < 2) return bail("strip rings disagree");
+
+        // Wound so the strip faces out of the solid: running a-then-b in
+        // index order gives the inward face, which build() then refuses as two
+        // faces sharing a directed edge.
+        for (size_t s = 0; s + 1 < a.size(); ++s)
+            soup.face({a[s + 1], b[s + 1], b[s], a[s]});
+    }
+
+    // Vertex patches, wherever at least one incident edge was beveled.
+    for (Index v = 0; v < mesh.vertexCount(); ++v) {
+        const Index start = mesh.verts[v].halfedge;
+        if (start == kInvalid) continue;
+
+        bool any = false;
+        Index h = start;
+        do {
+            if (beveled[h]) { any = true; break; }
+            h = mesh.halfedges[mesh.halfedges[h].twin].next;
+        } while (h != start);
+        if (!any) continue;
+
+        // Walk the outgoing half-edges. Each face contributes its corner --
+        // which may be two points where it split -- and each beveled edge
+        // contributes the arc crossing it, which the strip already shares.
+        std::vector<uint32_t> loop;
+        std::vector<Vec3> loopPos;
+        std::vector<Vec3> centres;
+
+        auto push = [&](uint32_t idx) {
+            if (!loop.empty() && loop.back() == idx) return;   // corners can coincide
+            loop.push_back(idx);
+            loopPos.push_back(soup.positions[idx]);
+        };
+
+        h = start;
+        do {
+            const Index p = mesh.halfedges[h].prev;
+            if (!beveled[p]) push(edgePoint(mesh.halfedges[p].twin));
+            push(corner[h]);
+            if (beveled[h]) {
+                const std::vector<uint32_t>& ring = ringAt[h];
+                for (size_t i = 1; i + 1 < ring.size(); ++i) push(ring[i]);
+                if (arcAt[h].circular) centres.push_back(arcAt[h].centre);
+            }
+            h = mesh.halfedges[mesh.halfedges[h].twin].next;
+        } while (h != start && loop.size() < 4096);
+
+        // The walk can close on the point it started from.
+        while (loop.size() > 1 && loop.front() == loop.back()) {
+            loop.pop_back();
+            loopPos.pop_back();
+        }
+
+        std::reverse(loop.begin(), loop.end());
+        std::reverse(loopPos.begin(), loopPos.end());
+        if (loop.size() < 3) continue;
+
+        if (loop.size() <= 4 || centres.empty()) {
+            soup.face(loop);
+            continue;
+        }
+
+        // A rounded corner's patch is not planar, and fanning a non-planar
+        // n-gon from one of its own corners gives a lopsided, sometimes folded
+        // result. Add a centre that sits on the same sphere the edge arcs do,
+        // and fan from that instead.
+        Vec3 c{};
+        for (const Vec3& p : centres) c += p;
+        c = c / static_cast<Real>(centres.size());
+
+        Vec3 ringMid{};
+        Real radius = 0.0;
+        for (const Vec3& p : loopPos) { ringMid += p; radius += length(p - c); }
+        ringMid = ringMid / static_cast<Real>(loopPos.size());
+        radius /= static_cast<Real>(loopPos.size());
+
+        const Vec3 dir = ringMid - c;
+        if (lengthSq(dir) < 1e-18) { soup.face(loop); continue; }
+
+        const uint32_t hub = soup.vertex(c + normalize(dir) * radius);
+        for (size_t i = 0; i < loop.size(); ++i)
+            soup.face({hub, loop[i], loop[(i + 1) % loop.size()]});
+    }
+
+    if (!soup.commit(mesh)) {
+        if (dbg) {
+            std::map<std::pair<uint32_t,uint32_t>,int> dir;
+            size_t at = 0; 
+            for (uint32_t fs : soup.faceSizes) {
+                for (uint32_t i = 0; i < fs; ++i)
+                    ++dir[{soup.faceIndices[at+i], soup.faceIndices[at+(i+1)%fs]}];
+                at += fs;
+            }
+            int unpaired = 0, dupes = 0;
+            for (const auto& [k,n] : dir) {
+                if (n > 1) ++dupes;
+                if (!dir.count({k.second, k.first})) ++unpaired;
+            }
+            std::fprintf(stderr, "[bevel] rebuild refused: %zu verts %zu faces, "
+                         "%d unpaired, %d duplicated\n",
+                         soup.positions.size(), soup.faceSizes.size(), unpaired, dupes);
+        }
+        return false;
+    }
     return true;
+}
+
+bool bevelAllEdges(Mesh& mesh, Real width, int segments) {
+    std::vector<Index> all;
+    all.reserve(static_cast<size_t>(mesh.halfedgeCount()) / 2);
+    for (Index h = 0; h < mesh.halfedgeCount(); ++h)
+        if (edgeOf(mesh, h) == h) all.push_back(h);
+    return bevelEdges(mesh, all, width, segments);
 }
 
 } // namespace tg

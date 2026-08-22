@@ -188,6 +188,9 @@ public:
     // Faces currently selected on one object, for feeding the mesh operations.
     std::vector<Index> selectedFaces(ObjectId id) const;
 
+    // Selected edges on one object, named by canonical half-edge.
+    std::vector<Index> selectedEdges(ObjectId id) const;
+
     // Drops any element selection referring to geometry that no longer exists.
     // Mesh edits renumber faces wholesale, so stale refs must not survive one.
     void pruneElementSelection();

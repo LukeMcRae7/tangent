@@ -43,8 +43,13 @@ std::string Feature::summary() const {
                           faces.size() == 1 ? "" : "s");
             break;
         case FeatureKind::Bevel:
-            std::snprintf(buf, sizeof(buf), "Bevel  %.2f mm  x%d",
-                          static_cast<double>(width), segments);
+            if (edges.empty())
+                std::snprintf(buf, sizeof(buf), "Bevel all  %.2f mm  x%d",
+                              static_cast<double>(width), segments);
+            else
+                std::snprintf(buf, sizeof(buf), "Fillet  %.2f mm  x%d  (%zu edge%s)",
+                              static_cast<double>(width), segments, edges.size(),
+                              edges.size() == 1 ? "" : "s");
             break;
         case FeatureKind::VertexEdit:
             std::snprintf(buf, sizeof(buf), "Edit  %zu vert%s", verts.size(),
@@ -120,8 +125,17 @@ bool evaluateFrom(std::vector<Feature>& features, size_t from,
             break;
 
         case FeatureKind::Bevel:
-            if (mesh.empty()) fail("nothing to bevel");
-            else if (!bevelAllEdges(mesh, f.width, f.segments)) fail("width too large");
+            if (mesh.empty()) { fail("nothing to bevel"); break; }
+            if (f.edges.empty()) {
+                if (!bevelAllEdges(mesh, f.width, f.segments)) fail("width too large");
+            } else {
+                bool resolves = true;
+                for (Index e : f.edges)
+                    if (e < 0 || e >= mesh.halfedgeCount()) { resolves = false; break; }
+                if (!resolves) fail("edges no longer exist");
+                else if (!bevelEdges(mesh, f.edges, f.width, f.segments))
+                    fail("width too large for these edges");
+            }
             break;
 
         case FeatureKind::BaseMesh:
