@@ -5,6 +5,16 @@
 
 namespace tg {
 
+const char* elementKindName(ElementKind k) {
+    switch (k) {
+        case ElementKind::Vertex: return "Vertex";
+        case ElementKind::Edge:   return "Edge";
+        case ElementKind::Face:   return "Face";
+        case ElementKind::None:   return "None";
+    }
+    return "None";
+}
+
 const char* primitiveName(PrimitiveKind k) {
     switch (k) {
         case PrimitiveKind::Box:      return "Box";
@@ -94,6 +104,8 @@ bool Scene::removeObject(ObjectId id) {
     if (it == objects_.end()) return false;
     objects_.erase(it);
     selection_.erase(std::remove(selection_.begin(), selection_.end(), id), selection_.end());
+    elements_.erase(std::remove_if(elements_.begin(), elements_.end(),
+        [id](const ElementRef& e) { return e.object == id; }), elements_.end());
     return true;
 }
 
@@ -130,6 +142,8 @@ std::unique_ptr<SceneObject> Scene::takeObject(ObjectId id) {
     std::unique_ptr<SceneObject> out = std::move(*it);
     objects_.erase(it);
     selection_.erase(std::remove(selection_.begin(), selection_.end(), id), selection_.end());
+    elements_.erase(std::remove_if(elements_.begin(), elements_.end(),
+        [id](const ElementRef& e) { return e.object == id; }), elements_.end());
     return out;
 }
 
@@ -154,6 +168,7 @@ const SceneObject* Scene::find(ObjectId id) const {
 void Scene::clear() {
     objects_.clear();
     selection_.clear();
+    elements_.clear();
     nextId_ = 1;
 }
 
@@ -222,6 +237,126 @@ AABB Scene::selectionBounds() const {
 Vec3 Scene::selectionCenter() const {
     const AABB b = selectionBounds();
     return b.valid() ? b.center() : Vec3{};
+}
+
+namespace {
+
+// Projects to pixels using the same convention as Camera::projectToPixel:
+// origin top-left, Y downward. Returns false behind the camera.
+bool projectPx(const Mat4& viewProj, int w, int h, Vec3 world, Vec2& out) {
+    const Vec4 clip = viewProj * Vec4(world, 1.0f);
+    if (clip.w <= 1e-6f) return false;
+    const Vec3 ndc = clip.xyz() / clip.w;
+    out = {(ndc.x * 0.5f + 0.5f) * static_cast<float>(w),
+           (1.0f - (ndc.y * 0.5f + 0.5f)) * static_cast<float>(h)};
+    return true;
+}
+
+float distToSegment(Vec2 p, Vec2 a, Vec2 b) {
+    const Vec2 ab = b - a;
+    const float len2 = lengthSq(ab);
+    if (len2 < 1e-9f) return length(p - a);
+    const float t = clampf(dot(p - a, ab) / len2, 0.0f, 1.0f);
+    return length(p - (a + ab * t));
+}
+
+} // namespace
+
+ElementHit Scene::pickElement(const Ray& ray, const Mat4& viewProj,
+                              int viewportW, int viewportH, Vec2 cursorPx,
+                              float vertexTolPx, float edgeTolPx) const {
+    ElementHit out;
+
+    const RayHit surface = raycast(ray);
+    if (!surface.hit()) return out;
+
+    const SceneObject* obj = find(surface.object);
+    if (!obj || surface.face == kInvalid) return out;
+
+    // Default to the face; a nearer vertex or edge overrides it below.
+    out.ref = {surface.object, ElementKind::Face, surface.face};
+    out.t = surface.t;
+    out.point = surface.point;
+
+    const Mat4 model = obj->modelMatrix();
+    const Mesh& mesh = obj->mesh;
+
+    // Only the edges and corners of the face actually under the cursor are
+    // considered. Every edge belongs to both of its faces, so whichever face
+    // the ray struck still contains the edge the user is aiming at.
+    float bestVert = vertexTolPx, bestEdge = edgeTolPx;
+    Index vertPick = kInvalid, edgePick = kInvalid;
+
+    const Index start = mesh.faces[surface.face].halfedge;
+    Index h = start;
+    do {
+        const Index v0 = mesh.fromVertex(h);
+        const Index v1 = mesh.halfedges[h].vertex;
+
+        Vec2 p0, p1;
+        const bool ok0 = projectPx(viewProj, viewportW, viewportH,
+                                   transformPoint(model, mesh.verts[v0].position), p0);
+        const bool ok1 = projectPx(viewProj, viewportW, viewportH,
+                                   transformPoint(model, mesh.verts[v1].position), p1);
+
+        if (ok0) {
+            const float d = length(cursorPx - p0);
+            if (d < bestVert) { bestVert = d; vertPick = v0; }
+        }
+        if (ok0 && ok1) {
+            const float d = distToSegment(cursorPx, p0, p1);
+            if (d < bestEdge) {
+                bestEdge = d;
+                // Canonical half-edge so both directions name one edge.
+                edgePick = std::min(h, mesh.halfedges[h].twin);
+            }
+        }
+        h = mesh.halfedges[h].next;
+    } while (h != start);
+
+    if (vertPick != kInvalid)      out.ref = {surface.object, ElementKind::Vertex, vertPick};
+    else if (edgePick != kInvalid) out.ref = {surface.object, ElementKind::Edge, edgePick};
+    return out;
+}
+
+// ---------------------------------------------------------------------------
+bool Scene::isElementSelected(const ElementRef& e) const {
+    return std::find(elements_.begin(), elements_.end(), e) != elements_.end();
+}
+
+void Scene::selectElement(const ElementRef& e, bool additive) {
+    if (!additive) elements_.clear();
+    if (!e.valid()) return;
+    if (!isElementSelected(e)) elements_.push_back(e);
+}
+
+void Scene::toggleElement(const ElementRef& e) {
+    if (!e.valid()) return;
+    auto it = std::find(elements_.begin(), elements_.end(), e);
+    if (it != elements_.end()) elements_.erase(it);
+    else elements_.push_back(e);
+}
+
+std::vector<Index> Scene::selectedFaces(ObjectId id) const {
+    std::vector<Index> out;
+    for (const ElementRef& e : elements_)
+        if (e.object == id && e.kind == ElementKind::Face) out.push_back(e.index);
+    return out;
+}
+
+void Scene::pruneElementSelection() {
+    elements_.erase(std::remove_if(elements_.begin(), elements_.end(),
+        [this](const ElementRef& e) {
+            const SceneObject* o = find(e.object);
+            if (!o) return true;
+            switch (e.kind) {
+                case ElementKind::Face:   return e.index >= o->mesh.faceCount();
+                case ElementKind::Edge:   return e.index >= o->mesh.halfedgeCount();
+                case ElementKind::Vertex: return e.index >= o->mesh.vertexCount();
+                case ElementKind::None:   return true;
+            }
+            return true;
+        }), elements_.end());
 }
 
 RayHit Scene::raycast(const Ray& ray) const {

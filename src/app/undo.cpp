@@ -90,6 +90,25 @@ bool ParameterCommand::mergeWith(const Command& other) {
 }
 
 // ---------------------------------------------------------------------------
+void MeshCommand::apply(Scene& scene, const Mesh& mesh, const PrimitiveSpec& spec) {
+    SceneObject* o = scene.find(id_);
+    if (!o) return;
+    o->mesh = mesh;
+    o->mesh.buildRenderMesh(o->render);
+    o->localBounds = o->mesh.bounds();
+    o->spec = spec;
+    o->markMeshChanged();
+    // Face and vertex numbering does not survive a mesh edit, so anything the
+    // user had picked must be dropped rather than left pointing at whatever
+    // now happens to occupy that index.
+    scene.pruneElementSelection();
+    scene.clearElementSelection();
+}
+
+void MeshCommand::undo(Scene& scene) { apply(scene, before_, specBefore_); }
+void MeshCommand::redo(Scene& scene) { apply(scene, after_, specAfter_); }
+
+// ---------------------------------------------------------------------------
 void UndoStack::push(std::unique_ptr<Command> cmd, bool merge) {
     if (!cmd) return;
 

@@ -52,6 +52,10 @@ public:
     // One-line readout for the status bar, e.g. "Move X  12.50 mm".
     std::string statusText() const;
 
+    // The snap increment currently in force, in millimetres. Zero when the
+    // tool is not snapping.
+    float snapStep() const { return snapStep_; }
+
     void drawOverlay(Renderer& renderer, const Camera& camera) const;
 
 private:
@@ -78,6 +82,7 @@ private:
     float rotateLast_  = 0.0f;
 
     std::string typed_;
+    float snapStep_ = 0.0f;
     float amount_ = 0.0f;    // last applied scalar, for the readout
     Vec3  delta_{};          // last applied translation, for the readout
 };

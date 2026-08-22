@@ -86,6 +86,29 @@ private:
     PrimitiveSpec before_, after_;
 };
 
+// A mesh edit (extrude, inset, bevel...). Holds full before/after meshes:
+// operations rewrite connectivity wholesale, so there is no compact delta to
+// store, and a print-design mesh is small enough for this to be cheap.
+class MeshCommand : public Command {
+public:
+    MeshCommand(ObjectId id, Mesh before, Mesh after,
+                PrimitiveSpec specBefore, PrimitiveSpec specAfter, std::string what)
+        : id_(id), before_(std::move(before)), after_(std::move(after)),
+          specBefore_(specBefore), specAfter_(specAfter), what_(std::move(what)) {}
+
+    void undo(Scene& scene) override;
+    void redo(Scene& scene) override;
+    std::string label() const override { return what_; }
+
+private:
+    void apply(Scene& scene, const Mesh& mesh, const PrimitiveSpec& spec);
+
+    ObjectId      id_;
+    Mesh          before_, after_;
+    PrimitiveSpec specBefore_, specAfter_;
+    std::string   what_;
+};
+
 class UndoStack {
 public:
     // `merge` collapses this command into the previous one when they represent

@@ -63,6 +63,31 @@ struct SceneObject {
     void markMeshChanged() { ++meshVersion; }
 };
 
+// What a click resolved to. Edges are identified by the lower of their two
+// half-edge indices so both directions name the same edge.
+enum class ElementKind { None, Vertex, Edge, Face };
+
+const char* elementKindName(ElementKind k);
+
+struct ElementRef {
+    ObjectId    object = kNoObject;
+    ElementKind kind   = ElementKind::None;
+    Index       index  = kInvalid;
+
+    bool valid() const { return object != kNoObject && kind != ElementKind::None; }
+    bool operator==(const ElementRef& o) const {
+        return object == o.object && kind == o.kind && index == o.index;
+    }
+    bool operator!=(const ElementRef& o) const { return !(*this == o); }
+};
+
+struct ElementHit {
+    ElementRef ref;
+    float      t = 0.0f;
+    Vec3       point;
+    bool hit() const { return ref.valid(); }
+};
+
 struct RayHit {
     ObjectId object = kNoObject;
     Index    face   = kInvalid;
@@ -114,11 +139,37 @@ public:
     // Nearest surface hit along the ray, in world space.
     RayHit raycast(const Ray& ray) const;
 
+    // Resolves a click to the specific vertex, edge or face under the cursor,
+    // the way a CAD tool does: whatever is nearest in *screen* space wins, with
+    // vertices beating edges beating the face behind them. Tolerances are in
+    // pixels so the pick feels the same at any zoom.
+    //
+    // Takes the view-projection and viewport size rather than a Camera, so the
+    // scene layer stays independent of the application layer.
+    ElementHit pickElement(const Ray& ray, const Mat4& viewProj,
+                           int viewportW, int viewportH, Vec2 cursorPx,
+                           float vertexTolPx = 9.0f, float edgeTolPx = 7.0f) const;
+
+    // ---- Sub-object selection --------------------------------------------
+    const std::vector<ElementRef>& elementSelection() const { return elements_; }
+    bool isElementSelected(const ElementRef& e) const;
+    void selectElement(const ElementRef& e, bool additive = false);
+    void toggleElement(const ElementRef& e);
+    void clearElementSelection() { elements_.clear(); }
+
+    // Faces currently selected on one object, for feeding the mesh operations.
+    std::vector<Index> selectedFaces(ObjectId id) const;
+
+    // Drops any element selection referring to geometry that no longer exists.
+    // Mesh edits renumber faces wholesale, so stale refs must not survive one.
+    void pruneElementSelection();
+
 private:
     std::string uniqueName(const std::string& base) const;
 
     std::vector<std::unique_ptr<SceneObject>> objects_;
     std::vector<ObjectId> selection_;
+    std::vector<ElementRef> elements_;
     ObjectId nextId_ = 1;
 };
 

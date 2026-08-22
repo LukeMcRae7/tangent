@@ -105,6 +105,13 @@ bool Application::init() {
         placeOnBuildPlate(startup);
         scene_.select(startup);
     }
+    if (pickFace_ >= 0 && !scene_.objects().empty()) {
+        const ObjectId id = scene_.objects().front()->id;
+        scene_.clearSelection();
+        scene_.selectElement({id, ElementKind::Face, static_cast<Index>(pickFace_)});
+        if (autoExtrude_) extrudeSelection();
+    }
+
     if (!fixedCamera_) {
         camera_.frame(scene_.bounds());
         camera_.snapToGoal();
@@ -193,18 +200,110 @@ void Application::handleViewportMouse() {
 
     if (io.MouseWheel != 0.0f) camera_.dolly(io.MouseWheel);
 
-    // Left click selects; Shift extends. A click that ends a drag is ignored
-    // so that box-select gestures later do not also fire a pick.
+    // A click that ends a drag is ignored, so an orbit or a future box-select
+    // gesture does not also fire a pick.
     if (ImGui::IsMouseReleased(ImGuiMouseButton_Left) &&
         !ImGui::IsMouseDragging(ImGuiMouseButton_Left, 4.0f)) {
-        const Ray ray = camera_.rayThroughPixel(io.MousePos.x - viewRect_.x,
-                                                io.MousePos.y - viewRect_.y);
+        handleViewportClick(io.KeyShift, io.KeyCtrl);
+    }
+}
+
+// Plain click picks the specific edge, face or vertex under the cursor, the way
+// a CAD tool does. Ctrl+click takes the whole object instead, matching what
+// clicking its row in the outliner does. Shift extends either.
+void Application::handleViewportClick(bool shift, bool ctrl) {
+    const Vec2 cursor = mouseInViewport();
+    const Ray ray = camera_.rayThroughPixel(cursor.x, cursor.y);
+
+    if (ctrl) {
         const RayHit hit = scene_.raycast(ray);
+        scene_.clearElementSelection();
         if (hit.hit()) {
-            if (io.KeyShift) scene_.toggleSelect(hit.object);
-            else             scene_.select(hit.object);
-        } else if (!io.KeyShift) {
+            if (shift) scene_.toggleSelect(hit.object);
+            else       scene_.select(hit.object);
+        } else if (!shift) {
             scene_.clearSelection();
+        }
+        return;
+    }
+
+    const ElementHit pick = scene_.pickElement(ray, camera_.viewProjection(),
+                                               camera_.viewportW, camera_.viewportH,
+                                               cursor);
+    if (pick.hit()) {
+        // Picking a sub-element takes the object selection out of play, so a
+        // following G/R/S cannot silently move the whole body instead.
+        scene_.clearSelection();
+        if (shift) scene_.toggleElement(pick.ref);
+        else       scene_.selectElement(pick.ref);
+    } else if (!shift) {
+        scene_.clearElementSelection();
+        scene_.clearSelection();
+    }
+}
+
+void Application::drawSelectionHighlights() {
+    const Vec4 faceTint = toVec4(palette::kBrand, 0.30f);
+    const Vec4 edgeCol  = toVec4(palette::kBrand, 1.0f);
+
+    for (const ElementRef& e : scene_.elementSelection()) {
+        const SceneObject* o = scene_.find(e.object);
+        if (!o) continue;
+        const Mat4 model = o->modelMatrix();
+
+        // Nudge toward the eye by a fixed number of pixels' worth of world
+        // distance, so the highlight sits on the surface at any zoom instead of
+        // z-fighting with it.
+        auto lift = [&](Vec3 p) {
+            const Vec3 toEye = camera_.eye() - p;
+            const float len = length(toEye);
+            if (len < 1e-6f) return p;
+            return p + toEye * (camera_.pixelWorldSize(p) * 2.0f / len);
+        };
+
+        switch (e.kind) {
+        case ElementKind::Face: {
+            if (e.index >= o->mesh.faceCount()) break;
+            const RenderMesh& rm = o->render;
+            for (size_t i = 0; i < rm.triangleFace.size(); ++i) {
+                if (rm.triangleFace[i] != e.index) continue;
+                renderer_.addTriangle(
+                    lift(transformPoint(model, rm.positions[rm.triangles[i * 3 + 0]])),
+                    lift(transformPoint(model, rm.positions[rm.triangles[i * 3 + 1]])),
+                    lift(transformPoint(model, rm.positions[rm.triangles[i * 3 + 2]])),
+                    faceTint);
+            }
+            // Outline it too, so a face on a busy mesh still reads clearly.
+            const Index start = o->mesh.faces[e.index].halfedge;
+            Index h = start;
+            do {
+                renderer_.addLine(
+                    lift(transformPoint(model, o->mesh.verts[o->mesh.fromVertex(h)].position)),
+                    lift(transformPoint(model, o->mesh.verts[o->mesh.halfedges[h].vertex].position)),
+                    edgeCol);
+                h = o->mesh.halfedges[h].next;
+            } while (h != start);
+            break;
+        }
+        case ElementKind::Edge: {
+            if (e.index >= o->mesh.halfedgeCount()) break;
+            const Vec3 a = o->mesh.verts[o->mesh.fromVertex(e.index)].position;
+            const Vec3 b = o->mesh.verts[o->mesh.halfedges[e.index].vertex].position;
+            renderer_.addLine(lift(transformPoint(model, a)),
+                              lift(transformPoint(model, b)), edgeCol);
+            break;
+        }
+        case ElementKind::Vertex: {
+            if (e.index >= o->mesh.vertexCount()) break;
+            const Vec3 p = lift(transformPoint(model, o->mesh.verts[e.index].position));
+            const float s = camera_.pixelWorldSize(p) * 4.0f;
+            renderer_.addLine(p - Vec3{s, 0, 0}, p + Vec3{s, 0, 0}, edgeCol);
+            renderer_.addLine(p - Vec3{0, s, 0}, p + Vec3{0, s, 0}, edgeCol);
+            renderer_.addLine(p - Vec3{0, 0, s}, p + Vec3{0, 0, s}, edgeCol);
+            break;
+        }
+        case ElementKind::None:
+            break;
         }
     }
 }
@@ -280,6 +379,10 @@ void Application::handleShortcuts() {
     if (ImGui::IsKeyPressed(ImGuiKey_Z, false) && !ctrl && !shift)
         view_.showWireframe = !view_.showWireframe;
 
+    // Mesh edits act on the selected faces. Shift+E cuts inward.
+    if (!ctrl && !alt && ImGui::IsKeyPressed(ImGuiKey_E, false)) ui_.actions.extrude = true;
+    if (ctrl && ImGui::IsKeyPressed(ImGuiKey_B, false))          ui_.actions.bevel = true;
+
     // Numpad view shortcuts; Ctrl gives the opposite side, as in Blender.
     if (ImGui::IsKeyPressed(ImGuiKey_Keypad1, false))
         camera_.setStandardView(ctrl ? StandardView::Back : StandardView::Front);
@@ -323,6 +426,67 @@ void Application::addPrimitiveAtCursor(PrimitiveKind kind) {
     }
 }
 
+namespace {
+// One snap step at the current zoom, reused so a keyboard mesh edit moves by
+// the same increment a snapped drag would.
+float editStep(const Camera& camera, Vec3 at) {
+    return niceStep(camera.pixelWorldSize(at) * 42.0f);
+}
+} // namespace
+
+// Runs a mesh operation on the active object and records it for undo. The
+// operation is given a scratch copy, so a rejected edit (a bevel too wide for
+// the geometry, an inset that would invert a face) leaves the object alone.
+void Application::extrudeSelection() {
+    const ObjectId id = scene_.elementSelection().empty()
+                        ? kNoObject : scene_.elementSelection().front().object;
+    SceneObject* obj = scene_.find(id);
+    if (!obj) return;
+
+    const std::vector<Index> faces = scene_.selectedFaces(id);
+    if (faces.empty()) return;
+
+    const bool inward = ImGui::GetIO().KeyShift;
+    const float step = editStep(camera_, obj->worldBounds().center());
+
+    Mesh next = obj->mesh;
+    if (!extrudeFaces(next, faces, inward ? -step : step, nullptr)) return;
+
+    PrimitiveSpec after = obj->spec;
+    after.kind = PrimitiveKind::Custom;   // no longer describable by parameters
+
+    // Apply through the command's own redo, so the path that performs the edit
+    // is exactly the path that replays it. (Pushing first would not work:
+    // push() clears the redo stack, so a redo() afterwards is a no-op.)
+    auto cmd = std::make_unique<MeshCommand>(id, obj->mesh, std::move(next),
+                                             obj->spec, after,
+                                             inward ? "Extrude Inward" : "Extrude");
+    cmd->redo(scene_);
+    undo_.push(std::move(cmd));
+}
+
+void Application::bevelActiveObject() {
+    SceneObject* obj = scene_.find(scene_.activeObject());
+    if (!obj) return;
+
+    // Clamp to what the geometry can actually take, so the slider cannot ask
+    // for a bevel that inverts a face.
+    const float limit = maxBevelWidth(obj->mesh);
+    const float width = std::min(view_.bevelWidth, limit * 0.95f);
+    if (width <= 1e-4f) return;
+
+    Mesh next = obj->mesh;
+    if (!bevelAllEdges(next, width, view_.bevelSegments)) return;
+
+    PrimitiveSpec after = obj->spec;
+    after.kind = PrimitiveKind::Custom;
+
+    auto cmd = std::make_unique<MeshCommand>(scene_.activeObject(), obj->mesh,
+                                             std::move(next), obj->spec, after, "Bevel");
+    cmd->redo(scene_);
+    undo_.push(std::move(cmd));
+}
+
 void Application::applyActions() {
     UiActions& a = ui_.actions;
 
@@ -359,6 +523,9 @@ void Application::applyActions() {
             scene_.clearSelection();
         }
     }
+
+    if (a.extrude) extrudeSelection();
+    if (a.bevel)   bevelActiveObject();
 
     if (a.rebuildObject != kNoObject) {
         SceneObject* o = scene_.find(a.rebuildObject);
@@ -654,6 +821,7 @@ int Application::run() {
 
         // Queued before the frame is drawn; the renderer flushes overlay lines
         // at the end of its pass.
+        drawSelectionHighlights();
         tool_.drawOverlay(renderer_, camera_);
 
         camera_.update(dt);

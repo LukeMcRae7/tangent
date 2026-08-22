@@ -3,6 +3,7 @@
 
 #include "app/camera.h"
 #include "app/transform_tool.h"
+#include "mesh/operations.h"
 #include "app/undo.h"
 #include "render/renderer.h"
 #include "scene/scene.h"
@@ -63,6 +64,12 @@ public:
         alignProbe_ = true;
     }
 
+    // Pre-selects a face of the first object. Diagnostic only: it makes the
+    // selection highlight and the mesh operations reproducible in a capture,
+    // which a click cannot be.
+    void setPickFace(int index) { pickFace_ = index; }
+    void setAutoExtrude() { autoExtrude_ = true; }
+
     // Writes the viewport to a PPM after `afterFrames` frames. Reads back this
     // process's own GL framebuffer rather than going through the compositor, so
     // it captures only Tangent and works regardless of what else is on screen.
@@ -78,6 +85,10 @@ private:
     void handleTransformKeys();
     Vec2 mouseInViewport() const;
     void beginTransform(TransformMode mode);
+    void handleViewportClick(bool shift, bool ctrl);
+    void drawSelectionHighlights();
+    void extrudeSelection();
+    void bevelActiveObject();
     void applyActions();
     void buildUi();
     void drawFrame();
@@ -123,6 +134,8 @@ private:
     int         screenshotFrame_ = -1;
     bool        fixedCamera_ = false;
     bool        startEmpty_ = false;
+    int         pickFace_ = -1;
+    bool        autoExtrude_ = false;
 
     double meanViewportLuminance() const;
     void   readViewport(std::vector<unsigned char>& out) const;

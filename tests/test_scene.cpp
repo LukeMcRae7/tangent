@@ -1,6 +1,7 @@
 // Scene-level behaviour: creation, naming, picking, selection, parametric
 // rebuild. No GL context is involved, so this runs headless.
 #include "scene/scene.h"
+#include "app/camera.h"
 
 #include <cstdio>
 #include <string>
@@ -11,6 +12,7 @@ static int failures = 0;
 static void check(bool ok, const std::string& what) {
     if (!ok) { std::printf("  FAIL: %s\n", what.c_str()); ++failures; }
 }
+static bool near(float a, float b, float eps = 1e-4f) { return std::fabs(a - b) < eps; }
 
 int main() {
     // ---- Creation and naming ---------------------------------------------
@@ -146,6 +148,120 @@ int main() {
         check(!o->render.triangles.empty(), "object still renders after a rejected rebuild");
         std::printf("[rebuild] bounds preserved at %.1f mm after invalid input\n",
                     o->localBounds.size().x);
+    }
+
+    // ---- Element picking ---------------------------------------------------
+    {
+        Scene s;
+        const ObjectId box = s.addPrimitive(PrimitiveKind::Box);   // 20mm, centred
+
+        // Straight down the -Z axis onto the top face. A viewProj built the
+        // same way the camera builds it, looking down from +Z.
+        const int W = 800, H = 800;
+        const Mat4 view = lookAt({0, 0, 200}, {0, 0, 0}, {0, 1, 0});
+        const Mat4 proj = perspective(radians(45.0f), 1.0f, 0.1f, 1000.0f);
+        const Mat4 vp = proj * view;
+
+        auto pixelOf = [&](Vec3 world) {
+            const Vec4 clip = vp * Vec4(world, 1.0f);
+            const Vec3 ndc = clip.xyz() / clip.w;
+            return Vec2{(ndc.x * 0.5f + 0.5f) * W, (1.0f - (ndc.y * 0.5f + 0.5f)) * H};
+        };
+
+        // Middle of the top face: nothing else is near, so the face wins.
+        {
+            const Vec2 px = pixelOf({0, 0, 10});
+            const ElementHit h = s.pickElement(Ray{{0, 0, 200}, {0, 0, -1}}, vp, W, H, px);
+            check(h.hit() && h.ref.kind == ElementKind::Face, "centre of a face picks the face");
+            check(h.ref.object == box, "and reports the right object");
+        }
+
+        // Over an edge midpoint: the edge beats the face behind it.
+        {
+            const Vec3 mid{10.0f, 0.0f, 10.0f};       // middle of a top-face edge
+            const Vec2 px = pixelOf(mid);
+            const Ray ray{{mid.x, mid.y, 200.0f}, {0, 0, -1}};
+            const ElementHit h = s.pickElement(ray, vp, W, H, px);
+            check(h.hit() && h.ref.kind == ElementKind::Edge, "over an edge picks the edge");
+        }
+
+        // Over a corner: the vertex beats the edge.
+        {
+            const Vec3 corner{10.0f, 10.0f, 10.0f};
+            const Vec2 px = pixelOf(corner);
+            const Ray ray{{corner.x - 0.01f, corner.y - 0.01f, 200.0f}, {0, 0, -1}};
+            const ElementHit h = s.pickElement(ray, vp, W, H, px);
+            check(h.hit() && h.ref.kind == ElementKind::Vertex, "over a corner picks the vertex");
+        }
+
+        // Missing the object entirely.
+        {
+            const ElementHit h = s.pickElement(Ray{{500, 500, 200}, {0, 0, -1}}, vp, W, H,
+                                               Vec2{0, 0});
+            check(!h.hit(), "a miss picks nothing");
+        }
+        std::printf("[pick] vertex/edge/face priority ok\n");
+    }
+
+    // ---- Element selection bookkeeping -------------------------------------
+    {
+        Scene s;
+        const ObjectId a = s.addPrimitive(PrimitiveKind::Box);
+        const ElementRef f0{a, ElementKind::Face, 0};
+        const ElementRef f1{a, ElementKind::Face, 1};
+
+        s.selectElement(f0);
+        check(s.isElementSelected(f0), "element selected");
+        s.selectElement(f1, true);
+        check(s.elementSelection().size() == 2, "additive keeps both");
+        check(s.selectedFaces(a).size() == 2, "both reported as faces");
+
+        s.toggleElement(f0);
+        check(!s.isElementSelected(f0) && s.isElementSelected(f1), "toggle removes");
+
+        // Stale references must not survive a mesh edit that renumbers faces.
+        s.selectElement(ElementRef{a, ElementKind::Face, 999}, true);
+        s.pruneElementSelection();
+        check(s.elementSelection().size() == 1, "out-of-range element pruned");
+
+        // Nor outlive the object itself.
+        s.removeObject(a);
+        check(s.elementSelection().empty(), "removing the object clears its elements");
+        std::printf("[pick] selection bookkeeping ok\n");
+    }
+
+    // ---- Zoom-adaptive snap ladder -----------------------------------------
+    {
+        check(near(niceStep(0.7f), 0.5f), "0.7 -> 0.5");
+        check(near(niceStep(1.0f), 1.0f), "1.0 -> 1");
+        check(near(niceStep(1.2f), 1.0f), "1.2 -> 1");
+        check(near(niceStep(4.0f), 5.0f), "4 -> 5");
+        check(near(niceStep(12.0f), 10.0f), "12 -> 10");
+        check(near(niceStep(0.06f), 0.05f), "0.06 -> 0.05");
+
+        // Every step must be a 1, 2 or 5 times a power of ten, and the ladder
+        // must never go backwards as the requested size grows.
+        float prev = 0.0f;
+        for (float v = 0.01f; v < 500.0f; v *= 1.05f) {
+            const float s = niceStep(v);
+            check(s >= prev, "ladder is monotonic");
+            prev = s;
+            const float m = s / std::pow(10.0f, std::floor(std::log10(s)));
+            check(near(m, 1.0f, 1e-3f) || near(m, 2.0f, 1e-3f) || near(m, 5.0f, 1e-3f),
+                  "step is a round number");
+        }
+
+        // One step should stay about the same size on screen as the camera
+        // moves: 42 pixels' worth, rounded.
+        Camera cam;
+        cam.viewportW = 1000; cam.viewportH = 800;
+        for (float d : {20.0f, 100.0f, 500.0f}) {
+            cam.distance = d;
+            const float step = niceStep(cam.pixelWorldSize({0, 0, 0}) * 42.0f);
+            const float px = step / cam.pixelWorldSize({0, 0, 0});
+            check(px > 20.0f && px < 90.0f, "one snap step stays a sane screen size");
+        }
+        std::printf("[snap] ladder and zoom scaling ok\n");
     }
 
     std::printf("\n%s (%d failures)\n", failures ? "FAILED" : "ALL PASS", failures);

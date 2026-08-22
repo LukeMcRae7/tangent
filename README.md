@@ -57,6 +57,9 @@ save, so you can edit them while the app runs.
 - **Millimetres**, **+Z up** — matching Fusion 360 and Blender.
 - New objects are placed **on the build plate** (z = 0), not centred through it.
 - The grid subdivides by powers of ten as you zoom, down to 0.1 mm.
+- Snapping is relative to zoom: one step is always about the same distance on
+  screen, rounded to a value you would actually pick (0.5, 1, 2, 5, 10 mm...).
+  The active increment is shown in the status bar while you drag.
 
 ## Controls
 
@@ -65,7 +68,11 @@ save, so you can edit them while the app runs.
 | MMB drag | Orbit |
 | Shift + MMB | Pan |
 | Wheel | Zoom |
-| Click / Shift + click | Select / extend selection |
+| Click | Select the edge, face or vertex under the cursor |
+| Ctrl + click | Select the whole object (as clicking its outliner row) |
+| Shift + click | Extend either selection |
+| E / Shift + E | Extrude selected faces outward / inward |
+| Ctrl + B | Bevel all edges of the active object |
 | Numpad 1 / 3 / 7 | Front / Right / Top (Ctrl for opposite) |
 | Numpad 4 / 6 / 8 / 2 | Orbit in 15° steps |
 | Numpad 5 | Perspective / orthographic |
@@ -74,7 +81,7 @@ save, so you can edit them while the app runs.
 | X / Y / Z | *(during a transform)* constrain to an axis |
 | Shift + X/Y/Z | *(during a transform)* constrain to a plane |
 | type a number | *(during a transform)* exact value |
-| Ctrl | *(during a transform)* snap to 1 mm / 5° / 0.1 |
+| Ctrl | *(during a transform)* snap to a round increment |
 | Enter or click | Confirm transform |
 | Esc or right click | Cancel transform |
 | Ctrl + Z / Ctrl + Shift + Z | Undo / redo |

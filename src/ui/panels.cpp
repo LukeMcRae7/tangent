@@ -160,6 +160,23 @@ void drawMenuBar(UiContext& ctx) {
 
     if (ImGui::BeginMenu("Add")) { drawAddMenuItems(ctx); ImGui::EndMenu(); }
 
+    if (ImGui::BeginMenu("Modify")) {
+        const bool hasFaces = !ctx.scene->elementSelection().empty();
+        if (ImGui::MenuItem("Extrude Faces", "E", false, hasFaces))
+            ctx.actions.extrude = true;
+        ImGui::TextColored(kDim, "  Shift+E cuts inward");
+        ImGui::Separator();
+        ImGui::SetNextItemWidth(140.0f);
+        ImGui::DragFloat("Width", &ctx.view->bevelWidth, 0.05f, 0.01f, 100.0f, "%.2f mm");
+        ImGui::SetNextItemWidth(140.0f);
+        ImGui::DragInt("Segments", &ctx.view->bevelSegments, 0.1f, 1, 6);
+        if (ImGui::MenuItem("Bevel All Edges", "Ctrl+B", false,
+                            ctx.scene->activeObject() != kNoObject))
+            ctx.actions.bevel = true;
+        ImGui::TextColored(kDim, "  more segments round the edge further");
+        ImGui::EndMenu();
+    }
+
     if (ImGui::BeginMenu("Transform")) {
         const bool has = !ctx.scene->selection().empty();
         ImGui::MenuItem("Move", "G", false, has);
@@ -347,13 +364,21 @@ void drawStatusBar(UiContext& ctx) {
         ImGui::TextColored(kDim, "%zu object%s", scene.objectCount(),
                            scene.objectCount() == 1 ? "" : "s");
         ImGui::SameLine(0, 18);
-        ImGui::TextColored(kDim, "%zu selected", scene.selection().size());
+        if (!scene.elementSelection().empty()) {
+            const ElementRef& e = scene.elementSelection().front();
+            ImGui::TextColored(kAccent, "%zu %s%s selected",
+                               scene.elementSelection().size(),
+                               elementKindName(e.kind),
+                               scene.elementSelection().size() == 1 ? "" : "s");
+        } else {
+            ImGui::TextColored(kDim, "%zu selected", scene.selection().size());
+        }
         ImGui::SameLine(0, 18);
         ImGui::TextColored(kDim, "%zu tris", ctx.stats.triangles);
         ImGui::SameLine(0, 18);
         ImGui::TextColored(kDim, "mm");
 
-        const char* hint = "MMB orbit   Shift+MMB pan   Wheel zoom   G move   R rotate   S scale   Shift+A add";
+        const char* hint = "click edge/face   Ctrl+click object   G/R/S transform   E extrude   Ctrl snap";
         const float tw = ImGui::CalcTextSize(hint).x;
         ImGui::SameLine(ImGui::GetWindowWidth() - tw - 14.0f);
         ImGui::TextColored(kDim, "%s", hint);

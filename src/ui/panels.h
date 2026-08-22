@@ -36,6 +36,8 @@ struct UiActions {
 
     bool undo = false;
     bool redo = false;
+    bool extrude = false;
+    bool bevel = false;
 };
 
 struct UiStats {

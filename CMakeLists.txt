@@ -77,7 +77,7 @@ target_compile_options(test_mesh PRIVATE -Wall -Wextra)
 add_test(NAME mesh COMMAND test_mesh)
 
 add_executable(test_scene tests/test_scene.cpp
-  src/scene/scene.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp)
+  src/scene/scene.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp src/app/camera.cpp)
 target_include_directories(test_scene PRIVATE src)
 target_compile_options(test_scene PRIVATE -Wall -Wextra)
 add_test(NAME scene COMMAND test_scene)

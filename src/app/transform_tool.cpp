@@ -36,6 +36,16 @@ float snapTo(float v, float step) {
     return step > 0.0f ? std::round(v / step) * step : v;
 }
 
+// Snap increment sized so one step is about the same distance on screen at any
+// zoom, then rounded to a value a person would pick. Without the zoom term a
+// fixed 1mm step is uselessly fine when zoomed out to a whole plate and far too
+// coarse when zoomed in on a 0.4mm wall.
+constexpr float kSnapPixels = 42.0f;
+
+float snapStepFor(const Camera& camera, Vec3 at) {
+    return niceStep(camera.pixelWorldSize(at) * kSnapPixels);
+}
+
 } // namespace
 
 const char* transformModeName(TransformMode m) {
@@ -122,6 +132,9 @@ void TransformTool::apply(Scene& scene, const Camera& camera, Vec2 mousePx, bool
     const Ray rayNow   = camera.rayThroughPixel(mousePx.x, mousePx.y);
     const Ray rayStart = camera.rayThroughPixel(startMouse_.x, startMouse_.y);
 
+    const float step = snapStepFor(camera, pivot_);
+    snapStep_ = snap ? step : 0.0f;
+
     switch (mode_) {
     // ---------------------------------------------------------------- move --
     case TransformMode::Translate: {
@@ -138,7 +151,7 @@ void TransformTool::apply(Scene& scene, const Camera& camera, Vec2 mousePx, bool
             if (closestOnLine(rayStart, pivot_, axis, s0) &&
                 closestOnLine(rayNow,   pivot_, axis, s1)) {
                 float travel = s1 - s0;
-                if (snap) travel = snapTo(travel, 1.0f);
+                if (snap) travel = snapTo(travel, step);
                 delta = axis * travel;
             }
         } else {
@@ -149,8 +162,8 @@ void TransformTool::apply(Scene& scene, const Camera& camera, Vec2 mousePx, bool
             if (intersectPlane(rayStart, pivot_, normal, p0) &&
                 intersectPlane(rayNow,   pivot_, normal, p1)) {
                 delta = p1 - p0;
-                if (snap) delta = {snapTo(delta.x, 1.0f), snapTo(delta.y, 1.0f),
-                                   snapTo(delta.z, 1.0f)};
+                if (snap) delta = {snapTo(delta.x, step), snapTo(delta.y, step),
+                                   snapTo(delta.z, step)};
             }
         }
 
@@ -301,14 +314,19 @@ std::string TransformTool::statusText() const {
     }
 
     switch (mode_) {
-        case TransformMode::Translate:
+        case TransformMode::Translate: {
+            char snapNote[48] = "";
+            if (snapStep_ > 0.0f)
+                std::snprintf(snapNote, sizeof(snapNote), "   snap %g mm",
+                              static_cast<double>(snapStep_));
             if (constraint_ != Constraint::None && !isPlane())
-                std::snprintf(buf, sizeof(buf), "Move%s  %.2f mm", axisName,
-                              dot(delta_, constraintAxis()));
+                std::snprintf(buf, sizeof(buf), "Move%s  %.2f mm%s", axisName,
+                              dot(delta_, constraintAxis()), snapNote);
             else
-                std::snprintf(buf, sizeof(buf), "Move%s  %.2f, %.2f, %.2f mm",
-                              axisName, delta_.x, delta_.y, delta_.z);
+                std::snprintf(buf, sizeof(buf), "Move%s  %.2f, %.2f, %.2f mm%s",
+                              axisName, delta_.x, delta_.y, delta_.z, snapNote);
             break;
+        }
         case TransformMode::Rotate:
             std::snprintf(buf, sizeof(buf), "Rotate%s  %.1f deg", axisName, amount_);
             break;

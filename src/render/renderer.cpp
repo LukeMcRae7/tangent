@@ -32,6 +32,18 @@ bool Renderer::init(const std::string& dir) {
     glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, stride,
                           reinterpret_cast<void*>(offsetof(LineVert, color)));
     glBindVertexArray(0);
+
+    // Same vertex layout as the line batch, drawn as triangles.
+    glGenVertexArrays(1, &triVao_);
+    glGenBuffers(1, &triVbo_);
+    glBindVertexArray(triVao_);
+    glBindBuffer(GL_ARRAY_BUFFER, triVbo_);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<void*>(0));
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, stride,
+                          reinterpret_cast<void*>(offsetof(LineVert, color)));
+    glBindVertexArray(0);
     return true;
 }
 
@@ -39,10 +51,14 @@ void Renderer::shutdown() {
     // Order matters: every GL object must be released while the context is
     // still current, before Application destroys it.
     cache_.clear();
+    triVerts_.clear();
+    lineVerts_.clear();
     surfaceShader_.destroy();
     lineShader_.destroy();
     gridShader_.destroy();
     overlayShader_.destroy();
+    if (triVbo_) { glDeleteBuffers(1, &triVbo_); triVbo_ = 0; }
+    if (triVao_) { glDeleteVertexArrays(1, &triVao_); triVao_ = 0; }
     if (lineVbo_) { glDeleteBuffers(1, &lineVbo_); lineVbo_ = 0; }
     if (lineVao_) { glDeleteVertexArrays(1, &lineVao_); lineVao_ = 0; }
     if (emptyVao_) { glDeleteVertexArrays(1, &emptyVao_); emptyVao_ = 0; }
@@ -82,6 +98,12 @@ void Renderer::pruneCache() {
 void Renderer::addLine(Vec3 a, Vec3 b, Vec4 color) {
     lineVerts_.push_back({a, color});
     lineVerts_.push_back({b, color});
+}
+
+void Renderer::addTriangle(Vec3 a, Vec3 b, Vec3 c, Vec4 color) {
+    triVerts_.push_back({a, color});
+    triVerts_.push_back({b, color});
+    triVerts_.push_back({c, color});
 }
 
 void Renderer::addBox(const AABB& box, Vec4 color) {
@@ -138,6 +160,29 @@ void Renderer::flushLines(const Camera& camera) {
     glBindVertexArray(0);
 
     lineVerts_.clear();
+}
+
+void Renderer::flushTriangles(const Camera& camera) {
+    if (triVerts_.empty()) return;
+
+    overlayShader_.bind();
+    overlayShader_.set("uViewProj", camera.viewProjection());
+
+    // Tint without occluding: the highlight must not hide the geometry under it
+    // or write depth that later overlay lines would fail against.
+    glDepthMask(GL_FALSE);
+    glDisable(GL_CULL_FACE);
+
+    glBindVertexArray(triVao_);
+    glBindBuffer(GL_ARRAY_BUFFER, triVbo_);
+    glBufferData(GL_ARRAY_BUFFER,
+                 static_cast<GLsizeiptr>(triVerts_.size() * sizeof(LineVert)),
+                 triVerts_.data(), GL_STREAM_DRAW);
+    glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(triVerts_.size()));
+    glBindVertexArray(0);
+
+    glDepthMask(GL_TRUE);
+    triVerts_.clear();
 }
 
 void Renderer::render(const Scene& scene, const Camera& camera, const ViewOptions& opts,
@@ -239,6 +284,7 @@ void Renderer::render(const Scene& scene, const Camera& camera, const ViewOption
     }
 
     glDisable(GL_CULL_FACE);
+    flushTriangles(camera);
     flushLines(camera);
 
     glDisable(GL_BLEND);

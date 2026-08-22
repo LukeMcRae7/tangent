@@ -22,6 +22,18 @@ inline float clampf(float v, float lo, float hi) { return v < lo ? lo : (v > hi 
 inline float lerpf(float a, float b, float t) { return a + (b - a) * t; }
 inline float sign(float v) { return v < 0.0f ? -1.0f : (v > 0.0f ? 1.0f : 0.0f); }
 
+// Rounds a rough magnitude to the nearest "nice" value: 1, 2 or 5 times a
+// power of ten. Used to turn a desired snap distance in millimetres into one a
+// person would actually choose -- 0.5, 1, 2, 5, 10 -- rather than 0.734.
+inline float niceStep(float approx) {
+    if (!(approx > 0.0f)) return 0.0f;
+    const float e = std::floor(std::log10(approx));
+    const float base = std::pow(10.0f, e);
+    const float m = approx / base;             // in [1, 10)
+    const float mult = m < 1.5f ? 1.0f : (m < 3.5f ? 2.0f : (m < 7.5f ? 5.0f : 10.0f));
+    return base * mult;
+}
+
 // ---------------------------------------------------------------- Vec2 -----
 struct Vec2 {
     float x = 0, y = 0;
