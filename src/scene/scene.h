@@ -6,7 +6,7 @@
 // tells the renderer its cached buffers went stale.
 #pragma once
 
-#include "mesh/primitives.h"
+#include "scene/feature.h"
 
 #include <memory>
 #include <string>
@@ -27,27 +27,15 @@ struct Transform {
     }
 };
 
-enum class PrimitiveKind { Box, Cylinder, Sphere, Cone, Torus, Plane, Custom };
-
-const char* primitiveName(PrimitiveKind k);
-
-// Every generator's parameters travel together; the struct is small and this
-// keeps serialisation and the inspector free of variant plumbing.
-struct PrimitiveSpec {
-    PrimitiveKind  kind = PrimitiveKind::Box;
-    BoxParams      box;
-    CylinderParams cylinder;
-    SphereParams   sphere;
-    ConeParams     cone;
-    TorusParams    torus;
-    PlaneParams    plane;
-};
-
 struct SceneObject {
     ObjectId      id = kNoObject;
     std::string   name;
     Transform     transform;
     PrimitiveSpec spec;
+
+    // The chain the mesh is evaluated from. The first entry is the base
+    // primitive; later entries are operations applied in order.
+    std::vector<Feature> features;
 
     Mesh       mesh;
     RenderMesh render;
@@ -126,9 +114,18 @@ public:
     size_t objectCount() const { return objects_.size(); }
     void clear();
 
-    // Regenerates geometry from the object's parameters. Returns false and
-    // leaves the old mesh in place if the parameters are degenerate.
+    // Re-evaluates an object's feature chain. Returns false and leaves the
+    // previous mesh in place if the chain cannot produce geometry at all.
     bool rebuild(ObjectId id);
+
+    // Appends a feature and re-evaluates. On failure the feature is removed
+    // again, so a rejected operation cannot leave a dead entry in the timeline.
+    bool addFeature(ObjectId id, Feature feature);
+
+    // Re-runs an object's chain as it stands. rebuild() pushes the inspector's
+    // spec into the base feature first; this does not, which is what undo
+    // needs when restoring a whole chain.
+    bool reevaluate(ObjectId id);
 
     // ---- Selection -------------------------------------------------------
     const std::vector<ObjectId>& selection() const { return selection_; }
@@ -138,6 +135,15 @@ public:
     void toggleSelect(ObjectId id);
     void selectAll();
     ObjectId activeObject() const { return selection_.empty() ? kNoObject : selection_.back(); }
+
+    // The object the side panels should describe. Picking a face deliberately
+    // clears the object selection, but the panels should still follow the body
+    // that face belongs to rather than going blank.
+    ObjectId contextObject() const {
+        if (!selection_.empty()) return selection_.back();
+        if (!elements_.empty()) return elements_.front().object;
+        return kNoObject;
+    }
 
     // ---- Queries ---------------------------------------------------------
     AABB bounds() const;

@@ -90,6 +90,25 @@ bool ParameterCommand::mergeWith(const Command& other) {
 }
 
 // ---------------------------------------------------------------------------
+void FeatureCommand::apply(Scene& scene, const std::vector<Feature>& chain) {
+    SceneObject* o = scene.find(id_);
+    if (!o) return;
+    o->features = chain;
+    // Keep the inspector's copy of the base parameters in step with the chain.
+    for (const Feature& f : o->features)
+        if (f.kind == FeatureKind::Primitive) { o->spec = f.primitive; break; }
+    scene.reevaluate(id_);
+    scene.clearElementSelection();
+}
+
+bool FeatureCommand::mergeWith(const Command& other) {
+    const auto* rhs = dynamic_cast<const FeatureCommand*>(&other);
+    if (!rhs || rhs->id_ != id_ || rhs->what_ != what_) return false;
+    after_ = rhs->after_;
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 void VertexCommand::apply(Scene& scene, const std::vector<Vec3>& positions) {
     SceneObject* o = scene.find(id_);
     if (!o) return;

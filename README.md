@@ -99,7 +99,7 @@ Orbit direction can be inverted per axis under **View → Invert Orbit**.
 ```
 src/core/     math and colour palette (header only)
 src/mesh/     half-edge kernel, parametric primitive generators
-src/scene/    scene graph, transforms, selection, ray picking
+src/scene/    scene graph, feature history, selection, ray picking
 src/render/   shader and buffer wrappers, viewport renderer
 src/app/      SDL3 shell, orbit camera, input dispatch, transform tool, undo
 src/ui/       theme and panels
@@ -115,9 +115,18 @@ polygonal faces. Triangulation happens only when building render buffers, and
 every triangle remembers the face it came from, so picking resolves to a real
 face.
 
-**Geometry is derived, not authored.** An object stores the parameters it was
-built from, so editing a value re-evaluates the mesh. This is the foundation
-the parametric feature history will be built on.
+**Geometry is derived, not authored.** An object is a *feature chain* — a base
+primitive followed by operations — and its mesh is evaluated from that chain.
+Editing any parameter re-runs everything after it. Widen the base box and an
+extrusion added later re-applies to the wider box.
+
+The known limit, stated plainly because it will bite: operations name faces by
+index. Numbering is stable while earlier features are unchanged, so editing
+dimensions works. Inserting or reordering a feature renumbers everything
+downstream, and an index cannot follow that — the topological naming problem,
+which needs identifiers that survive a remesh. Rather than silently acting on
+the wrong face, a step whose references no longer resolve is marked failed,
+skipped, and shown as failed in the History panel.
 
 ## Theming
 
@@ -139,7 +148,7 @@ inline constexpr Rgb kBrand = hex(0xFF4B33);
    driven by the modal G/R/S grammar.*
 3. **Face editing** — extrude, move face, fillet, full parametric history
    *(next)*
-4. **Multi-object** — booleans, split
+4. **Multi-object** *(next)* — booleans, split
 5. **Project files** — save/load, STL and 3MF export
 
 ## Licence

@@ -1,6 +1,20 @@
 #include "mesh/primitives.h"
 
 namespace tg {
+
+const char* primitiveName(PrimitiveKind k) {
+    switch (k) {
+        case PrimitiveKind::Box:      return "Box";
+        case PrimitiveKind::Cylinder: return "Cylinder";
+        case PrimitiveKind::Sphere:   return "Sphere";
+        case PrimitiveKind::Cone:     return "Cone";
+        case PrimitiveKind::Torus:    return "Torus";
+        case PrimitiveKind::Plane:    return "Plane";
+        case PrimitiveKind::Custom:   return "Mesh";
+    }
+    return "Object";
+}
+
 namespace {
 
 // Small accumulator so each generator reads as "emit vertices, emit faces"

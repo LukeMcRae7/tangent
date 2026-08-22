@@ -15,36 +15,6 @@ const char* elementKindName(ElementKind k) {
     return "None";
 }
 
-const char* primitiveName(PrimitiveKind k) {
-    switch (k) {
-        case PrimitiveKind::Box:      return "Box";
-        case PrimitiveKind::Cylinder: return "Cylinder";
-        case PrimitiveKind::Sphere:   return "Sphere";
-        case PrimitiveKind::Cone:     return "Cone";
-        case PrimitiveKind::Torus:    return "Torus";
-        case PrimitiveKind::Plane:    return "Plane";
-        case PrimitiveKind::Custom:   return "Mesh";
-    }
-    return "Object";
-}
-
-namespace {
-
-bool generate(const PrimitiveSpec& spec, Mesh& out) {
-    switch (spec.kind) {
-        case PrimitiveKind::Box:      return makeBox(out, spec.box);
-        case PrimitiveKind::Cylinder: return makeCylinder(out, spec.cylinder);
-        case PrimitiveKind::Sphere:   return makeSphere(out, spec.sphere);
-        case PrimitiveKind::Cone:     return makeCone(out, spec.cone);
-        case PrimitiveKind::Torus:    return makeTorus(out, spec.torus);
-        case PrimitiveKind::Plane:    return makePlane(out, spec.plane);
-        case PrimitiveKind::Custom:   return false;   // edited meshes are not regenerated
-    }
-    return false;
-}
-
-} // namespace
-
 // ---------------------------------------------------------------------------
 AABB SceneObject::worldBounds() const {
     AABB out;
@@ -85,7 +55,12 @@ ObjectId Scene::addPrimitive(PrimitiveKind kind, const PrimitiveSpec& spec, Vec3
     obj->spec = spec;
     obj->spec.kind = kind;
 
-    if (!generate(obj->spec, obj->mesh)) return kNoObject;
+    Feature base;
+    base.kind = FeatureKind::Primitive;
+    base.primitive = obj->spec;
+    obj->features.push_back(base);
+
+    if (!evaluateFeatures(obj->features, obj->mesh)) return kNoObject;
 
     obj->id = nextId_++;
     obj->name = uniqueName(primitiveName(kind));
@@ -115,6 +90,7 @@ ObjectId Scene::duplicateObject(ObjectId id) {
 
     auto obj = std::make_unique<SceneObject>();
     obj->spec        = src->spec;
+    obj->features    = src->features;
     obj->transform   = src->transform;
     obj->mesh        = src->mesh;
     obj->render      = src->render;
@@ -176,15 +152,51 @@ bool Scene::rebuild(ObjectId id) {
     SceneObject* obj = find(id);
     if (!obj) return false;
 
-    // Build into a scratch mesh first: degenerate parameters must not destroy
-    // the geometry the user can still see.
+    // The inspector edits obj->spec directly, so push that into the base
+    // feature before evaluating; the chain is the authority, not the spec.
+    for (Feature& f : obj->features)
+        if (f.kind == FeatureKind::Primitive) { f.primitive = obj->spec; break; }
+
+    return reevaluate(id);
+}
+
+bool Scene::reevaluate(ObjectId id) {
+    SceneObject* obj = find(id);
+    if (!obj) return false;
+
+    // Evaluate into a scratch mesh: a chain that produces nothing must not
+    // destroy the geometry the user can still see.
     Mesh next;
-    if (!generate(obj->spec, next)) return false;
+    if (!evaluateFeatures(obj->features, next)) return false;
 
     obj->mesh = std::move(next);
-    obj->mesh.buildRenderMesh(obj->render);
-    obj->localBounds = obj->mesh.bounds();
-    obj->markMeshChanged();
+    obj->refreshDerived();
+    // Face numbering does not survive a re-evaluation.
+    pruneElementSelection();
+    return true;
+}
+
+bool Scene::addFeature(ObjectId id, Feature feature) {
+    SceneObject* obj = find(id);
+    if (!obj) return false;
+
+    obj->features.push_back(std::move(feature));
+
+    Mesh next;
+    if (!evaluateFeatures(obj->features, next)) {
+        obj->features.pop_back();
+        return false;
+    }
+    // A feature that evaluated but errored did nothing; keeping it would leave
+    // a step in the timeline that has no effect and cannot be fixed.
+    if (obj->features.back().errored) {
+        obj->features.pop_back();
+        return false;
+    }
+
+    obj->mesh = std::move(next);
+    obj->refreshDerived();
+    pruneElementSelection();
     return true;
 }
 

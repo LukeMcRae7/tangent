@@ -171,7 +171,7 @@ void drawMenuBar(UiContext& ctx) {
         ImGui::SetNextItemWidth(140.0f);
         ImGui::DragInt("Segments", &ctx.view->bevelSegments, 0.1f, 1, 6);
         if (ImGui::MenuItem("Bevel All Edges", "Ctrl+B", false,
-                            ctx.scene->activeObject() != kNoObject))
+                            ctx.scene->contextObject() != kNoObject))
             ctx.actions.bevel = true;
         ImGui::TextColored(kDim, "  more segments round the edge further");
         ImGui::EndMenu();
@@ -268,7 +268,7 @@ void drawInspector(UiContext& ctx) {
     if (!ImGui::Begin("Inspector")) { ImGui::End(); return; }
 
     Scene& scene = *ctx.scene;
-    SceneObject* obj = scene.find(scene.activeObject());
+    SceneObject* obj = scene.find(scene.contextObject());
     if (!obj) {
         ImGui::TextColored(kDim, "Nothing selected");
         ImGui::End();
@@ -327,6 +327,89 @@ void drawInspector(UiContext& ctx) {
     ImGui::TextColored(kDim, "Faces   %d", obj->mesh.faceCount());
     ImGui::TextColored(kDim, "Tris    %zu", obj->render.triangles.size() / 3);
 
+    ImGui::End();
+}
+
+// ---------------------------------------------------------------------------
+void drawHistory(UiContext& ctx) {
+    if (!ImGui::Begin("History")) { ImGui::End(); return; }
+
+    Scene& scene = *ctx.scene;
+    SceneObject* obj = scene.find(scene.contextObject());
+    if (!obj) {
+        ImGui::TextColored(kDim, "Select an object to see its history");
+        ImGui::End();
+        return;
+    }
+
+    const std::vector<Feature> before = obj->features;
+    bool changed = false;
+
+    for (size_t i = 0; i < obj->features.size(); ++i) {
+        Feature& f = obj->features[i];
+        ImGui::PushID(static_cast<int>(i));
+
+        bool enabled = f.enabled;
+        if (ImGui::Checkbox("##on", &enabled)) { f.enabled = enabled; changed = true; }
+        ImGui::SameLine();
+
+        const bool open = ImGui::TreeNodeEx("##row", ImGuiTreeNodeFlags_SpanAvailWidth,
+                                            "%s", f.summary().c_str());
+        if (f.errored) {
+            ImGui::SameLine();
+            ImGui::TextColored(kAccent, "  failed: %s", f.error.c_str());
+        } else if (!f.enabled) {
+            ImGui::SameLine();
+            ImGui::TextColored(kDim, "  off");
+        }
+
+        if (open) {
+            switch (f.kind) {
+            case FeatureKind::Primitive:
+                ImGui::TextColored(kDim, "Edit dimensions in the Inspector");
+                break;
+            case FeatureKind::Extrude:
+                changed |= labeledDrag("Distance", f.distance, 0.1f, -10000.0f, 10000.0f);
+                ImGui::TextColored(kDim, "%zu face%s", f.faces.size(),
+                                   f.faces.size() == 1 ? "" : "s");
+                break;
+            case FeatureKind::Inset:
+                changed |= labeledDrag("Amount", f.amount, 0.05f, 0.01f, 10000.0f);
+                break;
+            case FeatureKind::Bevel:
+                changed |= labeledDrag("Width", f.width, 0.05f, 0.01f, 10000.0f);
+                changed |= labeledInt("Segments", f.segments, 1, 6);
+                break;
+            case FeatureKind::VertexEdit:
+                ImGui::TextColored(kDim, "Free-form edit of %zu vertices",
+                                   f.verts.size());
+                break;
+            }
+
+            // The base primitive is what the chain starts from, so it cannot be
+            // removed without leaving the rest with nothing to act on.
+            if (f.kind != FeatureKind::Primitive) {
+                if (ImGui::SmallButton("Delete")) {
+                    obj->features.erase(obj->features.begin() + static_cast<long>(i));
+                    changed = true;
+                    ImGui::TreePop();
+                    ImGui::PopID();
+                    break;
+                }
+            }
+            ImGui::TreePop();
+        }
+        ImGui::PopID();
+    }
+
+    if (changed) {
+        ctx.actions.featuresEdited = obj->id;
+        ctx.actions.featuresBefore = before;
+    }
+
+    ImGui::Spacing();
+    ImGui::TextColored(kDim, "%zu feature%s", obj->features.size(),
+                       obj->features.size() == 1 ? "" : "s");
     ImGui::End();
 }
 

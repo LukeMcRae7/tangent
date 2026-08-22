@@ -10,6 +10,7 @@
 #include "app/camera.h"
 
 #include <string>
+#include <vector>
 
 namespace tg {
 
@@ -38,6 +39,11 @@ struct UiActions {
     bool redo = false;
     bool extrude = false;
     bool bevel = false;
+
+    // Set when the timeline changed a feature: the chain as it was, so the
+    // edit can be re-evaluated and recorded.
+    ObjectId             featuresEdited = kNoObject;
+    std::vector<Feature> featuresBefore;
 };
 
 struct UiStats {
@@ -62,6 +68,7 @@ struct UiContext {
 void drawMenuBar(UiContext& ctx);
 void drawOutliner(UiContext& ctx);
 void drawInspector(UiContext& ctx);
+void drawHistory(UiContext& ctx);
 void drawStatusBar(UiContext& ctx);
 
 // Body of the add-object menu, shared by the menu bar and the Shift+A popup.

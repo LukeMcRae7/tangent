@@ -51,6 +51,7 @@ add_executable(tangent
   src/mesh/primitives.cpp
   src/mesh/operations.cpp
   src/scene/scene.cpp
+  src/scene/feature.cpp
   src/render/shader.cpp
   src/render/gpu_mesh.cpp
   src/render/renderer.cpp
@@ -77,7 +78,8 @@ target_compile_options(test_mesh PRIVATE -Wall -Wextra)
 add_test(NAME mesh COMMAND test_mesh)
 
 add_executable(test_scene tests/test_scene.cpp
-  src/scene/scene.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp src/app/camera.cpp)
+  src/scene/scene.cpp src/scene/feature.cpp src/mesh/operations.cpp
+  src/mesh/halfedge.cpp src/mesh/primitives.cpp src/app/camera.cpp)
 target_include_directories(test_scene PRIVATE src)
 target_compile_options(test_scene PRIVATE -Wall -Wextra)
 add_test(NAME scene COMMAND test_scene)
@@ -86,7 +88,8 @@ add_test(NAME scene COMMAND test_scene)
 # test never creates a GL context or issues a draw.
 add_executable(test_transform tests/test_transform.cpp
   src/app/transform_tool.cpp src/app/undo.cpp src/app/camera.cpp
-  src/scene/scene.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp
+  src/scene/scene.cpp src/scene/feature.cpp src/mesh/operations.cpp
+  src/mesh/halfedge.cpp src/mesh/primitives.cpp
   src/render/renderer.cpp src/render/shader.cpp src/render/gpu_mesh.cpp)
 target_include_directories(test_transform PRIVATE src)
 target_link_libraries(test_transform PRIVATE PkgConfig::EPOXY)
@@ -98,3 +101,10 @@ add_executable(test_operations tests/test_operations.cpp
 target_include_directories(test_operations PRIVATE src)
 target_compile_options(test_operations PRIVATE -Wall -Wextra)
 add_test(NAME operations COMMAND test_operations)
+
+add_executable(test_features tests/test_features.cpp
+  src/scene/scene.cpp src/scene/feature.cpp src/mesh/operations.cpp
+  src/mesh/halfedge.cpp src/mesh/primitives.cpp)
+target_include_directories(test_features PRIVATE src)
+target_compile_options(test_features PRIVATE -Wall -Wextra)
+add_test(NAME features COMMAND test_features)

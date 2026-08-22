@@ -141,10 +141,13 @@ private:
     bool        startEmpty_ = false;
     // Set while a transform is finishing an operation that also changed
     // topology, so commit records one undo entry covering both.
-    ObjectId      pendingMeshObject_ = kNoObject;
-    Mesh          pendingMeshBefore_;
-    PrimitiveSpec pendingSpecBefore_;
-    std::string   pendingLabel_;
+    ObjectId             pendingMeshObject_ = kNoObject;
+    Mesh                 pendingMeshBefore_;
+    std::vector<Feature> pendingChainBefore_;
+    std::vector<Index>   pendingExtrudeFaces_;
+    std::vector<Index>   pendingNewFaces_;
+    Vec3                 pendingLocalNormal_{0, 0, 1};
+    std::string          pendingLabel_;
 
     int         pickFace_ = -1;
     bool        autoExtrude_ = false;

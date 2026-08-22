@@ -458,16 +458,18 @@ void Application::extrudeSelection() {
     const Vec3 worldNormal = normalize(transformVector(normalMatrix(obj->modelMatrix()), normal));
 
     Mesh before = obj->mesh;
-    const PrimitiveSpec specBefore = obj->spec;
+    std::vector<Feature> chainBefore = obj->features;
 
     constexpr float kSeed = 0.01f;   // mm
     Mesh next = obj->mesh;
     std::vector<Index> newFaces;
     if (!extrudeFaces(next, faces, kSeed, &newFaces)) return;
 
+    // The drag edits the mesh directly for immediate feedback; on commit the
+    // whole gesture is replaced by one Extrude feature, so the history stays
+    // the authority rather than accumulating baked-in geometry.
     obj->mesh = std::move(next);
     obj->refreshDerived();
-    obj->spec.kind = PrimitiveKind::Custom;   // no longer describable by parameters
 
     // The moved faces stay selected, so the drag acts on them and so the user
     // can extrude again straight away.
@@ -477,14 +479,16 @@ void Application::extrudeSelection() {
     if (!tool_.begin(TransformMode::Translate, scene_, camera_, mouseInViewport())) {
         obj->mesh = std::move(before);
         obj->refreshDerived();
-        obj->spec = specBefore;
         return;
     }
     tool_.setCustomAxis(worldNormal, "N");
 
     pendingMeshObject_ = id;
     pendingMeshBefore_ = std::move(before);
-    pendingSpecBefore_ = specBefore;
+    pendingChainBefore_ = std::move(chainBefore);
+    pendingExtrudeFaces_ = faces;
+    pendingNewFaces_ = newFaces;
+    pendingLocalNormal_ = normal;
     pendingLabel_ = "Extrude";
 }
 
@@ -492,19 +496,64 @@ void Application::commitTransform() {
     std::unique_ptr<Command> cmd = tool_.confirm(scene_);
 
     if (pendingMeshObject_ != kNoObject) {
-        // Topology changed as well as positions, so the vertex-level command
-        // the tool produced cannot describe the edit. Record the whole mesh
-        // instead, covering the operation and the drag as one step.
-        SceneObject* obj = scene_.find(pendingMeshObject_);
-        if (obj) {
-            undo_.push(std::make_unique<MeshCommand>(
-                pendingMeshObject_, std::move(pendingMeshBefore_), obj->mesh,
-                pendingSpecBefore_, obj->spec, pendingLabel_));
-        }
+        const ObjectId id = pendingMeshObject_;
         pendingMeshObject_ = kNoObject;
+
+        SceneObject* obj = scene_.find(id);
+        if (obj && !pendingNewFaces_.empty() && !pendingExtrudeFaces_.empty()) {
+            // Recover the distance from the geometry itself rather than from
+            // the drag: the drag happened in world space, and the feature needs
+            // an object-space distance along the face normal, which differ as
+            // soon as the object carries a scale.
+            const Vec3 fromC = pendingMeshBefore_.faceCentroid(pendingExtrudeFaces_[0]);
+            const Vec3 toC   = obj->mesh.faceCentroid(pendingNewFaces_[0]);
+            const float distance = dot(toC - fromC, pendingLocalNormal_);
+
+            Feature f;
+            f.kind = FeatureKind::Extrude;
+            f.faces = pendingExtrudeFaces_;
+            f.distance = distance;
+
+            // Roll back to the pre-extrude chain, then let the feature produce
+            // the result, so the mesh is always something the history can
+            // reproduce.
+            obj->features = pendingChainBefore_;
+            if (scene_.addFeature(id, f)) {
+                undo_.push(std::make_unique<FeatureCommand>(
+                    id, pendingChainBefore_, obj->features, pendingLabel_));
+            } else {
+                obj->mesh = pendingMeshBefore_;
+                obj->refreshDerived();
+            }
+        }
         pendingMeshBefore_ = Mesh{};
+        pendingChainBefore_.clear();
+        pendingExtrudeFaces_.clear();
+        pendingNewFaces_.clear();
         return;
     }
+
+    // A free-form drag of vertices is recorded as a feature too. It is not
+    // parametric, but it has to live in the chain: otherwise re-evaluating an
+    // earlier feature would silently discard it.
+    if (const auto* vc = dynamic_cast<VertexCommand*>(cmd.get())) {
+        SceneObject* obj = scene_.find(vc->object());
+        if (obj) {
+            Feature f;
+            f.kind = FeatureKind::VertexEdit;
+            f.verts = vc->vertices();
+            for (size_t i = 0; i < f.verts.size(); ++i)
+                f.offsets.push_back(vc->afterPositions()[i] - vc->beforePositions()[i]);
+
+            std::vector<Feature> chainBefore = obj->features;
+            if (scene_.addFeature(vc->object(), f)) {
+                undo_.push(std::make_unique<FeatureCommand>(
+                    vc->object(), std::move(chainBefore), obj->features, "Edit Vertices"));
+                return;
+            }
+        }
+    }
+
     undo_.push(std::move(cmd));
 }
 
@@ -513,18 +562,22 @@ void Application::abortTransform() {
 
     if (pendingMeshObject_ != kNoObject) {
         if (SceneObject* obj = scene_.find(pendingMeshObject_)) {
+            obj->features = pendingChainBefore_;
             obj->mesh = std::move(pendingMeshBefore_);
             obj->refreshDerived();
-            obj->spec = pendingSpecBefore_;
             scene_.clearElementSelection();
         }
         pendingMeshObject_ = kNoObject;
         pendingMeshBefore_ = Mesh{};
+        pendingChainBefore_.clear();
+        pendingExtrudeFaces_.clear();
+        pendingNewFaces_.clear();
     }
 }
 
 void Application::bevelActiveObject() {
-    SceneObject* obj = scene_.find(scene_.activeObject());
+    const ObjectId target = scene_.contextObject();
+    SceneObject* obj = scene_.find(target);
     if (!obj) return;
 
     // Clamp to what the geometry can actually take, so the slider cannot ask
@@ -533,16 +586,15 @@ void Application::bevelActiveObject() {
     const float width = std::min(view_.bevelWidth, limit * 0.95f);
     if (width <= 1e-4f) return;
 
-    Mesh next = obj->mesh;
-    if (!bevelAllEdges(next, width, view_.bevelSegments)) return;
+    Feature f;
+    f.kind = FeatureKind::Bevel;
+    f.width = width;
+    f.segments = view_.bevelSegments;
 
-    PrimitiveSpec after = obj->spec;
-    after.kind = PrimitiveKind::Custom;
-
-    auto cmd = std::make_unique<MeshCommand>(scene_.activeObject(), obj->mesh,
-                                             std::move(next), obj->spec, after, "Bevel");
-    cmd->redo(scene_);
-    undo_.push(std::move(cmd));
+    std::vector<Feature> chainBefore = obj->features;
+    if (!scene_.addFeature(target, f)) return;
+    undo_.push(std::make_unique<FeatureCommand>(target, std::move(chainBefore),
+                                                obj->features, "Bevel"));
 }
 
 void Application::applyActions() {
@@ -582,18 +634,39 @@ void Application::applyActions() {
         }
     }
 
+    if (a.featuresEdited != kNoObject) {
+        SceneObject* o = scene_.find(a.featuresEdited);
+        if (o) {
+            if (scene_.reevaluate(a.featuresEdited)) {
+                undo_.push(std::make_unique<FeatureCommand>(
+                    a.featuresEdited, std::move(a.featuresBefore), o->features,
+                    "Edit History"), /*merge=*/true);
+            } else {
+                // The chain no longer produces anything; put it back.
+                o->features = a.featuresBefore;
+                scene_.reevaluate(a.featuresEdited);
+            }
+        }
+    }
+
     if (a.extrude) extrudeSelection();
     if (a.bevel)   bevelActiveObject();
 
     if (a.rebuildObject != kNoObject) {
         SceneObject* o = scene_.find(a.rebuildObject);
         if (o) {
-            const PrimitiveSpec after = o->spec;
+            std::vector<Feature> chainBefore = o->features;
+            for (Feature& f : chainBefore)
+                if (f.kind == FeatureKind::Primitive) { f.primitive = a.specBefore; break; }
+
+            // Editing the base parameters re-runs every later operation, which
+            // is the whole point of the history.
             scene_.rebuild(a.rebuildObject);
             // Merged so that dragging a parameter slider is one undo step
             // rather than one per frame.
-            undo_.push(std::make_unique<ParameterCommand>(a.rebuildObject,
-                                                          a.specBefore, after),
+            undo_.push(std::make_unique<FeatureCommand>(a.rebuildObject,
+                                                        std::move(chainBefore),
+                                                        o->features, "Change Parameters"),
                        /*merge=*/true);
         }
     }
@@ -665,6 +738,7 @@ void Application::buildUi() {
 
         ImGui::DockBuilderDockWindow("Outliner", right);
         ImGui::DockBuilderDockWindow("Inspector", lower);
+        ImGui::DockBuilderDockWindow("History", lower);
         ImGui::DockBuilderFinish(dockId);
     }
     firstLayout_ = false;
@@ -682,6 +756,7 @@ void Application::buildUi() {
     drawMenuBar(ui_);
     drawOutliner(ui_);
     drawInspector(ui_);
+    drawHistory(ui_);
     drawStatusBar(ui_);
     drawViewportOverlay(ui_, viewRect_.x, viewRect_.y, viewRect_.w, viewRect_.h);
 

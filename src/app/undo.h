@@ -124,6 +124,12 @@ public:
     std::string label() const override { return what_; }
     bool mergeWith(const Command& other) override;
 
+    // Lets the application turn a completed drag into a history entry.
+    ObjectId object() const { return id_; }
+    const std::vector<Index>& vertices() const { return verts_; }
+    const std::vector<Vec3>& beforePositions() const { return before_; }
+    const std::vector<Vec3>& afterPositions() const { return after_; }
+
 private:
     void apply(Scene& scene, const std::vector<Vec3>& positions);
 
@@ -131,6 +137,30 @@ private:
     std::vector<Index> verts_;
     std::vector<Vec3>  before_, after_;
     std::string        what_;
+};
+
+// Any change to an object's feature chain: adding an operation, toggling one
+// off, editing a parameter. Stores the chain either side and re-evaluates,
+// which is cheap next to storing meshes and is the only representation that
+// stays correct when a later edit re-runs the whole thing.
+class FeatureCommand : public Command {
+public:
+    FeatureCommand(ObjectId id, std::vector<Feature> before,
+                   std::vector<Feature> after, std::string what)
+        : id_(id), before_(std::move(before)), after_(std::move(after)),
+          what_(std::move(what)) {}
+
+    void undo(Scene& scene) override { apply(scene, before_); }
+    void redo(Scene& scene) override { apply(scene, after_); }
+    std::string label() const override { return what_; }
+    bool mergeWith(const Command& other) override;
+
+private:
+    void apply(Scene& scene, const std::vector<Feature>& chain);
+
+    ObjectId             id_;
+    std::vector<Feature> before_, after_;
+    std::string          what_;
 };
 
 class UndoStack {

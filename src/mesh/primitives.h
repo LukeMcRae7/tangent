@@ -47,6 +47,23 @@ struct PlaneParams {
     float depth = 20.0f;
 };
 
+// Which generator a shape comes from, and the parameters for every one of
+// them. They travel together: the struct is small, and this keeps the feature
+// history and serialisation free of variant plumbing.
+enum class PrimitiveKind { Box, Cylinder, Sphere, Cone, Torus, Plane, Custom };
+
+const char* primitiveName(PrimitiveKind k);
+
+struct PrimitiveSpec {
+    PrimitiveKind  kind = PrimitiveKind::Box;
+    BoxParams      box;
+    CylinderParams cylinder;
+    SphereParams   sphere;
+    ConeParams     cone;
+    TorusParams    torus;
+    PlaneParams    plane;
+};
+
 // Each builds a closed, outward-wound, manifold mesh centred on the origin
 // (the plane being the one open surface). All return false only if the
 // parameters are degenerate.
