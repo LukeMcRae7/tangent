@@ -34,10 +34,14 @@ void GpuMesh::upload(const RenderMesh& mesh) {
 
     std::vector<float> interleaved;
     interleaved.reserve(mesh.positions.size() * 6);
+    // Geometry is kept in double; the GPU takes float32. This and Shader::set
+    // are the only places that narrowing happens.
+    auto f = [](Real v) { return static_cast<float>(v); };
     for (size_t i = 0; i < mesh.positions.size(); ++i) {
         const Vec3& p = mesh.positions[i];
         const Vec3& n = mesh.normals[i];
-        interleaved.insert(interleaved.end(), {p.x, p.y, p.z, n.x, n.y, n.z});
+        interleaved.insert(interleaved.end(),
+                           {f(p.x), f(p.y), f(p.z), f(n.x), f(n.y), f(n.z)});
     }
 
     glBindVertexArray(vao_);

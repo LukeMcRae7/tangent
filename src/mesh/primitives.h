@@ -11,40 +11,40 @@
 namespace tg {
 
 struct BoxParams {
-    float width  = 20.0f;  // X
-    float depth  = 20.0f;  // Y
-    float height = 20.0f;  // Z
+    Real width  = 20.0f;  // X
+    Real depth  = 20.0f;  // Y
+    Real height = 20.0f;  // Z
 };
 
 struct CylinderParams {
-    float radius   = 10.0f;
-    float height   = 20.0f;
+    Real radius   = 10.0f;
+    Real height   = 20.0f;
     int   segments = 32;
 };
 
 struct SphereParams {
-    float radius   = 10.0f;
+    Real radius   = 10.0f;
     int   segments = 32;   // around Z
     int   rings    = 16;   // pole to pole
 };
 
 struct ConeParams {
-    float bottomRadius = 10.0f;
-    float topRadius    = 0.0f;   // 0 gives a true apex
-    float height       = 20.0f;
+    Real bottomRadius = 10.0f;
+    Real topRadius    = 0.0f;   // 0 gives a true apex
+    Real height       = 20.0f;
     int   segments     = 32;
 };
 
 struct TorusParams {
-    float majorRadius = 12.0f;
-    float minorRadius = 4.0f;
+    Real majorRadius = 12.0f;
+    Real minorRadius = 4.0f;
     int   majorSegments = 40;
     int   minorSegments = 20;
 };
 
 struct PlaneParams {
-    float width = 20.0f;
-    float depth = 20.0f;
+    Real width = 20.0f;
+    Real depth = 20.0f;
 };
 
 // Which generator a shape comes from, and the parameters for every one of

@@ -20,7 +20,7 @@ struct ViewOptions {
     bool  showWireframe  = true;
     bool  showSelectionBox = false;
     bool  backfaceCulling = true;
-    float creaseAngleDeg = 35.0f;
+    Real  creaseAngleDeg = 35.0;
 
     Vec3  background    = toVec3(palette::kViewport);
     Vec3  objectColor   = toVec3(palette::kSurface);
@@ -31,11 +31,11 @@ struct ViewOptions {
     // Base cell size in mm. The grid subdivides and merges by powers of this
     // ratio as you zoom, so these are the finest cell and the step between
     // levels rather than two fixed line sets.
-    float gridSpacing    = 1.0f;
-    float gridSubdivide  = 10.0f;
+    Real  gridSpacing    = 1.0;
+    Real  gridSubdivide  = 10.0;
 
     // Bevel parameters, driven from the Modify menu.
-    float bevelWidth    = 1.0f;
+    Real  bevelWidth    = 1.0;
     int   bevelSegments = 1;
 };
 

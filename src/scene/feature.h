@@ -36,11 +36,11 @@ struct Feature {
 
     // Extrude / Inset: which faces, as numbered at this point in the chain.
     std::vector<Index> faces;
-    float distance = 5.0f;   // Extrude, signed
-    float amount   = 2.0f;   // Inset
+    Real distance = 5.0f;   // Extrude, signed
+    Real amount   = 2.0f;   // Inset
 
     // Bevel.
-    float width    = 1.0f;
+    Real width    = 1.0f;
     int   segments = 1;
 
     // VertexEdit: a free-form drag, recorded as explicit offsets. Not

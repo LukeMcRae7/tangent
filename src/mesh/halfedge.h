@@ -81,7 +81,7 @@ public:
     // ---- Queries ---------------------------------------------------------
     Vec3 faceNormal(Index f) const;     // Newell's method; robust for n-gons
     Vec3 faceCentroid(Index f) const;
-    float faceArea(Index f) const;
+    Real faceArea(Index f) const;
     int  faceDegree(Index f) const;
     void faceVertices(Index f, std::vector<Index>& out) const;
 
@@ -99,7 +99,7 @@ public:
     // faces only when the dihedral angle is under `creaseAngleDeg`, which
     // gives sharp box edges and smooth cylinder walls without per-primitive
     // shading flags.
-    void buildRenderMesh(RenderMesh& out, float creaseAngleDeg = 35.0f) const;
+    void buildRenderMesh(RenderMesh& out, Real creaseAngleDeg = 35.0) const;
 
     // Structural self-check used by tests and asserts; `err` gets the reason.
     bool validate(std::string* err = nullptr) const;

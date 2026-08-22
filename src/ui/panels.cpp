@@ -22,23 +22,28 @@ void sectionLabel(const char* text) {
 
 // Labelled row with the field stretched to the panel width; used everywhere so
 // the inspector columns line up regardless of label length.
+// Geometry is double, so these bind ImGui's double scalar path rather than
+// round-tripping through float and quietly losing digits in the fields the
+// user types exact dimensions into.
 bool labeledDrag3(const char* label, Vec3& v, float speed, const char* fmt) {
     ImGui::PushID(label);
     ImGui::TextUnformatted(label);
     ImGui::SameLine(78.0f);
     ImGui::SetNextItemWidth(-1.0f);
-    const bool changed = ImGui::DragFloat3("##v", &v.x, speed, 0.0f, 0.0f, fmt);
+    const bool changed = ImGui::DragScalarN("##v", ImGuiDataType_Double, &v.x, 3,
+                                            speed, nullptr, nullptr, fmt);
     ImGui::PopID();
     return changed;
 }
 
-bool labeledDrag(const char* label, float& v, float speed, float lo, float hi,
+bool labeledDrag(const char* label, Real& v, float speed, Real lo, Real hi,
                  const char* fmt = "%.2f mm") {
     ImGui::PushID(label);
     ImGui::TextUnformatted(label);
     ImGui::SameLine(78.0f);
     ImGui::SetNextItemWidth(-1.0f);
-    const bool changed = ImGui::DragFloat("##v", &v, speed, lo, hi, fmt);
+    const bool changed = ImGui::DragScalarN("##v", ImGuiDataType_Double, &v, 1,
+                                            speed, &lo, &hi, fmt);
     ImGui::PopID();
     return changed;
 }
@@ -167,7 +172,8 @@ void drawMenuBar(UiContext& ctx) {
         ImGui::TextColored(kDim, "  Shift+E cuts inward");
         ImGui::Separator();
         ImGui::SetNextItemWidth(140.0f);
-        ImGui::DragFloat("Width", &ctx.view->bevelWidth, 0.05f, 0.01f, 100.0f, "%.2f mm");
+        ImGui::DragScalarN("Width", ImGuiDataType_Double, &ctx.view->bevelWidth, 1,
+                           0.05f, nullptr, nullptr, "%.2f mm");
         ImGui::SetNextItemWidth(140.0f);
         ImGui::DragInt("Segments", &ctx.view->bevelSegments, 0.1f, 1, 6);
         if (ImGui::MenuItem("Bevel All Edges", "Ctrl+B", false,

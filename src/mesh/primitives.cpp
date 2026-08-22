@@ -48,7 +48,7 @@ struct SoupBuilder {
 // ---------------------------------------------------------------------------
 bool makeBox(Mesh& out, const BoxParams& p) {
     if (p.width <= 0 || p.depth <= 0 || p.height <= 0) return false;
-    const float x = p.width * 0.5f, y = p.depth * 0.5f, z = p.height * 0.5f;
+    const Real x = p.width * 0.5f, y = p.depth * 0.5f, z = p.height * 0.5f;
 
     SoupBuilder s;
     s.vertex({-x, -y, -z}); s.vertex({ x, -y, -z});   // 0 1
@@ -69,15 +69,15 @@ bool makeBox(Mesh& out, const BoxParams& p) {
 bool makeCylinder(Mesh& out, const CylinderParams& p) {
     if (p.radius <= 0 || p.height <= 0 || p.segments < 3) return false;
     const int n = p.segments;
-    const float hz = p.height * 0.5f;
+    const Real hz = p.height * 0.5f;
 
     SoupBuilder s;
     for (int i = 0; i < n; ++i) {
-        const float a = kTwoPi * static_cast<float>(i) / static_cast<float>(n);
+        const Real a = kTwoPi * static_cast<Real>(i) / static_cast<Real>(n);
         s.vertex({p.radius * std::cos(a), p.radius * std::sin(a), -hz});
     }
     for (int i = 0; i < n; ++i) {
-        const float a = kTwoPi * static_cast<float>(i) / static_cast<float>(n);
+        const Real a = kTwoPi * static_cast<Real>(i) / static_cast<Real>(n);
         s.vertex({p.radius * std::cos(a), p.radius * std::sin(a),  hz});
     }
 
@@ -105,11 +105,11 @@ bool makeSphere(Mesh& out, const SphereParams& p) {
 
     // Interior latitude bands only; the poles are single vertices.
     for (int j = 1; j < r; ++j) {
-        const float phi = kPi * static_cast<float>(j) / static_cast<float>(r);
-        const float rz  = p.radius * std::cos(phi);
-        const float rr  = p.radius * std::sin(phi);
+        const Real phi = kPi * static_cast<Real>(j) / static_cast<Real>(r);
+        const Real rz  = p.radius * std::cos(phi);
+        const Real rr  = p.radius * std::sin(phi);
         for (int i = 0; i < n; ++i) {
-            const float a = kTwoPi * static_cast<float>(i) / static_cast<float>(n);
+            const Real a = kTwoPi * static_cast<Real>(i) / static_cast<Real>(n);
             s.vertex({rr * std::cos(a), rr * std::sin(a), rz});
         }
     }
@@ -133,12 +133,12 @@ bool makeCone(Mesh& out, const ConeParams& p) {
     if (p.bottomRadius <= 0 || p.topRadius < 0 || p.height <= 0 || p.segments < 3)
         return false;
     const int n = p.segments;
-    const float hz = p.height * 0.5f;
+    const Real hz = p.height * 0.5f;
     const bool pointed = p.topRadius < 1e-5f;
 
     SoupBuilder s;
     for (int i = 0; i < n; ++i) {
-        const float a = kTwoPi * static_cast<float>(i) / static_cast<float>(n);
+        const Real a = kTwoPi * static_cast<Real>(i) / static_cast<Real>(n);
         s.vertex({p.bottomRadius * std::cos(a), p.bottomRadius * std::sin(a), -hz});
     }
 
@@ -147,7 +147,7 @@ bool makeCone(Mesh& out, const ConeParams& p) {
         for (int i = 0; i < n; ++i) s.tri(i, (i + 1) % n, apex);
     } else {
         for (int i = 0; i < n; ++i) {
-            const float a = kTwoPi * static_cast<float>(i) / static_cast<float>(n);
+            const Real a = kTwoPi * static_cast<Real>(i) / static_cast<Real>(n);
             s.vertex({p.topRadius * std::cos(a), p.topRadius * std::sin(a), hz});
         }
         for (int i = 0; i < n; ++i) {
@@ -173,10 +173,10 @@ bool makeTorus(Mesh& out, const TorusParams& p) {
 
     SoupBuilder s;
     for (int i = 0; i < N; ++i) {
-        const float u = kTwoPi * static_cast<float>(i) / static_cast<float>(N);
+        const Real u = kTwoPi * static_cast<Real>(i) / static_cast<Real>(N);
         const Vec3 dir{std::cos(u), std::sin(u), 0.0f};
         for (int j = 0; j < M; ++j) {
-            const float v = kTwoPi * static_cast<float>(j) / static_cast<float>(M);
+            const Real v = kTwoPi * static_cast<Real>(j) / static_cast<Real>(M);
             const Vec3 c = dir * p.majorRadius;
             s.vertex(c + dir * (p.minorRadius * std::cos(v)) +
                      Vec3{0, 0, p.minorRadius * std::sin(v)});
@@ -196,7 +196,7 @@ bool makeTorus(Mesh& out, const TorusParams& p) {
 // ---------------------------------------------------------------------------
 bool makePlane(Mesh& out, const PlaneParams& p) {
     if (p.width <= 0 || p.depth <= 0) return false;
-    const float x = p.width * 0.5f, y = p.depth * 0.5f;
+    const Real x = p.width * 0.5f, y = p.depth * 0.5f;
 
     SoupBuilder s;
     s.vertex({-x, -y, 0}); s.vertex({ x, -y, 0});

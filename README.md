@@ -90,6 +90,18 @@ Tangent takes the opposite position, because the output is a printed part:
   model that was sound. The status bar shows `solid` / `not solid` and the
   Inspector lists exactly what is wrong.
 
+## Precision
+
+Geometry is computed in **double precision**. Booleans are the reason: their
+robustness is dominated by how reliably a point can be classified against a
+surface, and the hard cases are always near-degenerate — faces that are almost
+coplanar, an edge passing almost exactly through a vertex. At float32 a 100 mm
+part resolves to about 7.6e-06 mm, which is not enough headroom for those
+decisions; in double it is 1.4e-14 mm.
+
+Narrowing to float32 happens in exactly two places, both at the GPU boundary:
+`Shader::set` for uniforms and `GpuMesh::upload` for vertex data.
+
 ## Conventions
 
 - **Millimetres**, **+Z up** — matching Fusion 360 and Blender.

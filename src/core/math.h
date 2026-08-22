@@ -9,91 +9,104 @@
 
 namespace tg {
 
-inline constexpr float kPi      = 3.14159265358979323846f;
-inline constexpr float kTwoPi   = 6.28318530717958647692f;
-inline constexpr float kHalfPi  = 1.57079632679489661923f;
-inline constexpr float kDeg2Rad = kPi / 180.0f;
-inline constexpr float kRad2Deg = 180.0f / kPi;
-inline constexpr float kEps     = 1e-6f;
+// Geometry is computed in double precision.
+//
+// Booleans are the reason. Their robustness is dominated by how reliably a
+// point can be classified against a surface, and the hard cases are always
+// near-degenerate: faces that are almost coplanar, an edge that passes almost
+// exactly through a vertex. At float32 a 100mm part resolves to about 1e-4 mm,
+// which is not enough headroom for those decisions, and the failure mode is a
+// boolean that produces a leaking or non-manifold result.
+//
+// The GPU still wants float32, so conversion happens at that boundary only:
+// Shader::set for uniforms and GpuMesh::upload for vertex data.
+using Real = double;
 
-inline float radians(float d) { return d * kDeg2Rad; }
-inline float degrees(float r) { return r * kRad2Deg; }
-inline float clampf(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
-inline float lerpf(float a, float b, float t) { return a + (b - a) * t; }
-inline float sign(float v) { return v < 0.0f ? -1.0f : (v > 0.0f ? 1.0f : 0.0f); }
+inline constexpr Real kPi      = 3.14159265358979323846f;
+inline constexpr Real kTwoPi   = 6.28318530717958647692f;
+inline constexpr Real kHalfPi  = 1.57079632679489661923f;
+inline constexpr Real kDeg2Rad = kPi / 180.0f;
+inline constexpr Real kRad2Deg = 180.0f / kPi;
+inline constexpr Real kEps     = 1e-6f;
+
+inline Real radians(Real d) { return d * kDeg2Rad; }
+inline Real degrees(Real r) { return r * kRad2Deg; }
+inline Real clampf(Real v, Real lo, Real hi) { return v < lo ? lo : (v > hi ? hi : v); }
+inline Real lerpf(Real a, Real b, Real t) { return a + (b - a) * t; }
+inline Real sign(Real v) { return v < 0.0f ? -1.0f : (v > 0.0f ? 1.0f : 0.0f); }
 
 // Rounds a rough magnitude to the nearest "nice" value: 1, 2 or 5 times a
 // power of ten. Used to turn a desired snap distance in millimetres into one a
 // person would actually choose -- 0.5, 1, 2, 5, 10 -- rather than 0.734.
-inline float niceStep(float approx) {
+inline Real niceStep(Real approx) {
     if (!(approx > 0.0f)) return 0.0f;
-    const float e = std::floor(std::log10(approx));
-    const float base = std::pow(10.0f, e);
-    const float m = approx / base;             // in [1, 10)
-    const float mult = m < 1.5f ? 1.0f : (m < 3.5f ? 2.0f : (m < 7.5f ? 5.0f : 10.0f));
+    const Real e = std::floor(std::log10(approx));
+    const Real base = std::pow(10.0f, e);
+    const Real m = approx / base;             // in [1, 10)
+    const Real mult = m < 1.5f ? 1.0f : (m < 3.5f ? 2.0f : (m < 7.5f ? 5.0f : 10.0f));
     return base * mult;
 }
 
 // ---------------------------------------------------------------- Vec2 -----
 struct Vec2 {
-    float x = 0, y = 0;
+    Real x = 0, y = 0;
     constexpr Vec2() = default;
-    constexpr Vec2(float x_, float y_) : x(x_), y(y_) {}
-    explicit constexpr Vec2(float s) : x(s), y(s) {}
-    float& operator[](int i) { return (&x)[i]; }
-    const float& operator[](int i) const { return (&x)[i]; }
+    constexpr Vec2(Real x_, Real y_) : x(x_), y(y_) {}
+    explicit constexpr Vec2(Real s) : x(s), y(s) {}
+    Real& operator[](int i) { return (&x)[i]; }
+    const Real& operator[](int i) const { return (&x)[i]; }
 };
 inline Vec2 operator+(Vec2 a, Vec2 b) { return {a.x + b.x, a.y + b.y}; }
 inline Vec2 operator-(Vec2 a, Vec2 b) { return {a.x - b.x, a.y - b.y}; }
 inline Vec2 operator-(Vec2 a)         { return {-a.x, -a.y}; }
-inline Vec2 operator*(Vec2 a, float s) { return {a.x * s, a.y * s}; }
-inline Vec2 operator*(float s, Vec2 a) { return a * s; }
-inline Vec2 operator/(Vec2 a, float s) { return {a.x / s, a.y / s}; }
+inline Vec2 operator*(Vec2 a, Real s) { return {a.x * s, a.y * s}; }
+inline Vec2 operator*(Real s, Vec2 a) { return a * s; }
+inline Vec2 operator/(Vec2 a, Real s) { return {a.x / s, a.y / s}; }
 inline Vec2& operator+=(Vec2& a, Vec2 b) { a = a + b; return a; }
 inline Vec2& operator-=(Vec2& a, Vec2 b) { a = a - b; return a; }
-inline Vec2& operator*=(Vec2& a, float s) { a = a * s; return a; }
-inline float dot(Vec2 a, Vec2 b) { return a.x * b.x + a.y * b.y; }
-inline float length(Vec2 a) { return std::sqrt(dot(a, a)); }
-inline float lengthSq(Vec2 a) { return dot(a, a); }
-inline Vec2 normalize(Vec2 a) { float l = length(a); return l > kEps ? a / l : Vec2{}; }
+inline Vec2& operator*=(Vec2& a, Real s) { a = a * s; return a; }
+inline Real dot(Vec2 a, Vec2 b) { return a.x * b.x + a.y * b.y; }
+inline Real length(Vec2 a) { return std::sqrt(dot(a, a)); }
+inline Real lengthSq(Vec2 a) { return dot(a, a); }
+inline Vec2 normalize(Vec2 a) { Real l = length(a); return l > kEps ? a / l : Vec2{}; }
 
 // ---------------------------------------------------------------- Vec3 -----
 struct Vec3 {
-    float x = 0, y = 0, z = 0;
+    Real x = 0, y = 0, z = 0;
     constexpr Vec3() = default;
-    constexpr Vec3(float x_, float y_, float z_) : x(x_), y(y_), z(z_) {}
-    explicit constexpr Vec3(float s) : x(s), y(s), z(s) {}
-    float& operator[](int i) { return (&x)[i]; }
-    const float& operator[](int i) const { return (&x)[i]; }
+    constexpr Vec3(Real x_, Real y_, Real z_) : x(x_), y(y_), z(z_) {}
+    explicit constexpr Vec3(Real s) : x(s), y(s), z(s) {}
+    Real& operator[](int i) { return (&x)[i]; }
+    const Real& operator[](int i) const { return (&x)[i]; }
 };
 inline Vec3 operator+(Vec3 a, Vec3 b) { return {a.x + b.x, a.y + b.y, a.z + b.z}; }
 inline Vec3 operator-(Vec3 a, Vec3 b) { return {a.x - b.x, a.y - b.y, a.z - b.z}; }
 inline Vec3 operator-(Vec3 a)         { return {-a.x, -a.y, -a.z}; }
-inline Vec3 operator*(Vec3 a, float s) { return {a.x * s, a.y * s, a.z * s}; }
-inline Vec3 operator*(float s, Vec3 a) { return a * s; }
+inline Vec3 operator*(Vec3 a, Real s) { return {a.x * s, a.y * s, a.z * s}; }
+inline Vec3 operator*(Real s, Vec3 a) { return a * s; }
 inline Vec3 operator*(Vec3 a, Vec3 b) { return {a.x * b.x, a.y * b.y, a.z * b.z}; }
-inline Vec3 operator/(Vec3 a, float s) { return {a.x / s, a.y / s, a.z / s}; }
+inline Vec3 operator/(Vec3 a, Real s) { return {a.x / s, a.y / s, a.z / s}; }
 inline Vec3 operator/(Vec3 a, Vec3 b) { return {a.x / b.x, a.y / b.y, a.z / b.z}; }
 inline Vec3& operator+=(Vec3& a, Vec3 b) { a = a + b; return a; }
 inline Vec3& operator-=(Vec3& a, Vec3 b) { a = a - b; return a; }
-inline Vec3& operator*=(Vec3& a, float s) { a = a * s; return a; }
+inline Vec3& operator*=(Vec3& a, Real s) { a = a * s; return a; }
 inline Vec3& operator*=(Vec3& a, Vec3 b) { a = a * b; return a; }
 inline bool operator==(Vec3 a, Vec3 b) { return a.x == b.x && a.y == b.y && a.z == b.z; }
 inline bool operator!=(Vec3 a, Vec3 b) { return !(a == b); }
 
-inline float dot(Vec3 a, Vec3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+inline Real dot(Vec3 a, Vec3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
 inline Vec3 cross(Vec3 a, Vec3 b) {
     return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
 }
-inline float lengthSq(Vec3 a) { return dot(a, a); }
-inline float length(Vec3 a) { return std::sqrt(dot(a, a)); }
-inline float distance(Vec3 a, Vec3 b) { return length(b - a); }
-inline Vec3 normalize(Vec3 a) { float l = length(a); return l > kEps ? a / l : Vec3{}; }
+inline Real lengthSq(Vec3 a) { return dot(a, a); }
+inline Real length(Vec3 a) { return std::sqrt(dot(a, a)); }
+inline Real distance(Vec3 a, Vec3 b) { return length(b - a); }
+inline Vec3 normalize(Vec3 a) { Real l = length(a); return l > kEps ? a / l : Vec3{}; }
 inline Vec3 minv(Vec3 a, Vec3 b) { return {std::min(a.x,b.x), std::min(a.y,b.y), std::min(a.z,b.z)}; }
 inline Vec3 maxv(Vec3 a, Vec3 b) { return {std::max(a.x,b.x), std::max(a.y,b.y), std::max(a.z,b.z)}; }
 inline Vec3 absv(Vec3 a) { return {std::fabs(a.x), std::fabs(a.y), std::fabs(a.z)}; }
-inline Vec3 lerp(Vec3 a, Vec3 b, float t) { return a + (b - a) * t; }
-inline float maxComponent(Vec3 a) { return std::max(a.x, std::max(a.y, a.z)); }
+inline Vec3 lerp(Vec3 a, Vec3 b, Real t) { return a + (b - a) * t; }
+inline Real maxComponent(Vec3 a) { return std::max(a.x, std::max(a.y, a.z)); }
 inline int maxAxis(Vec3 a) { return a.x > a.y ? (a.x > a.z ? 0 : 2) : (a.y > a.z ? 1 : 2); }
 
 // Any unit vector perpendicular to n. Branch-free and numerically safe.
@@ -104,20 +117,20 @@ inline Vec3 perpendicular(Vec3 n) {
 
 // ---------------------------------------------------------------- Vec4 -----
 struct Vec4 {
-    float x = 0, y = 0, z = 0, w = 0;
+    Real x = 0, y = 0, z = 0, w = 0;
     constexpr Vec4() = default;
-    constexpr Vec4(float x_, float y_, float z_, float w_) : x(x_), y(y_), z(z_), w(w_) {}
-    constexpr Vec4(Vec3 v, float w_) : x(v.x), y(v.y), z(v.z), w(w_) {}
-    explicit constexpr Vec4(float s) : x(s), y(s), z(s), w(s) {}
-    float& operator[](int i) { return (&x)[i]; }
-    const float& operator[](int i) const { return (&x)[i]; }
+    constexpr Vec4(Real x_, Real y_, Real z_, Real w_) : x(x_), y(y_), z(z_), w(w_) {}
+    constexpr Vec4(Vec3 v, Real w_) : x(v.x), y(v.y), z(v.z), w(w_) {}
+    explicit constexpr Vec4(Real s) : x(s), y(s), z(s), w(s) {}
+    Real& operator[](int i) { return (&x)[i]; }
+    const Real& operator[](int i) const { return (&x)[i]; }
     Vec3 xyz() const { return {x, y, z}; }
 };
 inline Vec4 operator+(Vec4 a, Vec4 b) { return {a.x+b.x, a.y+b.y, a.z+b.z, a.w+b.w}; }
 inline Vec4 operator-(Vec4 a, Vec4 b) { return {a.x-b.x, a.y-b.y, a.z-b.z, a.w-b.w}; }
-inline Vec4 operator*(Vec4 a, float s) { return {a.x*s, a.y*s, a.z*s, a.w*s}; }
-inline Vec4 operator*(float s, Vec4 a) { return a * s; }
-inline float dot(Vec4 a, Vec4 b) { return a.x*b.x + a.y*b.y + a.z*b.z + a.w*b.w; }
+inline Vec4 operator*(Vec4 a, Real s) { return {a.x*s, a.y*s, a.z*s, a.w*s}; }
+inline Vec4 operator*(Real s, Vec4 a) { return a * s; }
+inline Real dot(Vec4 a, Vec4 b) { return a.x*b.x + a.y*b.y + a.z*b.z + a.w*b.w; }
 
 // ---------------------------------------------------------------- Mat4 -----
 // Column-major: col[c] is the c-th basis column. M*v = sum_c col[c] * v[c].
@@ -132,7 +145,15 @@ struct Mat4 {
 
     Vec4& operator[](int c) { return col[c]; }
     const Vec4& operator[](int c) const { return col[c]; }
-    const float* data() const { return &col[0].x; }
+    const Real* data() const { return &col[0].x; }
+
+    // Column-major float copy for OpenGL, which has no double-precision
+    // uniform path worth using here.
+    void toFloats(float out[16]) const {
+        for (int c = 0; c < 4; ++c)
+            for (int r = 0; r < 4; ++r)
+                out[c * 4 + r] = static_cast<float>(col[c][r]);
+    }
 
     Vec3 translation() const { return col[3].xyz(); }
     // Upper-left 3x3 basis vectors (object axes in world space).
@@ -161,9 +182,9 @@ inline Mat4 scaleMat(Vec3 s) {
     m.col[0] = {s.x,0,0,0}; m.col[1] = {0,s.y,0,0}; m.col[2] = {0,0,s.z,0};
     return m;
 }
-inline Mat4 rotateAxis(Vec3 axis, float angle) {
+inline Mat4 rotateAxis(Vec3 axis, Real angle) {
     Vec3 a = normalize(axis);
-    float c = std::cos(angle), s = std::sin(angle), t = 1.0f - c;
+    Real c = std::cos(angle), s = std::sin(angle), t = 1.0f - c;
     Mat4 m;
     m.col[0] = {t*a.x*a.x + c,     t*a.x*a.y + s*a.z, t*a.x*a.z - s*a.y, 0};
     m.col[1] = {t*a.x*a.y - s*a.z, t*a.y*a.y + c,     t*a.y*a.z + s*a.x, 0};
@@ -181,8 +202,8 @@ inline Mat4 transpose(const Mat4& m) {
 
 // General 4x4 inverse (cofactor expansion). Returns identity if singular.
 inline Mat4 inverse(const Mat4& m) {
-    const float* a = m.data();
-    float inv[16];
+    const Real* a = m.data();
+    Real inv[16];
     inv[0]  =  a[5]*a[10]*a[15] - a[5]*a[11]*a[14] - a[9]*a[6]*a[15]
              + a[9]*a[7]*a[14]  + a[13]*a[6]*a[11] - a[13]*a[7]*a[10];
     inv[4]  = -a[4]*a[10]*a[15] + a[4]*a[11]*a[14] + a[8]*a[6]*a[15]
@@ -216,7 +237,7 @@ inline Mat4 inverse(const Mat4& m) {
     inv[15] =  a[0]*a[5]*a[10]  - a[0]*a[6]*a[9]   - a[4]*a[1]*a[10]
              + a[4]*a[2]*a[9]   + a[8]*a[1]*a[6]   - a[8]*a[2]*a[5];
 
-    float det = a[0]*inv[0] + a[1]*inv[4] + a[2]*inv[8] + a[3]*inv[12];
+    Real det = a[0]*inv[0] + a[1]*inv[4] + a[2]*inv[8] + a[3]*inv[12];
     if (std::fabs(det) < 1e-20f) return Mat4::identity();
     det = 1.0f / det;
 
@@ -237,8 +258,8 @@ inline Mat4 normalMatrix(const Mat4& model) {
 }
 
 // ---- Projections (right-handed, depth mapped to OpenGL's [-1, 1]) ---------
-inline Mat4 perspective(float fovyRadians, float aspect, float zNear, float zFar) {
-    float f = 1.0f / std::tan(fovyRadians * 0.5f);
+inline Mat4 perspective(Real fovyRadians, Real aspect, Real zNear, Real zFar) {
+    Real f = 1.0f / std::tan(fovyRadians * 0.5f);
     Mat4 m = Mat4::zero();
     m.col[0][0] = f / aspect;
     m.col[1][1] = f;
@@ -247,7 +268,7 @@ inline Mat4 perspective(float fovyRadians, float aspect, float zNear, float zFar
     m.col[3][2] = (2.0f * zFar * zNear) / (zNear - zFar);
     return m;
 }
-inline Mat4 orthoProjection(float l, float r, float b, float t, float zNear, float zFar) {
+inline Mat4 orthoProjection(Real l, Real r, Real b, Real t, Real zNear, Real zFar) {
     Mat4 m;
     m.col[0][0] = 2.0f / (r - l);
     m.col[1][1] = 2.0f / (t - b);
@@ -272,20 +293,20 @@ inline Mat4 lookAt(Vec3 eye, Vec3 center, Vec3 up) {
 
 // ---------------------------------------------------------------- Quat -----
 struct Quat {
-    float x = 0, y = 0, z = 0, w = 1;
+    Real x = 0, y = 0, z = 0, w = 1;
     constexpr Quat() = default;
-    constexpr Quat(float x_, float y_, float z_, float w_) : x(x_), y(y_), z(z_), w(w_) {}
+    constexpr Quat(Real x_, Real y_, Real z_, Real w_) : x(x_), y(y_), z(z_), w(w_) {}
 
-    static Quat fromAxisAngle(Vec3 axis, float angle) {
+    static Quat fromAxisAngle(Vec3 axis, Real angle) {
         Vec3 a = normalize(axis);
-        float h = angle * 0.5f, s = std::sin(h);
+        Real h = angle * 0.5f, s = std::sin(h);
         return {a.x * s, a.y * s, a.z * s, std::cos(h)};
     }
     // Intrinsic X-then-Y-then-Z (matches the XYZ Euler order shown in the UI).
     static Quat fromEuler(Vec3 e) {
-        float cx = std::cos(e.x*0.5f), sx = std::sin(e.x*0.5f);
-        float cy = std::cos(e.y*0.5f), sy = std::sin(e.y*0.5f);
-        float cz = std::cos(e.z*0.5f), sz = std::sin(e.z*0.5f);
+        Real cx = std::cos(e.x*0.5f), sx = std::sin(e.x*0.5f);
+        Real cy = std::cos(e.y*0.5f), sy = std::sin(e.y*0.5f);
+        Real cz = std::cos(e.z*0.5f), sz = std::sin(e.z*0.5f);
         return {sx*cy*cz - cx*sy*sz, cx*sy*cz + sx*cy*sz,
                 cx*cy*sz - sx*sy*cz, cx*cy*cz + sx*sy*sz};
     }
@@ -297,7 +318,7 @@ inline Quat operator*(Quat a, Quat b) {
             a.w*b.w - a.x*b.x - a.y*b.y - a.z*b.z};
 }
 inline Quat normalize(Quat q) {
-    float l = std::sqrt(q.x*q.x + q.y*q.y + q.z*q.z + q.w*q.w);
+    Real l = std::sqrt(q.x*q.x + q.y*q.y + q.z*q.z + q.w*q.w);
     if (l < kEps) return Quat();
     return {q.x/l, q.y/l, q.z/l, q.w/l};
 }
@@ -308,9 +329,9 @@ inline Vec3 rotate(Quat q, Vec3 v) {
     return v + t * q.w + cross(u, t);
 }
 inline Mat4 toMat4(Quat q) {
-    float xx=q.x*q.x, yy=q.y*q.y, zz=q.z*q.z;
-    float xy=q.x*q.y, xz=q.x*q.z, yz=q.y*q.z;
-    float wx=q.w*q.x, wy=q.w*q.y, wz=q.w*q.z;
+    Real xx=q.x*q.x, yy=q.y*q.y, zz=q.z*q.z;
+    Real xy=q.x*q.y, xz=q.x*q.z, yz=q.y*q.z;
+    Real wx=q.w*q.x, wy=q.w*q.y, wz=q.w*q.z;
     Mat4 m;
     m.col[0] = {1-2*(yy+zz), 2*(xy+wz),   2*(xz-wy),   0};
     m.col[1] = {2*(xy-wz),   1-2*(xx+zz), 2*(yz+wx),   0};
@@ -320,13 +341,13 @@ inline Mat4 toMat4(Quat q) {
 // Recover intrinsic XYZ Euler angles; used to round-trip the inspector fields.
 inline Vec3 toEuler(Quat q) {
     Vec3 e;
-    float sinx = 2.0f * (q.w*q.x + q.y*q.z);
-    float cosx = 1.0f - 2.0f * (q.x*q.x + q.y*q.y);
+    Real sinx = 2.0f * (q.w*q.x + q.y*q.z);
+    Real cosx = 1.0f - 2.0f * (q.x*q.x + q.y*q.y);
     e.x = std::atan2(sinx, cosx);
-    float siny = 2.0f * (q.w*q.y - q.z*q.x);
+    Real siny = 2.0f * (q.w*q.y - q.z*q.x);
     e.y = std::fabs(siny) >= 1.0f ? std::copysign(kHalfPi, siny) : std::asin(siny);
-    float sinz = 2.0f * (q.w*q.z + q.x*q.y);
-    float cosz = 1.0f - 2.0f * (q.y*q.y + q.z*q.z);
+    Real sinz = 2.0f * (q.w*q.z + q.x*q.y);
+    Real cosz = 1.0f - 2.0f * (q.y*q.y + q.z*q.z);
     e.z = std::atan2(sinz, cosz);
     return e;
 }
@@ -335,32 +356,32 @@ inline Vec3 toEuler(Quat q) {
 struct Ray {
     Vec3 origin;
     Vec3 dir;  // expected normalized
-    Vec3 at(float t) const { return origin + dir * t; }
+    Vec3 at(Real t) const { return origin + dir * t; }
 };
 
 struct AABB {
-    Vec3 min{ std::numeric_limits<float>::max(),  std::numeric_limits<float>::max(),  std::numeric_limits<float>::max()};
-    Vec3 max{-std::numeric_limits<float>::max(), -std::numeric_limits<float>::max(), -std::numeric_limits<float>::max()};
+    Vec3 min{ std::numeric_limits<Real>::max(),  std::numeric_limits<Real>::max(),  std::numeric_limits<Real>::max()};
+    Vec3 max{-std::numeric_limits<Real>::max(), -std::numeric_limits<Real>::max(), -std::numeric_limits<Real>::max()};
 
     bool valid() const { return min.x <= max.x && min.y <= max.y && min.z <= max.z; }
     void expand(Vec3 p) { min = minv(min, p); max = maxv(max, p); }
     void expand(const AABB& b) { if (b.valid()) { min = minv(min, b.min); max = maxv(max, b.max); } }
     Vec3 center() const { return valid() ? (min + max) * 0.5f : Vec3{}; }
     Vec3 size() const { return valid() ? max - min : Vec3{}; }
-    float radius() const { return valid() ? length(size()) * 0.5f : 0.0f; }
+    Real radius() const { return valid() ? length(size()) * 0.5f : 0.0f; }
 };
 
 // Slab test. Returns nearest positive hit distance, or false if no hit.
-inline bool rayAABB(const Ray& r, const AABB& b, float& tHit) {
-    float t0 = 0.0f, t1 = std::numeric_limits<float>::max();
+inline bool rayAABB(const Ray& r, const AABB& b, Real& tHit) {
+    Real t0 = 0.0f, t1 = std::numeric_limits<Real>::max();
     for (int i = 0; i < 3; ++i) {
         if (std::fabs(r.dir[i]) < 1e-8f) {
             if (r.origin[i] < b.min[i] || r.origin[i] > b.max[i]) return false;
             continue;
         }
-        float invD = 1.0f / r.dir[i];
-        float tn = (b.min[i] - r.origin[i]) * invD;
-        float tf = (b.max[i] - r.origin[i]) * invD;
+        Real invD = 1.0f / r.dir[i];
+        Real tn = (b.min[i] - r.origin[i]) * invD;
+        Real tf = (b.max[i] - r.origin[i]) * invD;
         if (tn > tf) std::swap(tn, tf);
         t0 = std::max(t0, tn);
         t1 = std::min(t1, tf);
@@ -371,19 +392,19 @@ inline bool rayAABB(const Ray& r, const AABB& b, float& tHit) {
 }
 
 // Moller-Trumbore. Culls nothing; back faces hit too (needed for picking).
-inline bool rayTriangle(const Ray& r, Vec3 a, Vec3 b, Vec3 c, float& tHit) {
+inline bool rayTriangle(const Ray& r, Vec3 a, Vec3 b, Vec3 c, Real& tHit) {
     Vec3 e1 = b - a, e2 = c - a;
     Vec3 p = cross(r.dir, e2);
-    float det = dot(e1, p);
+    Real det = dot(e1, p);
     if (std::fabs(det) < 1e-12f) return false;
-    float invDet = 1.0f / det;
+    Real invDet = 1.0f / det;
     Vec3 tv = r.origin - a;
-    float u = dot(tv, p) * invDet;
+    Real u = dot(tv, p) * invDet;
     if (u < -1e-6f || u > 1.0f + 1e-6f) return false;
     Vec3 q = cross(tv, e1);
-    float v = dot(r.dir, q) * invDet;
+    Real v = dot(r.dir, q) * invDet;
     if (v < -1e-6f || u + v > 1.0f + 1e-6f) return false;
-    float t = dot(e2, q) * invDet;
+    Real t = dot(e2, q) * invDet;
     if (t < 1e-6f) return false;
     tHit = t;
     return true;

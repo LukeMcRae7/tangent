@@ -88,7 +88,7 @@ void Camera::frame(const AABB& box) {
     animating_ = true;
 
     goal_.target = box.center();
-    const float radius = std::max(box.radius(), 0.5f);
+    const float radius = std::max(box.radius(), Real(0.5));
     // Fit by the tighter of the two field-of-view axes, then leave a margin.
     const float fovX = 2.0f * std::atan(std::tan(fovY * 0.5f) * aspect());
     const float fit  = radius / std::sin(std::max(std::min(fovY, fovX) * 0.5f, 0.01f));
@@ -123,7 +123,7 @@ bool Camera::projectToPixel(Vec3 world, Vec2& outPixel) const {
 float Camera::pixelWorldSize(Vec3 atPoint) const {
     const int h = viewportH > 0 ? viewportH : 1;
     if (orthographic) return orthoHeight() / static_cast<float>(h);
-    const float depth = std::max(dot(atPoint - eye(), forward()), 1e-4f);
+    const Real depth = std::max(dot(atPoint - eye(), forward()), Real(1e-4));
     return 2.0f * depth * std::tan(fovY * 0.5f) / static_cast<float>(h);
 }
 

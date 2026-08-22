@@ -394,13 +394,13 @@ RayHit Scene::raycast(const Ray& ray) const {
         if (dirScale < 1e-9f) continue;
         local.dir = local.dir / dirScale;
 
-        float boxT = 0.0f;
+        Real boxT = 0.0;
         if (!rayAABB(local, o->localBounds, boxT)) continue;
         if (boxT / dirScale > bestT) continue;   // whole object is behind a closer hit
 
         const RenderMesh& rm = o->render;
         for (size_t i = 0; i + 2 < rm.triangles.size(); i += 3) {
-            float t = 0.0f;
+            Real t = 0.0;
             if (!rayTriangle(local, rm.positions[rm.triangles[i + 0]],
                                     rm.positions[rm.triangles[i + 1]],
                                     rm.positions[rm.triangles[i + 2]], t)) continue;

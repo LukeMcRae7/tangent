@@ -15,19 +15,19 @@ bool segmentHitsTriangle(Vec3 p0, Vec3 p1, Vec3 a, Vec3 b, Vec3 c) {
     const Vec3 dir = p1 - p0;
     const Vec3 e1 = b - a, e2 = c - a;
     const Vec3 pv = cross(dir, e2);
-    const float det = dot(e1, pv);
+    const Real det = dot(e1, pv);
     if (std::fabs(det) < 1e-12f) return false;      // parallel
 
-    const float inv = 1.0f / det;
+    const Real inv = 1.0f / det;
     const Vec3 tv = p0 - a;
-    const float u = dot(tv, pv) * inv;
+    const Real u = dot(tv, pv) * inv;
     if (u < 1e-6f || u > 1.0f - 1e-6f) return false;
 
     const Vec3 qv = cross(tv, e1);
-    const float v = dot(dir, qv) * inv;
+    const Real v = dot(dir, qv) * inv;
     if (v < 1e-6f || u + v > 1.0f - 1e-6f) return false;
 
-    const float t = dot(e2, qv) * inv;
+    const Real t = dot(e2, qv) * inv;
     // Strictly inside the segment: touching exactly at an endpoint is what
     // legitimately adjacent triangles do.
     return t > 1e-5f && t < 1.0f - 1e-5f;
@@ -124,8 +124,7 @@ MeshHealth checkHealth(const Mesh& mesh, bool checkIntersections) {
 
     // Cell about the size of an average triangle: small enough to cut the pair
     // count down, large enough that triangles do not smear across many cells.
-    const float cell = std::max(static_cast<float>(edgeSum / static_cast<double>(tris.size())),
-                                1e-4f);
+    const Real cell = std::max(edgeSum / static_cast<Real>(tris.size()), Real(1e-4));
 
     auto key = [&](int x, int y, int z) {
         return (static_cast<uint64_t>(static_cast<uint32_t>(x)) * 73856093u) ^

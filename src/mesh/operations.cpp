@@ -64,7 +64,7 @@ std::vector<uint32_t> faceLoop(const Mesh& m, Index f) {
 // dot(d,n0) = dot(d,n1) = amount, which solves exactly to
 // amount * (n0 + n1) / (1 + dot(n0, n1)). Moving corners toward the centroid
 // instead would only be correct for regular polygons.
-bool insetPolygon(const std::vector<Vec3>& poly, Vec3 normal, float amount,
+bool insetPolygon(const std::vector<Vec3>& poly, Vec3 normal, Real amount,
                   std::vector<Vec3>& out) {
     const size_t n = poly.size();
     if (n < 3) return false;
@@ -83,7 +83,7 @@ bool insetPolygon(const std::vector<Vec3>& poly, Vec3 normal, float amount,
         const Vec3 n0 = normalize(cross(normal, ePrev));
         const Vec3 n1 = normalize(cross(normal, eNext));
 
-        const float denom = 1.0f + dot(n0, n1);
+        const Real denom = 1.0f + dot(n0, n1);
         if (denom < 1e-4f) return false;    // edges double back; no finite offset
         out[i] = cur + (n0 + n1) * (amount / denom);
     }
@@ -91,7 +91,7 @@ bool insetPolygon(const std::vector<Vec3>& poly, Vec3 normal, float amount,
 }
 
 // Signed area of a polygon about its own normal.
-float signedArea(const std::vector<Vec3>& poly, Vec3 normal) {
+Real signedArea(const std::vector<Vec3>& poly, Vec3 normal) {
     Vec3 acc{};
     const size_t n = poly.size();
     for (size_t i = 0; i < n; ++i) acc += cross(poly[i], poly[(i + 1) % n]);
@@ -125,7 +125,7 @@ bool insetIsValid(const std::vector<Vec3>& orig, const std::vector<Vec3>& inset,
 } // namespace
 
 // ---------------------------------------------------------------------------
-bool extrudeFaces(Mesh& mesh, const std::vector<Index>& faces, float distance,
+bool extrudeFaces(Mesh& mesh, const std::vector<Index>& faces, Real distance,
                   std::vector<Index>* newFaces) {
     if (faces.empty() || mesh.empty()) return false;
 
@@ -199,7 +199,7 @@ bool extrudeFaces(Mesh& mesh, const std::vector<Index>& faces, float distance,
 }
 
 // ---------------------------------------------------------------------------
-bool insetFaces(Mesh& mesh, const std::vector<Index>& faces, float amount,
+bool insetFaces(Mesh& mesh, const std::vector<Index>& faces, Real amount,
                 std::vector<Index>* newFaces) {
     if (faces.empty() || mesh.empty() || amount <= 0.0f) return false;
 
@@ -276,14 +276,14 @@ bool moveFaces(Mesh& mesh, const std::vector<Index>& faces, Vec3 delta) {
 }
 
 // ---------------------------------------------------------------------------
-float maxBevelWidth(const Mesh& mesh) {
+Real maxBevelWidth(const Mesh& mesh) {
     // The binding constraint is the face that runs out of room first. Bisect
     // on "does every face still inset to a positive area", which is monotone.
-    float lo = 0.0f, hi = 0.0f;
+    Real lo = 0.0f, hi = 0.0f;
     for (Index f = 0; f < mesh.faceCount(); ++f) hi = std::max(hi, mesh.faceArea(f));
-    hi = std::sqrt(std::max(hi, 1e-6f));
+    hi = std::sqrt(std::max(hi, Real(1e-6)));
 
-    auto fits = [&](float w) {
+    auto fits = [&](Real w) {
         for (Index f = 0; f < mesh.faceCount(); ++f) {
             std::vector<Index> verts;
             mesh.faceVertices(f, verts);
@@ -299,7 +299,7 @@ float maxBevelWidth(const Mesh& mesh) {
 
     if (!fits(hi)) {
         for (int i = 0; i < 40; ++i) {
-            const float mid = (lo + hi) * 0.5f;
+            const Real mid = (lo + hi) * 0.5f;
             if (fits(mid)) lo = mid; else hi = mid;
         }
         return lo;
@@ -313,7 +313,7 @@ namespace {
 // One flat chamfer pass: every face shrinks inward by `width`, every edge
 // becomes a quad spanning the two shrunken faces, and every vertex becomes a
 // face closing the corner. (This is the Conway truncation operator.)
-bool chamferOnce(Mesh& mesh, float width) {
+bool chamferOnce(Mesh& mesh, Real width) {
     if (mesh.empty() || width <= 0.0f) return false;
 
     const Index faceCount = mesh.faceCount();
@@ -386,7 +386,7 @@ bool chamferOnce(Mesh& mesh, float width) {
 
 } // namespace
 
-bool bevelAllEdges(Mesh& mesh, float width, int segments) {
+bool bevelAllEdges(Mesh& mesh, Real width, int segments) {
     if (mesh.empty() || width <= 0.0f || segments < 1) return false;
 
     // Work on a copy so a failure part-way through leaves the caller's mesh
@@ -404,11 +404,11 @@ bool bevelAllEdges(Mesh& mesh, float width, int segments) {
     // The trade-off is that `width` is the first cut's width rather than an
     // exact fillet radius, so this approximates a fillet rather than producing
     // one analytically.
-    float w = width * 0.42f;
+    Real w = width * 0.42f;
     for (int i = 1; i < segments; ++i) {
         // Never cut deeper than the new, smaller faces can take.
-        const float limit = maxBevelWidth(work) * 0.7f;
-        const float step = std::min(w, limit);
+        const Real limit = maxBevelWidth(work) * 0.7f;
+        const Real step = std::min(w, limit);
         if (step <= 1e-5f) break;
         // Stop refining rather than fail: the caller asked for a rounder edge
         // and a slightly less round one is a better answer than none.

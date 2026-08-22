@@ -18,13 +18,13 @@ namespace tg {
 //
 // A negative distance cuts inward. Extruding an open surface (a plane) leaves
 // the far side open, which is what removing the original face implies.
-bool extrudeFaces(Mesh& mesh, const std::vector<Index>& faces, float distance,
+bool extrudeFaces(Mesh& mesh, const std::vector<Index>& faces, Real distance,
                   std::vector<Index>* newFaces = nullptr);
 
 // Shrinks each face toward its own interior by `amount`, measured
 // perpendicular to every edge, and fills the gap with a rim of quads.
 // Operates per face rather than per region.
-bool insetFaces(Mesh& mesh, const std::vector<Index>& faces, float amount,
+bool insetFaces(Mesh& mesh, const std::vector<Index>& faces, Real amount,
                 std::vector<Index>* newFaces = nullptr);
 
 // Translates the vertices belonging to a face set. Topology is unchanged, so
@@ -43,10 +43,10 @@ bool moveFaces(Mesh& mesh, const std::vector<Index>& faces, Vec3 delta);
 //
 // Fails without modifying the mesh if the width is too large for the geometry
 // -- that is, if any face would invert.
-bool bevelAllEdges(Mesh& mesh, float width, int segments = 1);
+bool bevelAllEdges(Mesh& mesh, Real width, int segments = 1);
 
 // Largest bevel width the mesh can take before a face collapses. Useful for
 // clamping a UI slider to a range that always produces valid geometry.
-float maxBevelWidth(const Mesh& mesh);
+Real maxBevelWidth(const Mesh& mesh);
 
 } // namespace tg

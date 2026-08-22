@@ -200,15 +200,15 @@ Vec3 Mesh::faceCentroid(Index f) const {
     const Index start = faces[f].halfedge;
     Index he = start;
     do { c += verts[fromVertex(he)].position; ++n; he = halfedges[he].next; } while (he != start);
-    return n > 0 ? c / static_cast<float>(n) : c;
+    return n > 0 ? c / static_cast<Real>(n) : c;
 }
 
-float Mesh::faceArea(Index f) const {
+Real Mesh::faceArea(Index f) const {
     // Fan the polygon from its first corner; valid for planar polygons and a
     // good approximation otherwise.
     const Index start = faces[f].halfedge;
     const Vec3& a = verts[fromVertex(start)].position;
-    float area = 0.0f;
+    Real area = 0.0f;
     Index he = halfedges[start].next;
     while (halfedges[he].next != start) {
         const Vec3& b = verts[fromVertex(he)].position;
@@ -248,7 +248,7 @@ void Mesh::triangulateFace(Index f, std::vector<Index>& out) const {
     }
 
     // Signed area fixes the winding so "convex" below has a consistent sense.
-    float area2 = 0.0f;
+    Real area2 = 0.0f;
     for (int i = 0; i < n; ++i) {
         const Vec2& a = p[i];
         const Vec2& b = p[(i + 1) % n];
@@ -300,11 +300,11 @@ void Mesh::triangulateFace(Index f, std::vector<Index>& out) const {
 }
 
 // ---------------------------------------------------------------------------
-void Mesh::buildRenderMesh(RenderMesh& out, float creaseAngleDeg) const {
+void Mesh::buildRenderMesh(RenderMesh& out, Real creaseAngleDeg) const {
     out.clear();
     if (faces.empty()) return;
 
-    const float creaseCos = std::cos(radians(creaseAngleDeg));
+    const Real creaseCos = std::cos(radians(creaseAngleDeg));
 
     std::vector<Vec3> faceNormals(faces.size());
     for (size_t f = 0; f < faces.size(); ++f)

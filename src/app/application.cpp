@@ -617,7 +617,7 @@ void Application::bevelActiveObject() {
     // Clamp to what the geometry can actually take, so the slider cannot ask
     // for a bevel that inverts a face.
     const float limit = maxBevelWidth(obj->mesh);
-    const float width = std::min(view_.bevelWidth, limit * 0.95f);
+    const Real width = std::min(view_.bevelWidth, limit * Real(0.95));
     if (width <= 1e-4f) return;
 
     Feature f;

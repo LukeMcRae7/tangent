@@ -123,10 +123,22 @@ int Shader::location(const char* name) {
     return loc;
 }
 
-void Shader::set(const char* n, int v)          { glUniform1i(location(n), v); }
-void Shader::set(const char* n, float v)        { glUniform1f(location(n), v); }
-void Shader::set(const char* n, Vec3 v)         { glUniform3f(location(n), v.x, v.y, v.z); }
-void Shader::set(const char* n, Vec4 v)         { glUniform4f(location(n), v.x, v.y, v.z, v.w); }
-void Shader::set(const char* n, const Mat4& m)  { glUniformMatrix4fv(location(n), 1, GL_FALSE, m.data()); }
+// Geometry is kept in double; GL takes float. Narrowing happens here and in
+// GpuMesh::upload, and nowhere else.
+void Shader::set(const char* n, int v)   { glUniform1i(location(n), v); }
+void Shader::set(const char* n, Real v)  { glUniform1f(location(n), static_cast<float>(v)); }
+void Shader::set(const char* n, Vec3 v)  {
+    glUniform3f(location(n), static_cast<float>(v.x), static_cast<float>(v.y),
+                static_cast<float>(v.z));
+}
+void Shader::set(const char* n, Vec4 v)  {
+    glUniform4f(location(n), static_cast<float>(v.x), static_cast<float>(v.y),
+                static_cast<float>(v.z), static_cast<float>(v.w));
+}
+void Shader::set(const char* n, const Mat4& m) {
+    float f[16];
+    m.toFloats(f);
+    glUniformMatrix4fv(location(n), 1, GL_FALSE, f);
+}
 
 } // namespace tg

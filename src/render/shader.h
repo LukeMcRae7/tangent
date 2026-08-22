@@ -31,7 +31,7 @@ public:
     bool valid() const { return program_ != 0; }
 
     void set(const char* name, int value);
-    void set(const char* name, float value);
+    void set(const char* name, Real value);
     void set(const char* name, Vec3 v);
     void set(const char* name, Vec4 v);
     void set(const char* name, const Mat4& m);
