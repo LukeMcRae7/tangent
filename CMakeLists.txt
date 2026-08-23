@@ -83,7 +83,7 @@ target_compile_options(test_mesh PRIVATE -Wall -Wextra)
 add_test(NAME mesh COMMAND test_mesh)
 
 add_executable(test_scene tests/test_scene.cpp
-  src/scene/scene.cpp src/scene/feature.cpp src/mesh/boolean.cpp src/mesh/operations.cpp
+  src/scene/scene.cpp src/scene/feature.cpp src/mesh/boolean.cpp src/mesh/health.cpp src/mesh/operations.cpp
   src/mesh/halfedge.cpp src/mesh/primitives.cpp src/app/camera.cpp)
 target_include_directories(test_scene PRIVATE src)
 target_compile_options(test_scene PRIVATE -Wall -Wextra)
@@ -93,7 +93,7 @@ add_test(NAME scene COMMAND test_scene)
 # test never creates a GL context or issues a draw.
 add_executable(test_transform tests/test_transform.cpp
   src/app/transform_tool.cpp src/app/undo.cpp src/app/camera.cpp
-  src/scene/scene.cpp src/scene/feature.cpp src/mesh/boolean.cpp src/mesh/operations.cpp
+  src/scene/scene.cpp src/scene/feature.cpp src/mesh/boolean.cpp src/mesh/health.cpp src/mesh/operations.cpp
   src/mesh/halfedge.cpp src/mesh/primitives.cpp
   src/render/renderer.cpp src/render/shader.cpp src/render/gpu_mesh.cpp)
 target_include_directories(test_transform PRIVATE src)
@@ -102,7 +102,7 @@ target_compile_options(test_transform PRIVATE -Wall -Wextra -Wno-unused-paramete
 add_test(NAME transform COMMAND test_transform)
 
 add_executable(test_operations tests/test_operations.cpp
-  src/mesh/boolean.cpp src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp)
+  src/mesh/boolean.cpp src/mesh/health.cpp src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp)
 target_include_directories(test_operations PRIVATE src)
 target_compile_options(test_operations PRIVATE -Wall -Wextra)
 add_test(NAME operations COMMAND test_operations)
@@ -156,7 +156,7 @@ add_test(NAME boolean COMMAND test_boolean)
 # context is created.
 add_executable(test_measure tests/test_measure.cpp
   src/app/measure.cpp src/app/camera.cpp src/scene/scene.cpp src/scene/feature.cpp src/mesh/boolean.cpp
-  src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp
+  src/mesh/health.cpp src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp
   src/render/renderer.cpp src/render/shader.cpp src/render/gpu_mesh.cpp)
 target_include_directories(test_measure PRIVATE src)
 target_link_libraries(test_measure PRIVATE PkgConfig::EPOXY)
@@ -166,7 +166,7 @@ add_test(NAME measure COMMAND test_measure)
 add_executable(test_io tests/test_io.cpp
   src/mesh/export_stl.cpp src/scene/serialize.cpp
   src/scene/scene.cpp src/scene/feature.cpp src/mesh/boolean.cpp
-  src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp)
+  src/mesh/health.cpp src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp)
 target_include_directories(test_io PRIVATE src)
 target_compile_options(test_io PRIVATE -Wall -Wextra)
 add_test(NAME io COMMAND test_io)

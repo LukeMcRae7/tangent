@@ -120,6 +120,27 @@ static bool makeLPrism(Mesh& m) {
     return m.build(p, sz, ix);
 }
 
+// A cube with its top face rotated about Z, which is what the rotate tool on a
+// face selection leaves behind. The four side faces stop being flat.
+static bool makeTwistedCube(Mesh& m, double degrees) {
+    const double a = degrees * kPi / 180.0;
+    const double c[4][2] = {{-10, -10}, {10, -10}, {10, 10}, {-10, 10}};
+    std::vector<Vec3> p;
+    std::vector<uint32_t> sz, ix;
+    for (int i = 0; i < 4; ++i) p.push_back({c[i][0], c[i][1], -10});
+    for (int i = 0; i < 4; ++i)
+        p.push_back({c[i][0] * std::cos(a) - c[i][1] * std::sin(a),
+                     c[i][0] * std::sin(a) + c[i][1] * std::cos(a), 10});
+    sz.push_back(4); for (int i = 3; i >= 0; --i) ix.push_back(i);
+    sz.push_back(4); for (int i = 0; i < 4; ++i) ix.push_back(4 + i);
+    for (int i = 0; i < 4; ++i) {
+        const int j = (i + 1) % 4;
+        sz.push_back(4);
+        ix.push_back(i); ix.push_back(j); ix.push_back(4 + j); ix.push_back(4 + i);
+    }
+    return m.build(p, sz, ix);
+}
+
 // Regular octahedron: every vertex has four edges, so a corner there is one
 // the cube cases never reach.
 static bool makeOctahedron(Mesh& m, double r) {
@@ -780,6 +801,51 @@ int main() {
             } else {
                 std::printf("   %4.0f deg apex: band %.3f, refused\n", apex, band);
             }
+        }
+    }
+
+    // =====================================================================
+    // 13. A body whose faces have been twisted
+    // =====================================================================
+    //
+    // Rotating a face is an ordinary thing to do and it leaves the faces round
+    // it no longer flat. Both a single edge and every edge have to work on the
+    // result; they used to be mutually exclusive, because flattening those
+    // faces first is what one needs and the other cannot survive.
+    {
+        std::printf("-- twisted faces --\n");
+        for (double deg : {10.0, 25.0, 45.0}) {
+            Mesh base;
+            check(makeTwistedCube(base, deg), "twisted cube builds");
+            const double baseVolume = volumeOf(base);
+
+            const std::string at = std::to_string(static_cast<int>(deg)) + " deg";
+
+            // One edge.
+            {
+                Mesh m;
+                makeTwistedCube(m, deg);
+                Index one = kInvalid;
+                for (Index h = 0; h < m.halfedgeCount() && one == kInvalid; ++h) {
+                    if (h > m.halfedges[h].twin) continue;
+                    if (std::fabs(m.verts[m.fromVertex(h)].position.z -
+                                  m.verts[m.halfedges[h].vertex].position.z) > 1e-6) one = h;
+                }
+                check(one != kInvalid, "found an edge across the twist");
+                check(bevelEdges(m, {one}, 1.5, 6), at + ", one edge: fillet");
+                expectSolid(m, at + ", one edge");
+                check(volumeOf(m) < baseVolume + 1e-6, at + ", one edge: removes material");
+            }
+
+            // Every edge.
+            {
+                Mesh m;
+                makeTwistedCube(m, deg);
+                check(bevelEdges(m, allEdges(m), 1.5, 6), at + ", all edges: fillet");
+                expectSolid(m, at + ", all edges");
+                check(volumeOf(m) < baseVolume + 1e-6, at + ", all edges: removes material");
+            }
+            std::printf("   %s: one edge and all edges both build solid\n", at.c_str());
         }
     }
 

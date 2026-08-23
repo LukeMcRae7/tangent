@@ -1,6 +1,7 @@
 #include "mesh/operations.h"
 
 #include "mesh/boolean.h"
+#include "mesh/health.h"
 
 #include <algorithm>
 #include <cmath>
@@ -900,7 +901,88 @@ static bool splitNonPlanarFaces(Mesh& mesh, const std::vector<bool>& beveled, Re
     return true;
 }
 
+static bool filletEdgesDirect(Mesh& mesh, const FilletSpec& spec);
+
+// Faces that are not flat have no single plane for the ball to touch, so they
+// can be split into triangles first -- but only where that helps.
+//
+// It cuts both ways, and which way depends on the selection rather than on the
+// body. Rounding every edge of a twisted cube needs the split: without it the
+// arcs are solved against an average the surface departs from, and the result
+// self-intersects. Rounding a single edge of the same body needs the opposite:
+// splitting turns the three faces round each end of that edge into a fan of
+// five, the fillet then has to close against a creased fan rather than one
+// face, and it comes out folded -- where leaving the body alone gives a clean
+// solid.
+//
+// Rather than guess from the geometry which case this is, build it both ways
+// and keep the one that is a solid. Nothing is paid for it on a body whose
+// faces are already flat, which is nearly all of them: there is nothing to
+// split, so there is only ever one attempt.
 bool filletEdges(Mesh& mesh, const FilletSpec& spec) {
+    Mesh direct = mesh;
+    const bool directOk = filletEdgesDirect(direct, spec);
+    if (directOk && checkHealth(direct).solid()) {
+        mesh = std::move(direct);
+        return true;
+    }
+
+    // Held by where their ends are, not by name. Splitting moves no vertex and
+    // adds none, so the endpoints are the one key that works whether the mesh
+    // has been named or not -- an imported body has not been.
+    struct Wanted { Vec3 a, b; Real radius; };
+    std::vector<Wanted> want;
+    std::vector<bool> touched(static_cast<size_t>(mesh.halfedgeCount()), false);
+    for (const FilletEdge& fe : spec.edges) {
+        const Index e = fe.edge;
+        if (e < 0 || e >= mesh.halfedgeCount() || fe.radius <= 0.0) break;
+        touched[e] = touched[mesh.halfedges[e].twin] = true;
+        want.push_back(Wanted{mesh.verts[mesh.fromVertex(e)].position,
+                              mesh.verts[mesh.halfedges[e].vertex].position, fe.radius});
+    }
+
+    Real smallest = std::numeric_limits<Real>::max();
+    for (const Wanted& w : want) smallest = std::min(smallest, w.radius);
+    const Real modelScale = std::max(length(mesh.bounds().size()), Real(1.0));
+    const Real flatTol = std::max(modelScale * 1e-9, smallest * 1e-3);
+
+    Mesh flattened = mesh;
+    if (want.size() == spec.edges.size() &&
+        splitNonPlanarFaces(flattened, touched, flatTol)) {
+        FilletSpec again;
+        again.segments = spec.segments;
+        again.salt = spec.salt;
+
+        const Real snap = modelScale * 1e-9;
+        bool found = true;
+        for (const Wanted& w : want) {
+            Index at = kInvalid;
+            for (Index h = 0; h < flattened.halfedgeCount() && at == kInvalid; ++h) {
+                if (h > flattened.halfedges[h].twin) continue;
+                const Vec3 p = flattened.verts[flattened.fromVertex(h)].position;
+                const Vec3 q = flattened.verts[flattened.halfedges[h].vertex].position;
+                if ((lengthSq(p - w.a) < snap * snap && lengthSq(q - w.b) < snap * snap) ||
+                    (lengthSq(p - w.b) < snap * snap && lengthSq(q - w.a) < snap * snap))
+                    at = h;
+            }
+            if (at == kInvalid) { found = false; break; }
+            again.edges.push_back({at, w.radius});
+        }
+
+        if (found && filletEdgesDirect(flattened, again) && checkHealth(flattened).solid()) {
+            mesh = std::move(flattened);
+            return true;
+        }
+    }
+
+    // Neither way gave a solid, so neither is an answer. Handing back the one
+    // that merely built would be handing back a part that looks right and will
+    // not print, which is the one thing this must not do.
+    (void)directOk;
+    return false;
+}
+
+static bool filletEdgesDirect(Mesh& mesh, const FilletSpec& spec) {
     const int segments = spec.segments;
     const ElementId salt = spec.salt;
     const bool dbg = std::getenv("TANGENT_BEVEL_DEBUG") != nullptr;
@@ -929,55 +1011,6 @@ bool filletEdges(Mesh& mesh, const FilletSpec& spec) {
         radiusOf[e] = radiusOf[tw] = std::max(radiusOf[e], fe.radius);
     }
     if (chosen == 0) return bail("no edges chosen");
-
-    // Faces that are not flat have no plane for the ball to touch, so they are
-    // made flat first. The selection is re-found afterwards by name: splitting
-    // adds no vertices, and an edge is named by its endpoints.
-    {
-        Real smallest = std::numeric_limits<Real>::max();
-        for (Index h = 0; h < heCount; ++h)
-            if (beveled[h]) smallest = std::min(smallest, radiusOf[h]);
-        const Real modelScale = std::max(length(mesh.bounds().size()), Real(1.0));
-        const Real flatTol = std::max(modelScale * 1e-9, smallest * 1e-3);
-
-        // Held by where their ends are, not by name. Splitting moves no vertex
-        // and adds none, so the endpoints are the one key that works whether
-        // the mesh has been named or not -- an imported body has not been.
-        struct Wanted { Vec3 a, b; Real radius; };
-        std::vector<Wanted> want;
-        for (Index h = 0; h < heCount; ++h)
-            if (beveled[h] && h < mesh.halfedges[h].twin)
-                want.push_back(Wanted{mesh.verts[mesh.fromVertex(h)].position,
-                                      mesh.verts[mesh.halfedges[h].vertex].position,
-                                      radiusOf[h]});
-
-        Mesh flattened = mesh;
-        if (splitNonPlanarFaces(flattened, beveled, flatTol)) {
-            FilletSpec again;
-            again.segments = spec.segments;
-            again.salt = spec.salt;
-
-            const Real snap = modelScale * 1e-9;
-            for (const Wanted& w : want) {
-                Index found = kInvalid;
-                for (Index h = 0; h < flattened.halfedgeCount(); ++h) {
-                    if (h > flattened.halfedges[h].twin) continue;
-                    const Vec3 p = flattened.verts[flattened.fromVertex(h)].position;
-                    const Vec3 q = flattened.verts[flattened.halfedges[h].vertex].position;
-                    if ((lengthSq(p - w.a) < snap * snap && lengthSq(q - w.b) < snap * snap) ||
-                        (lengthSq(p - w.b) < snap * snap && lengthSq(q - w.a) < snap * snap)) {
-                        found = h;
-                        break;
-                    }
-                }
-                if (found == kInvalid) return bail("an edge went missing when flattening");
-                again.edges.push_back({found, w.radius});
-            }
-            if (!filletEdges(flattened, again)) return false;
-            mesh = std::move(flattened);
-            return true;
-        }
-    }
 
     // Scaled to the model, not fixed. Sections that should coincide are
     // computed two ways -- offset from a face, and cut back along an edge --
