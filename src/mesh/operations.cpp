@@ -1,12 +1,13 @@
 #include "mesh/operations.h"
 
 #include <algorithm>
-#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <map>
 #include <limits>
 #include <unordered_map>
+#include <functional>
 #include <utility>
 #include <unordered_set>
 
@@ -43,6 +44,70 @@ struct Soup {
             idx = static_cast<uint32_t>(remap[idx]);
         }
         positions.swap(kept);
+    }
+
+    // Merges vertices that landed in the same place and drops the faces that
+    // leaves with no area.
+    //
+    // A fillet produces these legitimately. Two filleted edges that run
+    // straight through a vertex -- the seam an extrude leaves behind, say --
+    // have nothing to blend there: both sections land on the same points, and
+    // the corner patch between them is a polygon of zero width. Dropping that
+    // patch alone would open a hole, because the two edge strips reach it
+    // through separate vertices in the same position. Welding first is what
+    // lets the strips meet each other directly instead.
+    void weld(Real eps) {
+        const Real inv = 1.0 / eps;
+        struct Key { int64_t x, y, z; bool operator==(const Key& o) const {
+            return x == o.x && y == o.y && z == o.z; } };
+        struct Hash { size_t operator()(const Key& k) const {
+            return std::hash<int64_t>{}(k.x * 73856093LL ^ k.y * 19349663LL ^ k.z * 83492791LL); } };
+
+        std::unordered_map<Key, uint32_t, Hash> seen;
+        std::vector<uint32_t> remap(positions.size());
+        for (uint32_t i = 0; i < positions.size(); ++i) {
+            const Vec3& p = positions[i];
+            const Key k{static_cast<int64_t>(std::llround(p.x * inv)),
+                        static_cast<int64_t>(std::llround(p.y * inv)),
+                        static_cast<int64_t>(std::llround(p.z * inv))};
+            // Probing the neighbours keeps two points either side of a cell
+            // boundary together, which quantising alone does not.
+            uint32_t hit = ~0u;
+            for (int dx = -1; dx <= 1 && hit == ~0u; ++dx)
+                for (int dy = -1; dy <= 1 && hit == ~0u; ++dy)
+                    for (int dz = -1; dz <= 1 && hit == ~0u; ++dz) {
+                        auto it = seen.find({k.x + dx, k.y + dy, k.z + dz});
+                        if (it != seen.end() &&
+                            lengthSq(positions[it->second] - p) < eps * eps)
+                            hit = it->second;
+                    }
+            if (hit == ~0u) { seen.emplace(k, i); hit = i; }
+            remap[i] = hit;
+        }
+
+        std::vector<uint32_t> sizes, indices, loop;
+        size_t at = 0;
+        for (uint32_t n : faceSizes) {
+            loop.clear();
+            for (uint32_t i = 0; i < n; ++i) {
+                const uint32_t idx = remap[faceIndices[at + i]];
+                if (loop.empty() || loop.back() != idx) loop.push_back(idx);
+            }
+            at += n;
+            while (loop.size() > 1 && loop.front() == loop.back()) loop.pop_back();
+            if (loop.size() < 3) continue;
+
+            // Collinear-but-distinct points still leave no area.
+            Vec3 area{};
+            for (size_t i = 0; i < loop.size(); ++i)
+                area += cross(positions[loop[i]], positions[loop[(i + 1) % loop.size()]]);
+            if (lengthSq(area) < 1e-18) continue;
+
+            sizes.push_back(static_cast<uint32_t>(loop.size()));
+            indices.insert(indices.end(), loop.begin(), loop.end());
+        }
+        faceSizes.swap(sizes);
+        faceIndices.swap(indices);
     }
 
     bool commit(Mesh& mesh) {
@@ -458,10 +523,11 @@ void sampleArc(const Arc& arc, Vec3 p0, Vec3 p1, Vec3 axis, int segments,
 
 } // namespace
 
-bool bevelEdges(Mesh& mesh, const std::vector<Index>& edges, Real width, int segments) {
+bool filletEdges(Mesh& mesh, const FilletSpec& spec) {
+    const int segments = spec.segments;
     const bool dbg = std::getenv("TANGENT_BEVEL_DEBUG") != nullptr;
     auto bail = [&](const char* why) { if (dbg) std::fprintf(stderr, "[bevel] %s\n", why); return false; };
-    if (mesh.empty() || width <= 0.0 || segments < 1) return bail("bad arguments");
+    if (mesh.empty() || spec.edges.empty() || segments < 1) return bail("bad arguments");
 
     const Index heCount = mesh.halfedgeCount();
 
@@ -469,19 +535,43 @@ bool bevelEdges(Mesh& mesh, const std::vector<Index>& edges, Real width, int seg
     for (Index h = 0; h < heCount; ++h)
         if (mesh.halfedges[h].face == kInvalid) return bail("open surface");
 
+    // Radius per half-edge, shared with its twin. Naming an edge twice with
+    // different radii takes the larger, which is the one the geometry has to
+    // clear.
     std::vector<bool> beveled(static_cast<size_t>(heCount), false);
+    std::vector<Real> radiusOf(static_cast<size_t>(heCount), 0.0);
     size_t chosen = 0;
-    for (Index e : edges) {
+    for (const FilletEdge& fe : spec.edges) {
+        const Index e = fe.edge;
         if (e < 0 || e >= heCount) return bail("edge index out of range");
+        if (fe.radius <= 0.0) return bail("radius must be positive");
         const Index tw = mesh.halfedges[e].twin;
         if (!beveled[e]) ++chosen;
-        beveled[e] = true;
-        beveled[tw] = true;
+        beveled[e] = beveled[tw] = true;
+        radiusOf[e] = radiusOf[tw] = std::max(radiusOf[e], fe.radius);
     }
     if (chosen == 0) return bail("no edges chosen");
 
     std::vector<Vec3> faceNormals(static_cast<size_t>(mesh.faceCount()));
     for (Index f = 0; f < mesh.faceCount(); ++f) faceNormals[f] = mesh.faceNormal(f);
+
+    // An edge whose two faces are coplanar is not an edge the surface turns at,
+    // and there is nothing there to round: the ball touches both faces in the
+    // same place, so the section has zero width. Drop those rather than emit
+    // slivers -- Fusion likewise refuses to fillet a tangent edge. It matters
+    // for whole-part rounding, where a model carries seams left by an extrude
+    // that the user does not think of as edges at all.
+    constexpr Real kFlatCos = 0.9999619;   // half a degree
+    for (Index h = 0; h < heCount; ++h) {
+        if (!beveled[h]) continue;
+        const Index tw = mesh.halfedges[h].twin;
+        if (dot(faceNormals[mesh.halfedges[h].face],
+                faceNormals[mesh.halfedges[tw].face]) < kFlatCos) continue;
+        beveled[h] = beveled[tw] = false;
+        radiusOf[h] = radiusOf[tw] = 0.0;
+        --chosen;
+    }
+    if (chosen == 0) return bail("every chosen edge is flat");
 
     auto posOf = [&](Index v) { return mesh.verts[v].position; };
     auto dirOf = [&](Index h) {
@@ -499,28 +589,111 @@ bool bevelEdges(Mesh& mesh, const std::vector<Index>& edges, Real width, int seg
     }
     auto blendsAt = [&](Index v) { return filletsAt[v] >= 2; };
 
-    // Where a face's corner moves, which is the fillet's cross-section there.
+    // The ball that sits in the corner at each vertex.
     //
-    // At a vertex where fillets meet, the section is set back along the edge by
-    // the radius as well as offset from it -- the symmetric offset -- because
-    // that is the point where the sphere takes over from the cylinder. Taking
-    // the one-sided offset there leaves the section skewed, its two ends at
-    // different positions along the edge, and since a strip is ruled between
-    // its two ends that skew deforms the fillet along the whole edge.
+    // This is the whole of the corner model. A fillet is the surface of a ball
+    // rolled along an edge, so at a vertex the ball settles into the corner:
+    // tangent to every face that a filleted edge runs along, and as close to
+    // the vertex as those tangencies allow. Where it touches each of those
+    // faces is where that face's boundary turns, and the ball's surface between
+    // those points is the corner blend.
     //
-    // Where only one fillet arrives there is no pivot and no blend: the
-    // cylinder runs straight into the face across the end, and the section
-    // belongs at the vertex itself, in that face's plane. Setting it back there
-    // lifts the section off the plane and opens a gap that then has to be
-    // covered by a patch which should not exist at all.
-    auto crossOffsetAt = [&](Index h, Vec3& d) {
+    // Everything else follows from it. One fillet arriving gives two tangent
+    // planes, and the ball slides freely along the edge to sit at the vertex --
+    // no setback, a flat cap. Three at a cube corner give one point, and the
+    // blend is a spherical triangle. Two filleted edges and a sharp one give
+    // the same ball, tangent to all three faces, and the sharp edge is cut back
+    // to where its two faces have been pulled to -- a pinch, exactly as Fusion
+    // leaves the vertical edge of a filleted box rim.
+    //
+    // Critically, the setback is *solved* rather than assumed to be the radius.
+    // It equals the radius only where the faces meet at right angles. Between
+    // two facets of a cylinder wall, 11 degrees apart, it is almost nothing --
+    // and taking the radius there pulls both ends of a 2mm facet 2mm inward and
+    // collapses it, which is why a rim fillet on a curved surface used to fail.
+    //
+    // Solved as a least-squares fit: find u minimising sum over the tangent
+    // faces of (n_i . u + r_i)^2, which is (sum n_i n_i^T) u = -sum r_i n_i.
+    // The vertex lies on every one of those planes, so u is the offset from it.
+    // Three independent planes make this exact; more are averaged, which is
+    // what a faceted surface needs; two leave a free direction, and a small
+    // regularisation picks the point nearest the vertex, which is the right
+    // answer for a fillet running off the end of an edge.
+    std::vector<Vec3> ballAt(static_cast<size_t>(mesh.vertexCount()));
+    std::vector<bool> ballOk(static_cast<size_t>(mesh.vertexCount()), false);
+
+    // Radius the corner ball uses against the face on the far side of `h` --
+    // the larger of the filleted edges bounding that face at this vertex.
+    auto faceRadiusAt = [&](Index h) {
         const Index p = mesh.halfedges[h].prev;
+        Real r = 0.0;
+        if (beveled[h]) r = std::max(r, radiusOf[h]);
+        if (beveled[p]) r = std::max(r, radiusOf[p]);
+        return r;
+    };
+
+    for (Index v = 0; v < mesh.vertexCount(); ++v) {
+        if (filletsAt[v] == 0) continue;
+
+        Real m[6] = {0, 0, 0, 0, 0, 0};   // symmetric 3x3: xx xy xz yy yz zz
+        Vec3 rhs{};
+        Real scale = 0.0;
+        int planes = 0;
+
+        const Index start = mesh.verts[v].halfedge;
+        Index h = start;
+        do {
+            const Real r = faceRadiusAt(h);
+            if (r > 0.0) {
+                const Vec3 n = faceNormals[mesh.halfedges[h].face];
+                m[0] += n.x * n.x; m[1] += n.x * n.y; m[2] += n.x * n.z;
+                m[3] += n.y * n.y; m[4] += n.y * n.z; m[5] += n.z * n.z;
+                rhs -= n * r;
+                scale += 1.0;
+                ++planes;
+            }
+            h = mesh.halfedges[mesh.halfedges[h].twin].next;
+        } while (h != start);
+
+        if (planes < 2) continue;
+
+        // Enough to pin the free direction of an under-determined fit without
+        // disturbing one that is already determined.
+        const Real eps = scale * 1e-13;
+        m[0] += eps; m[3] += eps; m[5] += eps;
+
+        // Cramer on the symmetric system.
+        const Real c00 = m[3] * m[5] - m[4] * m[4];
+        const Real c01 = m[2] * m[4] - m[1] * m[5];
+        const Real c02 = m[1] * m[4] - m[2] * m[3];
+        const Real det = m[0] * c00 + m[1] * c01 + m[2] * c02;
+        if (std::fabs(det) < 1e-18) continue;
+
+        const Real c11 = m[0] * m[5] - m[2] * m[2];
+        const Real c12 = m[1] * m[2] - m[0] * m[4];
+        const Real c22 = m[0] * m[3] - m[1] * m[1];
+        const Vec3 u{(c00 * rhs.x + c01 * rhs.y + c02 * rhs.z) / det,
+                     (c01 * rhs.x + c11 * rhs.y + c12 * rhs.z) / det,
+                     (c02 * rhs.x + c12 * rhs.y + c22 * rhs.z) / det};
+
+        ballAt[v] = posOf(v) + u;
+        ballOk[v] = true;
+    }
+
+    // Where a face's corner moves: the point the corner ball touches it.
+    auto crossOffsetAt = [&](Index h, Vec3& d) {
         const Index v = mesh.fromVertex(h);
-        const bool blend = blendsAt(v);
+        const Real r = faceRadiusAt(h);
+        if (ballOk[v] && r > 0.0) {
+            d = (ballAt[v] + faceNormals[mesh.halfedges[h].face] * r) - posOf(v);
+            return true;
+        }
+        // No ball to solve against: fall back to the plain two-sided inset.
+        const Index p = mesh.halfedges[h].prev;
         return cornerOffset(faceNormals[mesh.halfedges[h].face],
                             posOf(v) - posOf(mesh.fromVertex(p)), dirOf(h),
-                            (blend || beveled[p]) ? width : 0.0,
-                            (blend || beveled[h]) ? width : 0.0, d);
+                            beveled[p] ? radiusOf[p] : 0.0,
+                            beveled[h] ? radiusOf[h] : 0.0, d);
     };
 
     // True when either edge at this corner is being filleted, so the corner
@@ -1093,6 +1266,11 @@ bool bevelEdges(Mesh& mesh, const std::vector<Index>& edges, Real width, int seg
             soup.face({prev[i], prev[(i + 1) % prev.size()], pole});
     }
 
+    // Sections that land in the same place belong to the same vertex; see the
+    // note on Soup::weld. A nanometre is far below anything a fillet resolves
+    // and far above the arithmetic's noise.
+    soup.weld(1e-9);
+
     if (!soup.commit(mesh)) {
         if (dbg) {
             std::map<std::pair<uint32_t,uint32_t>,int> dir;
@@ -1114,6 +1292,14 @@ bool bevelEdges(Mesh& mesh, const std::vector<Index>& edges, Real width, int seg
         return false;
     }
     return true;
+}
+
+bool bevelEdges(Mesh& mesh, const std::vector<Index>& edges, Real width, int segments) {
+    FilletSpec spec;
+    spec.segments = segments;
+    spec.edges.reserve(edges.size());
+    for (Index e : edges) spec.edges.push_back({e, width});
+    return filletEdges(mesh, spec);
 }
 
 bool bevelAllEdges(Mesh& mesh, Real width, int segments) {

@@ -31,20 +31,45 @@ bool insetFaces(Mesh& mesh, const std::vector<Index>& faces, Real amount,
 // this is cheap: no rebuild is required.
 bool moveFaces(Mesh& mesh, const std::vector<Index>& faces, Vec3 delta);
 
-// Rounds the given edges, pulling each adjacent face back by `width` and
-// bridging the gap.
+// One edge of a fillet, with its own radius. Fusion attaches a radius per edge
+// within a single fillet feature rather than one radius for the whole
+// selection, and so do we: rounding two edges to different radii in one go is
+// a different solid from rounding them in sequence, because the corner where
+// they meet is blended once instead of twice.
+struct FilletEdge {
+    Index edge   = kInvalid;   // either half-edge
+    Real  radius = 1.0;
+};
+
+struct FilletSpec {
+    std::vector<FilletEdge> edges;
+
+    // 1 gives a flat chamfer. Above that the section follows a true circular
+    // arc, tangent to both faces, swept in equal angular steps -- so the
+    // segments are uniform and the surface is an actual fillet rather than a
+    // progressively cut corner.
+    int segments = 1;
+};
+
+// Rounds the given edges, pulling each adjacent face back to where a ball of
+// the edge's radius touches it and bridging the gap with the ball's surface.
 //
-// `segments` == 1 gives a flat chamfer. Above that the bridge follows a true
-// circular arc, tangent to both faces, swept in equal angular steps -- so the
-// segments are uniform and the surface is an actual fillet rather than a
-// progressively cut corner. The arc centre is solved from the two face planes,
-// which makes it correct for concave edges as well as convex ones.
+// The section is solved from the two face planes rather than assumed to be a
+// quarter circle, which is what makes it correct for any dihedral angle, for
+// concave edges as much as convex ones, and for the shallow angles between the
+// facets of a curved surface.
 //
-// Edges are named by either of their half-edges. Vertices where beveled edges
-// meet get a patch closing the corner.
+// At a vertex the same ball settles into the corner, tangent to every face a
+// filleted edge runs along, and the point where it touches each of those faces
+// is where that face's boundary turns. Solving for that ball is what sets the
+// corner back by the right amount -- which is the fillet radius only when the
+// faces happen to meet at right angles, and much less on a curved surface.
 //
-// Fails without modifying the mesh if the width is too large for the geometry
+// Fails without modifying the mesh if a radius is too large for the geometry
 // -- that is, if any face would invert.
+bool filletEdges(Mesh& mesh, const FilletSpec& spec);
+
+// One radius for the whole selection.
 bool bevelEdges(Mesh& mesh, const std::vector<Index>& edges, Real width,
                 int segments = 1);
 

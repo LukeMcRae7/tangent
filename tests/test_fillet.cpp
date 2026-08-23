@@ -23,21 +23,22 @@ using namespace tg;
 
 static int failures = 0;
 
-// Known gap, one cause, described at the two cases that hit it: where a
-// filleted edge meets an unfilleted one, the corner is modelled as a sphere of
-// the fillet radius, and the unfilleted edge is set back to clear it.
+// Known gap, one cause: filleting an edge whose neighbouring face is already a
+// fillet surface, in a *separate* operation.
 //
-// That is not what the rolling ball does. The ball stays tangent to the shared
-// face and pivots *around* the unfilleted edge, sweeping a horn torus that
-// comes to a point on it -- which is why Fusion leaves the vertical edge of a
-// filleted box rim sharp all the way to the top. The sphere never reaches the
-// unfilleted edge at all (it is at r*sqrt(3) from the centre, not r), so the
-// correct setback is zero and the correct corner is not a sphere.
+// The face's boundary there is the earlier fillet's end profile, an arc. The
+// new fillet needs to cut into that arc, but the corner solve only moves the
+// face's corner point -- it does not trim the boundary -- so the polygon folds
+// over itself and the operation is refused rather than producing a bad solid.
+// Fixing it properly means clipping each face against the tangent line of every
+// fillet arriving at it, rather than relocating corners.
 //
-// The setback is what these cases fail on. Removing it without also building
-// the pinch corner is worse, not better: the patch is still fitted as a sphere
-// and inflates outside the solid. So the fix is the corner surface, and until
-// it exists these stay recorded rather than silenced.
+// Filleting the same edges together in one operation is exact, which is not a
+// coincidence: the corner where they meet is blended once, against the original
+// faces, and never has to cut an existing blend. That is why Fusion attaches
+// many edges to a single fillet feature with a radius each, and why selecting
+// an edge next to an existing fillet should extend that feature rather than
+// stack a second one on top of it.
 static bool inKnownGap = false;
 static int gaps = 0;
 
@@ -91,13 +92,20 @@ static void expectInside(const Mesh& m, const AABB& original, const std::string&
     check(outside == 0, what + ": " + std::to_string(outside) + " vertices outside the original");
 }
 
-// Cross-section a 90-degree fillet removes: the square corner r x r, less the
-// inscribed polygonal approximation of the quarter disc that replaces it.
-// `segments` triangles of apex angle 90/segments.
-static double removedPerLength(double r, int segments) {
-    if (segments <= 1) return 0.5 * r * r;   // chamfer: the corner triangle
-    const double sector = 0.5 * segments * r * r * std::sin(kPi / (2.0 * segments));
-    return r * r - sector;
+// Cross-section a fillet removes at a dihedral of `theta` between the faces,
+// measured inside the solid.
+//
+// The ball of radius r touches each face at r/tan(theta/2) from the edge, so
+// the corner cut away is a kite of that area, less the polygon of `segments`
+// triangles that replaces it, each of apex angle (pi - theta)/segments. At
+// theta = pi/2 this is the familiar r^2 - quarter disc; the general form is
+// what a fillet on anything other than a box has to satisfy.
+//
+// The sign convention takes care of itself: a concave edge is the same
+// expression, and the material comes back rather than leaving.
+static double removedPerLength(double r, int segments, double theta = kPi / 2) {
+    return r * r / std::tan(theta / 2) -
+           0.5 * segments * r * r * std::sin((kPi - theta) / segments);
 }
 
 // The edge lying along the segment a-b, as a canonical edge index. Matching the
@@ -141,6 +149,76 @@ static void expectSameSolid(const Mesh& a, const Mesh& b, const std::string& wha
         worst = std::max(worst, std::sqrt(best));
     }
     check(worst < 1e-9, what + ": vertices do not line up (worst " + std::to_string(worst) + ")");
+}
+
+// L-profile in XZ extruded along Y. The edge at x=0,z=0 is reflex.
+static bool makeLPrism(Mesh& m) {
+    const double px[6] = {-10, 10, 10, 0, 0, -10};
+    const double pz[6] = {-10, -10, 0, 0, 10, 10};
+    std::vector<Vec3> p;
+    std::vector<uint32_t> sz, ix;
+    for (int i = 0; i < 6; ++i) p.push_back({px[i], -10, pz[i]});
+    for (int i = 0; i < 6; ++i) p.push_back({px[i], 10, pz[i]});
+    sz.push_back(6); for (int i = 0; i < 6; ++i) ix.push_back(i);
+    sz.push_back(6); for (int i = 5; i >= 0; --i) ix.push_back(6 + i);
+    for (int i = 0; i < 6; ++i) {
+        const int j = (i + 1) % 6;
+        sz.push_back(4);
+        ix.push_back(i); ix.push_back(6 + i); ix.push_back(6 + j); ix.push_back(j);
+    }
+    return m.build(p, sz, ix);
+}
+
+// Regular n-gon prism of the given across-flats side length, along Y.
+static bool makePrism(Mesh& m, int n, double side, double height) {
+    const double R = side / (2.0 * std::sin(kPi / n));
+    std::vector<Vec3> p;
+    std::vector<uint32_t> sz, ix;
+    for (int i = 0; i < n; ++i) {
+        const double a = 2.0 * kPi * i / n;
+        p.push_back({R * std::cos(a), -height / 2, R * std::sin(a)});
+    }
+    for (int i = 0; i < n; ++i) {
+        const double a = 2.0 * kPi * i / n;
+        p.push_back({R * std::cos(a), height / 2, R * std::sin(a)});
+    }
+    sz.push_back(n); for (int i = 0; i < n; ++i) ix.push_back(i);
+    sz.push_back(n); for (int i = n - 1; i >= 0; --i) ix.push_back(n + i);
+    for (int i = 0; i < n; ++i) {
+        const int j = (i + 1) % n;
+        sz.push_back(4);
+        ix.push_back(i); ix.push_back(n + i); ix.push_back(n + j); ix.push_back(j);
+    }
+    return m.build(p, sz, ix);
+}
+
+// Edges the solid turns inward at.
+static std::vector<Index> concaveEdges(const Mesh& m) {
+    std::vector<Index> out;
+    for (Index h = 0; h < m.halfedgeCount(); ++h) {
+        const Index tw = m.halfedges[h].twin;
+        if (h > tw) continue;
+        const Vec3 n0 = m.faceNormal(m.halfedges[h].face);
+        const Vec3 n1 = m.faceNormal(m.halfedges[tw].face);
+        if (dot(n0, n1) > 0.99) continue;
+        const Vec3 e = m.verts[m.halfedges[h].vertex].position -
+                       m.verts[m.fromVertex(h)].position;
+        if (dot(cross(n0, n1), e) < -1e-9) out.push_back(h);
+    }
+    return out;
+}
+
+// The edges of a prism that run along its length.
+static std::vector<Index> sideEdges(const Mesh& m) {
+    std::vector<Index> out;
+    for (Index h = 0; h < m.halfedgeCount(); ++h) {
+        const Index tw = m.halfedges[h].twin;
+        if (h > tw) continue;
+        const Vec3 a = m.verts[m.fromVertex(h)].position;
+        const Vec3 b = m.verts[m.halfedges[h].vertex].position;
+        if (std::fabs(a.y - b.y) > 1e-9) out.push_back(h);
+    }
+    return out;
 }
 
 int main() {
@@ -276,9 +354,8 @@ int main() {
     // built. Both orders must still produce the same solid, or the history
     // would depend on the sequence the user happened to click in.
     //
-    // Currently refused: the first fillet's setback already put a point on the
-    // shared unfilleted edge, and the second sets its neighbour back onto the
-    // same point, collapsing the face. See the note on `inKnownGap`.
+    // Currently refused: the second fillet has to cut into the first one's end
+    // profile. See the note on `inKnownGap`.
     inKnownGap = true;
     for (int segments : {1, 4, 8}) {
         Mesh ab, ba;
@@ -371,16 +448,116 @@ int main() {
         const std::string tag = "cylinder rim, " + std::to_string(segments) + " seg";
         check(rim.size() == 32, tag + ": rim should be 32 edges");
 
-        // Currently refused above a fraction of the facet width: the setback
-        // pushes tangentially along the side quad's vertical edges, and both
-        // ends of a 1.96mm facet move 2mm inward. Same cause as above.
-        inKnownGap = true;
         check(bevelEdges(m, rim, 2.0, segments), tag + ": fillet");
-        inKnownGap = false;
-        if (m.faceCount() == 34) continue;   // refused; nothing to check
         expectSolid(m, tag);
         expectInside(m, before, tag);
         std::printf("[curved] %s: %d faces, volume %.3f\n", tag.c_str(), m.faceCount(), volumeOf(m));
+    }
+
+    // ---- Concave edges -----------------------------------------------------
+    // The inverse fillet. Rounding a reflex edge adds material rather than
+    // removing it, and the section is the same arc tangent to both faces --
+    // which is the point of solving the arc from the face planes instead of
+    // assuming a quarter circle cut into a convex corner.
+    {
+        Mesh L;
+        check(makeLPrism(L), "L-prism builds");
+        check(std::fabs(volumeOf(L) - 6000.0) < 1e-9, "L-prism volume");
+
+        const std::vector<Index> concave = concaveEdges(L);
+        check(concave.size() == 1, "the L-prism has exactly one concave edge");
+
+        for (int segments : {1, 2, 4, 8}) {
+            Mesh m = L;
+            const std::string tag = "concave, " + std::to_string(segments) + " seg";
+            check(bevelEdges(m, concave, 3.0, segments), tag + ": fillet");
+            expectSolid(m, tag);
+
+            const double added = volumeOf(m) - 6000.0;
+            const double predicted = 20.0 * removedPerLength(3.0, segments);
+            check(added > 0.0, tag + ": a concave fillet adds material");
+            check(std::fabs(added - predicted) < 1e-6,
+                  tag + ": added " + std::to_string(added) + ", analytic " +
+                      std::to_string(predicted));
+            std::printf("[concave] %s: added %.4f (analytic %.4f)\n",
+                        tag.c_str(), added, predicted);
+        }
+    }
+
+    // ---- Dihedrals other than a right angle --------------------------------
+    // An equilateral prism meets at 60 degrees, so the ball touches each face
+    // at r/tan(30) = 1.73r from the edge rather than r. Getting this right is
+    // the difference between a fillet and an offset that happens to look like
+    // one on a box.
+    {
+        Mesh P;
+        check(makePrism(P, 3, 20.0, 20.0), "triangular prism builds");
+        const double base = volumeOf(P);
+        check(std::fabs(base - 3464.1016) < 1e-3, "equilateral prism volume");
+
+        for (int segments : {1, 2, 4, 8}) {
+            Mesh m;
+            makePrism(m, 3, 20.0, 20.0);
+            std::vector<Index> side = sideEdges(m);
+            check(side.size() == 3, "three vertical edges");
+
+            const std::string tag = "60 degree, " + std::to_string(segments) + " seg";
+            check(bevelEdges(m, side, 2.0, segments), tag + ": fillet");
+            expectSolid(m, tag);
+
+            // Each fillet runs off both ends into a cap, so no corner blends
+            // and the swept section is the whole story.
+            const double removed = base - volumeOf(m);
+            const double predicted = 3.0 * 20.0 * removedPerLength(2.0, segments, kPi / 3.0);
+            check(std::fabs(removed - predicted) < 1e-6,
+                  tag + ": removed " + std::to_string(removed) + ", analytic " +
+                      std::to_string(predicted));
+            std::printf("[angle] %s: removed %.4f (analytic %.4f)\n",
+                        tag.c_str(), removed, predicted);
+        }
+
+        // A shallow dihedral is the case that used to collapse: the setback is
+        // far larger than the radius, so assuming it equals the radius is not a
+        // small error there.
+        Mesh wide;
+        check(makePrism(wide, 12, 20.0, 20.0), "12-sided prism builds");
+        const double wideBase = volumeOf(wide);
+        std::vector<Index> side = sideEdges(wide);
+        check(side.size() == 12, "twelve vertical edges");
+        check(bevelEdges(wide, side, 1.0, 6), "shallow dihedral: fillet");
+        expectSolid(wide, "shallow dihedral");
+        const double removed = wideBase - volumeOf(wide);
+        const double interior = kPi * (12 - 2) / 12;
+        const double predicted = 12.0 * 20.0 * removedPerLength(1.0, 6, interior);
+        check(std::fabs(removed - predicted) < 1e-6,
+              "shallow dihedral: removed " + std::to_string(removed) + ", analytic " +
+                  std::to_string(predicted));
+        std::printf("[angle] 150 degree, 6 seg: removed %.4f (analytic %.4f)\n",
+                    removed, predicted);
+    }
+
+    // ---- Per-edge radii in one operation -----------------------------------
+    // Fusion's fillet carries a radius per edge. Two edges at different radii
+    // in one operation is a different solid from two operations, because the
+    // corner between them is blended once.
+    {
+        Mesh m;
+        makeBox(m);
+        FilletSpec spec;
+        spec.segments = 6;
+        spec.edges.push_back({edgeBetween(m, tFL, tFR), 2.0});
+        spec.edges.push_back({edgeBetween(m, tBL, tBR), 5.0});
+        check(filletEdges(m, spec), "per-edge radii");
+        expectSolid(m, "per-edge radii");
+        expectInside(m, box20, "per-edge radii");
+
+        const double removed = 8000.0 - volumeOf(m);
+        const double predicted = 20.0 * (removedPerLength(2.0, 6) + removedPerLength(5.0, 6));
+        check(std::fabs(removed - predicted) < 1e-6,
+              "per-edge radii: removed " + std::to_string(removed) + ", analytic " +
+                  std::to_string(predicted));
+        std::printf("[radii] two radii in one fillet: removed %.4f (analytic %.4f)\n",
+                    removed, predicted);
     }
 
     // ---- Refusal leaves the mesh alone -------------------------------------
@@ -405,8 +582,8 @@ int main() {
     }
 
     if (gaps)
-        std::printf("\n%d known gaps, all from the mixed-corner setback "
-                    "(see the note above `check`).\n", gaps);
+        std::printf("\n%d known gaps, all from filleting against an existing "
+                    "fillet (see the note above `check`).\n", gaps);
     std::printf("%s (%d failures)\n", failures ? "FAILED" : "ALL PASS", failures);
     return failures ? 1 : 0;
 }
