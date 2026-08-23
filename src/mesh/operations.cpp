@@ -833,6 +833,73 @@ void sampleArc(const Arc& arc, Vec3 p0, Vec3 p1, Vec3 axis, int segments,
 
 } // namespace
 
+// Splits faces that are not flat into triangles, which always are.
+//
+// A fillet is a ball rolled along an edge, kept touching the faces either side.
+// That needs those faces to have planes to touch. A quad whose corners do not
+// lie in one plane -- what a twisted face is -- has only an average, and the
+// real surface departs from it: rotate a cube's top face by 90 degrees and its
+// sides depart by 7mm. Offsets get measured from that average and the section's
+// arc solved against it, so the fillet is built where the surface is not, and
+// cuts back through it.
+//
+// A chamfer survives that, because a flat cut between two points is barely
+// sensitive to which plane they were measured from. Every extra segment follows
+// the arc further into the wrong place, which is why more segments made it
+// worse rather than better.
+//
+// Only faces a chosen edge actually touches are split, so the rest of the model
+// is left as the user built it. No vertices are added, so edge names -- which
+// come from their endpoints -- survive, and the caller re-finds its selection.
+static bool splitNonPlanarFaces(Mesh& mesh, const std::vector<bool>& beveled, Real tol) {
+    std::vector<bool> split(static_cast<size_t>(mesh.faceCount()), false);
+    std::vector<Index> fv;
+    bool any = false;
+
+    for (Index f = 0; f < mesh.faceCount(); ++f) {
+        if (mesh.faceDegree(f) < 4) continue;
+
+        bool touched = false;
+        const Index start = mesh.faces[f].halfedge;
+        Index h = start;
+        do {
+            if (beveled[h]) { touched = true; break; }
+            h = mesh.halfedges[h].next;
+        } while (h != start);
+        if (!touched) continue;
+
+        const Vec3 n = mesh.faceNormal(f);
+        const Vec3 c = mesh.faceCentroid(f);
+        mesh.faceVertices(f, fv);
+        Real worst = 0.0;
+        for (Index v : fv)
+            worst = std::max(worst, std::fabs(dot(mesh.verts[v].position - c, n)));
+        if (worst > tol) { split[f] = true; any = true; }
+    }
+    if (!any) return false;
+
+    Soup soup;
+    for (const MeshVertex& v : mesh.verts) soup.vertex(v.position, v.id);
+
+    std::vector<Index> tris;
+    for (Index f = 0; f < mesh.faceCount(); ++f) {
+        if (!split[f]) { soup.face(faceLoop(mesh, f), mesh.faces[f].id); continue; }
+        mesh.faceVertices(f, fv);
+        tris.clear();
+        mesh.triangulateFacePublic(f, tris);
+        for (size_t i = 0; i + 2 < tris.size(); i += 3)
+            soup.face({static_cast<uint32_t>(fv[tris[i]]),
+                       static_cast<uint32_t>(fv[tris[i + 1]]),
+                       static_cast<uint32_t>(fv[tris[i + 2]])},
+                      nameId(mesh.faces[f].id, IdRole::Split, i / 3));
+    }
+
+    Mesh next = mesh;
+    if (!soup.commit(next)) return false;
+    mesh = std::move(next);
+    return true;
+}
+
 bool filletEdges(Mesh& mesh, const FilletSpec& spec) {
     const int segments = spec.segments;
     const ElementId salt = spec.salt;
@@ -862,6 +929,55 @@ bool filletEdges(Mesh& mesh, const FilletSpec& spec) {
         radiusOf[e] = radiusOf[tw] = std::max(radiusOf[e], fe.radius);
     }
     if (chosen == 0) return bail("no edges chosen");
+
+    // Faces that are not flat have no plane for the ball to touch, so they are
+    // made flat first. The selection is re-found afterwards by name: splitting
+    // adds no vertices, and an edge is named by its endpoints.
+    {
+        Real smallest = std::numeric_limits<Real>::max();
+        for (Index h = 0; h < heCount; ++h)
+            if (beveled[h]) smallest = std::min(smallest, radiusOf[h]);
+        const Real modelScale = std::max(length(mesh.bounds().size()), Real(1.0));
+        const Real flatTol = std::max(modelScale * 1e-9, smallest * 1e-3);
+
+        // Held by where their ends are, not by name. Splitting moves no vertex
+        // and adds none, so the endpoints are the one key that works whether
+        // the mesh has been named or not -- an imported body has not been.
+        struct Wanted { Vec3 a, b; Real radius; };
+        std::vector<Wanted> want;
+        for (Index h = 0; h < heCount; ++h)
+            if (beveled[h] && h < mesh.halfedges[h].twin)
+                want.push_back(Wanted{mesh.verts[mesh.fromVertex(h)].position,
+                                      mesh.verts[mesh.halfedges[h].vertex].position,
+                                      radiusOf[h]});
+
+        Mesh flattened = mesh;
+        if (splitNonPlanarFaces(flattened, beveled, flatTol)) {
+            FilletSpec again;
+            again.segments = spec.segments;
+            again.salt = spec.salt;
+
+            const Real snap = modelScale * 1e-9;
+            for (const Wanted& w : want) {
+                Index found = kInvalid;
+                for (Index h = 0; h < flattened.halfedgeCount(); ++h) {
+                    if (h > flattened.halfedges[h].twin) continue;
+                    const Vec3 p = flattened.verts[flattened.fromVertex(h)].position;
+                    const Vec3 q = flattened.verts[flattened.halfedges[h].vertex].position;
+                    if ((lengthSq(p - w.a) < snap * snap && lengthSq(q - w.b) < snap * snap) ||
+                        (lengthSq(p - w.b) < snap * snap && lengthSq(q - w.a) < snap * snap)) {
+                        found = h;
+                        break;
+                    }
+                }
+                if (found == kInvalid) return bail("an edge went missing when flattening");
+                again.edges.push_back({found, w.radius});
+            }
+            if (!filletEdges(flattened, again)) return false;
+            mesh = std::move(flattened);
+            return true;
+        }
+    }
 
     // Scaled to the model, not fixed. Sections that should coincide are
     // computed two ways -- offset from a face, and cut back along an edge --

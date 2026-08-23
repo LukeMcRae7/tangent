@@ -169,6 +169,28 @@ static bool makeLPrism(Mesh& m) {
     return m.build(p, sz, ix);
 }
 
+// A cube with its top face rotated about Z, which is what twisting one does.
+// The four side faces stop being flat: at 90 degrees their corners sit 7mm off
+// the plane through them.
+static bool makeTwistedCube(Mesh& m, double degrees) {
+    const double a = degrees * kPi / 180.0;
+    const double c[4][2] = {{-10, -10}, {10, -10}, {10, 10}, {-10, 10}};
+    std::vector<Vec3> p;
+    std::vector<uint32_t> sz, ix;
+    for (int i = 0; i < 4; ++i) p.push_back({c[i][0], c[i][1], -10});
+    for (int i = 0; i < 4; ++i)
+        p.push_back({c[i][0] * std::cos(a) - c[i][1] * std::sin(a),
+                     c[i][0] * std::sin(a) + c[i][1] * std::cos(a), 10});
+    sz.push_back(4); for (int i = 3; i >= 0; --i) ix.push_back(i);
+    sz.push_back(4); for (int i = 0; i < 4; ++i) ix.push_back(4 + i);
+    for (int i = 0; i < 4; ++i) {
+        const int j = (i + 1) % 4;
+        sz.push_back(4);
+        ix.push_back(i); ix.push_back(j); ix.push_back(4 + j); ix.push_back(4 + i);
+    }
+    return m.build(p, sz, ix);
+}
+
 // Regular n-gon prism of the given across-flats side length, along Y.
 static bool makePrism(Mesh& m, int n, double side, double height) {
     const double R = side / (2.0 * std::sin(kPi / n));
@@ -654,6 +676,41 @@ int main() {
         check(bevelAllEdges(lim, w, 8), "the reported maximum width is usable");
         expectSolid(lim, "maximum-width fillet");
         std::printf("[limit] max width %.3f, volume %.3f\n", w, volumeOf(lim));
+    }
+
+    // ---- Faces that are not flat -------------------------------------------
+    // Twist a cube's top face and its sides stop being planes. A fillet is a
+    // ball rolled along an edge touching the faces either side, so it needs
+    // those faces to have planes to touch; measuring against the average of a
+    // twisted quad builds the arc where the surface is not, and it cuts back
+    // through. A chamfer barely noticed and every extra segment made it worse,
+    // which is exactly backwards from how more segments should behave.
+    for (double twist : {15.0, 45.0}) {
+        Mesh base;
+        check(makeTwistedCube(base, twist), "twisted cube builds");
+        const double baseVolume = checkHealth(base, false).volume;
+
+        const std::string at = std::to_string(static_cast<int>(twist)) + " deg";
+        for (int segments : {1, 4, 8}) {
+            Mesh m;
+            makeTwistedCube(m, twist);
+            std::vector<Index> all;
+            for (Index h = 0; h < m.halfedgeCount(); ++h)
+                if (h < m.halfedges[h].twin) all.push_back(h);
+
+            const std::string tag = "twisted " + at + ", " + std::to_string(segments) + " seg";
+            check(bevelEdges(m, all, 2.0, segments), tag + ": fillet");
+            if (m.faceCount() == base.faceCount()) continue;
+
+            const MeshHealth h = checkHealth(m);
+            check(h.selfIntersections == 0,
+                  tag + ": " + std::to_string(h.selfIntersections) + " self-intersections");
+            check(h.watertight, tag + ": not watertight");
+            check(h.volume > 0.0, tag + ": inside out");
+            check(h.volume < baseVolume + 1e-6,
+                  tag + ": rounding a convex body should not add volume");
+        }
+        std::printf("[twist] %s: filleted cleanly at 1, 4 and 8 segments\n", at.c_str());
     }
 
     if (gaps)
