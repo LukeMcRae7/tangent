@@ -750,6 +750,15 @@ bool filletEdges(Mesh& mesh, const FilletSpec& spec) {
     }
     auto blendsAt = [&](Index v) { return filletsAt[v] >= 2; };
 
+    // Unfilleted edges arriving at each vertex. One or more means the corner is
+    // a mitre rather than a ball; see the patch loop.
+    std::vector<int> sharpAt(static_cast<size_t>(mesh.vertexCount()), 0);
+    for (Index h = 0; h < heCount; ++h) {
+        if (beveled[h] || h > mesh.halfedges[h].twin) continue;
+        ++sharpAt[mesh.fromVertex(h)];
+        ++sharpAt[mesh.halfedges[h].vertex];
+    }
+
     // The ball that sits in the corner at each vertex.
     //
     // This is the whole of the corner model. A fillet is the surface of a ball
@@ -1242,12 +1251,6 @@ bool filletEdges(Mesh& mesh, const FilletSpec& spec) {
         } while (h != start);
         if (!any) continue;
 
-        // Walk the outgoing half-edges. Each face contributes its corner --
-        // which may be two points where it split -- and each beveled edge
-        // contributes the arc crossing it, which the strip already shares.
-        std::vector<uint32_t> loop;
-        std::vector<Vec3> loopPos;
-        std::vector<Vec3> centres;
         // Running counters so every point and face a patch emits gets its own
         // name. The code path is deterministic, so re-evaluating names them the
         // same way again.
@@ -1259,6 +1262,187 @@ bool filletEdges(Mesh& mesh, const FilletSpec& spec) {
             soup.face(l, nameId(salt, IdRole::Patch, mesh.verts[v].id, 2, patchF++));
         };
 
+        // A corner where two edges are filleted and at least one stays sharp is
+        // not a ball corner. The ball only settles into a corner when every
+        // face there is tangent to it, and the faces along a sharp edge are
+        // not. What happens instead is that the two fillet surfaces run into
+        // each other and are trimmed along the curve where they cross -- a
+        // mitre -- and the sharp edge runs up to the single point where that
+        // curve ends. It is what Fusion does, and Blender, and it is why a
+        // filleted box rim has a sharp vertical edge and no shelf at the
+        // corner.
+        //
+        // Building a sphere there instead leaves a gap between the sphere and
+        // the sharp edge, which then has to be covered by a flat gusset: a
+        // horizontal ledge tucked into the corner, facing up, that no fillet
+        // should ever produce.
+        //
+        // The mitre is exact and cheap. Take the section at the end of one
+        // fillet and slide each of its points along that edge until it lands on
+        // the other fillet's surface. Every point of the result is on both
+        // cylinders by construction, so the two ruled patches either side of it
+        // meet without a seam.
+        if (filletsAt[v] == 2 && sharpAt[v] == 1 && segments >= 1) {
+            Index g0 = kInvalid, g1 = kInvalid;
+            Index k = start;
+            do {
+                if (beveled[k]) { (g0 == kInvalid ? g0 : g1) = k; }
+                k = mesh.halfedges[mesh.halfedges[k].twin].next;
+            } while (k != start);
+
+            // The face both fillets bound. Their sections start there, and so
+            // does the mitre.
+            Index shared = kInvalid;
+            if (g0 != kInvalid && g1 != kInvalid) {
+                const Index a0 = mesh.halfedges[g0].face;
+                const Index a1 = mesh.halfedges[mesh.halfedges[g0].twin].face;
+                const Index b0 = mesh.halfedges[g1].face;
+                const Index b1 = mesh.halfedges[mesh.halfedges[g1].twin].face;
+                if (a0 == b0 || a0 == b1) shared = a0;
+                else if (a1 == b0 || a1 == b1) shared = a1;
+            }
+
+            // Only where the two fillets actually turn a corner. Where they
+            // run straight through -- consecutive edges of a rim on a curved
+            // wall, a few degrees apart -- they are one surface continuing, and
+            // there is nothing to trim one against the other. Mitring there
+            // cuts a real fillet against itself.
+            const bool turns =
+                g0 != kInvalid && g1 != kInvalid &&
+                dot(normalize(dirOf(g0)), normalize(dirOf(g1))) > -0.7;   // sharper than 135 degrees
+
+            if (turns && shared != kInvalid &&
+                arcAt[g0].circular && arcAt[g1].circular &&
+                ringAt[g0].size() == ringAt[g1].size() && ringAt[g0].size() >= 2) {
+
+                // Which of the two lies *in* the shared face decides the way
+                // round the patch is wound, and that is not the order the
+                // circulation happened to visit them in -- the sharp edge can
+                // fall either side. Naming them by their role rather than by
+                // their order is what makes the winding independent of it.
+                if (mesh.halfedges[g0].face != shared) std::swap(g0, g1);
+
+                // ringAt runs from face(h)'s corner round to the far face's, so
+                // the second section is read backwards. Both then start at the
+                // shared corner and their indices correspond.
+                std::vector<uint32_t> ra = ringAt[g0], rb = ringAt[g1];
+                if (mesh.halfedges[g0].face != shared) std::reverse(ra.begin(), ra.end());
+                if (mesh.halfedges[g1].face != shared) std::reverse(rb.begin(), rb.end());
+
+                // Slides `q` along `u` until it sits at radius r about the axis
+                // of the other fillet. Nearest non-negative root: the section
+                // starts on its own cylinder and moves toward the corner.
+                auto slideOnto = [&](Vec3 q, Vec3 u, Vec3 axisPt, Vec3 axisDir, Real r,
+                                     Real& t) {
+                    const Vec3 a = u - axisDir * dot(u, axisDir);
+                    const Vec3 w = q - axisPt;
+                    const Vec3 b = w - axisDir * dot(w, axisDir);
+                    const Real aa = lengthSq(a);
+                    if (aa < 1e-18) return false;
+                    const Real bb = dot(a, b), cc = lengthSq(b) - r * r;
+                    const Real disc = bb * bb - aa * cc;
+                    if (disc < 0.0) return false;
+                    const Real root = std::sqrt(disc);
+                    const Real t0 = (-bb - root) / aa, t1 = (-bb + root) / aa;
+                    t = (t0 >= -1e-9) ? t0 : t1;
+                    return t >= -1e-9;
+                };
+
+                const Vec3 u0 = -normalize(dirOf(g0));
+                const Vec3 d1 = normalize(dirOf(g1));
+                const Real r1 = radiusOf[g1];
+
+                // The point the sharp edge runs up to. The faces either side of
+                // that edge have already been cut back to it, so the mitre has
+                // to end on that exact vertex rather than on its own idea of
+                // where the curve finishes -- otherwise the patch and the faces
+                // meet at two points a hair apart and the surface does not
+                // close.
+                Index sharp = kInvalid;
+                Index sh = start;
+                do {
+                    if (!beveled[sh]) sharp = sh;
+                    sh = mesh.halfedges[mesh.halfedges[sh].twin].next;
+                } while (sh != start);
+
+                std::vector<uint32_t> mid;
+                bool ok = sharp != kInvalid;
+                for (size_t i = 0; ok && i < ra.size(); ++i) {
+                    // The ends belong to what is already there: the shared
+                    // face's corner, and the top of the sharp edge.
+                    if (i == 0) { mid.push_back(ra[0]); continue; }
+                    if (i + 1 == ra.size()) { mid.push_back(edgePoint(sharp)); continue; }
+
+                    Real t = 0.0;
+                    const Vec3 q = soup.positions[ra[i]];
+                    if (!slideOnto(q, u0, arcAt[g1].centre, d1, r1, t)) { ok = false; break; }
+
+                    // Where the two fillets differ sharply in how far they set
+                    // their faces back -- a 90 degree edge meeting a 22 degree
+                    // one -- the curve where they cross can run outside the
+                    // solid entirely. A fillet on a convex corner only ever
+                    // removes material, so a point outside any face at this
+                    // vertex means the mitre is not the right construction
+                    // here, and the corner falls back to a blend.
+                    const Vec3 p = q + u0 * t;
+                    Index fk = start;
+                    do {
+                        const Index face = mesh.halfedges[fk].face;
+                        if (face != kInvalid &&
+                            dot(p - posOf(v), faceNormals[face]) > 1e-9) ok = false;
+                        fk = mesh.halfedges[mesh.halfedges[fk].twin].next;
+                    } while (fk != start && ok);
+                    if (!ok) break;
+
+                    mid.push_back(patchVertex(p));
+                }
+
+                // Every piece of the patch has to face out of the solid. A
+                // mitre between two fillets that set their faces back by very
+                // different amounts can fold back on itself, and a folded patch
+                // is a self-intersecting model, so check before committing to
+                // it rather than after.
+                Vec3 outward{};
+                {
+                    Index fk = start;
+                    do {
+                        const Index face = mesh.halfedges[fk].face;
+                        if (face != kInvalid) outward += faceNormals[face];
+                        fk = mesh.halfedges[mesh.halfedges[fk].twin].next;
+                    } while (fk != start);
+                    if (lengthSq(outward) < 1e-18) ok = false;
+                    else outward = normalize(outward);
+                }
+
+                auto facesOut = [&](const std::vector<uint32_t>& l) {
+                    Vec3 n{};
+                    for (size_t i = 0; i < l.size(); ++i)
+                        n += cross(soup.positions[l[i]],
+                                   soup.positions[l[(i + 1) % l.size()]]);
+                    return lengthSq(n) < 1e-24 || dot(normalize(n), outward) > 0.0;
+                };
+
+                std::vector<std::vector<uint32_t>> pieces;
+                for (size_t i = 0; ok && i + 1 < ra.size(); ++i) {
+                    pieces.push_back({ra[i], mid[i], mid[i + 1], ra[i + 1]});
+                    pieces.push_back({mid[i], rb[i], rb[i + 1], mid[i + 1]});
+                    if (!facesOut(pieces[pieces.size() - 2]) || !facesOut(pieces.back()))
+                        ok = false;
+                }
+
+                if (ok) {
+                    for (const auto& piece : pieces) patchFace(piece);
+                    continue;
+                }
+            }
+        }
+
+        // Walk the outgoing half-edges. Each face contributes its corner --
+        // which may be two points where it split -- and each beveled edge
+        // contributes the arc crossing it, which the strip already shares.
+        std::vector<uint32_t> loop;
+        std::vector<Vec3> loopPos;
+        std::vector<Vec3> centres;
         std::vector<size_t> cornerSlots;   // where the face corners sit in `loop`
 
         auto push = [&](uint32_t idx) {
