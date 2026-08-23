@@ -1304,14 +1304,18 @@ bool filletEdges(Mesh& mesh, const FilletSpec& spec) {
                 else if (a1 == b0 || a1 == b1) shared = a1;
             }
 
-            // Only where the two fillets actually turn a corner. Where they
-            // run straight through -- consecutive edges of a rim on a curved
-            // wall, a few degrees apart -- they are one surface continuing, and
-            // there is nothing to trim one against the other. Mitring there
-            // cuts a real fillet against itself.
+            // Two fillets meeting at a vertex are trimmed against each other
+            // whether they turn a right angle or continue almost straight. On a
+            // rim following a curved wall the turn is a few degrees and the
+            // trim is correspondingly small -- but it is still the right
+            // surface, and it is a handful of faces where a blend patch at
+            // every vertex around the rim was hundreds.
+            //
+            // Exactly collinear is the one case with nothing to trim: the two
+            // cylinders coincide and there is no curve where they cross.
             const bool turns =
                 g0 != kInvalid && g1 != kInvalid &&
-                dot(normalize(dirOf(g0)), normalize(dirOf(g1))) > -0.7;   // sharper than 135 degrees
+                dot(normalize(dirOf(g0)), normalize(dirOf(g1))) > -0.99999;
 
             if (turns && shared != kInvalid &&
                 arcAt[g0].circular && arcAt[g1].circular &&
