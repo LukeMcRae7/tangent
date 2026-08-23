@@ -69,7 +69,7 @@ struct Soup {
     //
     // Only a neighbour sharing exactly one edge will do. Two shared edges mean
     // splicing would leave a polygon that touches itself.
-    void absorb(const std::vector<size_t>& faces, Real cosTol) {
+    void absorb(const std::vector<size_t>& faces, Real cosTol, bool chain = false) {
         if (faces.empty()) return;
 
         const size_t n = faceSizes.size();
@@ -119,7 +119,8 @@ struct Soup {
             }
 
             for (const auto& [g, count] : shared) {
-                if (count != 1 || gone[g] || listed[g]) continue;
+                if (count != 1 || gone[g]) continue;
+                if (listed[g] && !chain) continue;
                 if (dot(nf, normalOf(g)) < cosTol) continue;
 
                 // The shared edge, as f walks it and as g walks it back.
@@ -1880,6 +1881,39 @@ bool bevelEdges(Mesh& mesh, const std::vector<Index>& edges, Real width, int seg
     spec.edges.reserve(edges.size());
     for (Index e : edges) spec.edges.push_back({e, width});
     return filletEdges(mesh, spec);
+}
+
+int mergeCoplanarFaces(Mesh& mesh, Real toleranceDegrees) {
+    if (mesh.empty()) return 0;
+
+    Soup soup;
+    soup.positions.reserve(mesh.verts.size());
+    for (const MeshVertex& v : mesh.verts) soup.vertex(v.position, v.id);
+    for (Index f = 0; f < mesh.faceCount(); ++f) soup.face(faceLoop(mesh, f), mesh.faces[f].id);
+
+    const size_t before = soup.faceSizes.size();
+    std::vector<size_t> all(before);
+    for (size_t i = 0; i < before; ++i) all[i] = i;
+
+    // Repeated because absorbing one pair can make another pair adjacent along
+    // a single edge where before they met along two.
+    const Real cosTol = std::cos(toleranceDegrees * kPi / 180.0);
+    size_t count = soup.faceSizes.size();
+    for (int pass = 0; pass < 8; ++pass) {
+        soup.absorb(all, cosTol, true);
+        if (soup.faceSizes.size() == count) break;
+        count = soup.faceSizes.size();
+        all.assign(count, 0);
+        for (size_t i = 0; i < count; ++i) all[i] = i;
+    }
+
+    const int merged = static_cast<int>(before - soup.faceSizes.size());
+    if (merged == 0) return 0;
+
+    Mesh next = mesh;
+    if (!soup.commit(next)) return 0;   // leave the mesh alone rather than risk it
+    mesh = std::move(next);
+    return merged;
 }
 
 bool bevelAllEdges(Mesh& mesh, Real width, int segments) {

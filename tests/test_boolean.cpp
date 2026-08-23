@@ -233,6 +233,42 @@ int main() {
         }
     }
 
+    // ---- Touching parts become one face ------------------------------------
+    // A boolean cuts every face it touches into triangles and leaves a fan of
+    // them where one flat surface used to be. None of those edges are on the
+    // model, only in the data, and picking one selects a sliver of what the
+    // user sees as a face -- or a piece that disappears under an adjoining
+    // part. Coplanar neighbours are merged back into one face afterwards.
+    {
+        Mesh lo, hi, out;
+        BoxParams pl{20, 20, 20};
+        BoxParams ph{20, 20, 40};
+        makeBox(lo, pl);
+        makeBox(hi, ph);
+        for (auto& v : hi.verts) v.position += Vec3{20, 0, 10};
+
+        check(meshBoolean(lo, hi, BooleanOp::Union, out), "union of two boxes side by side");
+        check(checkHealth(out).solid(), "the L is a solid");
+
+        int seams = 0;
+        for (Index he = 0; he < out.halfedgeCount(); ++he) {
+            const Index tw = out.halfedges[he].twin;
+            if (he > tw) continue;
+            const Index a = out.halfedges[he].face, b = out.halfedges[tw].face;
+            if (a == kInvalid || b == kInvalid) continue;
+            if (dot(out.faceNormal(a), out.faceNormal(b)) > 0.9999619) ++seams;
+        }
+        check(seams == 0, "no edge is left between two faces in the same plane");
+
+        // An L-shaped solid has eight faces and no more: six walls and two
+        // ends. Anything above that is seams that were not merged.
+        check(out.faceCount() == 8,
+              "the L comes out as eight faces, not a triangle fan (" +
+                  std::to_string(out.faceCount()) + ")");
+        std::printf("[bool] two touching boxes merge into %d faces, %d seams\n",
+                    out.faceCount(), seams);
+    }
+
     std::printf("\n%s (%d failures)\n", failures ? "FAILED" : "ALL PASS", failures);
     return failures ? 1 : 0;
 }

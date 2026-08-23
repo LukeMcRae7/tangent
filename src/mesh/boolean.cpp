@@ -1,5 +1,7 @@
 #include "mesh/boolean.h"
 
+#include "mesh/operations.h"
+
 #include <algorithm>
 #include <array>
 #include <cstdio>
@@ -519,7 +521,15 @@ bool meshBoolean(const Mesh& a, const Mesh& b, BooleanOp op, Mesh& out) {
     na.gather(result);
     nb.gather(result);
 
-    return weldAndBuild(result, out);
+    if (!weldAndBuild(result, out)) return false;
+
+    // A boolean cuts every face it touches into triangles and leaves a fan of
+    // them where one flat surface used to be, plus a seam wherever the two
+    // solids' surfaces met in the same plane. None of those edges are on the
+    // model; they are only in the data, and picking one selects a sliver of
+    // what the user sees as a face.
+    mergeCoplanarFaces(out);
+    return true;
 }
 
 } // namespace tg

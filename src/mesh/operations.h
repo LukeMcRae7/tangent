@@ -83,6 +83,23 @@ bool bevelEdges(Mesh& mesh, const std::vector<Index>& edges, Real width,
 // Every edge at once. This is the whole-part rounding pass.
 bool bevelAllEdges(Mesh& mesh, Real width, int segments = 1);
 
+// Merges neighbouring faces that lie in the same plane, so a surface that is
+// geometrically flat is one face rather than several with seams across it.
+//
+// Operations leave these behind routinely. Raise part of a solid and the wall
+// of the raised part is coplanar with the wall it grew out of, but they are two
+// faces with an edge between them -- an edge that is not on the model, only in
+// the data. Picking one of them selects half of what the user sees as a face.
+//
+// Only pairs sharing exactly one edge are merged, and only when the result is a
+// simple polygon. That is what keeps it safe: merging along two shared edges
+// would pinch the face, and merging a ring closed would need a face with a
+// hole, which this mesh cannot represent. Both cases are left alone, so a ring
+// of coplanar faces merges as far as it can and stops.
+//
+// Returns the number of merges performed.
+int mergeCoplanarFaces(Mesh& mesh, Real toleranceDegrees = 0.5);
+
 // Splits a mesh into its connected bodies, in descending order of face count.
 // Returns the number produced; a mesh that is already one piece yields itself,
 // so a caller can always use the result.
