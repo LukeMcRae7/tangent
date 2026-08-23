@@ -36,15 +36,75 @@ enum class FeatureKind {
 
 const char* featureKindName(FeatureKind k);
 
+// What a feature acts on, expressed so that it still means the same thing after
+// the steps before it change.
+//
+// `Explicit` is a list of stable names -- what a user picking individual faces
+// or edges produces. It resolves exactly, and refuses rather than guesses when
+// an element it named no longer exists.
+//
+// `FaceBoundary` is every edge around one face. It exists because a list of
+// names cannot express "the rim": raise a cylinder from sixteen segments to
+// twenty-four and the sixteen edges the user clicked are genuinely gone, but
+// the cap they surrounded is still there and still has a rim. Naming the cap
+// and taking its boundary re-selects the whole rim at its new segment count,
+// which is what the user meant.
+struct ElementRefs {
+    enum class Kind : uint32_t { Explicit, FaceBoundary, All };
+
+    Kind kind = Kind::Explicit;
+    std::vector<ElementId> ids;    // Explicit
+    ElementId face = kNoId;        // FaceBoundary
+
+    // How many elements are named outright. A rim or a whole body is not a
+    // count, so callers wanting to show something use describe().
+    size_t count() const { return kind == Kind::Explicit ? ids.size() : 0; }
+
+    // Short phrase for the timeline: "3 edges", "a face's rim", "every edge".
+    std::string describe(const char* noun) const;
+
+    bool empty() const {
+        return kind == Kind::Explicit ? ids.empty()
+             : kind == Kind::FaceBoundary ? face == kNoId
+             : false;
+    }
+
+    // Resolves to half-edge indices in `mesh`. Returns false if anything named
+    // here has gone; a feature that cannot find what it acts on is errored, not
+    // quietly re-pointed at whatever now sits at those numbers.
+    bool resolveEdges(const Mesh& mesh, std::vector<Index>& out) const;
+
+    // Resolves to face indices.
+    bool resolveFaces(const Mesh& mesh, std::vector<Index>& out) const;
+};
+
+// Records a selection made on `mesh` as something that will still mean the
+// same thing later.
+ElementRefs nameFaces(const Mesh& mesh, const std::vector<Index>& faces);
+
+// As above, and additionally: if the chosen edges are exactly the boundary of
+// one face, that is recorded instead of the list. It is what the user meant --
+// they picked a rim, not sixteen edges that happen to be there today -- and it
+// is the only form that survives the face being retessellated under them.
+ElementRefs nameEdges(const Mesh& mesh, const std::vector<Index>& edges);
+
+std::vector<ElementId> nameVertices(const Mesh& mesh, const std::vector<Index>& verts);
+
 struct Feature {
     FeatureKind kind = FeatureKind::Primitive;
     bool        enabled = true;
 
+    // Identifies this feature for as long as it exists, independent of where it
+    // sits in the chain. It salts the names of everything the feature creates,
+    // so moving a feature does not rename its output and two features of the
+    // same kind do not collide. Assigned when the feature is created.
+    ElementId uid = 0;
+
     // Primitive: the base shape the chain starts from.
     PrimitiveSpec primitive;
 
-    // Extrude / Inset: which faces, as numbered at this point in the chain.
-    std::vector<Index> faces;
+    // Extrude / Inset: which faces, by name as of this point in the chain.
+    ElementRefs faces;
     Real distance = 5.0;    // Extrude, signed
     Real amount   = 2.0;    // Inset
 
@@ -61,12 +121,14 @@ struct Feature {
     // cut into the first one's surface, which is a harder problem and one we
     // currently refuse. So the editor extends this list rather than appending
     // another fillet whenever it can.
-    std::vector<Index> edges;
+    ElementRefs edges;
     std::vector<Real>  radii;
     Real width    = 1.0;
     int  segments = 1;
 
-    // Radius for `edges[i]`, falling back to the feature-wide width.
+    // Radius for the i'th resolved edge, falling back to the feature-wide
+    // width. Only an explicit selection carries per-edge radii; a rim selected
+    // as a face's boundary is one radius by construction.
     Real radiusFor(size_t i) const {
         return i < radii.size() && radii[i] > 0.0 ? radii[i] : width;
     }
@@ -83,8 +145,8 @@ struct Feature {
     // VertexEdit: a free-form drag, recorded as explicit offsets. Not
     // parametric in any meaningful sense, but it has to live in the chain so
     // that re-evaluating an earlier feature does not discard it.
-    std::vector<Index> verts;
-    std::vector<Vec3>  offsets;
+    std::vector<ElementId> verts;
+    std::vector<Vec3>      offsets;
 
     // Set by evaluation; not part of the definition.
     bool        errored = false;

@@ -16,7 +16,7 @@
 
 namespace tg {
 
-inline constexpr uint32_t kProjectVersion = 2;   // 2: fillets carry a radius per edge
+inline constexpr uint32_t kProjectVersion = 3;   // 3: features name what they act on
 
 struct ProjectResult {
     bool ok = false;

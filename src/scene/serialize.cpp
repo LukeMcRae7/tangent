@@ -23,6 +23,16 @@ struct Writer {
     void f64(double v)   { uint64_t b; std::memcpy(&b, &v, 8);
                            for (int i = 0; i < 8; ++i) buf.push_back((b >> (i * 8)) & 0xFF); }
     void vec3(const Vec3& v) { f64(v.x); f64(v.y); f64(v.z); }
+    void u64(uint64_t v) { for (int i = 0; i < 8; ++i) buf.push_back(static_cast<uint8_t>((v >> (i * 8)) & 0xFF)); }
+    void ids(const std::vector<ElementId>& v) {
+        u32(static_cast<uint32_t>(v.size()));
+        for (ElementId x : v) u64(x);
+    }
+    void refs(const ElementRefs& r) {
+        u32(static_cast<uint32_t>(r.kind));
+        ids(r.ids);
+        u64(r.face);
+    }
     void text(const std::string& s) { u32(static_cast<uint32_t>(s.size())); raw(s.data(), s.size()); }
 
     template <typename T> void indices(const std::vector<T>& v) {
@@ -49,6 +59,29 @@ struct Reader {
         return v;
     }
     int32_t i32() { return static_cast<int32_t>(u32()); }
+    uint64_t u64() {
+        if (!need(8)) return 0;
+        uint64_t v = 0;
+        for (int i = 0; i < 8; ++i) v |= static_cast<uint64_t>(*p++) << (i * 8);
+        return v;
+    }
+    std::vector<ElementId> ids() {
+        const uint32_t n = u32();
+        std::vector<ElementId> v;
+        if (!need(static_cast<size_t>(n) * 8)) return v;
+        v.reserve(n);
+        for (uint32_t i = 0; i < n; ++i) v.push_back(u64());
+        return v;
+    }
+    ElementRefs refs() {
+        ElementRefs r;
+        const uint32_t k = u32();
+        r.kind = k <= static_cast<uint32_t>(ElementRefs::Kind::All)
+               ? static_cast<ElementRefs::Kind>(k) : ElementRefs::Kind::Explicit;
+        r.ids = ids();
+        r.face = u64();
+        return r;
+    }
     double f64() {
         if (!need(8)) return 0.0;
         uint64_t b = 0;
@@ -151,8 +184,9 @@ void writeFeature(Writer& w, const Feature& f) {
     w.u32(static_cast<uint32_t>(f.kind));
     w.u8(f.enabled ? 1 : 0);
     writeSpec(w, f.primitive);
-    w.indices(f.faces);
-    w.indices(f.edges);
+    w.u64(f.uid);
+    w.refs(f.faces);
+    w.refs(f.edges);
     w.u32(static_cast<uint32_t>(f.radii.size()));
     for (Real x : f.radii) w.f64(x);
     w.f64(f.distance);
@@ -160,7 +194,7 @@ void writeFeature(Writer& w, const Feature& f) {
     w.f64(f.width);
     w.i32(f.segments);
     w.u32(static_cast<uint32_t>(f.booleanOp));
-    w.indices(f.verts);
+    w.ids(f.verts);
     w.u32(static_cast<uint32_t>(f.offsets.size()));
     for (const Vec3& o : f.offsets) w.vec3(o);
     writeMesh(w, f.bakedMesh);
@@ -172,11 +206,12 @@ bool readFeature(Reader& r, Feature& f) {
     f.kind = static_cast<FeatureKind>(kind);
     f.enabled = r.u8() != 0;
     if (!readSpec(r, f.primitive)) return false;
-    f.faces = r.indices<Index>();
-    f.edges = r.indices<Index>();
+    f.uid   = r.u64();
+    f.faces = r.refs();
+    f.edges = r.refs();
     {
         const uint32_t n = r.u32();
-        if (n > f.edges.size()) return false;
+        if (n > f.edges.count()) return false;
         f.radii.resize(n);
         for (uint32_t i = 0; i < n; ++i) f.radii[i] = r.f64();
     }
@@ -187,7 +222,7 @@ bool readFeature(Reader& r, Feature& f) {
     const uint32_t op = r.u32();
     if (op > static_cast<uint32_t>(BooleanOp::Intersection)) return false;
     f.booleanOp = static_cast<BooleanOp>(op);
-    f.verts = r.indices<Index>();
+    f.verts = r.ids();
     const uint32_t offsetCount = r.u32();
     if (r.bad || !r.need(static_cast<size_t>(offsetCount) * 24)) return false;
     f.offsets.clear();
@@ -206,6 +241,7 @@ ProjectResult saveProject(const Scene& scene, const std::string& path) {
     Writer w;
     w.raw(kMagic, sizeof(kMagic));
     w.u32(kProjectVersion);
+    w.u64(scene.nextFeatureUid());
     w.u32(static_cast<uint32_t>(scene.objectCount()));
 
     for (const auto& obj : scene.objects()) {
@@ -262,9 +298,12 @@ ProjectResult loadProject(Scene& scene, const std::string& path) {
         return res;
     }
 
+    const uint64_t nextUid = r.u64();
+
     // Built into a scratch scene first: a truncated or corrupt file must not
     // leave the user with half their model gone.
     Scene loaded;
+    loaded.setNextFeatureUid(nextUid);
     const uint32_t count = r.u32();
     if (r.bad) { res.error = "truncated header"; return res; }
 

@@ -713,7 +713,7 @@ void Application::commitTransform() {
 
             Feature f;
             f.kind = FeatureKind::Extrude;
-            f.faces = pendingExtrudeFaces_;
+            f.faces = nameFaces(pendingMeshBefore_, pendingExtrudeFaces_);
             f.distance = distance;
 
             // Roll back to the pre-extrude chain, then let the feature produce
@@ -751,7 +751,7 @@ void Application::commitTransform() {
         if (obj) {
             Feature f;
             f.kind = FeatureKind::VertexEdit;
-            f.verts = vc->vertices();
+            f.verts = nameVertices(obj->mesh, vc->vertices());
             for (size_t i = 0; i < f.verts.size(); ++i)
                 f.offsets.push_back(vc->afterPositions()[i] - vc->beforePositions()[i]);
 
@@ -798,6 +798,7 @@ void Application::bevelActiveObject() {
 
     Feature f;
     f.kind = FeatureKind::Bevel;
+    f.edges.kind = ElementRefs::Kind::All;   // whole-part rounding
     f.width = width;
     f.segments = view_.bevelSegments;
 
@@ -876,8 +877,8 @@ void Application::filletSelectedEdges() {
 
     Feature f;
     f.kind = FeatureKind::Bevel;
-    f.edges = edges;
-    f.radii.assign(edges.size(), width);
+    f.edges = nameEdges(obj->mesh, edges);
+    f.radii.assign(f.edges.count(), width);
     f.width = width;
     f.segments = view_.bevelSegments;
 
@@ -910,8 +911,15 @@ bool Application::extendLastFillet(SceneObject& obj, const std::vector<Index>& e
     const Mesh& before = obj.featureCache[last - 1];
     if (before.empty()) return false;
 
-    std::vector<Index> merged = fillet.edges;
-    std::vector<Real>  radii;
+    // Only a list of edges can have one added to it. A rim selected as a
+    // face's boundary already means "all of them", and adding to it would be
+    // saying something different.
+    if (fillet.edges.kind != ElementRefs::Kind::Explicit) return false;
+
+    std::vector<Index> merged;
+    if (!fillet.edges.resolveEdges(before, merged)) return false;
+
+    std::vector<Real> radii;
     radii.reserve(merged.size());
     for (size_t i = 0; i < merged.size(); ++i) radii.push_back(fillet.radiusFor(i));
 
@@ -933,10 +941,10 @@ bool Application::extendLastFillet(SceneObject& obj, const std::vector<Index>& e
     }
 
     std::vector<Feature> chainBefore = obj.features;
-    const std::vector<Index> edgesBefore = fillet.edges;
-    const std::vector<Real>  radiiBefore = fillet.radii;
+    const ElementRefs edgesBefore = fillet.edges;
+    const std::vector<Real> radiiBefore = fillet.radii;
 
-    fillet.edges = std::move(merged);
+    fillet.edges = nameEdges(before, merged);
     fillet.radii = std::move(radii);
     if (!scene_.reevaluateFrom(obj.id, last)) {
         fillet.edges = edgesBefore;

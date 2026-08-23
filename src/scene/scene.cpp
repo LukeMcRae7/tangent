@@ -58,6 +58,7 @@ ObjectId Scene::addPrimitive(PrimitiveKind kind, const PrimitiveSpec& spec, Vec3
     Feature base;
     base.kind = FeatureKind::Primitive;
     base.primitive = obj->spec;
+    base.uid = nextFeatureUid_++;
     obj->features.push_back(base);
 
     if (!evaluateFeatures(obj->features, obj->mesh)) return kNoObject;
@@ -182,6 +183,7 @@ bool Scene::addFeature(ObjectId id, Feature feature) {
     SceneObject* obj = find(id);
     if (!obj) return false;
 
+    if (feature.uid == 0) feature.uid = nextFeatureUid_++;
     obj->features.push_back(std::move(feature));
 
     // Only the new feature needs running; everything before it is cached.

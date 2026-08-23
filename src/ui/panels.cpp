@@ -458,8 +458,7 @@ void drawHistory(UiContext& ctx) {
                 break;
             case FeatureKind::Extrude:
                 changed |= labeledDrag("Distance", f.distance, 0.1f, -10000.0f, 10000.0f);
-                ImGui::TextColored(kDim, "%zu face%s", f.faces.size(),
-                                   f.faces.size() == 1 ? "" : "s");
+                ImGui::TextColored(kDim, "%s", f.faces.describe("face").c_str());
                 break;
             case FeatureKind::Inset:
                 changed |= labeledDrag("Amount", f.amount, 0.05f, 0.01f, 10000.0f);
@@ -470,14 +469,13 @@ void drawHistory(UiContext& ctx) {
                     // Editing the feature radius restates every edge's, which
                     // is what a user dragging one number expects. Per-edge
                     // radii come from picking edges one at a time.
-                    f.radii.assign(f.edges.size(), f.width);
+                    f.radii.assign(f.edges.count(), f.width);
                     changed = true;
                 }
                 changed |= labeledInt("Segments", f.segments, 1, 32);
                 if (wasChamfer != (f.segments == 1))
                     ImGui::TextColored(kDim, f.segments == 1 ? "flat cut" : "rounded");
-                ImGui::TextColored(kDim, "%zu edge%s", f.edges.size(),
-                                   f.edges.size() == 1 ? "" : "s");
+                ImGui::TextColored(kDim, "%s", f.edges.describe("edge").c_str());
                 break;
             }
             case FeatureKind::VertexEdit:

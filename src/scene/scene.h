@@ -132,6 +132,12 @@ public:
     // again, so a rejected operation cannot leave a dead entry in the timeline.
     bool addFeature(ObjectId id, Feature feature);
 
+    // For serialisation, which has to preserve the counter alongside the
+    // features it has already handed numbers to.
+    uint64_t nextFeatureUid() const { return nextFeatureUid_; }
+    void setNextFeatureUid(uint64_t v) { if (v > nextFeatureUid_) nextFeatureUid_ = v; }
+    ElementId takeFeatureUid() { return nextFeatureUid_++; }
+
     // Re-runs an object's chain as it stands. rebuild() pushes the inspector's
     // spec into the base feature first; this does not, which is what undo
     // needs when restoring a whole chain.
@@ -202,6 +208,11 @@ private:
     std::vector<ObjectId> selection_;
     std::vector<ElementRef> elements_;
     ObjectId nextId_ = 1;
+
+    // Handed to each new feature so it has an identity independent of where it
+    // sits in the chain. Saved with the project: reloading and then adding a
+    // feature must not reissue a number an existing feature already holds.
+    uint64_t nextFeatureUid_ = 1;
 };
 
 } // namespace tg

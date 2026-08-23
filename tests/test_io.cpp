@@ -166,13 +166,13 @@ int main() {
         // A chain with something of every interesting kind in it.
         Feature ext;
         ext.kind = FeatureKind::Extrude;
-        ext.faces = {0};
+        ext.faces = nameFaces(s.find(id)->mesh, {0});
         ext.distance = 6.0;
         check(s.addFeature(id, ext), "extrude added");
 
         Feature fil;
         fil.kind = FeatureKind::Bevel;
-        fil.edges = {0, 2};
+        fil.edges.ids = {s.find(id)->mesh.edgeId(0), s.find(id)->mesh.edgeId(2)};
         fil.radii = {2.0, 3.5};   // a radius per edge, as Fusion's fillet has
         fil.width = 2.0;
         fil.segments = 4;

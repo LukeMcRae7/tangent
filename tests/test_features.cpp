@@ -1,6 +1,7 @@
 // Parametric feature history: does editing an earlier step re-apply the later
 // ones, and does a step whose references have gone stale fail visibly rather
 // than producing wrong geometry?
+#include "mesh/health.h"
 #include "mesh/operations.h"
 #include "scene/scene.h"
 
@@ -54,7 +55,7 @@ int main() {
 
         Feature ext;
         ext.kind = FeatureKind::Extrude;
-        ext.faces = {faceFacing(o->mesh, {0, 0, 1})};
+        ext.faces = nameFaces(o->mesh, {faceFacing(o->mesh, {0, 0, 1})});
         ext.distance = 10.0f;
         check(s.addFeature(id, ext), "extrude added");
         check(o->features.size() == 2, "chain has two features");
@@ -80,6 +81,7 @@ int main() {
 
         Feature bev;
         bev.kind = FeatureKind::Bevel;
+        bev.edges.kind = ElementRefs::Kind::All;
         bev.width = 3.0f;
         check(s.addFeature(id, bev), "bevel added");
         const double beveled = volumeOf(o->mesh);
@@ -111,7 +113,7 @@ int main() {
 
         Feature ext;
         ext.kind = FeatureKind::Extrude;
-        ext.faces = {40};                 // no such face on a six-sided box
+        ext.faces.ids = {40};             // no such name on a six-sided box
         ext.distance = 5.0f;
         check(!s.addFeature(id, ext), "an unresolvable feature is refused outright");
         check(o->features.size() == 1, "and is not left in the chain");
@@ -122,12 +124,12 @@ int main() {
         // change that leaves the reference dangling.
         Feature good;
         good.kind = FeatureKind::Extrude;
-        good.faces = {faceFacing(o->mesh, {0, 0, 1})};
+        good.faces = nameFaces(o->mesh, {faceFacing(o->mesh, {0, 0, 1})});
         good.distance = 5.0f;
         check(s.addFeature(id, good), "valid extrude added");
 
         // Force the reference out of range by hand, then re-evaluate.
-        o->features[1].faces = {99};
+        o->features[1].faces.ids = {99};
         check(s.reevaluate(id), "chain still evaluates");
         check(o->features[1].errored, "the broken step is marked errored");
         check(!o->features[1].error.empty(), "with a reason for the timeline");
@@ -158,7 +160,7 @@ int main() {
 
         Feature edit;
         edit.kind = FeatureKind::VertexEdit;
-        edit.verts = {0};
+        edit.verts = nameVertices(o->mesh, {0});
         edit.offsets = {{0.0f, 0.0f, 12.0f}};
         check(s.addFeature(id, edit), "vertex edit added");
 
@@ -185,6 +187,7 @@ int main() {
         const ObjectId id = s.addPrimitive(PrimitiveKind::Box);
         Feature bev;
         bev.kind = FeatureKind::Bevel;
+        bev.edges.kind = ElementRefs::Kind::All;
         bev.width = 2.0f;
         check(s.addFeature(id, bev), "bevel added");
 
@@ -311,6 +314,79 @@ int main() {
         check(s.reevaluate(id), "BaseMesh evaluates");
         check(s.find(id)->mesh.faceCount() == sphere.faceCount(), "geometry came through");
         std::printf("[features] BaseMesh root: %d faces\n", s.find(id)->mesh.faceCount());
+    }
+
+    // ---- An upstream change the fillet has to survive ----------------------
+    // The reason features name what they act on. A rim fillet, then the
+    // cylinder's segment count raised -- a routine smoothness tweak.
+    //
+    // With edges stored as indices this came back silently wrong: the indices
+    // resolved, to different edges, and the model passed a health check with
+    // the rim sharp and a fillet somewhere else entirely. Nothing reported it.
+    {
+        Scene s;
+        PrimitiveSpec spec;
+        spec.cylinder.segments = 16;
+        const ObjectId id = s.addPrimitive(PrimitiveKind::Cylinder, spec);
+        SceneObject* o = s.find(id);
+
+        const AABB b = o->mesh.bounds();
+        std::vector<Index> rim;
+        for (Index h = 0; h < o->mesh.halfedgeCount(); ++h) {
+            if (h > o->mesh.halfedges[h].twin) continue;
+            const Vec3 p = o->mesh.verts[o->mesh.fromVertex(h)].position;
+            const Vec3 q = o->mesh.verts[o->mesh.halfedges[h].vertex].position;
+            if (std::fabs(p.z - b.max.z) < 1e-9 && std::fabs(q.z - b.max.z) < 1e-9)
+                rim.push_back(h);
+        }
+        check(rim.size() == 16, "sixteen rim edges");
+
+        Feature fil;
+        fil.kind = FeatureKind::Bevel;
+        fil.edges = nameEdges(o->mesh, rim);
+        fil.width = 0.3;
+        fil.segments = 6;
+
+        // Picking a whole rim is recorded as the rim, not as the edges that
+        // happen to make it up today. That is what lets it survive.
+        check(fil.edges.kind == ElementRefs::Kind::FaceBoundary,
+              "a full rim is recorded as the cap's boundary");
+        check(s.addFeature(id, fil), "rim fillet added");
+
+        o = s.find(id);
+        o->features[0].primitive.cylinder.segments = 24;
+        check(s.reevaluate(id), "chain re-evaluates after the segment change");
+        o = s.find(id);
+        check(!o->features[1].errored,
+              std::string("the fillet still resolves: ") + o->features[1].error);
+        check(checkHealth(o->mesh).solid(), "and still produces a solid");
+
+        // Measured, not assumed: against a plain 24-segment cylinder, the
+        // fillet must have removed the sliver a 0.3mm round of that rim takes.
+        Mesh plain;
+        CylinderParams cp;
+        cp.segments = 24;
+        makeCylinder(plain, cp);
+
+        double rimLen = 0.0;
+        const AABB pb = plain.bounds();
+        for (Index h = 0; h < plain.halfedgeCount(); ++h) {
+            if (h > plain.halfedges[h].twin) continue;
+            const Vec3 p = plain.verts[plain.fromVertex(h)].position;
+            const Vec3 q = plain.verts[plain.halfedges[h].vertex].position;
+            if (std::fabs(p.z - pb.max.z) < 1e-9 && std::fabs(q.z - pb.max.z) < 1e-9)
+                rimLen += length(q - p);
+        }
+        const double r = 0.3;
+        const double sector = 0.5 * 6 * r * r * std::sin(kPi / 12.0);
+        const double predicted = rimLen * (r * r - sector);
+        const double removed = volumeOf(plain) - volumeOf(o->mesh);
+        check(std::fabs(removed - predicted) < 0.05,
+              "the fillet ran over the whole new rim: removed " +
+                  std::to_string(removed) + " against " + std::to_string(predicted));
+        std::printf("[features] rim fillet survives 16 -> 24 segments: "
+                    "removed %.4f mm3 (analytic %.4f over %.2f mm of rim)\n",
+                    removed, predicted, rimLen);
     }
 
     std::printf("\n%s (%d failures)\n", failures ? "FAILED" : "ALL PASS", failures);
