@@ -269,6 +269,71 @@ int main() {
                     out.faceCount(), seams);
     }
 
+    // ---- A body can be cut more than once -----------------------------------
+    // It could not before. The boolean's own output was not something it could
+    // consume: forty triangles going in came back as three and a half thousand,
+    // and the rebuild refused them. Face-preserving classification is what
+    // makes the operation composable.
+    {
+        Mesh body;
+        makeBox(body);
+        BoxParams barSpec{6, 6, 30};
+        Mesh bar;
+        makeBox(bar, barSpec);
+
+        const Vec3 places[3] = {{-5, 0, 0}, {5, 0, 0}, {0, 5, 0}};
+        double volumes[3] = {0, 0, 0};
+        for (int i = 0; i < 3; ++i) {
+            Mesh tool = bar, next;
+            for (auto& v : tool.verts) v.position += places[i];
+            check(meshBoolean(body, tool, BooleanOp::Difference, next),
+                  "cut " + std::to_string(i + 1) + " succeeds");
+            if (next.faceCount() == 0) break;
+            body = std::move(next);
+            check(checkHealth(body).solid(), "cut " + std::to_string(i + 1) + " stays solid");
+            volumes[i] = volumeOf(body);
+        }
+        // The first cut is a clean 6x6 bar through a 20mm cube.
+        check(std::fabs(volumes[0] - 7280.0) < 1e-6,
+              "one bar through a cube leaves 7280 (" + std::to_string(volumes[0]) + ")");
+        check(volumes[1] < volumes[0] && volumes[2] < volumes[1],
+              "each further cut removes more");
+        std::printf("[bool] three cuts on one body: %.1f -> %.1f -> %.1f mm3\n",
+                    volumes[0], volumes[1], volumes[2]);
+    }
+
+    // ---- Divisions represent real edges -------------------------------------
+    // A subtracted sphere used to leave the cube's flat walls covered in
+    // zigzags: 329 edges between faces that were already in the same plane,
+    // none of them anywhere the surface turned.
+    {
+        Mesh cube, sphere, out;
+        makeBox(cube);
+        SphereParams sp;
+        sp.radius = 7;
+        sp.segments = 24;
+        sp.rings = 12;
+        makeSphere(sphere, sp);
+        for (auto& v : sphere.verts) v.position += Vec3{0, 0, 10};
+
+        check(meshBoolean(cube, sphere, BooleanOp::Difference, out), "dish a sphere into a cube");
+        check(checkHealth(out).solid(), "the dished cube is solid");
+
+        int seams = 0;
+        for (Index he = 0; he < out.halfedgeCount(); ++he) {
+            const Index tw = out.halfedges[he].twin;
+            if (he > tw) continue;
+            const Index a = out.halfedges[he].face, b = out.halfedges[tw].face;
+            if (a == kInvalid || b == kInvalid) continue;
+            if (dot(out.faceNormal(a), out.faceNormal(b)) > 0.9999619) ++seams;
+        }
+        // Two: the pair of cuts that let the dished face be held as two simple
+        // polygons, since this mesh cannot hold a face with a hole in it.
+        check(seams <= 2, "at most two edges lie inside a flat region (" +
+                              std::to_string(seams) + ")");
+        std::printf("[bool] cube less a sphere: %d faces, %d seams\n", out.faceCount(), seams);
+    }
+
     std::printf("\n%s (%d failures)\n", failures ? "FAILED" : "ALL PASS", failures);
     return failures ? 1 : 0;
 }

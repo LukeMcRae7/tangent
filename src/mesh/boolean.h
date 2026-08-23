@@ -38,4 +38,6 @@ const char* booleanOpName(BooleanOp op);
 // the result cannot be rebuilt as a manifold mesh.
 bool meshBoolean(const Mesh& a, const Mesh& b, BooleanOp op, Mesh& out);
 
+bool debugPointInsideMesh(const Mesh& m, Vec3 p);
+
 } // namespace tg

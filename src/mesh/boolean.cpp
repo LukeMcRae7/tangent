@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdio>
+#include <functional>
 #include <cstdlib>
 #include <utility>
 #include <map>
@@ -122,85 +123,36 @@ void splitPolygon(const Poly& poly, Vec3 n, Real w,
 
 // BSP node. Built lazily from a polygon list; the first polygon's plane splits
 // the rest.
-struct Node {
-    Vec3 normal;
-    Real w = 0.0;
-    bool hasPlane = false;
-    std::vector<Poly> polys;
-    std::unique_ptr<Node> front, back;
-
-    void build(std::vector<Poly> input) {
-        if (input.empty()) return;
-        if (!hasPlane) {
-            normal = input[0].normal;
-            w = input[0].w;
-            hasPlane = true;
-        }
-
-        std::vector<Poly> f, b;
-        for (const Poly& p : input)
-            splitPolygon(p, normal, w, polys, polys, f, b);
-
-        if (!f.empty()) {
-            if (!front) front = std::make_unique<Node>();
-            front->build(std::move(f));
-        }
-        if (!b.empty()) {
-            if (!back) back = std::make_unique<Node>();
-            back->build(std::move(b));
-        }
-    }
-
-    // Removes the parts of `input` that lie inside this solid.
-    std::vector<Poly> clipPolygons(const std::vector<Poly>& input) const {
-        if (!hasPlane) return input;
-
-        std::vector<Poly> f, b;
-        for (const Poly& p : input)
-            splitPolygon(p, normal, w, f, b, f, b);
-
-        std::vector<Poly> result = front ? front->clipPolygons(f) : f;
-        if (back) {
-            std::vector<Poly> clipped = back->clipPolygons(b);
-            result.insert(result.end(), clipped.begin(), clipped.end());
-        }
-        // No back child means everything behind this plane is inside the
-        // solid, so it is dropped.
-        return result;
-    }
-
-    void clipTo(const Node& other) {
-        polys = other.clipPolygons(polys);
-        if (front) front->clipTo(other);
-        if (back)  back->clipTo(other);
-    }
-
-    void invert() {
-        for (Poly& p : polys) p.flip();
-        normal = -normal;
-        w = -w;
-        std::swap(front, back);
-        if (front) front->invert();
-        if (back)  back->invert();
-    }
-
-    void gather(std::vector<Poly>& out) const {
-        out.insert(out.end(), polys.begin(), polys.end());
-        if (front) front->gather(out);
-        if (back)  back->gather(out);
-    }
-};
+// The BSP tree that used to drive this is gone.
+//
+// It was only ever a way to decide which side of one solid a piece of the other
+// was on, and it decided it by where the piece ended up in a tree of planes --
+// which made the answer depend on how the tree was built, split faces against
+// planes nowhere near them, and could not be asked twice about the same body.
+// Asking the geometry directly costs a solid-angle sum per piece and has none
+// of those properties.
 
 std::vector<Poly> toPolygons(const Mesh& m) {
     std::vector<Poly> out;
-    out.reserve(static_cast<size_t>(m.faceCount()));
-    std::vector<Index> verts;
+    out.reserve(static_cast<size_t>(m.faceCount()) * 2);
+    std::vector<Index> verts, tris;
     for (Index f = 0; f < m.faceCount(); ++f) {
         m.faceVertices(f, verts);
-        Poly p;
-        p.v.reserve(verts.size());
-        for (Index v : verts) p.v.push_back(m.verts[v].position);
-        if (p.computePlane()) out.push_back(std::move(p));
+        if (verts.size() == 3) {
+            Poly p;
+            for (Index v : verts) p.v.push_back(m.verts[v].position);
+            if (p.computePlane()) out.push_back(std::move(p));
+            continue;
+        }
+        tris.clear();   // it appends, and the corner indices are per face
+        m.triangulateFacePublic(f, tris);
+        for (size_t i = 0; i + 2 < tris.size(); i += 3) {
+            Poly p;
+            p.v = {m.verts[verts[tris[i]]].position,
+                   m.verts[verts[tris[i + 1]]].position,
+                   m.verts[verts[tris[i + 2]]].position};
+            if (p.computePlane()) out.push_back(std::move(p));
+        }
     }
     return out;
 }
@@ -468,58 +420,220 @@ bool isClosed(const Mesh& m) {
     return true;
 }
 
+// Is `p` inside the solid these triangles bound?
+//
+// By solid angle, not by counting ray crossings. A ray has to be aimed, and any
+// aim can graze an edge or pass exactly through a vertex -- firing at a cube's
+// centre along (1,1,1) leaves through the corner, and the count is then a coin
+// toss. Nudging the ray and retrying only moves the problem.
+//
+// The solid angle each triangle subtends at `p` has no such special cases. Sum
+// them and the total is a full sphere for a point inside a closed surface and
+// nothing for one outside, with no direction to choose and nothing to graze.
+bool pointInside(const std::vector<Poly>& tris, Vec3 p) {
+    Real total = 0.0;
+    for (const Poly& t : tris) {
+        if (t.v.size() < 3) continue;
+        // Fan the polygon; every piece's solid angle adds.
+        for (size_t i = 1; i + 1 < t.v.size(); ++i) {
+            const Vec3 a = t.v[0] - p, b = t.v[i] - p, cc = t.v[i + 1] - p;
+            const Real la = length(a), lb = length(b), lc = length(cc);
+            if (la < 1e-12 || lb < 1e-12 || lc < 1e-12) return true;   // on the surface
+            const Real num = dot(a, cross(b, cc));
+            const Real den = la * lb * lc + dot(a, b) * lc + dot(b, cc) * la +
+                             dot(cc, a) * lb;
+            total += 2.0 * std::atan2(num, den);
+        }
+    }
+    return std::fabs(total) > 2.0 * kPi;   // half of a full sphere
+}
+
+AABB polyBounds(const Poly& p) {
+    AABB b;
+    for (const Vec3& q : p.v) b.expand(q);
+    return b;
+}
+
+bool boxesOverlap(const AABB& a, const AABB& b, Real slack) {
+    return a.min.x - slack <= b.max.x && b.min.x - slack <= a.max.x &&
+           a.min.y - slack <= b.max.y && b.min.y - slack <= a.max.y &&
+           a.min.z - slack <= b.max.z && b.min.z - slack <= a.max.z;
+}
+
+// Where a piece of surface sits relative to the other solid.
+enum class Side { Outside, Inside, OnSurface };
+
+// Probes just off each face of the fragment. A fragment lying in the other
+// solid's surface reads differently on its two sides, and that is the case that
+// has to be recognised rather than guessed at: it is a shared skin, and which
+// copy survives is a question about the operation, not about geometry.
+Side sideOf(const Poly& frag, const std::vector<Poly>& otherTris, Real eps,
+            bool* sameFacing = nullptr) {
+    Vec3 c{};
+    for (const Vec3& q : frag.v) c += q;
+    c = c / static_cast<Real>(frag.v.size());
+
+    const bool behind = pointInside(otherTris, c - frag.normal * eps);
+    const bool ahead  = pointInside(otherTris, c + frag.normal * eps);
+    if (behind == ahead) return behind ? Side::Inside : Side::Outside;
+
+    // Material behind it means the other solid's surface faces the same way
+    // here; material ahead means the two solids are back to back and this is an
+    // internal wall.
+    if (sameFacing) *sameFacing = behind;
+    return Side::OnSurface;
+}
+
+// Keeps whole every face the other solid does not reach, splits the ones it
+// does, and decides each piece on its own.
+//
+// A BSP's planes are infinite: clipping a face against the tree splits it at
+// every plane it happens to cross on the way down, however far that is from any
+// real intersection. A cube with a small notch taken out came back with all six
+// walls diced into fans, and feeding that result into a second boolean turned
+// forty triangles into three and a half thousand -- which is why a body could
+// only be cut once.
+// `ownsShared` decides what happens to the skin the two solids have in common.
+//
+// It cannot be settled by matching identical faces afterwards, which is what
+// used to be attempted: the two solids triangulate that skin independently, and
+// their pieces have different diagonals, so nothing matches. It is not a
+// geometric question anyway. Where two surfaces coincide and face the same way,
+// the result needs exactly one copy of it, and saying which solid provides it
+// is simpler and always right.
+void classify(const std::vector<Poly>& faces, const std::vector<Poly>& otherTris,
+              bool keepInside, bool ownsShared, std::vector<Poly>& out) {
+    AABB otherBox;
+    for (const Poly& t : otherTris)
+        for (const Vec3& q : t.v) otherBox.expand(q);
+
+    const Real scale = std::max(length(otherBox.size()), Real(1.0));
+    const Real slack = scale * 1e-9;
+    const Real eps   = scale * 1e-6;
+
+    const bool dbgc = std::getenv("TANGENT_BOOL_DEBUG") != nullptr;
+    size_t whole = 0;
+
+    std::vector<Poly> straddling;
+    for (const Poly& f : faces) {
+        const AABB fb = polyBounds(f);
+
+        bool touches = false;
+        if (boxesOverlap(fb, otherBox, slack))
+            for (const Poly& t : otherTris)
+                if (boxesOverlap(fb, polyBounds(t), slack)) { touches = true; break; }
+
+        if (!touches) {
+            ++whole;
+            // Nothing of the other solid comes near it, so the whole face is on
+            // one side and one probe settles which.
+            bool sameFacing = false;
+            const Side s = sideOf(f, otherTris, eps, &sameFacing);
+            if (s == Side::OnSurface) {
+                if (ownsShared && sameFacing) out.push_back(f);
+            } else if ((s == Side::Inside) == keepInside) {
+                out.push_back(f);
+            }
+            continue;
+        }
+        straddling.push_back(f);
+    }
+
+    // Split each face against the planes of the triangles that actually reach
+    // it, and nothing else.
+    //
+    // Not by walking the tree. A polygon lying in one of the tree's own planes
+    // gets routed into whichever subtree that plane faces, and if that subtree
+    // is empty it is emitted there and then -- never meeting the planes further
+    // down that are the ones which cut it. Two overlapping cubes share four
+    // planes, and their side walls came back uncut because of exactly that.
+    std::vector<Poly> pieces;
+    for (const Poly& f : straddling) {
+        const AABB fb = polyBounds(f);
+
+        std::vector<std::pair<Vec3, Real>> planes;
+        for (const Poly& t : otherTris) {
+            if (!boxesOverlap(fb, polyBounds(t), slack)) continue;
+            bool seen = false;
+            for (const auto& [pn, pw] : planes)
+                if (dot(pn, t.normal) > 0.9999999 && std::fabs(pw - t.w) < slack) {
+                    seen = true;
+                    break;
+                }
+            if (!seen) planes.emplace_back(t.normal, t.w);
+        }
+
+        std::vector<Poly> cur{f}, next;
+        for (const auto& [pn, pw] : planes) {
+            next.clear();
+            for (const Poly& p : cur) splitPolygon(p, pn, pw, next, next, next, next);
+            cur.swap(next);
+        }
+        for (Poly& p : cur) pieces.push_back(std::move(p));
+    }
+
+    size_t kept = 0, shared = 0;
+    for (const Poly& p : pieces) {
+        bool sameFacing = false;
+        const Side s = sideOf(p, otherTris, eps, &sameFacing);
+        if (s == Side::OnSurface) {
+            // Back-to-back surfaces are an internal wall in every operation and
+            // belong to neither result.
+            if (ownsShared && sameFacing) { out.push_back(p); ++shared; }
+            continue;
+        }
+        if ((s == Side::Inside) == keepInside) { out.push_back(p); ++kept; }
+    }
+
+    if (dbgc)
+        std::fprintf(stderr,
+                     "[bool] keepInside=%d: %zu faces, %zu whole, %zu split into %zu "
+                     "(%zu kept, %zu shared)\n",
+                     (int)keepInside, faces.size(), whole, straddling.size(),
+                     pieces.size(), kept, shared);
+}
+
 } // namespace
+
+// Test hook for the ray classifier.
+bool debugPointInsideMesh(const Mesh& m, Vec3 p) {
+    return pointInside(toPolygons(m), p);
+}
 
 bool meshBoolean(const Mesh& a, const Mesh& b, BooleanOp op, Mesh& out) {
     // An open surface has no inside, so "inside the other solid" is undefined.
     if (!isClosed(a) || !isClosed(b)) return false;
 
-    Node na, nb;
-    na.build(toPolygons(a));
-    nb.build(toPolygons(b));
+    const std::vector<Poly> pa = toPolygons(a);
+    const std::vector<Poly> pb = toPolygons(b);
+    if (pa.empty() || pb.empty()) return false;
 
-    // The three operations are the same clipping sequence with different
-    // inversions, which is what makes a BSP formulation worth the slivers.
+    // Stated directly rather than as a sequence of inversions: each operation
+    // is which side of each solid survives, and whether the second one is
+    // turned inside out to become the wall of a cavity.
+    std::vector<Poly> result;
     switch (op) {
     case BooleanOp::Union:
-        na.clipTo(nb);
-        nb.clipTo(na);
-        // Drop nb's surface that coincides with na's, or the shared skin comes
-        // back twice.
-        nb.invert();
-        nb.clipTo(na);
-        nb.invert();
+        classify(pa, pb, false, true,  result);
+        classify(pb, pa, false, false, result);
         break;
-
     case BooleanOp::Intersection:
-        na.invert();
-        nb.clipTo(na);
-        nb.invert();
-        na.clipTo(nb);
-        nb.clipTo(na);
-        na.invert();
-        nb.invert();
+        classify(pa, pb, true, true,  result);
+        classify(pb, pa, true, false, result);
         break;
-
-    case BooleanOp::Difference:
-        na.invert();
-        na.clipTo(nb);
-        nb.clipTo(na);
-        nb.invert();
-        nb.clipTo(na);
-        nb.invert();
-        // The closing inversion applies to *both* sets, not just the first.
-        // The cutter's faces become the cavity wall, so they have to end up
-        // facing into the void; leaving them as they were gives the result two
-        // oppositely wound halves and build() refuses it.
-        na.invert();
-        nb.invert();
+    case BooleanOp::Difference: {
+        // Neither keeps the shared skin. Where the two surfaces coincide and
+        // face the same way, the material behind that patch belongs to both --
+        // so subtracting takes it away, and the patch is not on the result at
+        // all. Union and intersection both keep it, and take it from the first
+        // solid so there is exactly one copy.
+        classify(pa, pb, false, false, result);
+        std::vector<Poly> inner;
+        classify(pb, pa, true, false, inner);
+        for (Poly& p : inner) { p.flip(); result.push_back(std::move(p)); }
         break;
     }
-
-    std::vector<Poly> result;
-    na.gather(result);
-    nb.gather(result);
+    }
 
     if (!weldAndBuild(result, out)) return false;
 

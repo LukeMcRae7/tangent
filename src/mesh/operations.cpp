@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <map>
+#include <set>
 #include <limits>
 #include <unordered_map>
 #include <functional>
@@ -1883,35 +1884,256 @@ bool bevelEdges(Mesh& mesh, const std::vector<Index>& edges, Real width, int seg
     return filletEdges(mesh, spec);
 }
 
+namespace {
+
+// One flat region of the surface: every face lying in a common plane.
+struct PlaneGroup {
+    Vec3 normal;
+    Real offset = 0.0;
+    std::vector<Index> faces;
+};
+
+// Basis for measuring inside a plane.
+void planeBasis(Vec3 n, Vec3& u, Vec3& v) {
+    const Vec3 seed = std::fabs(n.z) < 0.9 ? Vec3{0, 0, 1} : Vec3{1, 0, 0};
+    u = normalize(cross(seed, n));
+    v = cross(n, u);
+}
+
+} // namespace
+
 int mergeCoplanarFaces(Mesh& mesh, Real toleranceDegrees) {
     if (mesh.empty()) return 0;
 
-    Soup soup;
-    soup.positions.reserve(mesh.verts.size());
-    for (const MeshVertex& v : mesh.verts) soup.vertex(v.position, v.id);
-    for (Index f = 0; f < mesh.faceCount(); ++f) soup.face(faceLoop(mesh, f), mesh.faces[f].id);
-
-    const size_t before = soup.faceSizes.size();
-    std::vector<size_t> all(before);
-    for (size_t i = 0; i < before; ++i) all[i] = i;
-
-    // Repeated because absorbing one pair can make another pair adjacent along
-    // a single edge where before they met along two.
     const Real cosTol = std::cos(toleranceDegrees * kPi / 180.0);
-    size_t count = soup.faceSizes.size();
-    for (int pass = 0; pass < 8; ++pass) {
-        soup.absorb(all, cosTol, true);
-        if (soup.faceSizes.size() == count) break;
-        count = soup.faceSizes.size();
-        all.assign(count, 0);
-        for (size_t i = 0; i < count; ++i) all[i] = i;
+    const Real offTol = std::max(length(mesh.bounds().size()), Real(1.0)) * 1e-7;
+
+    // ---- Gather the flat regions ------------------------------------------
+    std::vector<PlaneGroup> groups;
+    std::vector<int> groupOf(static_cast<size_t>(mesh.faceCount()), -1);
+    for (Index f = 0; f < mesh.faceCount(); ++f) {
+        if (mesh.faceArea(f) < 1e-14) continue;
+        const Vec3 n = mesh.faceNormal(f);
+        const Real d = dot(n, mesh.faceCentroid(f));
+        int at = -1;
+        for (size_t g = 0; g < groups.size(); ++g)
+            if (dot(groups[g].normal, n) > cosTol &&
+                std::fabs(groups[g].offset - d) < offTol) { at = static_cast<int>(g); break; }
+        if (at < 0) {
+            at = static_cast<int>(groups.size());
+            groups.push_back({n, d, {}});
+        }
+        groups[at].faces.push_back(f);
+        groupOf[f] = at;
     }
 
-    const int merged = static_cast<int>(before - soup.faceSizes.size());
+    // ---- Rebuild each region from its own outline --------------------------
+    //
+    // Not by merging faces two at a time. A boolean shreds one flat face into a
+    // fan of dozens, and pairwise merging stalls the moment the running polygon
+    // stops being simple -- which is why a subtracted sphere used to leave the
+    // cube's walls covered in zigzags.
+    //
+    // Instead: take every directed edge of every face in the region, and cancel
+    // the ones that appear in both directions. Those are interior to the region
+    // and the surface does not turn there. What survives is the region's actual
+    // outline, and it does not matter how many pieces it arrived in.
+    Soup soup;
+    soup.positions.reserve(mesh.verts.size());
+    for (const MeshVertex& mv : mesh.verts) soup.vertex(mv.position, mv.id);
+
+    int merged = 0;
+    std::vector<bool> emitted(static_cast<size_t>(mesh.faceCount()), false);
+    std::vector<Index> fv;
+
+    for (const PlaneGroup& g : groups) {
+        auto keepOriginals = [&] {
+            for (Index f : g.faces) {
+                if (emitted[f]) continue;
+                emitted[f] = true;
+                soup.face(faceLoop(mesh, f), mesh.faces[f].id);
+            }
+        };
+
+        if (g.faces.size() == 1) { keepOriginals(); continue; }
+
+        // Directed edges, with the interior ones cancelled.
+        std::map<std::pair<Index, Index>, int> dir;
+        for (Index f : g.faces) {
+            mesh.faceVertices(f, fv);
+            for (size_t i = 0; i < fv.size(); ++i)
+                ++dir[{fv[i], fv[(i + 1) % fv.size()]}];
+        }
+        std::map<Index, std::vector<Index>> outgoing;
+        bool ambiguous = false;
+        for (const auto& [e, n] : dir) {
+            if (n != 1) { ambiguous = true; break; }
+            if (dir.count({e.second, e.first})) continue;   // interior: cancels
+            outgoing[e.first].push_back(e.second);
+        }
+        // A vertex the outline passes through twice cannot be chained without
+        // guessing which way to go, so that region is left as it came.
+        for (const auto& [from, to] : outgoing)
+            if (to.size() != 1) { ambiguous = true; break; }
+        if (ambiguous || outgoing.empty()) { keepOriginals(); continue; }
+
+        // Chain the outline into closed loops.
+        std::vector<std::vector<Index>> loops;
+        std::set<Index> used;
+        bool broken = false;
+        for (const auto& [from, to] : outgoing) {
+            if (used.count(from)) continue;
+            std::vector<Index> loop;
+            Index at = from;
+            while (!used.count(at)) {
+                used.insert(at);
+                loop.push_back(at);
+                auto it = outgoing.find(at);
+                if (it == outgoing.end()) { broken = true; break; }
+                at = it->second.front();
+            }
+            if (broken || at != from || loop.size() < 3) { broken = true; break; }
+            loops.push_back(std::move(loop));
+        }
+        if (broken || loops.empty()) { keepOriginals(); continue; }
+
+        // Keep the name of the largest piece: it is the one the user is most
+        // likely to have selected, and the merged face is the same surface.
+        Index best = g.faces.front();
+        for (Index f : g.faces) if (mesh.faceArea(f) > mesh.faceArea(best)) best = f;
+
+        auto asSoup = [&](const std::vector<Index>& l) {
+            std::vector<uint32_t> out;
+            out.reserve(l.size());
+            for (Index v : l) out.push_back(static_cast<uint32_t>(v));
+            return out;
+        };
+
+        if (loops.size() == 1) {
+            soup.face(asSoup(loops[0]), mesh.faces[best].id);
+            for (Index f : g.faces) emitted[f] = true;
+            merged += static_cast<int>(g.faces.size()) - 1;
+            continue;
+        }
+
+        // A region with a hole needs a face with a hole, and this mesh cannot
+        // hold one. It can hold two faces that share two edges, though, so cut
+        // the ring across in two places. That is two edges where the surface
+        // does not really turn -- against the dozens the fan had -- and it is
+        // the face a slot or a drilled hole leaves behind, which is the case
+        // that matters.
+        //
+        // Anything more tangled than one hole is left alone rather than guessed
+        // at.
+        Vec3 pu, pv;
+        planeBasis(g.normal, pu, pv);
+        auto flat = [&](Index vtx) {
+            const Vec3 p = mesh.verts[vtx].position;
+            return Vec2{dot(p, pu), dot(p, pv)};
+        };
+        auto areaOf = [&](const std::vector<Index>& l) {
+            Real s = 0.0;
+            for (size_t i = 0; i < l.size(); ++i) {
+                const Vec2 a = flat(l[i]), b = flat(l[(i + 1) % l.size()]);
+                s += a.x * b.y - b.x * a.y;
+            }
+            return s * 0.5;
+        };
+
+        int outerAt = -1, holeAt = -1;
+        bool tangled = loops.size() != 2;
+        for (size_t i = 0; !tangled && i < loops.size(); ++i)
+            ((areaOf(loops[i]) > 0.0) ? outerAt : holeAt) = static_cast<int>(i);
+        if (tangled || outerAt < 0 || holeAt < 0) { keepOriginals(); continue; }
+
+        const std::vector<Index>& O = loops[outerAt];
+        const std::vector<Index>& H = loops[holeAt];
+
+        // Two cuts, from opposite sides of the hole to whichever outer vertex
+        // is nearest. Opposite sides so the two halves are both substantial
+        // rather than one being a sliver.
+        auto nearestOuter = [&](Index h) {
+            size_t best2 = 0;
+            Real bd = 1e300;
+            for (size_t i = 0; i < O.size(); ++i) {
+                const Real d = lengthSq(mesh.verts[O[i]].position - mesh.verts[h].position);
+                if (d < bd) { bd = d; best2 = i; }
+            }
+            return best2;
+        };
+        const size_t hi0 = 0, hi1 = H.size() / 2;
+        const size_t oi0 = nearestOuter(H[hi0]), oi1 = nearestOuter(H[hi1]);
+
+        if (H.size() < 3 || O.size() < 3 || hi0 == hi1 || oi0 == oi1) {
+            keepOriginals();
+            continue;
+        }
+
+        auto walk = [](const std::vector<Index>& l, size_t from, size_t to) {
+            std::vector<Index> out;
+            size_t i = from;
+            for (;;) {
+                out.push_back(l[i]);
+                if (i == to) break;
+                i = (i + 1) % l.size();
+            }
+            return out;
+        };
+
+        std::vector<Index> p1 = walk(O, oi0, oi1);
+        for (Index x : walk(H, hi1, hi0)) p1.push_back(x);
+        std::vector<Index> p2 = walk(O, oi1, oi0);
+        for (Index x : walk(H, hi0, hi1)) p2.push_back(x);
+
+        // The cuts must not cross the outline or each other, or the two halves
+        // would overlap. Cheaper to check than to repair.
+        auto simple = [&](const std::vector<Index>& l) {
+            const size_t n = l.size();
+            if (n < 3) return false;
+            auto seg = [&](size_t i, Vec2& a, Vec2& b) {
+                a = flat(l[i]); b = flat(l[(i + 1) % n]);
+            };
+            for (size_t i = 0; i < n; ++i) {
+                Vec2 a, b; seg(i, a, b);
+                for (size_t j = i + 1; j < n; ++j) {
+                    if (j == i || (j + 1) % n == i || (i + 1) % n == j) continue;
+                    Vec2 c, d; seg(j, c, d);
+                    auto side = [](Vec2 p, Vec2 q, Vec2 r) {
+                        return (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x);
+                    };
+                    const Real d1 = side(a, b, c), d2 = side(a, b, d);
+                    const Real d3 = side(c, d, a), d4 = side(c, d, b);
+                    if (((d1 > 1e-12 && d2 < -1e-12) || (d1 < -1e-12 && d2 > 1e-12)) &&
+                        ((d3 > 1e-12 && d4 < -1e-12) || (d3 < -1e-12 && d4 > 1e-12)))
+                        return false;
+                }
+            }
+            return true;
+        };
+
+        if (!simple(p1) || !simple(p2)) { keepOriginals(); continue; }
+
+        soup.face(asSoup(p1), mesh.faces[best].id);
+        soup.face(asSoup(p2));
+        for (Index f : g.faces) emitted[f] = true;
+        merged += static_cast<int>(g.faces.size()) - 2;
+    }
+
+    // Faces too small to have a reliable plane were never grouped.
+    for (Index f = 0; f < mesh.faceCount(); ++f)
+        if (!emitted[f]) soup.face(faceLoop(mesh, f), mesh.faces[f].id);
+
+    if (std::getenv("TANGENT_MERGE_DEBUG"))
+        std::fprintf(stderr, "[merge] %d faces in %zu planes -> %zu faces\n",
+                     mesh.faceCount(), groups.size(), soup.faceSizes.size());
     if (merged == 0) return 0;
 
     Mesh next = mesh;
-    if (!soup.commit(next)) return 0;   // leave the mesh alone rather than risk it
+    if (!soup.commit(next)) {
+        if (std::getenv("TANGENT_MERGE_DEBUG"))
+            std::fprintf(stderr, "[merge] rebuild REFUSED the merged soup\n");
+        return 0;   // leave the mesh alone rather than risk it
+    }
     mesh = std::move(next);
     return merged;
 }

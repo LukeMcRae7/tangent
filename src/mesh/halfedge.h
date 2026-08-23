@@ -85,6 +85,14 @@ public:
     Index findFace(ElementId id) const;
     Index findEdge(ElementId id) const;   // returns a half-edge
 
+    // Ear-clips one face into triangles, as corner indices local to the face.
+    // Public because a boolean has to feed the BSP convex pieces: the classic
+    // split routine assumes a plane cuts a polygon in two, which is only true
+    // if it is convex, and this mesh's faces need not be.
+    void triangulateFacePublic(Index f, std::vector<Index>& out) const {
+        triangulateFace(f, out);
+    }
+
     // True when every element carries a name and no name is used twice.
     bool named() const;
 
