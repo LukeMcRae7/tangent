@@ -2,6 +2,7 @@
 
 #include "mesh/operations.h"
 
+#include <algorithm>
 #include <cstdio>
 
 namespace tg {
@@ -42,15 +43,31 @@ std::string Feature::summary() const {
                           static_cast<double>(amount), faces.size(),
                           faces.size() == 1 ? "" : "s");
             break;
-        case FeatureKind::Bevel:
-            if (edges.empty())
-                std::snprintf(buf, sizeof(buf), "Bevel all  %.2f mm  x%d",
+        case FeatureKind::Bevel: {
+            // A single segment is a flat cut, which is a chamfer, not a fillet.
+            const char* what = segments == 1 ? "Chamfer" : "Fillet";
+            if (edges.empty()) {
+                std::snprintf(buf, sizeof(buf), "%s all  %.2f mm  x%d", what,
                               static_cast<double>(width), segments);
+                break;
+            }
+            // Say so when the edges do not all share a radius, rather than
+            // showing one of them as though it applied to the whole feature.
+            Real lo = radiusFor(0), hi = lo;
+            for (size_t i = 1; i < edges.size(); ++i) {
+                lo = std::min(lo, radiusFor(i));
+                hi = std::max(hi, radiusFor(i));
+            }
+            if (hi - lo > 1e-9)
+                std::snprintf(buf, sizeof(buf), "%s  %.2f-%.2f mm  x%d  (%zu edges)",
+                              what, static_cast<double>(lo), static_cast<double>(hi),
+                              segments, edges.size());
             else
-                std::snprintf(buf, sizeof(buf), "Fillet  %.2f mm  x%d  (%zu edge%s)",
-                              static_cast<double>(width), segments, edges.size(),
+                std::snprintf(buf, sizeof(buf), "%s  %.2f mm  x%d  (%zu edge%s)", what,
+                              static_cast<double>(lo), segments, edges.size(),
                               edges.size() == 1 ? "" : "s");
             break;
+        }
         case FeatureKind::VertexEdit:
             std::snprintf(buf, sizeof(buf), "Edit  %zu vert%s", verts.size(),
                           verts.size() == 1 ? "ex" : "ices");

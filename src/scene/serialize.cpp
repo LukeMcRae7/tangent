@@ -153,6 +153,8 @@ void writeFeature(Writer& w, const Feature& f) {
     writeSpec(w, f.primitive);
     w.indices(f.faces);
     w.indices(f.edges);
+    w.u32(static_cast<uint32_t>(f.radii.size()));
+    for (Real x : f.radii) w.f64(x);
     w.f64(f.distance);
     w.f64(f.amount);
     w.f64(f.width);
@@ -172,6 +174,12 @@ bool readFeature(Reader& r, Feature& f) {
     if (!readSpec(r, f.primitive)) return false;
     f.faces = r.indices<Index>();
     f.edges = r.indices<Index>();
+    {
+        const uint32_t n = r.u32();
+        if (n > f.edges.size()) return false;
+        f.radii.resize(n);
+        for (uint32_t i = 0; i < n; ++i) f.radii[i] = r.f64();
+    }
     f.distance = r.f64();
     f.amount = r.f64();
     f.width = r.f64();

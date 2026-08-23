@@ -182,7 +182,7 @@ void drawMenuBar(UiContext& ctx) {
         ImGui::DragScalarN("Width", ImGuiDataType_Double, &ctx.view->bevelWidth, 1,
                            0.05f, nullptr, nullptr, "%.2f mm");
         ImGui::SetNextItemWidth(140.0f);
-        ImGui::DragInt("Segments", &ctx.view->bevelSegments, 0.1f, 1, 6);
+        ImGui::DragInt("Segments", &ctx.view->bevelSegments, 0.1f, 1, 32);
         const size_t edgeCount = ctx.scene->selectedEdges(ctx.scene->contextObject()).size();
         if (ImGui::MenuItem("Fillet Selected Edges", "F", false, edgeCount > 0))
             ctx.actions.fillet = true;
@@ -464,10 +464,22 @@ void drawHistory(UiContext& ctx) {
             case FeatureKind::Inset:
                 changed |= labeledDrag("Amount", f.amount, 0.05f, 0.01f, 10000.0f);
                 break;
-            case FeatureKind::Bevel:
-                changed |= labeledDrag("Width", f.width, 0.05f, 0.01f, 10000.0f);
-                changed |= labeledInt("Segments", f.segments, 1, 6);
+            case FeatureKind::Bevel: {
+                const bool wasChamfer = f.segments == 1;
+                if (labeledDrag("Radius", f.width, 0.05f, 0.01f, 10000.0f)) {
+                    // Editing the feature radius restates every edge's, which
+                    // is what a user dragging one number expects. Per-edge
+                    // radii come from picking edges one at a time.
+                    f.radii.assign(f.edges.size(), f.width);
+                    changed = true;
+                }
+                changed |= labeledInt("Segments", f.segments, 1, 32);
+                if (wasChamfer != (f.segments == 1))
+                    ImGui::TextColored(kDim, f.segments == 1 ? "flat cut" : "rounded");
+                ImGui::TextColored(kDim, "%zu edge%s", f.edges.size(),
+                                   f.edges.size() == 1 ? "" : "s");
                 break;
+            }
             case FeatureKind::VertexEdit:
                 ImGui::TextColored(kDim, "Free-form edit of %zu vertices",
                                    f.verts.size());

@@ -172,7 +172,8 @@ int main() {
 
         Feature fil;
         fil.kind = FeatureKind::Bevel;
-        fil.edges = {0};
+        fil.edges = {0, 2};
+        fil.radii = {2.0, 3.5};   // a radius per edge, as Fusion's fillet has
         fil.width = 2.0;
         fil.segments = 4;
         check(s.addFeature(id, fil), "fillet added");
@@ -195,6 +196,12 @@ int main() {
         check(near(o->transform.position.x, 5.0) && near(o->transform.position.z, 7.0),
               "transform survived");
         check(o->features.size() == chainBefore, "the whole chain survived");
+        {
+            const Feature& f = o->features.back();
+            check(f.kind == FeatureKind::Bevel, "the fillet is still a fillet");
+            check(f.radii.size() == 2 && near(f.radii[0], 2.0) && near(f.radii[1], 3.5),
+                  "each edge kept its own radius");
+        }
         check(o->mesh.faceCount() == facesBefore, "re-evaluates to the same mesh");
         check(near(o->localBounds.size().z, boundsBefore.size().z, 1e-9),
               "same dimensions");
