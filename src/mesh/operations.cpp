@@ -1,5 +1,7 @@
 #include "mesh/operations.h"
 
+#include "mesh/boolean.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -338,6 +340,88 @@ bool insetIsValid(const std::vector<Vec3>& orig, const std::vector<Vec3>& inset,
 
 } // namespace
 
+// Signed volume, for telling a solid from something turned inside out.
+static Real checkVolume(const Mesh& m) {
+    RenderMesh rm;
+    m.buildRenderMesh(rm);
+    Real s6 = 0.0;
+    for (size_t i = 0; i < rm.triangles.size(); i += 3)
+        s6 += dot(rm.positions[rm.triangles[i]],
+                  cross(rm.positions[rm.triangles[i + 1]], rm.positions[rm.triangles[i + 2]]));
+    return s6 / 6.0;
+}
+
+// The solid a face region sweeps out as it travels `offset`.
+//
+// Bottom cap the region as it stands, top cap the region moved, walls between.
+// Wound so the bottom faces back down the sweep and the top faces along it,
+// which makes it a closed solid whichever way the offset points.
+static bool sweptSolid(const Mesh& mesh, const std::unordered_set<Index>& region,
+                       Vec3 offset, ElementId salt, Mesh& out) {
+    Soup soup;
+    std::unordered_map<Index, uint32_t> low, high;
+    std::vector<Index> fv;
+
+    auto lowOf = [&](Index v) {
+        auto it = low.find(v);
+        if (it != low.end()) return it->second;
+        const uint32_t idx = soup.vertex(mesh.verts[v].position, mesh.verts[v].id);
+        low.emplace(v, idx);
+        return idx;
+    };
+    auto highOf = [&](Index v) {
+        auto it = high.find(v);
+        if (it != high.end()) return it->second;
+        const uint32_t idx = soup.vertex(mesh.verts[v].position + offset,
+                                         nameId(salt, IdRole::Top, mesh.verts[v].id));
+        high.emplace(v, idx);
+        return idx;
+    };
+
+    // Sweeping against the region's own normal produces the same solid wound
+    // inside out, so the caps and walls are emitted the other way round.
+    Vec3 avg{};
+    for (Index f : region) avg += mesh.faceNormal(f) * mesh.faceArea(f);
+    const bool forward = dot(avg, offset) > 0.0;
+
+    for (Index f : region) {
+        mesh.faceVertices(f, fv);
+        std::vector<uint32_t> bottom, top;
+        for (Index v : fv) top.push_back(highOf(v));
+        for (size_t i = fv.size(); i-- > 0;) bottom.push_back(lowOf(fv[i]));
+        if (!forward) { std::reverse(bottom.begin(), bottom.end());
+                        std::reverse(top.begin(), top.end()); }
+        // The cap that ends up on the model is the face the user picked, moved,
+        // so it carries that face's name onward. The other cap is consumed by
+        // the combine and only needs to be distinct.
+        soup.face(bottom, nameId(salt, IdRole::Cap, mesh.faces[f].id, 0));
+        soup.face(top, mesh.faces[f].id);
+    }
+
+    for (Index f : region) {
+        const Index start = mesh.faces[f].halfedge;
+        Index h = start;
+        do {
+            const Index twinFace = mesh.halfedges[mesh.halfedges[h].twin].face;
+            if (twinFace == kInvalid || !region.count(twinFace)) {
+                const Index v0 = mesh.fromVertex(h), v1 = mesh.halfedges[h].vertex;
+                std::vector<uint32_t> wall{lowOf(v0), lowOf(v1), highOf(v1), highOf(v0)};
+                if (!forward) std::reverse(wall.begin(), wall.end());
+                soup.face(wall, nameId(salt, IdRole::Wall, mesh.edgeId(h)));
+            }
+            h = mesh.halfedges[h].next;
+        } while (h != start);
+    }
+
+    Mesh built;
+    if (!soup.commit(built)) return false;
+    // Wound for a forward sweep; a backward one comes out inside out.
+    if (built.faceCount() == 0) return false;
+    out = std::move(built);
+    return true;
+}
+
+
 // ---------------------------------------------------------------------------
 bool extrudeFaces(Mesh& mesh, const std::vector<Index>& faces, Real distance,
                   std::vector<Index>* newFaces, ElementId salt) {
@@ -353,6 +437,78 @@ bool extrudeFaces(Mesh& mesh, const std::vector<Index>& faces, Real distance,
     if (lengthSq(dir) < 1e-12f) return false;
     dir = normalize(dir);
     const Vec3 offset = dir * distance;
+
+    // An extrude is the solid the face sweeps out, combined with the body.
+    //
+    // Lifting the face and stitching walls onto it is only the same thing while
+    // the sweep meets nothing. Push a face into the body and the walls fold back
+    // through it, leaving a shell inside the solid rather than the face simply
+    // moving back. Push one into another part of the same body and the two
+    // surfaces pass through each other instead of joining. Sweeping and then
+    // combining has neither problem: material added is a union, material removed
+    // is a difference, and anything the sweep runs into is resolved rather than
+    // ignored.
+    //
+    // A zero-length extrude has no solid to sweep and keeps the old path: it is
+    // the deliberate one, duplicating a face without moving it.
+    const Real scale = std::max(length(mesh.bounds().size()), Real(1.0));
+
+    // A zero-length extrude leaves the mesh alone and simply reports the face
+    // back, so pressing extrude and then dragging works from the face already
+    // there.
+    //
+    // It used to build the extrusion anyway, which at zero length meant four
+    // walls of no area wrapped around a face in its original position: geometry
+    // that is not on the model, cannot be selected, and a slicer will reject.
+    // Doing it twice stacked another four. Reporting the face and stopping gives
+    // the same behaviour to drag against with none of that.
+    if (std::fabs(distance) <= scale * 1e-9) {
+        if (newFaces) *newFaces = faces;
+        return true;
+    }
+
+    // Combining only means anything for a closed solid. An open surface -- a
+    // plane, a sheet -- has no inside for a union or a difference to be about,
+    // so it is lifted and walled directly, which is all an extrude of a sheet
+    // is anyway.
+    bool closed = true;
+    for (Index h = 0; h < mesh.halfedgeCount() && closed; ++h)
+        if (mesh.halfedges[h].face == kInvalid) closed = false;
+
+    Mesh sweep;
+    if (closed && std::fabs(distance) > scale * 1e-9 &&
+        sweptSolid(mesh, region, offset, salt, sweep)) {
+        Mesh combined;
+        const bool combinedOk =
+            meshBoolean(mesh, sweep,
+                        distance > 0 ? BooleanOp::Union : BooleanOp::Difference,
+                        combined, nameId(salt, IdRole::Wall, 0), true);
+
+        // Cutting away at least as much as there was leaves nothing to model,
+        // and a face driven clean through the far side is that. Refuse it --
+        // the old path answered with a shell turned inside out, which is not a
+        // solid and is exactly what should never be produced.
+        if (!combinedOk || combined.empty() || checkVolume(combined) <= 0.0)
+            return false;
+
+        {
+
+            if (newFaces) {
+                // The face the user goes on to drag: whatever now lies in the
+                // plane the sweep ended at, facing the way it swept.
+                newFaces->clear();
+                const Vec3 target = mesh.faceCentroid(*region.begin()) + offset;
+                for (Index f = 0; f < combined.faceCount(); ++f) {
+                    if (dot(combined.faceNormal(f), dir) < 0.999) continue;
+                    if (std::fabs(dot(combined.faceCentroid(f) - target, dir)) > scale * 1e-7)
+                        continue;
+                    newFaces->push_back(f);
+                }
+            }
+            mesh = std::move(combined);
+            return true;
+        }
+    }
 
     Soup soup;
     soup.positions.reserve(mesh.verts.size() * 2);

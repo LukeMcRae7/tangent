@@ -102,25 +102,25 @@ target_compile_options(test_transform PRIVATE -Wall -Wextra -Wno-unused-paramete
 add_test(NAME transform COMMAND test_transform)
 
 add_executable(test_operations tests/test_operations.cpp
-  src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp)
+  src/mesh/boolean.cpp src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp)
 target_include_directories(test_operations PRIVATE src)
 target_compile_options(test_operations PRIVATE -Wall -Wextra)
 add_test(NAME operations COMMAND test_operations)
 
 add_executable(test_fillet tests/test_fillet.cpp
-  src/mesh/health.cpp src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp)
+  src/mesh/health.cpp src/mesh/boolean.cpp src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp)
 target_include_directories(test_fillet PRIVATE src)
 target_compile_options(test_fillet PRIVATE -Wall -Wextra)
 add_test(NAME fillet COMMAND test_fillet)
 
 add_executable(test_names tests/test_names.cpp
-  src/mesh/health.cpp src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp)
+  src/mesh/health.cpp src/mesh/boolean.cpp src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp)
 target_include_directories(test_names PRIVATE src)
 target_compile_options(test_names PRIVATE -Wall -Wextra)
 add_test(NAME names COMMAND test_names)
 
 add_executable(test_fillet_sweep tests/test_fillet_sweep.cpp
-  src/mesh/health.cpp src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp)
+  src/mesh/health.cpp src/mesh/boolean.cpp src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp)
 target_include_directories(test_fillet_sweep PRIVATE src)
 target_compile_options(test_fillet_sweep PRIVATE -Wall -Wextra)
 add_test(NAME fillet_sweep COMMAND test_fillet_sweep)
@@ -133,7 +133,7 @@ target_compile_options(test_features PRIVATE -Wall -Wextra)
 add_test(NAME features COMMAND test_features)
 
 add_executable(test_health tests/test_health.cpp
-  src/mesh/health.cpp src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp)
+  src/mesh/health.cpp src/mesh/boolean.cpp src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp)
 target_include_directories(test_health PRIVATE src)
 target_compile_options(test_health PRIVATE -Wall -Wextra)
 add_test(NAME health COMMAND test_health)
@@ -167,5 +167,5 @@ add_test(NAME io COMMAND test_io)
 # Not a test: a stopwatch for the heavy paths. Run it by hand.
 add_executable(bench EXCLUDE_FROM_ALL tests/bench.cpp
   src/scene/scene.cpp src/scene/feature.cpp src/mesh/health.cpp
-  src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp)
+  src/mesh/boolean.cpp src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp)
 target_include_directories(bench PRIVATE src)

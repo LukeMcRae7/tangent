@@ -41,8 +41,14 @@ const char* booleanOpName(BooleanOp op);
 // feature that acts on the result can still find what it acted on. Without one
 // the output is nameless, and a stored reference matches the first face in the
 // mesh rather than the intended one.
+// `trustBNames` says the second operand's names are already distinct from the
+// first's, so they pass through as they are. A caller that builds the second
+// solid out of the first's own faces -- an extrude sweeping a face it is about
+// to replace -- needs this, so the face comes out of the operation still called
+// what the user picked. Left false, the second operand's names are re-derived,
+// since two solids from the same generator name their faces identically.
 bool meshBoolean(const Mesh& a, const Mesh& b, BooleanOp op, Mesh& out,
-                 ElementId salt = 0);
+                 ElementId salt = 0, bool trustBNames = false);
 
 bool debugPointInsideMesh(const Mesh& m, Vec3 p);
 

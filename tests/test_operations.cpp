@@ -74,9 +74,12 @@ int main() {
               "moved face still points up");
         check(std::fabs(m.faceCentroid(moved[0]).z - 20.0f) < 1e-3f,
               "moved face sits 10mm higher");
-        // A cube with one face pushed out is still six-sided prism-wise: 4 new
-        // side walls replace nothing, so faces go 6 -> 10.
-        check(m.faceCount() == 10, "extrude adds four side walls");
+        // Pushing a box's whole top out gives a taller box, and a taller box
+        // has six faces. The new side walls are in the same planes as the walls
+        // they grew out of, and are merged into them -- the seam between them is
+        // in the data, not on the model.
+        check(m.faceCount() == 6, "extruding a whole face leaves a taller box, "
+                                  "not one with seams down its sides");
         std::printf("[extrude] volume %.1f, %d faces\n", volumeOf(m), m.faceCount());
     }
 
@@ -439,6 +442,57 @@ int main() {
               "boss volume adds up");
         std::printf("[compose] inset+extrude volume %.1f (expect %.1f)\n",
                     volumeOf(m), 8000.0 + 144.0 * 12.0);
+    }
+
+    // ---- An extrude is a solid combined with the body ----------------------
+    // Lifting a face and stitching walls onto it is only the same thing while
+    // the sweep meets nothing.
+    {
+        // Pushed inward, it must be the face moving back, not a shell left
+        // inside the solid.
+        Mesh m;
+        makeBox(m);
+        const Index top = faceFacing(m, {0, 0, 1});
+        check(extrudeFaces(m, {top}, -6.0, nullptr, 7), "extrude inward");
+        expectSolid(m, "inward extrude");
+        check(std::fabs(volumeOf(m) - 5600.0) < 1e-6,
+              "a 20x20 face pushed back 6mm leaves 5600 (" +
+                  std::to_string(volumeOf(m)) + ")");
+        check(m.faceCount() == 6, "and the body is still a box, not a box plus a shell");
+        check(std::fabs(m.bounds().max.z - 4.0) < 1e-9, "the face is where it was put");
+        std::printf("[extrude] inward: %d faces, %.1f mm3\n", m.faceCount(), volumeOf(m));
+    }
+    {
+        // Driven clean through the far side there is nothing left to be, and
+        // the old path answered with a solid turned inside out.
+        Mesh m;
+        BoxParams slab{40, 20, 10};
+        makeBox(m, slab);
+        const Index top = faceFacing(m, {0, 0, 1});
+        const int before = m.faceCount();
+        const double volBefore = volumeOf(m);
+        check(!extrudeFaces(m, {top}, -25.0, nullptr, 9),
+              "pushing a face through the far side is refused");
+        check(m.faceCount() == before && std::fabs(volumeOf(m) - volBefore) < 1e-9,
+              "and the body is left exactly as it was");
+        std::printf("[extrude] through the far side: refused, body untouched\n");
+    }
+    {
+        // Zero length: nothing built, but the face is reported so a drag has
+        // something to work from. Repeating it changes nothing.
+        Mesh m;
+        makeBox(m);
+        const Index top = faceFacing(m, {0, 0, 1});
+        std::vector<Index> reported;
+        const bool ok = extrudeFaces(m, {top}, 0.0, &reported, 11);
+        check(ok, "a zero-length extrude succeeds");
+        check(m.faceCount() == 6, "and builds nothing");
+        check(reported.size() == 1 && reported[0] == top, "but reports the face to drag");
+        const bool again = extrudeFaces(m, {top}, 0.0, &reported, 12);
+        check(again && m.faceCount() == 6, "repeating it still builds nothing");
+        expectSolid(m, "after zero-length extrudes");
+        std::printf("[extrude] zero length: %d faces, reports the picked face\n",
+                    m.faceCount());
     }
 
     std::printf("\n%s (%d failures)\n", failures ? "FAILED" : "ALL PASS", failures);

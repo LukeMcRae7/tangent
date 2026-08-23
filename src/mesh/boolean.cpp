@@ -176,7 +176,7 @@ std::vector<Poly> toPolygons(const Mesh& m, bool fromB) {
 // few ulps. Without welding, every seam would come back as a pair of open
 // boundaries and build() would reject the result.
 bool weldAndBuild(const std::vector<Poly>& polys, const Mesh& a, const Mesh& b,
-                  ElementId salt, Mesh& out) {
+                  ElementId salt, bool trustBNames, Mesh& out) {
     const bool dbg = std::getenv("TANGENT_BOOL_DEBUG") != nullptr;
     if (dbg) std::fprintf(stderr, "[bool] weld input: %zu polys\n", polys.size());
     if (polys.empty()) return false;
@@ -203,7 +203,6 @@ bool weldAndBuild(const std::vector<Poly>& polys, const Mesh& a, const Mesh& b,
     // Names carried alongside, because every step below can drop a face and the
     // built mesh has to end up knowing what each of its faces used to be.
     std::vector<ElementId> faceName;
-    std::map<std::pair<ElementId, bool>, uint64_t> fragmentOf;
 
     auto cellOf = [&](const Vec3& p) {
         return std::array<int64_t, 3>{static_cast<int64_t>(std::llround(p.x * inv)),
@@ -221,7 +220,8 @@ bool weldAndBuild(const std::vector<Poly>& polys, const Mesh& a, const Mesh& b,
     for (const MeshVertex& mv : b.verts)
         if (mv.id != kNoId)
             knownVertex.emplace(cellOf(mv.position),
-                                nameId(salt, IdRole::Vertex, mv.id, 1));
+                                trustBNames ? mv.id
+                                            : nameId(salt, IdRole::Vertex, mv.id, 1));
 
     auto findOrAdd = [&](const Vec3& p) {
         const std::array<int64_t, 3> c = cellOf(p);
@@ -256,11 +256,18 @@ bool weldAndBuild(const std::vector<Poly>& polys, const Mesh& a, const Mesh& b,
         faceSizes.push_back(static_cast<uint32_t>(clean.size()));
         faceIndices.insert(faceIndices.end(), clean.begin(), clean.end());
 
-        // One source face can arrive in several pieces, so they are counted
-        // apart. Emission order is fixed by the inputs, so re-running the same
-        // operation names them the same way again.
-        const uint64_t k = fragmentOf[{p.src, p.fromB}]++;
-        faceName.push_back(nameId(salt, IdRole::Face, p.src, p.fromB ? 1 : 0, k));
+        // A piece keeps the name of the face it was cut from, so a face that
+        // passes through the operation untouched comes out with the name it
+        // went in with. That matters more than it sounds: a boolean triangulates
+        // its input, so nearly every face arrives here in pieces, and the planar
+        // rebuild puts them back together under this same name.
+        //
+        // The second operand's names are re-derived, since the two solids may
+        // name their faces identically. Pieces that stay genuinely separate are
+        // separated below, once it is known which those are.
+        faceName.push_back((p.fromB && !trustBNames)
+                               ? nameId(salt, IdRole::Face, p.src, 1)
+                               : p.src);
     }
 
     if (dbg) std::fprintf(stderr, "[bool] after weld: %zu verts, %zu faces\n",
@@ -668,7 +675,8 @@ bool debugPointInsideMesh(const Mesh& m, Vec3 p) {
     return pointInside(toPolygons(m, false), p);
 }
 
-bool meshBoolean(const Mesh& a, const Mesh& b, BooleanOp op, Mesh& out, ElementId salt) {
+bool meshBoolean(const Mesh& a, const Mesh& b, BooleanOp op, Mesh& out,
+                 ElementId salt, bool trustBNames) {
     // An open surface has no inside, so "inside the other solid" is undefined.
     if (!isClosed(a) || !isClosed(b)) return false;
 
@@ -703,7 +711,7 @@ bool meshBoolean(const Mesh& a, const Mesh& b, BooleanOp op, Mesh& out, ElementI
     }
     }
 
-    if (!weldAndBuild(result, a, b, salt, out)) return false;
+    if (!weldAndBuild(result, a, b, salt, trustBNames, out)) return false;
 
     // A boolean cuts every face it touches into triangles and leaves a fan of
     // them where one flat surface used to be, plus a seam wherever the two
@@ -711,6 +719,23 @@ bool meshBoolean(const Mesh& a, const Mesh& b, BooleanOp op, Mesh& out, ElementI
     // model; they are only in the data, and picking one selects a sliver of
     // what the user sees as a face.
     mergeCoplanarFaces(out);
+
+    // A face the cut divided in two comes out as two faces sharing one name.
+    // One keeps it; the rest are derived from it, in the order the rebuild
+    // produced them, which the inputs fix.
+    {
+        std::map<ElementId, uint64_t> seen;
+        bool changed = false;
+        for (Index f = 0; f < out.faceCount(); ++f) {
+            const ElementId id = out.faces[f].id;
+            if (id == kNoId) continue;
+            const uint64_t k = seen[id]++;
+            if (k == 0) continue;
+            out.faces[f].id = nameId(salt, IdRole::Split, id, 0, k);
+            changed = true;
+        }
+        if (changed) out.nameEdges();
+    }
     return true;
 }
 
