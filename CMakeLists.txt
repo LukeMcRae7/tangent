@@ -119,6 +119,13 @@ target_include_directories(test_names PRIVATE src)
 target_compile_options(test_names PRIVATE -Wall -Wextra)
 add_test(NAME names COMMAND test_names)
 
+add_executable(test_fillet_mechanics tests/test_fillet_mechanics.cpp
+  src/mesh/health.cpp src/mesh/boolean.cpp src/mesh/operations.cpp
+  src/mesh/halfedge.cpp src/mesh/primitives.cpp)
+target_include_directories(test_fillet_mechanics PRIVATE src)
+target_compile_options(test_fillet_mechanics PRIVATE -Wall -Wextra)
+add_test(NAME fillet_mechanics COMMAND test_fillet_mechanics)
+
 add_executable(test_fillet_sweep tests/test_fillet_sweep.cpp
   src/mesh/health.cpp src/mesh/boolean.cpp src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp)
 target_include_directories(test_fillet_sweep PRIVATE src)
