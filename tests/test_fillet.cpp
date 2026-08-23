@@ -713,6 +713,62 @@ int main() {
         std::printf("[twist] %s: filleted cleanly at 1, 4 and 8 segments\n", at.c_str());
     }
 
+    // ---- One edge at a time, all twelve ------------------------------------
+    // Rounding a cube edge by edge has to end up at the same solid as rounding
+    // it in one go, or the model depends on the order the user happened to
+    // click in.
+    //
+    // It does, and not by filleting a filleted body -- that is the gap noted
+    // above. Each pick is traced back to the body the fillet was applied to and
+    // the whole set is re-filleted from there, which is what the editor records.
+    // The trace is by extent rather than by endpoint: an earlier fillet
+    // shortens its neighbours, so the edge the user picks is a piece of the one
+    // it was cut from.
+    {
+        const Real r = 2.0;
+        const int segments = 6;
+
+        Mesh original;
+        makeBox(original);
+
+        Mesh together;
+        makeBox(together);
+        std::vector<Index> all;
+        for (Index h = 0; h < together.halfedgeCount(); ++h)
+            if (h < together.halfedges[h].twin) all.push_back(h);
+        check(bevelEdges(together, all, r, segments), "all twelve at once");
+
+        std::vector<Index> picked;
+        Mesh current = original;
+        for (int step = 0; step < 12; ++step) {
+            Index chosen = kInvalid;
+            for (Index h = 0; h < current.halfedgeCount() && chosen == kInvalid; ++h) {
+                if (h > current.halfedges[h].twin) continue;
+                const Vec3 a = current.verts[current.fromVertex(h)].position;
+                const Vec3 b = current.verts[current.halfedges[h].vertex].position;
+                const Index traced = edgeCovering(original, a, b);
+                if (traced == kInvalid) continue;
+                if (std::find(picked.begin(), picked.end(), traced) == picked.end())
+                    chosen = traced;
+            }
+            check(chosen != kInvalid, "step " + std::to_string(step + 1) + ": an edge to pick");
+            if (chosen == kInvalid) break;
+
+            picked.push_back(chosen);
+            Mesh next = original;
+            check(bevelEdges(next, picked, r, segments),
+                  "step " + std::to_string(step + 1) + ": re-fillet the set so far");
+            current = std::move(next);
+        }
+
+        check(picked.size() == 12, "all twelve got picked");
+        expectSolid(current, "cube filleted one edge at a time");
+        expectSameSolid(current, together, "one at a time vs all at once");
+        std::printf("[order] twelve edges one at a time: %d faces, %d verts, %.4f -- "
+                    "identical to all at once\n",
+                    current.faceCount(), current.vertexCount(), volumeOf(current));
+    }
+
     if (gaps)
         std::printf("\n%d known gaps, all from filleting against an existing "
                     "fillet (see the note above `check`).\n", gaps);
