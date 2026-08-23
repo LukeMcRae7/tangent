@@ -46,6 +46,102 @@ struct Soup {
         positions.swap(kept);
     }
 
+    // Absorbs each listed face into the neighbour it is coplanar with.
+    //
+    // Where a fillet runs off the end of an edge its cap is flat, and it lies
+    // in the plane of the face across the end -- so emitting it as its own
+    // face draws a seam across a face the user never edited. Splicing it into
+    // that face removes the seam and leaves the n-gon a B-rep would have had.
+    //
+    // Only a neighbour sharing exactly one edge will do. Two shared edges mean
+    // splicing would leave a polygon that touches itself.
+    void absorb(const std::vector<size_t>& faces, Real cosTol) {
+        if (faces.empty()) return;
+
+        const size_t n = faceSizes.size();
+        std::vector<size_t> off(n + 1, 0);
+        for (size_t f = 0; f < n; ++f) off[f + 1] = off[f] + faceSizes[f];
+
+        auto normalOf = [&](size_t f) {
+            Vec3 a{};
+            const size_t k = faceSizes[f];
+            for (size_t i = 0; i < k; ++i)
+                a += cross(positions[faceIndices[off[f] + i]],
+                           positions[faceIndices[off[f] + (i + 1) % k]]);
+            return lengthSq(a) > 1e-24 ? normalize(a) : Vec3{};
+        };
+
+        std::map<std::pair<uint32_t, uint32_t>, std::vector<size_t>> byEdge;
+        for (size_t f = 0; f < n; ++f) {
+            const size_t k = faceSizes[f];
+            for (size_t i = 0; i < k; ++i) {
+                const uint32_t u = faceIndices[off[f] + i];
+                const uint32_t v = faceIndices[off[f] + (i + 1) % k];
+                byEdge[{std::min(u, v), std::max(u, v)}].push_back(f);
+            }
+        }
+
+        std::vector<std::vector<uint32_t>> loops(n);
+        for (size_t f = 0; f < n; ++f)
+            loops[f].assign(faceIndices.begin() + static_cast<long>(off[f]),
+                            faceIndices.begin() + static_cast<long>(off[f + 1]));
+        std::vector<bool> gone(n, false);
+        std::vector<bool> listed(n, false);
+        for (size_t f : faces) if (f < n) listed[f] = true;
+
+        for (size_t f : faces) {
+            if (f >= n || gone[f]) continue;
+            const Vec3 nf = normalOf(f);
+            if (lengthSq(nf) < 0.5) continue;
+
+            // Count shared edges per neighbour.
+            std::map<size_t, int> shared;
+            const size_t k = faceSizes[f];
+            for (size_t i = 0; i < k; ++i) {
+                const uint32_t u = faceIndices[off[f] + i];
+                const uint32_t v = faceIndices[off[f] + (i + 1) % k];
+                for (size_t g : byEdge[{std::min(u, v), std::max(u, v)}])
+                    if (g != f) ++shared[g];
+            }
+
+            for (const auto& [g, count] : shared) {
+                if (count != 1 || gone[g] || listed[g]) continue;
+                if (dot(nf, normalOf(g)) < cosTol) continue;
+
+                // The shared edge, as f walks it and as g walks it back.
+                size_t fi = loops[f].size(), gi = loops[g].size();
+                for (size_t i = 0; i < loops[f].size() && fi == loops[f].size(); ++i) {
+                    const uint32_t u = loops[f][i];
+                    const uint32_t v = loops[f][(i + 1) % loops[f].size()];
+                    for (size_t j = 0; j < loops[g].size(); ++j)
+                        if (loops[g][j] == v && loops[g][(j + 1) % loops[g].size()] == u) {
+                            fi = i; gi = j; break;
+                        }
+                }
+                if (fi == loops[f].size()) continue;
+
+                std::vector<uint32_t> merged;
+                const size_t fn = loops[f].size(), gn = loops[g].size();
+                for (size_t i = 0; i <= gi; ++i) merged.push_back(loops[g][i]);
+                for (size_t i = 2; i < fn; ++i) merged.push_back(loops[f][(fi + i) % fn]);
+                for (size_t i = gi + 1; i < gn; ++i) merged.push_back(loops[g][i]);
+
+                loops[g].swap(merged);
+                gone[f] = true;
+                break;
+            }
+        }
+
+        std::vector<uint32_t> sizes, indices;
+        for (size_t f = 0; f < n; ++f) {
+            if (gone[f]) continue;
+            sizes.push_back(static_cast<uint32_t>(loops[f].size()));
+            indices.insert(indices.end(), loops[f].begin(), loops[f].end());
+        }
+        faceSizes.swap(sizes);
+        faceIndices.swap(indices);
+    }
+
     // Merges vertices that landed in the same place and drops the faces that
     // leaves with no area.
     //
@@ -920,6 +1016,9 @@ bool filletEdges(Mesh& mesh, const FilletSpec& spec) {
     }
 
     // Vertex patches, wherever at least one incident edge was beveled.
+    // Flat end caps, to be spliced into the coplanar face across the end.
+    std::vector<size_t> capFaces;
+
     for (Index v = 0; v < mesh.vertexCount(); ++v) {
         const Index start = mesh.verts[v].halfedge;
         if (start == kInvalid) continue;
@@ -992,6 +1091,10 @@ bool filletEdges(Mesh& mesh, const FilletSpec& spec) {
         //
         // A chamfer's corner is genuinely a flat facet too.
         if (!blendsAt(v) || segments == 1 || loop.size() <= 3 || centres.empty()) {
+            // A cap closing the end of a single fillet is flat and sits in the
+            // plane of the face across the end. Note it so it can be spliced
+            // into that face rather than left as a seam across it.
+            if (filletsAt[v] == 1) capFaces.push_back(soup.faceSizes.size());
             soup.face(loop);
             continue;
         }
@@ -1265,6 +1368,9 @@ bool filletEdges(Mesh& mesh, const FilletSpec& spec) {
         for (size_t i = 0; i < prev.size(); ++i)
             soup.face({prev[i], prev[(i + 1) % prev.size()], pole});
     }
+
+    // Half a degree, matching the tolerance that decides an edge is flat.
+    soup.absorb(capFaces, 0.9999619);
 
     // Sections that land in the same place belong to the same vertex; see the
     // note on Soup::weld. A nanometre is far below anything a fillet resolves

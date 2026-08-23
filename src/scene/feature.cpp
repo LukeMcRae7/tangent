@@ -132,9 +132,14 @@ bool evaluateFrom(std::vector<Feature>& features, size_t from,
                 bool resolves = true;
                 for (Index e : f.edges)
                     if (e < 0 || e >= mesh.halfedgeCount()) { resolves = false; break; }
-                if (!resolves) fail("edges no longer exist");
-                else if (!bevelEdges(mesh, f.edges, f.width, f.segments))
-                    fail("width too large for these edges");
+                if (!resolves) { fail("edges no longer exist"); break; }
+
+                FilletSpec spec;
+                spec.segments = f.segments;
+                spec.edges.reserve(f.edges.size());
+                for (size_t i = 0; i < f.edges.size(); ++i)
+                    spec.edges.push_back({f.edges[i], f.radiusFor(i)});
+                if (!filletEdges(mesh, spec)) fail("radius too large for these edges");
             }
             break;
 

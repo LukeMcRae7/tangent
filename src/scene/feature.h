@@ -50,9 +50,26 @@ struct Feature {
 
     // Bevel / fillet. `edges` empty means every edge of the body; otherwise
     // just those, named by half-edge as numbered at this point in the chain.
+    //
+    // `radii` is parallel to `edges` and gives each one its own radius, as a
+    // Fusion fillet does. Left empty, `width` applies to all of them -- which
+    // is also what a file written before per-edge radii existed will load as.
+    //
+    // One feature holding many edges is not a convenience. Filleting two edges
+    // that meet in a single operation blends their shared corner once, against
+    // the original faces; filleting them one after another asks the second to
+    // cut into the first one's surface, which is a harder problem and one we
+    // currently refuse. So the editor extends this list rather than appending
+    // another fillet whenever it can.
     std::vector<Index> edges;
+    std::vector<Real>  radii;
     Real width    = 1.0;
     int  segments = 1;
+
+    // Radius for `edges[i]`, falling back to the feature-wide width.
+    Real radiusFor(size_t i) const {
+        return i < radii.size() && radii[i] > 0.0 ? radii[i] : width;
+    }
 
     // Boolean: how to combine, and the other body baked into this object's
     // local space. Baked rather than referenced because a live reference would

@@ -132,6 +132,7 @@ private:
 
     // Rounds the selected edges only, the way F does in Fusion.
     void filletSelectedEdges();
+    bool extendLastFillet(SceneObject& obj, const std::vector<Index>& edges, Real radius);
 
     // Combines the two selected objects. The first selected is kept and
     // becomes the result; the second is consumed as the tool.

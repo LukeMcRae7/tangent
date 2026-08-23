@@ -192,6 +192,30 @@ static bool makePrism(Mesh& m, int n, double side, double height) {
     return m.build(p, sz, ix);
 }
 
+// The edge whose own extent covers the segment a-b -- the direction the editor
+// traces in, from a shortened edge on the current mesh back to the longer one
+// it was cut from. `edgeBetween` asks the opposite question.
+static Index edgeCovering(const Mesh& m, Vec3 a, Vec3 b) {
+    Index found = kInvalid;
+    for (Index h = 0; h < m.halfedgeCount(); ++h) {
+        const Index tw = m.halfedges[h].twin;
+        if (h > tw) continue;
+        const Vec3 p = m.verts[m.fromVertex(h)].position;
+        const Vec3 q = m.verts[m.halfedges[h].vertex].position;
+        const Real len = length(q - p);
+        if (len < 1e-9) continue;
+        const Vec3 dir = (q - p) / len;
+        auto covers = [&](Vec3 x) {
+            const Real t = dot(x - p, dir);
+            return t > -1e-6 && t < len + 1e-6 && lengthSq(x - (p + dir * t)) < 1e-12;
+        };
+        if (!covers(a) || !covers(b)) continue;
+        if (found != kInvalid) return kInvalid;   // ambiguous
+        found = h;
+    }
+    return found;
+}
+
 // Edges the solid turns inward at.
 static std::vector<Index> concaveEdges(const Mesh& m) {
     std::vector<Index> out;
@@ -452,6 +476,57 @@ int main() {
         expectSolid(m, tag);
         expectInside(m, before, tag);
         std::printf("[curved] %s: %d faces, volume %.3f\n", tag.c_str(), m.faceCount(), volumeOf(m));
+    }
+
+    // ---- Extending a fillet rather than stacking one -----------------------
+    // The editor's answer to the gap above. The user fillets an edge, then
+    // picks the neighbouring one and asks for a fillet again. Rather than
+    // running a second operation on the result -- which has to cut into the
+    // first fillet's surface and is refused -- the edge is traced back to the
+    // mesh the first fillet saw and both are filleted together.
+    //
+    // The point of the test is that tracing back is sound: the merged feature
+    // must give the same solid as having picked both edges to begin with.
+    for (int segments : {1, 4, 8}) {
+        const std::string tag = "extend, " + std::to_string(segments) + " seg";
+
+        // What the user sees after the first fillet.
+        Mesh after;
+        makeBox(after);
+        check(bevelEdges(after, {edgeBetween(after, tFL, tFR)}, r, segments),
+              tag + ": first fillet");
+
+        // The neighbouring edge, as it exists on that result: a shortened piece
+        // of the original, since the corner it shared has been cut away.
+        const Index picked = edgeBetween(after, tFR, tBR);
+        check(picked != kInvalid, tag + ": neighbouring edge is pickable");
+        const Vec3 a = after.verts[after.fromVertex(picked)].position;
+        const Vec3 b = after.verts[after.halfedges[picked].vertex].position;
+        check(lengthSq(a - tFR) > 1e-9 && lengthSq(b - tFR) > 1e-9,
+              tag + ": the shared corner is gone, so endpoints cannot match");
+
+        // Trace it back to the mesh the first fillet was applied to.
+        Mesh original;
+        makeBox(original);
+        const Index traced = edgeCovering(original, a, b);
+        check(traced == edgeBetween(original, tFR, tBR),
+              tag + ": traces back to the edge it came from");
+
+        Mesh merged;
+        makeBox(merged);
+        check(bevelEdges(merged, {edgeBetween(merged, tFL, tFR), traced}, r, segments),
+              tag + ": merged fillet");
+        expectSolid(merged, tag);
+
+        Mesh together;
+        makeBox(together);
+        check(bevelEdges(together,
+                         {edgeBetween(together, tFL, tFR), edgeBetween(together, tFR, tBR)},
+                         r, segments),
+              tag + ": both at once");
+        expectSameSolid(merged, together, tag + ": merged matches picking both");
+        std::printf("[extend] %s: %d verts, %.4f\n",
+                    tag.c_str(), merged.vertexCount(), volumeOf(merged));
     }
 
     // ---- Concave edges -----------------------------------------------------

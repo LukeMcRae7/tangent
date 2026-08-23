@@ -807,6 +807,45 @@ void Application::bevelActiveObject() {
                                                 obj->features, "Bevel"));
 }
 
+namespace {
+
+// The edge of `mesh` that the segment a-b lies along.
+//
+// An edge the user picks after an earlier fillet is a shortened piece of the
+// edge that fillet was applied to, so matching endpoints does not find it and
+// matching the line it lies on does. Ambiguity is reported rather than guessed
+// at: two candidates means the caller should not merge.
+Index edgeAlongSegment(const Mesh& mesh, Vec3 a, Vec3 b) {
+    const Vec3 ab = b - a;
+    const Real span = length(ab);
+    if (span < 1e-9) return kInvalid;
+    const Vec3 dir = ab / span;
+
+    Index found = kInvalid;
+    for (Index h = 0; h < mesh.halfedgeCount(); ++h) {
+        const Index tw = mesh.halfedges[h].twin;
+        if (h > tw) continue;
+        const Vec3 p = mesh.verts[mesh.fromVertex(h)].position;
+        const Vec3 q = mesh.verts[mesh.halfedges[h].vertex].position;
+
+        auto covers = [&](Vec3 x) {
+            const Real t = dot(x - p, normalize(q - p));
+            const Real len = length(q - p);
+            return t > -1e-6 && t < len + 1e-6 &&
+                   lengthSq(x - (p + normalize(q - p) * t)) < 1e-12;
+        };
+        // Same line, and it contains the segment the user picked.
+        if (std::fabs(std::fabs(dot(normalize(q - p), dir)) - 1.0) > 1e-9) continue;
+        if (!covers(a) || !covers(b)) continue;
+
+        if (found != kInvalid) return kInvalid;   // ambiguous
+        found = h;
+    }
+    return found;
+}
+
+} // namespace
+
 void Application::filletSelectedEdges() {
     const ObjectId id = scene_.contextObject();
     SceneObject* obj = scene_.find(id);
@@ -824,9 +863,21 @@ void Application::filletSelectedEdges() {
     const Real width = std::min(view_.bevelWidth, limit * Real(0.95));
     if (width <= 1e-4) { setNotice("No room for a fillet at this size"); return; }
 
+    // Extend the fillet that is already there, rather than stacking a second
+    // one on it.
+    //
+    // This is the Fusion behaviour, and here it is also the difference between
+    // geometry that works and geometry that does not: two edges filleted
+    // together blend their shared corner once against the original faces, where
+    // filleting one after the other asks the second to cut into the first one's
+    // surface. Picking a neighbouring edge and pressing F again should give the
+    // solid the user pictures, not a refusal.
+    if (extendLastFillet(*obj, edges, width)) return;
+
     Feature f;
     f.kind = FeatureKind::Bevel;
     f.edges = edges;
+    f.radii.assign(edges.size(), width);
     f.width = width;
     f.segments = view_.bevelSegments;
 
@@ -837,6 +888,73 @@ void Application::filletSelectedEdges() {
     }
     undo_.push(std::make_unique<FeatureCommand>(id, std::move(chainBefore),
                                                 obj->features, "Fillet"));
+}
+
+// Folds `edges`, picked on the current mesh, into the fillet at the end of the
+// chain. Returns false if there is nothing to fold them into, if any of them
+// cannot be traced back to an edge of the mesh that fillet saw, or if the
+// merged fillet does not evaluate -- in which case the caller adds a new
+// feature and the object is left exactly as it was.
+bool Application::extendLastFillet(SceneObject& obj, const std::vector<Index>& edges,
+                                   Real radius) {
+    if (obj.features.empty()) return false;
+    const size_t last = obj.features.size() - 1;
+    Feature& fillet = obj.features[last];
+    if (fillet.kind != FeatureKind::Bevel || fillet.edges.empty() || !fillet.enabled)
+        return false;
+    if (fillet.segments != view_.bevelSegments) return false;
+
+    // The mesh as it stood before that fillet ran, which is what its edge
+    // indices are numbered against.
+    if (last == 0 || last > obj.featureCache.size()) return false;
+    const Mesh& before = obj.featureCache[last - 1];
+    if (before.empty()) return false;
+
+    std::vector<Index> merged = fillet.edges;
+    std::vector<Real>  radii;
+    radii.reserve(merged.size());
+    for (size_t i = 0; i < merged.size(); ++i) radii.push_back(fillet.radiusFor(i));
+
+    for (Index e : edges) {
+        if (e < 0 || e >= obj.mesh.halfedgeCount()) return false;
+        const Vec3 a = obj.mesh.verts[obj.mesh.fromVertex(e)].position;
+        const Vec3 b = obj.mesh.verts[obj.mesh.halfedges[e].vertex].position;
+        const Index mapped = edgeAlongSegment(before, a, b);
+        if (mapped == kInvalid) return false;
+
+        const Index tw = before.halfedges[mapped].twin;
+        bool already = false;
+        for (size_t i = 0; i < merged.size(); ++i)
+            if (merged[i] == mapped || merged[i] == tw) {
+                radii[i] = radius;   // re-picking an edge restates its radius
+                already = true;
+            }
+        if (!already) { merged.push_back(mapped); radii.push_back(radius); }
+    }
+
+    std::vector<Feature> chainBefore = obj.features;
+    const std::vector<Index> edgesBefore = fillet.edges;
+    const std::vector<Real>  radiiBefore = fillet.radii;
+
+    fillet.edges = std::move(merged);
+    fillet.radii = std::move(radii);
+    if (!scene_.reevaluateFrom(obj.id, last)) {
+        fillet.edges = edgesBefore;
+        fillet.radii = radiiBefore;
+        scene_.reevaluateFrom(obj.id, last);
+        return false;
+    }
+    if (obj.features[last].errored) {
+        fillet.edges = edgesBefore;
+        fillet.radii = radiiBefore;
+        scene_.reevaluateFrom(obj.id, last);
+        return false;
+    }
+
+    setNotice("Added to the fillet above");
+    undo_.push(std::make_unique<FeatureCommand>(obj.id, std::move(chainBefore),
+                                                obj.features, "Fillet"));
+    return true;
 }
 
 void Application::applyBoolean(BooleanOp op) {
