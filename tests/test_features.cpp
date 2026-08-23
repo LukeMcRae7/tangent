@@ -389,6 +389,63 @@ int main() {
                     removed, predicted, rimLen);
     }
 
+    // ---- Acting on a body that has been cut --------------------------------
+    // Every face of a boolean's output used to come back nameless. A feature
+    // acting on one stored nothing, and on the next evaluation nothing matched
+    // the first face in the mesh -- so extruding the top of a bored block
+    // quietly moved a different face instead. It happened after almost every
+    // boolean, which is what made it so visible.
+    {
+        Scene s;
+        const ObjectId id = s.addPrimitive(PrimitiveKind::Box);
+
+        CylinderParams bore;
+        bore.radius = 6;
+        bore.height = 40;
+        bore.segments = 32;
+        Mesh tool;
+        makeCylinder(tool, bore);
+        for (auto& v : tool.verts) v.position += Vec3{3, 3, 10};
+
+        Feature cut;
+        cut.kind = FeatureKind::Boolean;
+        cut.booleanOp = BooleanOp::Difference;
+        cut.bakedMesh = tool;
+        check(s.addFeature(id, cut), "bore a hole");
+
+        SceneObject* o = s.find(id);
+        check(checkHealth(o->mesh).solid(), "the bored block is solid");
+
+        int unnamed = 0;
+        for (const MeshVertex& v : o->mesh.verts) if (v.id == kNoId) ++unnamed;
+        for (const MeshFace& f : o->mesh.faces) if (f.id == kNoId) ++unnamed;
+        check(unnamed == 0, "a boolean names everything it produces (" +
+                                std::to_string(unnamed) + " unnamed)");
+
+        // Pick the top and extrude it.
+        Index top = 0;
+        for (Index f = 0; f < o->mesh.faceCount(); ++f)
+            if (dot(o->mesh.faceNormal(f), Vec3{0, 0, 1}) > 0.99 &&
+                o->mesh.faceCentroid(f).z > o->mesh.faceCentroid(top).z) top = f;
+        const Real bottomBefore = o->mesh.bounds().min.z;
+
+        Feature ext;
+        ext.kind = FeatureKind::Extrude;
+        ext.faces = nameFaces(o->mesh, {top});
+        ext.distance = 15.0;
+        check(s.addFeature(id, ext), "extrude the top of the bored block");
+
+        o = s.find(id);
+        check(!o->features.back().errored,
+              std::string("the extrude resolves: ") + o->features.back().error);
+        check(std::fabs(o->mesh.bounds().max.z - 25.0) < 1e-6,
+              "the top moved up by 15");
+        check(std::fabs(o->mesh.bounds().min.z - bottomBefore) < 1e-6,
+              "and the bottom did not move");
+        std::printf("[features] extrude after a boolean moves the picked face: "
+                    "z %.1f..%.1f\n", o->mesh.bounds().min.z, o->mesh.bounds().max.z);
+    }
+
     std::printf("\n%s (%d failures)\n", failures ? "FAILED" : "ALL PASS", failures);
     return failures ? 1 : 0;
 }

@@ -36,6 +36,14 @@ struct Poly {
     Vec3 normal;
     Real w = 0.0;      // plane offset: dot(normal, p) == w for p on the plane
 
+    // The face this piece was cut from, and which operand it belongs to. The
+    // result is named from these: without them every face of a boolean's output
+    // comes back nameless, a feature that acted on one stores nothing, and on
+    // the next evaluation "nothing" matches the first face in the mesh. An
+    // extrude of the top of a cut body would quietly move the bottom instead.
+    ElementId src = kNoId;
+    bool fromB = false;
+
     bool computePlane() {
         if (v.size() < 3) return false;
         // Newell, so a slightly non-planar polygon still gets a sane plane.
@@ -112,8 +120,8 @@ void splitPolygon(const Poly& poly, Vec3 n, Real w,
                 b.v.push_back(cut);
             }
         }
-        f.normal = poly.normal; f.w = poly.w;
-        b.normal = poly.normal; b.w = poly.w;
+        f.normal = poly.normal; f.w = poly.w; f.src = poly.src; f.fromB = poly.fromB;
+        b.normal = poly.normal; b.w = poly.w; b.src = poly.src; b.fromB = poly.fromB;
         if (f.v.size() >= 3) front.push_back(f);
         if (b.v.size() >= 3) back.push_back(b);
         break;
@@ -132,7 +140,7 @@ void splitPolygon(const Poly& poly, Vec3 n, Real w,
 // Asking the geometry directly costs a solid-angle sum per piece and has none
 // of those properties.
 
-std::vector<Poly> toPolygons(const Mesh& m) {
+std::vector<Poly> toPolygons(const Mesh& m, bool fromB) {
     std::vector<Poly> out;
     out.reserve(static_cast<size_t>(m.faceCount()) * 2);
     std::vector<Index> verts, tris;
@@ -140,6 +148,8 @@ std::vector<Poly> toPolygons(const Mesh& m) {
         m.faceVertices(f, verts);
         if (verts.size() == 3) {
             Poly p;
+            p.src = m.faces[f].id;
+            p.fromB = fromB;
             for (Index v : verts) p.v.push_back(m.verts[v].position);
             if (p.computePlane()) out.push_back(std::move(p));
             continue;
@@ -148,6 +158,8 @@ std::vector<Poly> toPolygons(const Mesh& m) {
         m.triangulateFacePublic(f, tris);
         for (size_t i = 0; i + 2 < tris.size(); i += 3) {
             Poly p;
+            p.src = m.faces[f].id;
+            p.fromB = fromB;
             p.v = {m.verts[verts[tris[i]]].position,
                    m.verts[verts[tris[i + 1]]].position,
                    m.verts[verts[tris[i + 2]]].position};
@@ -163,7 +175,8 @@ std::vector<Poly> toPolygons(const Mesh& m) {
 // arithmetic that produced it differs, so the values agree only to within a
 // few ulps. Without welding, every seam would come back as a pair of open
 // boundaries and build() would reject the result.
-bool weldAndBuild(const std::vector<Poly>& polys, Mesh& out) {
+bool weldAndBuild(const std::vector<Poly>& polys, const Mesh& a, const Mesh& b,
+                  ElementId salt, Mesh& out) {
     const bool dbg = std::getenv("TANGENT_BOOL_DEBUG") != nullptr;
     if (dbg) std::fprintf(stderr, "[bool] weld input: %zu polys\n", polys.size());
     if (polys.empty()) return false;
@@ -187,11 +200,28 @@ bool weldAndBuild(const std::vector<Poly>& polys, Mesh& out) {
     std::vector<Vec3> positions;
     std::vector<uint32_t> faceSizes, faceIndices;
 
+    // Names carried alongside, because every step below can drop a face and the
+    // built mesh has to end up knowing what each of its faces used to be.
+    std::vector<ElementId> faceName;
+    std::map<std::pair<ElementId, bool>, uint64_t> fragmentOf;
+
     auto cellOf = [&](const Vec3& p) {
         return std::array<int64_t, 3>{static_cast<int64_t>(std::llround(p.x * inv)),
                                       static_cast<int64_t>(std::llround(p.y * inv)),
                                       static_cast<int64_t>(std::llround(p.z * inv))};
     };
+
+    // A point that was already a vertex of an operand keeps that operand's
+    // name. The second operand's names are re-derived: two boxes name their
+    // corners identically, and letting both through would put the same name on
+    // two different vertices of the result.
+    std::map<std::array<int64_t, 3>, ElementId> knownVertex;
+    for (const MeshVertex& mv : a.verts)
+        if (mv.id != kNoId) knownVertex.emplace(cellOf(mv.position), mv.id);
+    for (const MeshVertex& mv : b.verts)
+        if (mv.id != kNoId)
+            knownVertex.emplace(cellOf(mv.position),
+                                nameId(salt, IdRole::Vertex, mv.id, 1));
 
     auto findOrAdd = [&](const Vec3& p) {
         const std::array<int64_t, 3> c = cellOf(p);
@@ -225,6 +255,12 @@ bool weldAndBuild(const std::vector<Poly>& polys, Mesh& out) {
 
         faceSizes.push_back(static_cast<uint32_t>(clean.size()));
         faceIndices.insert(faceIndices.end(), clean.begin(), clean.end());
+
+        // One source face can arrive in several pieces, so they are counted
+        // apart. Emission order is fixed by the inputs, so re-running the same
+        // operation names them the same way again.
+        const uint64_t k = fragmentOf[{p.src, p.fromB}]++;
+        faceName.push_back(nameId(salt, IdRole::Face, p.src, p.fromB ? 1 : 0, k));
     }
 
     if (dbg) std::fprintf(stderr, "[bool] after weld: %zu verts, %zu faces\n",
@@ -255,8 +291,10 @@ bool weldAndBuild(const std::vector<Poly>& polys, Mesh& out) {
             buckets[bucketOf(positions[i])].push_back(i);
 
         std::vector<uint32_t> rebuiltSizes, rebuiltIndices;
-        size_t at = 0;
+        std::vector<ElementId> rebuiltNames;
+        size_t at = 0, face = 0;
         for (uint32_t fs : faceSizes) {
+            const size_t self = face++;
             std::vector<uint32_t> loop(faceIndices.begin() + static_cast<long>(at),
                                        faceIndices.begin() + static_cast<long>(at + fs));
             at += fs;
@@ -297,11 +335,13 @@ bool weldAndBuild(const std::vector<Poly>& polys, Mesh& out) {
             }
 
             if (grown.size() < 3) continue;
+            rebuiltNames.push_back(faceName[self]);
             rebuiltSizes.push_back(static_cast<uint32_t>(grown.size()));
             rebuiltIndices.insert(rebuiltIndices.end(), grown.begin(), grown.end());
         }
         faceSizes.swap(rebuiltSizes);
         faceIndices.swap(rebuiltIndices);
+        faceName.swap(rebuiltNames);
     }
 
     if (dbg) std::fprintf(stderr, "[bool] after T-junction repair: %zu faces\n",
@@ -364,8 +404,10 @@ bool weldAndBuild(const std::vector<Poly>& polys, Mesh& out) {
         }
 
         std::vector<uint32_t> keptSizes, keptIndices;
+        std::vector<ElementId> keptNames;
         for (size_t i = 0; i < loops.size(); ++i) {
             if (dropped[i]) continue;
+            keptNames.push_back(faceName[i]);
             keptSizes.push_back(static_cast<uint32_t>(loops[i].size()));
             keptIndices.insert(keptIndices.end(), loops[i].begin(), loops[i].end());
         }
@@ -374,12 +416,38 @@ bool weldAndBuild(const std::vector<Poly>& polys, Mesh& out) {
                          faceSizes.size(), keptSizes.size());
         faceSizes.swap(keptSizes);
         faceIndices.swap(keptIndices);
+        faceName.swap(keptNames);
     }
 
     if (faceSizes.empty()) return false;
 
+    Mesh::Names names;
+    names.faces = faceName;
+    names.vertices.reserve(positions.size());
+    for (const Vec3& p : positions) {
+        auto it = knownVertex.find(cellOf(p));
+        if (it == knownVertex.end()) {
+            // Cut through neighbouring cells too, or a point a hair either side
+            // of a boundary is treated as new when it is not.
+            const auto cc = cellOf(p);
+            for (int dx = -1; dx <= 1 && it == knownVertex.end(); ++dx)
+                for (int dy = -1; dy <= 1 && it == knownVertex.end(); ++dy)
+                    for (int dz = -1; dz <= 1 && it == knownVertex.end(); ++dz)
+                        it = knownVertex.find({cc[0] + dx, cc[1] + dy, cc[2] + dz});
+        }
+        if (it != knownVertex.end()) { names.vertices.push_back(it->second); continue; }
+
+        // Born on the intersection curve, so it has no earlier name. Derived
+        // from where it is, which is reproducible for the same inputs.
+        const auto cc = cellOf(p);
+        names.vertices.push_back(nameId(salt, IdRole::Vertex,
+                                        static_cast<ElementId>(cc[0]),
+                                        static_cast<ElementId>(cc[1]),
+                                        static_cast<uint64_t>(cc[2])));
+    }
+
     Mesh built;
-    if (!built.build(positions, faceSizes, faceIndices)) {
+    if (!built.build(positions, faceSizes, faceIndices, &names)) {
         if (std::getenv("TANGENT_BOOL_DEBUG")) {
             // How many directed edges are unpaired, and are any faces slivers?
             std::map<std::pair<uint32_t,uint32_t>, int> dir;
@@ -597,15 +665,15 @@ void classify(const std::vector<Poly>& faces, const std::vector<Poly>& otherTris
 
 // Test hook for the ray classifier.
 bool debugPointInsideMesh(const Mesh& m, Vec3 p) {
-    return pointInside(toPolygons(m), p);
+    return pointInside(toPolygons(m, false), p);
 }
 
-bool meshBoolean(const Mesh& a, const Mesh& b, BooleanOp op, Mesh& out) {
+bool meshBoolean(const Mesh& a, const Mesh& b, BooleanOp op, Mesh& out, ElementId salt) {
     // An open surface has no inside, so "inside the other solid" is undefined.
     if (!isClosed(a) || !isClosed(b)) return false;
 
-    const std::vector<Poly> pa = toPolygons(a);
-    const std::vector<Poly> pb = toPolygons(b);
+    const std::vector<Poly> pa = toPolygons(a, false);
+    const std::vector<Poly> pb = toPolygons(b, true);
     if (pa.empty() || pb.empty()) return false;
 
     // Stated directly rather than as a sequence of inversions: each operation
@@ -635,7 +703,7 @@ bool meshBoolean(const Mesh& a, const Mesh& b, BooleanOp op, Mesh& out) {
     }
     }
 
-    if (!weldAndBuild(result, out)) return false;
+    if (!weldAndBuild(result, a, b, salt, out)) return false;
 
     // A boolean cuts every face it touches into triangles and leaves a fan of
     // them where one flat surface used to be, plus a seam wherever the two

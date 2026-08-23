@@ -2113,8 +2113,13 @@ int mergeCoplanarFaces(Mesh& mesh, Real toleranceDegrees) {
 
         if (!simple(p1) || !simple(p2)) { keepOriginals(); continue; }
 
+        // Both halves need a name. The second used to go out without one, and
+        // a nameless face is worse than an unnamed one: every reference to it
+        // stores nothing, and nothing matches the first nameless face in the
+        // mesh. Picking the bored top of a cut body and extruding moved some
+        // other face entirely.
         soup.face(asSoup(p1), mesh.faces[best].id);
-        soup.face(asSoup(p2));
+        soup.face(asSoup(p2), nameId(0, IdRole::Split, mesh.faces[best].id));
         for (Index f : g.faces) emitted[f] = true;
         merged += static_cast<int>(g.faces.size()) - 2;
     }

@@ -281,7 +281,7 @@ bool evaluateFrom(std::vector<Feature>& features, size_t from,
             if (mesh.empty()) { fail("nothing to combine with"); break; }
             if (f.bakedMesh.empty()) { fail("tool body is missing"); break; }
             Mesh combined;
-            if (!meshBoolean(mesh, f.bakedMesh, f.booleanOp, combined))
+            if (!meshBoolean(mesh, f.bakedMesh, f.booleanOp, combined, f.uid))
                 fail("boolean produced no valid solid");
             else
                 mesh = std::move(combined);

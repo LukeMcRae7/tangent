@@ -36,7 +36,13 @@ const char* booleanOpName(BooleanOp op);
 // Returns false, leaving `out` untouched, if either input is not closed, if the
 // operation produces nothing (subtracting a solid from inside itself), or if
 // the result cannot be rebuilt as a manifold mesh.
-bool meshBoolean(const Mesh& a, const Mesh& b, BooleanOp op, Mesh& out);
+// `salt` identifies the operation when naming the result. Every face and vertex
+// of the output gets a stable name derived from the face it was cut from, so a
+// feature that acts on the result can still find what it acted on. Without one
+// the output is nameless, and a stored reference matches the first face in the
+// mesh rather than the intended one.
+bool meshBoolean(const Mesh& a, const Mesh& b, BooleanOp op, Mesh& out,
+                 ElementId salt = 0);
 
 bool debugPointInsideMesh(const Mesh& m, Vec3 p);
 
