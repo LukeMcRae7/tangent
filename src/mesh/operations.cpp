@@ -17,6 +17,8 @@ namespace {
 // Polygon soup under construction, with the vertex compaction every operation
 // needs at the end (faces get replaced, orphaning their old vertices).
 struct Soup {
+    static constexpr size_t kDropped = static_cast<size_t>(-1);
+
     std::vector<Vec3>     positions;
     std::vector<uint32_t> faceSizes;
     std::vector<uint32_t> faceIndices;
@@ -126,6 +128,13 @@ struct Soup {
                 for (size_t i = 2; i < fn; ++i) merged.push_back(loops[f][(fi + i) % fn]);
                 for (size_t i = gi + 1; i < gn; ++i) merged.push_back(loops[g][i]);
 
+                // Splicing can bring the two faces' copies of the same point
+                // together. A loop that visits a vertex twice is not a face.
+                std::vector<uint32_t> seenIdx = merged;
+                std::sort(seenIdx.begin(), seenIdx.end());
+                if (std::adjacent_find(seenIdx.begin(), seenIdx.end()) != seenIdx.end())
+                    continue;
+
                 loops[g].swap(merged);
                 gone[f] = true;
                 break;
@@ -152,7 +161,7 @@ struct Soup {
     // patch alone would open a hole, because the two edge strips reach it
     // through separate vertices in the same position. Welding first is what
     // lets the strips meet each other directly instead.
-    void weld(Real eps) {
+    void weld(Real eps, std::vector<size_t>* faceRemap = nullptr) {
         const Real inv = 1.0 / eps;
         struct Key { int64_t x, y, z; bool operator==(const Key& o) const {
             return x == o.x && y == o.y && z == o.z; } };
@@ -182,8 +191,11 @@ struct Soup {
         }
 
         std::vector<uint32_t> sizes, indices, loop;
+        if (faceRemap) faceRemap->assign(faceSizes.size(), kDropped);
         size_t at = 0;
+        size_t which = 0;
         for (uint32_t n : faceSizes) {
+            const size_t self = which++;
             loop.clear();
             for (uint32_t i = 0; i < n; ++i) {
                 const uint32_t idx = remap[faceIndices[at + i]];
@@ -199,6 +211,7 @@ struct Soup {
                 area += cross(positions[loop[i]], positions[loop[(i + 1) % loop.size()]]);
             if (lengthSq(area) < 1e-18) continue;
 
+            if (faceRemap) (*faceRemap)[self] = sizes.size();
             sizes.push_back(static_cast<uint32_t>(loop.size()));
             indices.insert(indices.end(), loop.begin(), loop.end());
         }
@@ -648,6 +661,14 @@ bool filletEdges(Mesh& mesh, const FilletSpec& spec) {
     }
     if (chosen == 0) return bail("no edges chosen");
 
+    // Scaled to the model, not fixed. Sections that should coincide are
+    // computed two ways -- offset from a face, and cut back along an edge --
+    // and agree to within rounding, which on a 20mm part is a few nanometres
+    // and on a 2m one is a few microns. An absolute tolerance is right for
+    // exactly one model size; this is right for all of them, and still a
+    // thousand times finer than anything a printer resolves.
+    const Real weldEps = std::max(length(mesh.bounds().size()), Real(1e-3)) * 1e-9;
+
     std::vector<Vec3> faceNormals(static_cast<size_t>(mesh.faceCount()));
     for (Index f = 0; f < mesh.faceCount(); ++f) faceNormals[f] = mesh.faceNormal(f);
 
@@ -731,9 +752,11 @@ bool filletEdges(Mesh& mesh, const FilletSpec& spec) {
     for (Index v = 0; v < mesh.vertexCount(); ++v) {
         if (filletsAt[v] == 0) continue;
 
-        Real m[6] = {0, 0, 0, 0, 0, 0};   // symmetric 3x3: xx xy xz yy yz zz
-        Vec3 rhs{};
-        Real scale = 0.0;
+        // The distinct planes at this vertex. Two faces with the same normal
+        // are the same plane -- every face here passes through v -- and
+        // counting one twice only makes the fit worse.
+        Vec3 nrm[16];
+        Real rad[16];
         int planes = 0;
 
         const Index start = mesh.verts[v].halfedge;
@@ -742,39 +765,161 @@ bool filletEdges(Mesh& mesh, const FilletSpec& spec) {
             const Real r = faceRadiusAt(h);
             if (r > 0.0) {
                 const Vec3 n = faceNormals[mesh.halfedges[h].face];
-                m[0] += n.x * n.x; m[1] += n.x * n.y; m[2] += n.x * n.z;
-                m[3] += n.y * n.y; m[4] += n.y * n.z; m[5] += n.z * n.z;
-                rhs -= n * r;
-                scale += 1.0;
-                ++planes;
+                int at = -1;
+                for (int i = 0; i < planes; ++i)
+                    if (dot(nrm[i], n) > 1.0 - 1e-12) { at = i; break; }
+                if (at >= 0) rad[at] = std::max(rad[at], r);
+                else if (planes < 16) { nrm[planes] = n; rad[planes] = r; ++planes; }
             }
             h = mesh.halfedges[mesh.halfedges[h].twin].next;
         } while (h != start);
 
         if (planes < 2) continue;
 
-        // Enough to pin the free direction of an under-determined fit without
-        // disturbing one that is already determined.
-        const Real eps = scale * 1e-13;
-        m[0] += eps; m[3] += eps; m[5] += eps;
+        Vec3 u{};
+        bool solved = false;
 
-        // Cramer on the symmetric system.
-        const Real c00 = m[3] * m[5] - m[4] * m[4];
-        const Real c01 = m[2] * m[4] - m[1] * m[5];
-        const Real c02 = m[1] * m[4] - m[2] * m[3];
-        const Real det = m[0] * c00 + m[1] * c01 + m[2] * c02;
-        if (std::fabs(det) < 1e-18) continue;
+        if (planes >= 3) {
+            // Over- or exactly-determined: least squares on the offsets.
+            Real m[6] = {0, 0, 0, 0, 0, 0};   // xx xy xz yy yz zz
+            Vec3 rhs{};
+            for (int i = 0; i < planes; ++i) {
+                const Vec3& n = nrm[i];
+                m[0] += n.x * n.x; m[1] += n.x * n.y; m[2] += n.x * n.z;
+                m[3] += n.y * n.y; m[4] += n.y * n.z; m[5] += n.z * n.z;
+                rhs -= n * rad[i];
+            }
+            const Real c00 = m[3] * m[5] - m[4] * m[4];
+            const Real c01 = m[2] * m[4] - m[1] * m[5];
+            const Real c02 = m[1] * m[4] - m[2] * m[3];
+            const Real det = m[0] * c00 + m[1] * c01 + m[2] * c02;
+            // Scale-free rank test: a flat or nearly flat fan of normals spans
+            // a plane, not space, and must be solved in that plane instead.
+            const Real trace = m[0] + m[3] + m[5];
+            if (std::fabs(det) > 1e-10 * trace * trace * trace) {
+                const Real c11 = m[0] * m[5] - m[2] * m[2];
+                const Real c12 = m[1] * m[2] - m[0] * m[4];
+                const Real c22 = m[0] * m[3] - m[1] * m[1];
+                u = Vec3{(c00 * rhs.x + c01 * rhs.y + c02 * rhs.z) / det,
+                         (c01 * rhs.x + c11 * rhs.y + c12 * rhs.z) / det,
+                         (c02 * rhs.x + c12 * rhs.y + c22 * rhs.z) / det};
+                solved = true;
+            }
+        }
 
-        const Real c11 = m[0] * m[5] - m[2] * m[2];
-        const Real c12 = m[1] * m[2] - m[0] * m[4];
-        const Real c22 = m[0] * m[3] - m[1] * m[1];
-        const Vec3 u{(c00 * rhs.x + c01 * rhs.y + c02 * rhs.z) / det,
-                     (c01 * rhs.x + c11 * rhs.y + c12 * rhs.z) / det,
-                     (c02 * rhs.x + c12 * rhs.y + c22 * rhs.z) / det};
+        if (!solved) {
+            // Under-determined: the constraints leave a free direction, and the
+            // answer is the smallest offset that satisfies them -- which is the
+            // one lying in the span of the normals. Solving that directly is
+            // exact. Nudging the singular system with a small diagonal instead,
+            // as this used to, leaves a determinant near zero and throws away
+            // most of the mantissa: it put points that should have coincided
+            // microns apart, which is a crack, not a rounding difference.
+            //
+            // Pick the two least parallel planes; a third would be dependent.
+            int p0 = 0, p1 = 1;
+            Real worst = 2.0;
+            for (int i = 0; i < planes; ++i)
+                for (int j = i + 1; j < planes; ++j) {
+                    const Real c = std::fabs(dot(nrm[i], nrm[j]));
+                    if (c < worst) { worst = c; p0 = i; p1 = j; }
+                }
+            const Real c = dot(nrm[p0], nrm[p1]);
+            const Real det = 1.0 - c * c;
+            if (det < 1e-12) continue;   // parallel: no corner to speak of
+            const Real l0 = (-rad[p0] + c * rad[p1]) / det;
+            const Real l1 = (-rad[p1] + c * rad[p0]) / det;
+            u = nrm[p0] * l0 + nrm[p1] * l1;
+        }
 
         ballAt[v] = posOf(v) + u;
         ballOk[v] = true;
     }
+
+    // Where a fillet runs off the end of an edge it does not stop in mid-air:
+    // it runs on until it meets the face across the end, and the cap is the
+    // curve where the two meet, lying in that face's plane.
+    //
+    // Capping it in the plane perpendicular to the edge instead is only right
+    // when the end face happens to be perpendicular -- true of a box, and of
+    // almost nothing else. On a cylinder rim, a cone, a torus, the cap came out
+    // as a polygon whose points were not coplanar, ear clipping folded it, and
+    // the result self-intersected at any radius at all, however small.
+    //
+    // endFaceAt[v] is that face, and endDirAt[v] points from v along the edge
+    // the fillet arrives on. Only meaningful where exactly one fillet ends at
+    // v and exactly one face there is clear of it.
+    std::vector<Index> endFaceAt(static_cast<size_t>(mesh.vertexCount()), kInvalid);
+    std::vector<Vec3>  endDirAt(static_cast<size_t>(mesh.vertexCount()));
+    for (Index v = 0; v < mesh.vertexCount(); ++v) {
+        if (filletsAt[v] != 1) continue;
+
+        Vec3 dir{};
+        const Index start = mesh.verts[v].halfedge;
+        Index h = start;
+        do {
+            if (beveled[h]) dir = normalize(dirOf(h));
+            h = mesh.halfedges[mesh.halfedges[h].twin].next;
+        } while (h != start);
+        if (lengthSq(dir) < 0.5) continue;
+
+        // Of the faces at v that no fillet touches, the one the edge runs into
+        // first. Where several are clear -- a vertex on a quad mesh has two --
+        // they are the faces of one smooth surface and only degrees apart, so
+        // taking the nearest is a small approximation rather than a wrong
+        // answer. It also keeps the cap a single planar curve, which is the
+        // property that matters: capping across two planes is what folded.
+        Index clear = kInvalid;
+        Real bestT = std::numeric_limits<Real>::max();
+        h = start;
+        do {
+            if (!beveled[h] && !beveled[mesh.halfedges[h].prev]) {
+                const Index f = mesh.halfedges[h].face;
+                const Real denom = dot(dir, faceNormals[f]);
+                if (std::fabs(denom) > 1e-9) {
+                    // Measured at the corner ball, not at v: every face here
+                    // contains v, so v cannot tell them apart. How far the
+                    // section has to slide to reach each plane can.
+                    const Vec3 c = ballOk[v] ? ballAt[v] : posOf(v);
+                    const Real t = std::fabs(dot(posOf(v) - c, faceNormals[f]) / denom);
+                    if (t < bestT) { bestT = t; clear = f; }
+                }
+            }
+            h = mesh.halfedges[mesh.halfedges[h].twin].next;
+        } while (h != start);
+
+        // Every face across the end runs parallel to the edge, so the fillet
+        // never reaches one and there is nothing to trim against.
+        if (clear == kInvalid) return bail("fillet ends without a face to stop at");
+
+        // Taking the nearest is only defensible while the faces it stands in
+        // for lie in nearly the same plane. Across a real crease -- the corner
+        // of a quad mesh, where they can be thirty degrees apart -- the cap
+        // genuinely spans two planes, and trimming it into one puts geometry
+        // through the surface. Splitting a cap across a fan of faces is an
+        // operation we do not have, so refuse rather than build that.
+        h = start;
+        do {
+            if (!beveled[h] && !beveled[mesh.halfedges[h].prev]) {
+                const Index f = mesh.halfedges[h].face;
+                if (dot(faceNormals[f], faceNormals[clear]) < 0.996)   // five degrees
+                    return bail("fillet ends on a corner of several faces");
+            }
+            h = mesh.halfedges[mesh.halfedges[h].twin].next;
+        } while (h != start);
+
+        endFaceAt[v] = clear;
+        endDirAt[v] = dir;
+    }
+
+    // Slides a point along the edge until it lands on the end face's plane.
+    auto trimToEnd = [&](Index v, Vec3 p) {
+        const Index g = endFaceAt[v];
+        if (g == kInvalid) return p;
+        const Vec3 n = faceNormals[g];
+        const Vec3 d = endDirAt[v];
+        return p + d * (dot(posOf(v) - p, n) / dot(d, n));
+    };
 
     // Where a face's corner moves: the point the corner ball touches it.
     auto crossOffsetAt = [&](Index h, Vec3& d) {
@@ -790,6 +935,18 @@ bool filletEdges(Mesh& mesh, const FilletSpec& spec) {
                             posOf(v) - posOf(mesh.fromVertex(p)), dirOf(h),
                             beveled[p] ? radiusOf[p] : 0.0,
                             beveled[h] ? radiusOf[h] : 0.0, d);
+    };
+
+    // The same point, moved onto the plane of the face across the end. This is
+    // the one that gets built; the untrimmed point above is what the section's
+    // arc is solved from, so the fillet keeps its true radius and only its
+    // termination follows the end face.
+    auto crossPointEmit = [&](Index h, Vec3& out) {
+        Vec3 d;
+        if (!crossOffsetAt(h, d)) return false;
+        const Index v = mesh.fromVertex(h);
+        out = trimToEnd(v, posOf(v) + d);
+        return true;
     };
 
     // True when either edge at this corner is being filleted, so the corner
@@ -815,15 +972,15 @@ bool filletEdges(Mesh& mesh, const FilletSpec& spec) {
         // Both faces meeting along this edge get a say; the deeper cut wins,
         // because the corner has to clear every fillet arriving at it.
         if (cornerActive(h)) {
-            Vec3 d;
-            if (!crossOffsetAt(h, d)) return bail("corner offset is undefined");
-            t = std::max(t, dot(d, dir));
+            Vec3 pt;
+            if (!crossPointEmit(h, pt)) return bail("corner offset is undefined");
+            t = std::max(t, dot(pt - posOf(mesh.fromVertex(h)), dir));
         }
         const Index across = mesh.halfedges[mesh.halfedges[h].twin].next;
         if (cornerActive(across)) {
-            Vec3 d;
-            if (!crossOffsetAt(across, d)) return bail("corner offset is undefined");
-            t = std::max(t, dot(d, dir));
+            Vec3 pt;
+            if (!crossPointEmit(across, pt)) return bail("corner offset is undefined");
+            t = std::max(t, dot(pt - posOf(mesh.fromVertex(across)), dir));
         }
         cutBack[h] = std::max(t, 0.0);
     }
@@ -890,7 +1047,8 @@ bool filletEdges(Mesh& mesh, const FilletSpec& spec) {
             if (bevPrev || bevNext) {
                 Vec3 d;
                 if (!crossOffsetAt(h, d)) return bail("corner offset is undefined");
-                const Vec3 pt = posOf(v) + d;
+                const Vec3 ptTrue = posOf(v) + d;
+                const Vec3 pt = trimToEnd(v, ptTrue);
 
                 // Where the offset runs purely along an unfilleted edge, the
                 // cross-section lands exactly on that edge's cut-back point.
@@ -910,7 +1068,7 @@ bool filletEdges(Mesh& mesh, const FilletSpec& spec) {
 
                 if (loop.empty() || loop.back() != idx) loop.push_back(idx);
                 crossIdx[h] = idx;
-                crossPos[h] = pt;
+                crossPos[h] = ptTrue;
                 hasCross[h] = true;
                 corner[h] = idx;
                 cornerPos[h] = pt;
@@ -991,7 +1149,7 @@ bool filletEdges(Mesh& mesh, const FilletSpec& spec) {
         std::vector<uint32_t>& ring = ringAt[h];
         ring.push_back(crossIdx[h]);
         for (size_t i = 1; i + 1 < pts.size(); ++i)
-            ring.push_back(soup.vertex(pts[i]));
+            ring.push_back(soup.vertex(trimToEnd(mesh.fromVertex(h), pts[i])));
         ring.push_back(crossIdx[far]);
     }
 
@@ -1095,7 +1253,46 @@ bool filletEdges(Mesh& mesh, const FilletSpec& spec) {
             // plane of the face across the end. Note it so it can be spliced
             // into that face rather than left as a seam across it.
             if (filletsAt[v] == 1) capFaces.push_back(soup.faceSizes.size());
-            soup.face(loop);
+
+            // A corner where three edges meet closes with a triangle, which is
+            // planar whatever its corners do. Four or more need not be: at a
+            // vertex of a quad mesh a chamfer's corner is four points that in
+            // general lie on no common plane, and handing that to the
+            // triangulator -- which has to flatten it to work at all -- folds
+            // it over itself. Fan it from a point on the blend sphere instead,
+            // so every triangle is planar and the patch stays on the surface
+            // the fillet is made of.
+            Vec3 mid{};
+            for (const Vec3& q : loopPos) mid += q;
+            mid = mid / static_cast<Real>(loopPos.size());
+
+            Real flatness = 0.0;
+            if (loop.size() > 3) {
+                Vec3 nrm{};
+                for (size_t i = 0; i < loopPos.size(); ++i)
+                    nrm += cross(loopPos[i], loopPos[(i + 1) % loopPos.size()]);
+                if (lengthSq(nrm) > 1e-24) {
+                    nrm = normalize(nrm);
+                    for (const Vec3& q : loopPos)
+                        flatness = std::max(flatness, std::fabs(dot(q - mid, nrm)));
+                }
+            }
+
+            if (flatness <= weldEps * 1e3) {
+                soup.face(loop);
+                continue;
+            }
+
+            // Onto the sphere the surrounding sections are tangent to, so the
+            // fan sits on the blend rather than cutting across it.
+            if (ballOk[v]) {
+                const Vec3 away = mid - ballAt[v];
+                if (lengthSq(away) > 1e-24)
+                    mid = ballAt[v] + normalize(away) * length(loopPos[0] - ballAt[v]);
+            }
+            const uint32_t hub = soup.vertex(mid);
+            for (size_t i = 0; i < loop.size(); ++i)
+                soup.face({loop[i], loop[(i + 1) % loop.size()], hub});
             continue;
         }
 
@@ -1369,13 +1566,42 @@ bool filletEdges(Mesh& mesh, const FilletSpec& spec) {
             soup.face({prev[i], prev[(i + 1) % prev.size()], pole});
     }
 
-    // Half a degree, matching the tolerance that decides an edge is flat.
-    soup.absorb(capFaces, 0.9999619);
+    // Weld before merging, not after. Two sections that landed in the same
+    // place are one vertex, and until that is settled a cap and the face it
+    // belongs to look like they meet along one edge when they really touch at
+    // a second point too -- and splicing them there folds the polygon onto
+    // itself. A nanometre is far below anything a fillet resolves and far
+    // above the arithmetic's noise.
+    std::vector<size_t> movedTo;
+    soup.weld(weldEps, &movedTo);
 
-    // Sections that land in the same place belong to the same vertex; see the
-    // note on Soup::weld. A nanometre is far below anything a fillet resolves
-    // and far above the arithmetic's noise.
-    soup.weld(1e-9);
+    std::vector<size_t> caps;
+    caps.reserve(capFaces.size());
+    for (size_t f : capFaces)
+        if (f < movedTo.size() && movedTo[f] != Soup::kDropped) caps.push_back(movedTo[f]);
+
+    // Half a degree, matching the tolerance that decides an edge is flat.
+    soup.absorb(caps, 0.9999619);
+    soup.weld(weldEps);
+
+    if (dbg) {
+        size_t at = 0;
+        for (size_t f = 0; f < soup.faceSizes.size(); ++f) {
+            const uint32_t n = soup.faceSizes[f];
+            std::vector<uint32_t> s(soup.faceIndices.begin() + static_cast<long>(at),
+                                    soup.faceIndices.begin() + static_cast<long>(at + n));
+            at += n;
+            std::vector<uint32_t> t = s;
+            std::sort(t.begin(), t.end());
+            if (std::adjacent_find(t.begin(), t.end()) == t.end()) continue;
+            std::fprintf(stderr, "[bevel] face %zu repeats a vertex:", f);
+            for (uint32_t i : s) std::fprintf(stderr, " %u", i);
+            std::fprintf(stderr, "\n");
+            for (uint32_t i : s)
+                std::fprintf(stderr, "          %u (%.4f %.4f %.4f)\n", i,
+                             soup.positions[i].x, soup.positions[i].y, soup.positions[i].z);
+        }
+    }
 
     if (!soup.commit(mesh)) {
         if (dbg) {
