@@ -107,6 +107,12 @@ target_include_directories(test_operations PRIVATE src)
 target_compile_options(test_operations PRIVATE -Wall -Wextra)
 add_test(NAME operations COMMAND test_operations)
 
+add_executable(test_fillet tests/test_fillet.cpp
+  src/mesh/health.cpp src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp)
+target_include_directories(test_fillet PRIVATE src)
+target_compile_options(test_fillet PRIVATE -Wall -Wextra)
+add_test(NAME fillet COMMAND test_fillet)
+
 add_executable(test_features tests/test_features.cpp
   src/scene/scene.cpp src/scene/feature.cpp src/mesh/boolean.cpp src/mesh/operations.cpp
   src/mesh/halfedge.cpp src/mesh/primitives.cpp)
