@@ -2,6 +2,7 @@
 
 #include <cassert>
 #include <cstdio>
+#include <unordered_set>
 #include <unordered_map>
 #include <vector>
 
@@ -13,11 +14,21 @@ namespace {
 // ---------------------------------------------------------------------------
 bool Mesh::build(const std::vector<Vec3>& positions,
                  const std::vector<uint32_t>& faceSizes,
-                 const std::vector<uint32_t>& faceIndices) {
+                 const std::vector<uint32_t>& faceIndices,
+                 const Names* names) {
     clear();
 
+    // Names are optional and all-or-nothing per array: a caller that supplies
+    // the wrong length is telling us something is out of step, and silently
+    // half-naming a mesh would be worse than not naming it.
+    const bool haveVertexNames = names && names->vertices.size() == positions.size();
+    const bool haveFaceNames   = names && names->faces.size() == faceSizes.size();
+
     verts.resize(positions.size());
-    for (size_t i = 0; i < positions.size(); ++i) verts[i].position = positions[i];
+    for (size_t i = 0; i < positions.size(); ++i) {
+        verts[i].position = positions[i];
+        if (haveVertexNames) verts[i].id = names->vertices[i];
+    }
 
     const Index nVerts = static_cast<Index>(positions.size());
     faces.reserve(faceSizes.size());
@@ -56,12 +67,14 @@ bool Mesh::build(const std::vector<Vec3>& positions,
             if (verts[from].halfedge == kInvalid) verts[from].halfedge = he;
         }
 
-        faces.push_back(MeshFace{firstHe});
+        faces.push_back(MeshFace{firstHe, haveFaceNames ? names->faces[faces.size()] : kNoId});
         cursor += degree;
     }
     if (cursor != faceIndices.size()) { clear(); return false; }
 
     const Index interiorCount = static_cast<Index>(halfedges.size());
+
+    edgeIds.assign(halfedges.size(), kNoId);
 
     // Bucket half-edges by their originating vertex (counting sort into CSR).
     std::vector<Index> bucketStart(static_cast<size_t>(nVerts) + 1, 0);
@@ -109,6 +122,7 @@ bool Mesh::build(const std::vector<Vec3>& positions,
         h.face   = kInvalid;
         h.twin   = he;
         halfedges.push_back(h);
+        edgeIds.push_back(kNoId);
         halfedges[he].twin = b;
 
         const Index start = halfedges[he].vertex;  // b originates here
@@ -158,6 +172,7 @@ bool Mesh::build(const std::vector<Vec3>& positions,
         }
     }
 
+    nameEdges();
     return true;
 }
 
@@ -375,6 +390,55 @@ void Mesh::buildRenderMesh(RenderMesh& out, Real creaseAngleDeg) const {
 }
 
 // ---------------------------------------------------------------------------
+Index Mesh::findVertex(ElementId id) const {
+    if (id == kNoId) return kInvalid;
+    for (Index v = 0; v < vertexCount(); ++v)
+        if (verts[v].id == id) return v;
+    return kInvalid;
+}
+
+Index Mesh::findFace(ElementId id) const {
+    if (id == kNoId) return kInvalid;
+    for (Index f = 0; f < faceCount(); ++f)
+        if (faces[f].id == id) return f;
+    return kInvalid;
+}
+
+Index Mesh::findEdge(ElementId id) const {
+    if (id == kNoId) return kInvalid;
+    for (Index he = 0; he < static_cast<Index>(edgeIds.size()); ++he)
+        if (edgeIds[he] == id) return he;
+    return kInvalid;
+}
+
+bool Mesh::named() const {
+    if (verts.empty()) return false;
+    std::unordered_set<ElementId> seen;
+    for (const MeshVertex& v : verts)
+        if (v.id == kNoId || !seen.insert(v.id).second) return false;
+    seen.clear();
+    for (const MeshFace& f : faces)
+        if (f.id == kNoId || !seen.insert(f.id).second) return false;
+    seen.clear();
+    for (Index he = 0; he < static_cast<Index>(edgeIds.size()); ++he) {
+        if (he > halfedges[he].twin) continue;
+        if (edgeIds[he] == kNoId || !seen.insert(edgeIds[he]).second) return false;
+    }
+    return true;
+}
+
+// An edge takes its name from the two vertices it joins, so it is the same
+// name whichever half-edge asks and whichever operation built it.
+void Mesh::nameEdges() {
+    edgeIds.assign(halfedges.size(), kNoId);
+    for (Index he = 0; he < halfedgeCount(); ++he) {
+        const ElementId a = verts[fromVertex(he)].id;
+        const ElementId b = verts[halfedges[he].vertex].id;
+        if (a == kNoId || b == kNoId) continue;
+        edgeIds[he] = edgeNameFrom(0, a, b);
+    }
+}
+
 bool Mesh::validate(std::string* err) const {
     auto fail = [&](const std::string& m) { if (err) *err = m; return false; };
     const Index nh = static_cast<Index>(halfedges.size());

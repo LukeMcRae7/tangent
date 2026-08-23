@@ -12,6 +12,7 @@
 #pragma once
 
 #include "core/math.h"
+#include "mesh/element_id.h"
 
 #include <cstdint>
 #include <string>
@@ -33,10 +34,12 @@ struct HalfEdge {
 struct MeshVertex {
     Vec3  position;
     Index halfedge = kInvalid;  // one half-edge originating at this vertex
+    ElementId id   = kNoId;     // stable across re-evaluation; see element_id.h
 };
 
 struct MeshFace {
     Index halfedge = kInvalid;  // one half-edge bounding this face
+    ElementId id   = kNoId;
 };
 
 // Flat render buffers produced from the half-edge mesh.
@@ -62,7 +65,33 @@ public:
     std::vector<HalfEdge>   halfedges;
     std::vector<MeshFace>   faces;
 
-    void clear() { verts.clear(); halfedges.clear(); faces.clear(); }
+    // Parallel to `halfedges`; an edge's two half-edges hold the same name.
+    // Kept beside the half-edges rather than inside them: traversal is the
+    // hot path and touches this only when a name is actually wanted.
+    std::vector<ElementId>  edgeIds;
+
+    void clear() { verts.clear(); halfedges.clear(); faces.clear(); edgeIds.clear(); }
+
+    // ---- Names -----------------------------------------------------------
+    ElementId vertexId(Index v) const { return verts[v].id; }
+    ElementId faceId(Index f)   const { return faces[f].id; }
+    ElementId edgeId(Index he)  const {
+        return he >= 0 && he < static_cast<Index>(edgeIds.size()) ? edgeIds[he] : kNoId;
+    }
+
+    // Index for a name, or kInvalid. Linear: callers resolving a whole feature
+    // should build a map instead of calling this in a loop.
+    Index findVertex(ElementId id) const;
+    Index findFace(ElementId id) const;
+    Index findEdge(ElementId id) const;   // returns a half-edge
+
+    // True when every element carries a name and no name is used twice.
+    bool named() const;
+
+    // Derives every edge name from its endpoints. Called by build once the
+    // connectivity exists; public so an operation that renames vertices in
+    // place can bring the edges back into step without a rebuild.
+    void nameEdges();
     bool empty() const { return faces.empty(); }
 
     Index vertexCount() const { return static_cast<Index>(verts.size()); }
@@ -74,9 +103,23 @@ public:
     // count of face i, and `faceIndices` holds those indices back to back.
     // Returns false (leaving the mesh cleared) if the input is non-manifold,
     // which we reject rather than silently producing broken connectivity.
+    // Stable names to attach to what is being built, if the caller has them.
+    //
+    // Only vertices and faces are named here. Edges are not, because they do
+    // not need to be: a manifold mesh has at most one edge between any pair of
+    // vertices, so the pair names the edge. Deriving it costs nothing, is
+    // order-independent, and -- the point of the exercise -- means an edge that
+    // survives an operation keeps its name without the operation having to know
+    // it did. See element_id.h.
+    struct Names {
+        std::vector<ElementId> vertices;   // parallel to positions
+        std::vector<ElementId> faces;      // parallel to faceSizes
+    };
+
     bool build(const std::vector<Vec3>& positions,
                const std::vector<uint32_t>& faceSizes,
-               const std::vector<uint32_t>& faceIndices);
+               const std::vector<uint32_t>& faceIndices,
+               const Names* names = nullptr);
 
     // ---- Queries ---------------------------------------------------------
     Vec3 faceNormal(Index f) const;     // Newell's method; robust for n-gons

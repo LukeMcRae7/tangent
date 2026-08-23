@@ -18,14 +18,16 @@ namespace tg {
 //
 // A negative distance cuts inward. Extruding an open surface (a plane) leaves
 // the far side open, which is what removing the original face implies.
+// `salt` identifies the operation when naming what it creates; a feature
+// passes its own identity. See element_id.h.
 bool extrudeFaces(Mesh& mesh, const std::vector<Index>& faces, Real distance,
-                  std::vector<Index>* newFaces = nullptr);
+                  std::vector<Index>* newFaces = nullptr, ElementId salt = 0);
 
 // Shrinks each face toward its own interior by `amount`, measured
 // perpendicular to every edge, and fills the gap with a rim of quads.
 // Operates per face rather than per region.
 bool insetFaces(Mesh& mesh, const std::vector<Index>& faces, Real amount,
-                std::vector<Index>* newFaces = nullptr);
+                std::vector<Index>* newFaces = nullptr, ElementId salt = 0);
 
 // Translates the vertices belonging to a face set. Topology is unchanged, so
 // this is cheap: no rebuild is required.
@@ -43,6 +45,11 @@ struct FilletEdge {
 
 struct FilletSpec {
     std::vector<FilletEdge> edges;
+
+    // Identifies the operation when naming what it creates, so that two
+    // fillets in a chain do not hand their new faces the same names. A
+    // feature passes its own identity here; see element_id.h.
+    ElementId salt = 0;
 
     // 1 gives a flat chamfer. Above that the section follows a true circular
     // arc, tangent to both faces, swept in equal angular steps -- so the

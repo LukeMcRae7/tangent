@@ -23,29 +23,41 @@ struct Soup {
     std::vector<uint32_t> faceSizes;
     std::vector<uint32_t> faceIndices;
 
-    uint32_t vertex(Vec3 p) {
+    // Stable names, parallel to the three arrays above. An operation that has
+    // nothing to say about an element leaves kNoId there and the element comes
+    // out unnamed, which a feature referring to it will notice.
+    std::vector<ElementId> vertexNames;
+    std::vector<ElementId> faceNames;
+
+    uint32_t vertex(Vec3 p, ElementId id = kNoId) {
         positions.push_back(p);
+        vertexNames.push_back(id);
         return static_cast<uint32_t>(positions.size() - 1);
     }
-    void face(const std::vector<uint32_t>& loop) {
+    void face(const std::vector<uint32_t>& loop, ElementId id = kNoId) {
         if (loop.size() < 3) return;
         faceSizes.push_back(static_cast<uint32_t>(loop.size()));
         faceIndices.insert(faceIndices.end(), loop.begin(), loop.end());
+        faceNames.push_back(id);
     }
 
     // Drops vertices no face references and renumbers the rest.
     void compact() {
         std::vector<int32_t> remap(positions.size(), -1);
         std::vector<Vec3> kept;
+        std::vector<ElementId> keptNames;
         kept.reserve(positions.size());
+        keptNames.reserve(positions.size());
         for (uint32_t& idx : faceIndices) {
             if (remap[idx] < 0) {
                 remap[idx] = static_cast<int32_t>(kept.size());
                 kept.push_back(positions[idx]);
+                keptNames.push_back(idx < vertexNames.size() ? vertexNames[idx] : kNoId);
             }
             idx = static_cast<uint32_t>(remap[idx]);
         }
         positions.swap(kept);
+        vertexNames.swap(keptNames);
     }
 
     // Absorbs each listed face into the neighbour it is coplanar with.
@@ -142,13 +154,16 @@ struct Soup {
         }
 
         std::vector<uint32_t> sizes, indices;
+        std::vector<ElementId> fnames;
         for (size_t f = 0; f < n; ++f) {
             if (gone[f]) continue;
             sizes.push_back(static_cast<uint32_t>(loops[f].size()));
             indices.insert(indices.end(), loops[f].begin(), loops[f].end());
+            fnames.push_back(f < faceNames.size() ? faceNames[f] : kNoId);
         }
         faceSizes.swap(sizes);
         faceIndices.swap(indices);
+        faceNames.swap(fnames);
     }
 
     // Merges vertices that landed in the same place and drops the faces that
@@ -190,7 +205,19 @@ struct Soup {
             remap[i] = hit;
         }
 
+        // Two points in the same place are one vertex, so they must settle on
+        // one name. The smaller wins, which makes the choice independent of the
+        // order they happened to be emitted in.
+        for (uint32_t i = 0; i < positions.size(); ++i) {
+            if (remap[i] == i) continue;
+            ElementId& keep = vertexNames[remap[i]];
+            const ElementId other = vertexNames[i];
+            if (keep == kNoId) keep = other;
+            else if (other != kNoId && other < keep) keep = other;
+        }
+
         std::vector<uint32_t> sizes, indices, loop;
+        std::vector<ElementId> fnames;
         if (faceRemap) faceRemap->assign(faceSizes.size(), kDropped);
         size_t at = 0;
         size_t which = 0;
@@ -214,15 +241,20 @@ struct Soup {
             if (faceRemap) (*faceRemap)[self] = sizes.size();
             sizes.push_back(static_cast<uint32_t>(loop.size()));
             indices.insert(indices.end(), loop.begin(), loop.end());
+            fnames.push_back(self < faceNames.size() ? faceNames[self] : kNoId);
         }
         faceSizes.swap(sizes);
         faceIndices.swap(indices);
+        faceNames.swap(fnames);
     }
 
     bool commit(Mesh& mesh) {
         compact();
+        Mesh::Names names;
+        names.vertices = vertexNames;
+        names.faces    = faceNames;
         Mesh next;
-        if (!next.build(positions, faceSizes, faceIndices)) return false;
+        if (!next.build(positions, faceSizes, faceIndices, &names)) return false;
         mesh = std::move(next);
         return true;
     }
@@ -306,7 +338,7 @@ bool insetIsValid(const std::vector<Vec3>& orig, const std::vector<Vec3>& inset,
 
 // ---------------------------------------------------------------------------
 bool extrudeFaces(Mesh& mesh, const std::vector<Index>& faces, Real distance,
-                  std::vector<Index>* newFaces) {
+                  std::vector<Index>* newFaces, ElementId salt) {
     if (faces.empty() || mesh.empty()) return false;
 
     std::unordered_set<Index> region(faces.begin(), faces.end());
@@ -322,7 +354,7 @@ bool extrudeFaces(Mesh& mesh, const std::vector<Index>& faces, Real distance,
 
     Soup soup;
     soup.positions.reserve(mesh.verts.size() * 2);
-    for (const MeshVertex& v : mesh.verts) soup.vertex(v.position);
+    for (const MeshVertex& v : mesh.verts) soup.vertex(v.position, v.id);
 
     // One raised copy per vertex touched by the region. Vertices used *only*
     // by region faces are left behind and compaction removes them.
@@ -331,12 +363,14 @@ bool extrudeFaces(Mesh& mesh, const std::vector<Index>& faces, Real distance,
         std::vector<Index> verts;
         mesh.faceVertices(f, verts);
         for (Index v : verts)
-            if (!raised.count(v)) raised[v] = soup.vertex(mesh.verts[v].position + offset);
+            if (!raised.count(v))
+                raised[v] = soup.vertex(mesh.verts[v].position + offset,
+                                        nameId(salt, IdRole::Top, mesh.verts[v].id));
     }
 
     // Faces outside the region are carried over untouched.
     for (Index f = 0; f < mesh.faceCount(); ++f)
-        if (!region.count(f)) soup.face(faceLoop(mesh, f));
+        if (!region.count(f)) soup.face(faceLoop(mesh, f), mesh.faces[f].id);
 
     const size_t firstMoved = soup.faceSizes.size();
 
@@ -347,7 +381,8 @@ bool extrudeFaces(Mesh& mesh, const std::vector<Index>& faces, Real distance,
         std::vector<uint32_t> loop;
         loop.reserve(verts.size());
         for (Index v : verts) loop.push_back(raised[v]);
-        soup.face(loop);
+        // The same face, moved: it keeps its name.
+        soup.face(loop, mesh.faces[f].id);
     }
 
     // Side walls along the region's boundary. For a half-edge v0->v1 whose
@@ -362,7 +397,8 @@ bool extrudeFaces(Mesh& mesh, const std::vector<Index>& faces, Real distance,
                 const Index v0 = mesh.fromVertex(h);
                 const Index v1 = mesh.halfedges[h].vertex;
                 soup.face({static_cast<uint32_t>(v0), static_cast<uint32_t>(v1),
-                           raised[v1], raised[v0]});
+                           raised[v1], raised[v0]},
+                          nameId(salt, IdRole::Wall, mesh.edgeId(h)));
             }
             h = mesh.halfedges[h].next;
         } while (h != start);
@@ -380,7 +416,7 @@ bool extrudeFaces(Mesh& mesh, const std::vector<Index>& faces, Real distance,
 
 // ---------------------------------------------------------------------------
 bool insetFaces(Mesh& mesh, const std::vector<Index>& faces, Real amount,
-                std::vector<Index>* newFaces) {
+                std::vector<Index>* newFaces, ElementId salt) {
     if (faces.empty() || mesh.empty() || amount <= 0.0f) return false;
 
     std::unordered_set<Index> region(faces.begin(), faces.end());
@@ -388,10 +424,10 @@ bool insetFaces(Mesh& mesh, const std::vector<Index>& faces, Real amount,
         if (f < 0 || f >= mesh.faceCount()) return false;
 
     Soup soup;
-    for (const MeshVertex& v : mesh.verts) soup.vertex(v.position);
+    for (const MeshVertex& v : mesh.verts) soup.vertex(v.position, v.id);
 
     for (Index f = 0; f < mesh.faceCount(); ++f)
-        if (!region.count(f)) soup.face(faceLoop(mesh, f));
+        if (!region.count(f)) soup.face(faceLoop(mesh, f), mesh.faces[f].id);
 
     // Each inset face emits its inner face followed by one rim quad per edge,
     // so the inner faces are not contiguous. Record where each one lands as we
@@ -414,17 +450,24 @@ bool insetFaces(Mesh& mesh, const std::vector<Index>& faces, Real amount,
 
         std::vector<uint32_t> innerIdx;
         innerIdx.reserve(inner.size());
-        for (const Vec3& p : inner) innerIdx.push_back(soup.vertex(p));
+        for (size_t i = 0; i < inner.size(); ++i)
+            innerIdx.push_back(soup.vertex(
+                inner[i], nameId(salt, IdRole::Top, mesh.verts[verts[i]].id)));
 
         innerAt.push_back(soup.faceSizes.size());
-        soup.face(innerIdx);
+        // The shrunk face is the same face: it keeps its name.
+        soup.face(innerIdx, mesh.faces[f].id);
 
         // Rim: (v_i, v_i+1, inner_i+1, inner_i) carries the face's own normal.
+        // Each rim quad belongs to the edge it was raised from.
         const size_t n = verts.size();
+        Index h = mesh.faces[f].halfedge;
         for (size_t i = 0; i < n; ++i) {
             const size_t j = (i + 1) % n;
             soup.face({static_cast<uint32_t>(verts[i]), static_cast<uint32_t>(verts[j]),
-                       innerIdx[j], innerIdx[i]});
+                       innerIdx[j], innerIdx[i]},
+                      nameId(salt, IdRole::Wall, mesh.edgeId(h)));
+            h = mesh.halfedges[h].next;
         }
     }
 
@@ -487,7 +530,7 @@ size_t splitShells(const Mesh& mesh, std::vector<Mesh>& out) {
         Soup soup;
         // Vertices are re-indexed per body; Soup::compact drops the rest.
         soup.positions.reserve(mesh.verts.size());
-        for (const MeshVertex& v : mesh.verts) soup.vertex(v.position);
+        for (const MeshVertex& v : mesh.verts) soup.vertex(v.position, v.id);
         for (Index f = 0; f < mesh.faceCount(); ++f)
             if (shell[f] == id) soup.face(faceLoop(mesh, f));
 
@@ -634,6 +677,7 @@ void sampleArc(const Arc& arc, Vec3 p0, Vec3 p1, Vec3 axis, int segments,
 
 bool filletEdges(Mesh& mesh, const FilletSpec& spec) {
     const int segments = spec.segments;
+    const ElementId salt = spec.salt;
     const bool dbg = std::getenv("TANGENT_BEVEL_DEBUG") != nullptr;
     auto bail = [&](const char* why) { if (dbg) std::fprintf(stderr, "[bevel] %s\n", why); return false; };
     if (mesh.empty() || spec.edges.empty() || segments < 1) return bail("bad arguments");
@@ -993,7 +1037,8 @@ bool filletEdges(Mesh& mesh, const FilletSpec& spec) {
     std::vector<uint32_t> baseIdx(static_cast<size_t>(mesh.vertexCount()));
     std::vector<bool> baseUsed(static_cast<size_t>(mesh.vertexCount()), false);
     auto baseVertex = [&](Index v) {
-        if (!baseUsed[v]) { baseIdx[v] = soup.vertex(posOf(v)); baseUsed[v] = true; }
+        // Untouched, so it keeps the name it already had.
+        if (!baseUsed[v]) { baseIdx[v] = soup.vertex(posOf(v), mesh.verts[v].id); baseUsed[v] = true; }
         return baseIdx[v];
     };
 
@@ -1005,7 +1050,8 @@ bool filletEdges(Mesh& mesh, const FilletSpec& spec) {
         const Index v = mesh.fromVertex(h);
         sharedPt[h] = cutBack[h] <= 1e-12
                     ? baseVertex(v)
-                    : soup.vertex(posOf(v) + normalize(dirOf(h)) * cutBack[h]);
+                    : soup.vertex(posOf(v) + normalize(dirOf(h)) * cutBack[h],
+                                  nameId(salt, IdRole::Cross, mesh.edgeId(h), mesh.verts[v].id));
         sharedSet[h] = true;
         return sharedPt[h];
     };
@@ -1064,7 +1110,9 @@ bool filletEdges(Mesh& mesh, const FilletSpec& spec) {
                     const uint32_t e = edgePoint(h);
                     if (lengthSq(soup.positions[e] - pt) < kWeldEps) idx = e;
                 }
-                if (idx == kNoVertex) idx = soup.vertex(pt);
+                if (idx == kNoVertex)
+                    idx = soup.vertex(pt, nameId(salt, IdRole::Cross, mesh.verts[v].id,
+                                                 mesh.faces[mesh.halfedges[h].face].id));
 
                 if (loop.empty() || loop.back() != idx) loop.push_back(idx);
                 crossIdx[h] = idx;
@@ -1113,7 +1161,8 @@ bool filletEdges(Mesh& mesh, const FilletSpec& spec) {
                 return bail("emitted loop inverts at this width");
         }
 
-        soup.face(loop);
+        // Shrunk, not replaced: it is the same face and keeps its name.
+        soup.face(loop, mesh.faces[f].id);
     }
 
     // Arc points along each beveled edge, at both ends, keyed by half-edge so
@@ -1149,7 +1198,10 @@ bool filletEdges(Mesh& mesh, const FilletSpec& spec) {
         std::vector<uint32_t>& ring = ringAt[h];
         ring.push_back(crossIdx[h]);
         for (size_t i = 1; i + 1 < pts.size(); ++i)
-            ring.push_back(soup.vertex(trimToEnd(mesh.fromVertex(h), pts[i])));
+            ring.push_back(soup.vertex(
+                trimToEnd(mesh.fromVertex(h), pts[i]),
+                nameId(salt, IdRole::Ring, mesh.edgeId(h),
+                       mesh.verts[mesh.fromVertex(h)].id, i)));
         ring.push_back(crossIdx[far]);
     }
 
@@ -1170,7 +1222,8 @@ bool filletEdges(Mesh& mesh, const FilletSpec& spec) {
         // index order gives the inward face, which build() then refuses as two
         // faces sharing a directed edge.
         for (size_t s = 0; s + 1 < a.size(); ++s)
-            soup.face({a[s + 1], b[s + 1], b[s], a[s]});
+            soup.face({a[s + 1], b[s + 1], b[s], a[s]},
+                      nameId(salt, IdRole::Strip, mesh.edgeId(h), 0, s));
     }
 
     // Vertex patches, wherever at least one incident edge was beveled.
@@ -1195,6 +1248,17 @@ bool filletEdges(Mesh& mesh, const FilletSpec& spec) {
         std::vector<uint32_t> loop;
         std::vector<Vec3> loopPos;
         std::vector<Vec3> centres;
+        // Running counters so every point and face a patch emits gets its own
+        // name. The code path is deterministic, so re-evaluating names them the
+        // same way again.
+        uint64_t patchV = 0, patchF = 0;
+        auto patchVertex = [&](Vec3 p) {
+            return soup.vertex(p, nameId(salt, IdRole::Patch, mesh.verts[v].id, 1, patchV++));
+        };
+        auto patchFace = [&](const std::vector<uint32_t>& l) {
+            soup.face(l, nameId(salt, IdRole::Patch, mesh.verts[v].id, 2, patchF++));
+        };
+
         std::vector<size_t> cornerSlots;   // where the face corners sit in `loop`
 
         auto push = [&](uint32_t idx) {
@@ -1279,7 +1343,7 @@ bool filletEdges(Mesh& mesh, const FilletSpec& spec) {
             }
 
             if (flatness <= weldEps * 1e3) {
-                soup.face(loop);
+                patchFace(loop);
                 continue;
             }
 
@@ -1290,9 +1354,9 @@ bool filletEdges(Mesh& mesh, const FilletSpec& spec) {
                 if (lengthSq(away) > 1e-24)
                     mid = ballAt[v] + normalize(away) * length(loopPos[0] - ballAt[v]);
             }
-            const uint32_t hub = soup.vertex(mid);
+            const uint32_t hub = patchVertex(mid);
             for (size_t i = 0; i < loop.size(); ++i)
-                soup.face({loop[i], loop[(i + 1) % loop.size()], hub});
+                patchFace({loop[i], loop[(i + 1) % loop.size()], hub});
             continue;
         }
 
@@ -1373,7 +1437,7 @@ bool filletEdges(Mesh& mesh, const FilletSpec& spec) {
                     bridge.push_back(sphereLoop.back());
                     for (int s = 1; s < segments; ++s) {
                         const Vec3 p = slerpTo(a, b, static_cast<Real>(s) / segments);
-                        const uint32_t idx = soup.vertex(p);
+                        const uint32_t idx = patchVertex(p);
                         bridge.push_back(idx);
                         sphereLoop.push_back(idx);
                         spherePos.push_back(p);
@@ -1389,9 +1453,9 @@ bool filletEdges(Mesh& mesh, const FilletSpec& spec) {
                     const std::vector<uint32_t>& arc = g.first;
                     const std::vector<uint32_t>& run = g.second;
                     for (size_t i = 0; i + 1 < arc.size(); ++i)
-                        soup.face({arc[i + 1], arc[i], run.front()});
+                        patchFace({arc[i + 1], arc[i], run.front()});
                     for (size_t i = 0; i + 1 < run.size(); ++i)
-                        soup.face({arc.back(), run[i], run[i + 1]});
+                        patchFace({arc.back(), run[i], run[i + 1]});
                 }
 
                 loop.swap(sphereLoop);
@@ -1438,7 +1502,7 @@ bool filletEdges(Mesh& mesh, const FilletSpec& spec) {
             // should sit inside.
             poleRadius = std::min(poleRadius, len);
         }
-        if (degenerate || lengthSq(poleDir) < 1e-18) { soup.face(loop); continue; }
+        if (degenerate || lengthSq(poleDir) < 1e-18) { patchFace(loop); continue; }
         poleDir = normalize(poleDir);
 
         // Three arcs meeting at three tangent points is the ordinary corner --
@@ -1504,7 +1568,7 @@ bool filletEdges(Mesh& mesh, const FilletSpec& spec) {
                     const Real wa = static_cast<Real>(N - i) / N;
                     const Real wb = static_cast<Real>(i - j) / N;
                     const Real wg = static_cast<Real>(j) / N;
-                    row.push_back(soup.vertex(patchPoint(wa, wb, wg)));
+                    row.push_back(patchVertex(patchPoint(wa, wb, wg)));
                 }
             }
 
@@ -1512,10 +1576,10 @@ bool filletEdges(Mesh& mesh, const FilletSpec& spec) {
                 const std::vector<uint32_t>& up = rows[static_cast<size_t>(i)];
                 const std::vector<uint32_t>& lo2 = rows[static_cast<size_t>(i) + 1];
                 for (int j = 0; j <= i; ++j) {
-                    soup.face({up[static_cast<size_t>(j)], lo2[static_cast<size_t>(j)],
+                    patchFace({up[static_cast<size_t>(j)], lo2[static_cast<size_t>(j)],
                                lo2[static_cast<size_t>(j) + 1]});
                     if (j < i)
-                        soup.face({up[static_cast<size_t>(j)], lo2[static_cast<size_t>(j) + 1],
+                        patchFace({up[static_cast<size_t>(j)], lo2[static_cast<size_t>(j) + 1],
                                    up[static_cast<size_t>(j) + 1]});
                 }
             }
@@ -1552,18 +1616,18 @@ bool filletEdges(Mesh& mesh, const FilletSpec& spec) {
                              ? c + normalize(lerp(dirs[i], poleDir, t)) *
                                    lerpf(radii[i], poleRadius, t)
                              : lerp(loopPos[i], poleAt, t);
-                ring.push_back(soup.vertex(p));
+                ring.push_back(patchVertex(p));
             }
             for (size_t i = 0; i < n; ++i) {
                 const size_t k = (i + 1) % n;
-                soup.face({prev[i], prev[k], ring[k], ring[i]});
+                patchFace({prev[i], prev[k], ring[k], ring[i]});
             }
             prev.swap(ring);
         }
 
-        const uint32_t pole = soup.vertex(poleAt);
+        const uint32_t pole = patchVertex(poleAt);
         for (size_t i = 0; i < prev.size(); ++i)
-            soup.face({prev[i], prev[(i + 1) % prev.size()], pole});
+            patchFace({prev[i], prev[(i + 1) % prev.size()], pole});
     }
 
     // Weld before merging, not after. Two sections that landed in the same

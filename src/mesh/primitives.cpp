@@ -40,7 +40,56 @@ struct SoupBuilder {
         faceSizes.push_back(static_cast<uint32_t>(loop.size()));
         faceIndices.insert(faceIndices.end(), loop.begin(), loop.end());
     }
-    bool commit(Mesh& out) const { return out.build(positions, faceSizes, faceIndices); }
+
+    // Names the face just emitted after what it *is* rather than where it came
+    // in the generation order. A cylinder's end cap is the end cap whether the
+    // wall around it has sixteen facets or twenty-four, and a feature that
+    // refers to it should survive that change.
+    std::vector<std::pair<size_t, ElementId>> structural;
+    void nameLastFace(IdRole role, uint64_t k = 0) {
+        structural.emplace_back(faceSizes.size() - 1,
+                                nameId(0xCA9E, role, static_cast<ElementId>(k)));
+    }
+    // Every primitive is named the same way, from the order it generates in.
+    // That is stable under a parameter change that leaves the topology alone --
+    // a 20mm box and a 30mm box name their corners identically -- which is the
+    // case that matters, since it is what a user editing dimensions does.
+    //
+    // It cannot be stable when the topology itself changes: a cylinder taken
+    // from 16 segments to 24 has eight rim edges that did not exist before, and
+    // no naming scheme conjures a name for something that was not there. That
+    // is what the face-boundary selector is for; see feature.h.
+    //
+    // The kind is salted in so that switching a primitive from one shape to
+    // another does not hand the new shape the old one's names.
+    // `topo` carries whatever decides how many elements there are -- segment
+    // and ring counts. Folding it into the salt means a shape taken from
+    // sixteen segments to twenty-four shares no vertex names with its old self,
+    // so a stored reference to one of its edges fails to resolve instead of
+    // resolving to whichever edge now happens to sit at that ordinal. Loud is
+    // the whole point: silently filleting the wrong edge is the bug this file
+    // exists to prevent.
+    //
+    // Faces named structurally are exempt, so a reference to "the top cap"
+    // still lands, and a feature that selected a rim as that cap's boundary
+    // re-selects the whole rim at its new segment count.
+    bool commit(Mesh& out, PrimitiveKind kind, uint64_t topo = 0) const {
+        const ElementId base = static_cast<ElementId>(kind) + 1;
+        const ElementId salt = nameId(base, IdRole::Vertex, topo);
+
+        Mesh::Names names;
+        names.vertices.reserve(positions.size());
+        for (size_t i = 0; i < positions.size(); ++i)
+            names.vertices.push_back(nameId(salt, IdRole::Vertex, i));
+
+        names.faces.assign(faceSizes.size(), kNoId);
+        for (size_t f = 0; f < faceSizes.size(); ++f)
+            names.faces[f] = nameId(salt, IdRole::Face, f);
+        for (const auto& [at, id] : structural)
+            if (at < names.faces.size()) names.faces[at] = nameId(base, IdRole::Face, id);
+
+        return out.build(positions, faceSizes, faceIndices, &names);
+    }
 };
 
 } // namespace
@@ -62,7 +111,7 @@ bool makeBox(Mesh& out, const BoxParams& p) {
     s.quad(1, 2, 6, 5);   // +X
     s.quad(2, 3, 7, 6);   // +Y
     s.quad(3, 0, 4, 7);   // -X
-    return s.commit(out);
+    return s.commit(out, PrimitiveKind::Box);
 }
 
 // ---------------------------------------------------------------------------
@@ -89,10 +138,12 @@ bool makeCylinder(Mesh& out, const CylinderParams& p) {
     std::vector<uint32_t> cap;
     for (int i = 0; i < n; ++i) cap.push_back(static_cast<uint32_t>(i + n));
     s.ngon(cap);                                       // +Z
+    s.nameLastFace(IdRole::Cap, 1);
     cap.clear();
     for (int i = n - 1; i >= 0; --i) cap.push_back(static_cast<uint32_t>(i));
     s.ngon(cap);                                       // -Z
-    return s.commit(out);
+    s.nameLastFace(IdRole::Cap, 0);
+    return s.commit(out, PrimitiveKind::Cylinder, static_cast<uint64_t>(n));
 }
 
 // ---------------------------------------------------------------------------
@@ -125,7 +176,8 @@ bool makeSphere(Mesh& out, const SphereParams& p) {
             s.quad(ring(j, i), ring(j + 1, i), ring(j + 1, i + 1), ring(j, i + 1));
     for (int i = 0; i < n; ++i) s.tri(south, ring(r - 1, i + 1), ring(r - 1, i));
 
-    return s.commit(out);
+    return s.commit(out, PrimitiveKind::Sphere,
+                    static_cast<uint64_t>(p.segments) * 1024 + static_cast<uint64_t>(p.rings));
 }
 
 // ---------------------------------------------------------------------------
@@ -157,12 +209,15 @@ bool makeCone(Mesh& out, const ConeParams& p) {
         std::vector<uint32_t> cap;
         for (int i = 0; i < n; ++i) cap.push_back(static_cast<uint32_t>(i + n));
         s.ngon(cap);
+        s.nameLastFace(IdRole::Cap, 1);
     }
 
     std::vector<uint32_t> base;
     for (int i = n - 1; i >= 0; --i) base.push_back(static_cast<uint32_t>(i));
     s.ngon(base);
-    return s.commit(out);
+    s.nameLastFace(IdRole::Cap, 0);
+    return s.commit(out, PrimitiveKind::Cone,
+                    static_cast<uint64_t>(n) * 2 + (pointed ? 1 : 0));
 }
 
 // ---------------------------------------------------------------------------
@@ -190,7 +245,8 @@ bool makeTorus(Mesh& out, const TorusParams& p) {
         for (int j = 0; j < M; ++j)
             s.quad(at(i, j), at(i + 1, j), at(i + 1, j + 1), at(i, j + 1));
 
-    return s.commit(out);
+    return s.commit(out, PrimitiveKind::Torus,
+                    static_cast<uint64_t>(p.majorSegments) * 1024 + static_cast<uint64_t>(p.minorSegments));
 }
 
 // ---------------------------------------------------------------------------
@@ -202,7 +258,7 @@ bool makePlane(Mesh& out, const PlaneParams& p) {
     s.vertex({-x, -y, 0}); s.vertex({ x, -y, 0});
     s.vertex({ x,  y, 0}); s.vertex({-x,  y, 0});
     s.quad(0, 1, 2, 3);
-    return s.commit(out);
+    return s.commit(out, PrimitiveKind::Plane);
 }
 
 } // namespace tg
