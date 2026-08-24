@@ -2905,4 +2905,115 @@ bool bevelAllEdges(Mesh& mesh, Real width, int segments) {
     return bevelEdges(mesh, all, width, segments);
 }
 
+std::vector<Index> extendTangentChain(const Mesh& mesh, const std::vector<Index>& edges) {
+    if (edges.empty() || mesh.empty()) return edges;
+
+    std::set<Index> edgeSet;
+    for (Index e : edges) {
+        if (e >= 0 && e < mesh.halfedgeCount()) {
+            edgeSet.insert(std::min(e, mesh.halfedges[e].twin));
+        }
+    }
+
+    std::vector<std::vector<Index>> vertEdges(mesh.vertexCount());
+    for (Index h = 0; h < mesh.halfedgeCount(); ++h) {
+        if (h > mesh.halfedges[h].twin) continue;
+        const Index v0 = mesh.fromVertex(h);
+        const Index v1 = mesh.halfedges[h].vertex;
+        if (v0 < mesh.vertexCount()) vertEdges[v0].push_back(h);
+        if (v1 < mesh.vertexCount()) vertEdges[v1].push_back(h);
+    }
+
+    auto edgeVec = [&](Index h, Index fromV) {
+        const Index toV = (mesh.fromVertex(h) == fromV) ? mesh.halfedges[h].vertex : mesh.fromVertex(h);
+        const Vec3 d = mesh.verts[toV].position - mesh.verts[fromV].position;
+        const Real l = length(d);
+        return l > 1e-12 ? (d / l) : Vec3{0, 0, 0};
+    };
+
+    std::vector<Index> queue(edgeSet.begin(), edgeSet.end());
+    size_t head = 0;
+    while (head < queue.size()) {
+        const Index cur = queue[head++];
+        const Index v0 = mesh.fromVertex(cur);
+        const Index v1 = mesh.halfedges[cur].vertex;
+
+        for (Index v : {v0, v1}) {
+            if (v >= mesh.vertexCount()) continue;
+            const Vec3 dIn = -edgeVec(cur, v);
+            Index bestNext = kInvalid;
+            Real bestCos = 0.707; // G1 / tangent continuity within 45 degrees
+
+            for (Index cand : vertEdges[v]) {
+                if (cand == cur || edgeSet.count(cand)) continue;
+                const Vec3 dOut = edgeVec(cand, v);
+                const Real cosAngle = dot(dIn, dOut);
+                if (cosAngle > bestCos) {
+                    bestCos = cosAngle;
+                    bestNext = cand;
+                }
+            }
+
+            if (bestNext != kInvalid) {
+                edgeSet.insert(bestNext);
+                queue.push_back(bestNext);
+            }
+        }
+    }
+
+    return std::vector<Index>(edgeSet.begin(), edgeSet.end());
+}
+
+bool splitBodyByPlane(const Mesh& mesh, Vec3 planePoint, Vec3 planeNormal,
+                      Mesh& body1, Mesh& body2) {
+    if (mesh.empty()) return false;
+    const Real nLen = length(planeNormal);
+    if (nLen < 1e-12) return false;
+    const Vec3 N = planeNormal / nLen;
+
+    AABB box;
+    for (const auto& v : mesh.verts) box.expand(v.position);
+    if (!box.valid()) return false;
+
+    const Real diag = length(box.size()) * 4.0 + 20.0;
+    const Vec3 arb = (std::fabs(N.z) < 0.9) ? Vec3{0, 0, 1} : Vec3{1, 0, 0};
+    const Vec3 U = normalize(cross(N, arb));
+    const Vec3 V = cross(N, U);
+
+    const Vec3 c[8] = {
+        planePoint - U * diag - V * diag,
+        planePoint + U * diag - V * diag,
+        planePoint + U * diag + V * diag,
+        planePoint - U * diag + V * diag,
+        planePoint - U * diag - V * diag + N * diag,
+        planePoint + U * diag - V * diag + N * diag,
+        planePoint + U * diag + V * diag + N * diag,
+        planePoint - U * diag + V * diag + N * diag,
+    };
+
+    Soup bs;
+    for (int i = 0; i < 8; ++i) bs.vertex(c[i]);
+    bs.face({0, 3, 2, 1});
+    bs.face({4, 5, 6, 7});
+    bs.face({0, 1, 5, 4});
+    bs.face({1, 2, 6, 5});
+    bs.face({2, 3, 7, 6});
+    bs.face({3, 0, 4, 7});
+
+    Mesh cutBox;
+    if (!bs.commit(cutBox)) return false;
+
+    Mesh b1, b2;
+    const bool ok1 = meshBoolean(mesh, cutBox, BooleanOp::Intersection, b1);
+    const bool ok2 = meshBoolean(mesh, cutBox, BooleanOp::Difference, b2);
+
+    if (!ok1 || !ok2) return false;
+    if (b1.empty() || b2.empty()) return false;
+    if (b1.faceCount() < 3 || b2.faceCount() < 3) return false;
+
+    body1 = std::move(b1);
+    body2 = std::move(b2);
+    return true;
+}
+
 } // namespace tg

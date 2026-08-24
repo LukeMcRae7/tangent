@@ -184,13 +184,18 @@ void drawMenuBar(UiContext& ctx) {
         ImGui::SetNextItemWidth(140.0f);
         ImGui::DragInt("Segments", &ctx.view->bevelSegments, 0.1f, 1, 32);
         const size_t edgeCount = ctx.scene->selectedEdges(ctx.scene->contextObject()).size();
-        if (ImGui::MenuItem("Fillet Selected Edges", "F", false, edgeCount > 0))
+        const size_t faceCount = ctx.scene->selectedFaces(ctx.scene->contextObject()).size();
+        const bool canFillet = (edgeCount > 0 || faceCount > 0);
+        if (ImGui::MenuItem("Fillet Selected Edges / Faces", "F", false, canFillet))
             ctx.actions.fillet = true;
         if (edgeCount > 0)
             ImGui::TextColored(kDim, "  %zu edge%s selected", edgeCount,
                                edgeCount == 1 ? "" : "s");
+        else if (faceCount > 0)
+            ImGui::TextColored(kDim, "  %zu face%s selected (boundary edges)", faceCount,
+                               faceCount == 1 ? "" : "s");
         else
-            ImGui::TextColored(kDim, "  click an edge in the viewport first");
+            ImGui::TextColored(kDim, "  click an edge or face in viewport first");
 
         if (ImGui::MenuItem("Bevel All Edges", "Ctrl+B", false,
                             ctx.scene->contextObject() != kNoObject))
@@ -221,10 +226,10 @@ void drawMenuBar(UiContext& ctx) {
             ImGui::TextColored(kDim, "  First selected is kept, second is the tool");
 
         ImGui::Separator();
-        if (ImGui::MenuItem("Split Into Bodies", nullptr, false,
+        if (ImGui::MenuItem("Split Body", nullptr, false,
                             ctx.scene->contextObject() != kNoObject))
             ctx.actions.split = true;
-        ImGui::TextColored(kDim, "  Separates disconnected pieces");
+        ImGui::TextColored(kDim, "  Splits by face plane, tool plane, or shells");
         ImGui::EndMenu();
     }
 

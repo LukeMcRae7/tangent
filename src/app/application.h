@@ -134,11 +134,52 @@ private:
     void filletSelectedEdges();
     bool extendLastFillet(SceneObject& obj, const std::vector<Index>& edges, Real radius);
 
+    // Modal interactive fillet (mouse radius, scroll wheel segments, Blender/CAD style)
+    struct FilletToolState {
+        bool active = false;
+        ObjectId objectId = kNoObject;
+        std::vector<Index> edges;
+        Real baseRadius = 1.0;
+        Real currentRadius = 1.0;
+        int currentSegments = 3;
+        Vec2 startMousePx{0, 0};
+        Mesh meshBefore;
+        std::vector<Feature> chainBefore;
+        std::string typedValue;
+    };
+    FilletToolState filletTool_;
+
+    void beginFillet();
+    void updateFillet(bool snap);
+    void commitFillet();
+    void abortFillet();
+
+    // Origin plane selection when adding an object (Fusion 360 style)
+    enum class PlaneChoice { None, XY, XZ, YZ, Face };
+    struct AddPlaneState {
+        bool active = false;
+        PrimitiveKind kind = PrimitiveKind::Box;
+        PlaneChoice hoveredPlane = PlaneChoice::XY;
+        Vec3 planePoint{0, 0, 0};
+        Vec3 planeNormal{0, 0, 1};
+        ObjectId faceObject = kNoObject;
+        Index faceIndex = kInvalid;
+    };
+    AddPlaneState addPlaneState_;
+
+    void beginAddPrimitivePrompt(PrimitiveKind kind);
+    void updateAddPlane(Vec2 cursor);
+    void commitAddPlane();
+    void abortAddPlane();
+    void drawAddPlaneOverlay();
+
+    bool justFinishedModal_ = false;
+
     // Combines the two selected objects. The first selected is kept and
     // becomes the result; the second is consumed as the tool.
     void applyBoolean(BooleanOp op);
 
-    // Breaks the active object into its separate bodies.
+    // Breaks the active object into its separate bodies or splits by a plane/face.
     void splitActiveObject();
 
     // Single exit points for a modal transform, so the extrude-drag's extra

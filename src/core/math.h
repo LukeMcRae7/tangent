@@ -315,6 +315,27 @@ struct Quat {
         return {sx*cy*cz - cx*sy*sz, cx*sy*cz + sx*cy*sz,
                 cx*cy*sz - sx*sy*cz, cx*cy*cz + sx*sy*sz};
     }
+
+    static Quat fromTo(Vec3 from, Vec3 to) {
+        Vec3 u = normalize(from);
+        Vec3 v = normalize(to);
+        Real d = dot(u, v);
+        if (d >= 1.0f - 1e-6f) return Quat();
+        if (d <= -1.0f + 1e-6f) {
+            Vec3 axis = perpendicular(u);
+            return fromAxisAngle(axis, kPi);
+        }
+        Vec3 axis = cross(u, v);
+        Real s = std::sqrt((1.0f + d) * 2.0f);
+        Real invs = 1.0f / s;
+        Real qx = axis.x * invs;
+        Real qy = axis.y * invs;
+        Real qz = axis.z * invs;
+        Real qw = s * 0.5f;
+        Real l = std::sqrt(qx*qx + qy*qy + qz*qz + qw*qw);
+        if (l < kEps) return Quat();
+        return {qx/l, qy/l, qz/l, qw/l};
+    }
 };
 inline Quat operator*(Quat a, Quat b) {
     return {a.w*b.x + a.x*b.w + a.y*b.z - a.z*b.y,

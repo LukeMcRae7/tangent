@@ -113,4 +113,13 @@ size_t splitShells(const Mesh& mesh, std::vector<Mesh>& out);
 // clamping a UI slider to a range that always produces valid geometry.
 Real maxBevelWidth(const Mesh& mesh);
 
+// Extends a set of edges along smooth tangent curves or collinear segments
+// (G1 / tangent continuity), matching Fusion 360's tangent chain selection.
+std::vector<Index> extendTangentChain(const Mesh& mesh, const std::vector<Index>& edges);
+
+// Splits a solid mesh with a cutting plane into two watertight solid bodies.
+// Returns true if the cut produced two valid non-empty bodies.
+bool splitBodyByPlane(const Mesh& mesh, Vec3 planePoint, Vec3 planeNormal,
+                      Mesh& body1, Mesh& body2);
+
 } // namespace tg

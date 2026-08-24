@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <vector>
+#include <set>
 
 namespace tg {
 namespace {
@@ -269,6 +270,26 @@ void Application::handleViewportMouse() {
         }
     }
 
+    // Add primitive plane selection modal mode:
+    if (addPlaneState_.active) {
+        updateAddPlane(mouseInViewport());
+        if (!io.WantCaptureMouse) {
+            if (ImGui::IsMouseClicked(ImGuiMouseButton_Left))      commitAddPlane();
+            else if (ImGui::IsMouseClicked(ImGuiMouseButton_Right)) abortAddPlane();
+        }
+        return;
+    }
+
+    // Modal Fillet tool:
+    if (filletTool_.active) {
+        updateFillet(!io.KeyCtrl);
+        if (!io.WantCaptureMouse) {
+            if (ImGui::IsMouseClicked(ImGuiMouseButton_Left))      commitFillet();
+            else if (ImGui::IsMouseClicked(ImGuiMouseButton_Right)) abortFillet();
+        }
+        return;
+    }
+
     // Navigation stays live during a transform (orbiting mid-move is useful),
     // but clicks mean commit/cancel rather than select.
     if (tool_.active()) {
@@ -288,10 +309,13 @@ void Application::handleViewportMouse() {
     if (io.MouseWheel != 0.0f) camera_.dolly(io.MouseWheel);
 
     // A click that ends a drag is ignored, so an orbit or a future box-select
-    // gesture does not also fire a pick.
-    if (ImGui::IsMouseReleased(ImGuiMouseButton_Left) &&
-        !ImGui::IsMouseDragging(ImGuiMouseButton_Left, 4.0f)) {
-        handleViewportClick(io.KeyShift, io.KeyCtrl);
+    // gesture does not also fire a pick. Finalizing a modal action does not deselect.
+    if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+        if (justFinishedModal_) {
+            justFinishedModal_ = false;
+        } else if (!ImGui::IsMouseDragging(ImGuiMouseButton_Left, 4.0f)) {
+            handleViewportClick(io.KeyShift, io.KeyCtrl);
+        }
     }
 }
 
@@ -363,6 +387,37 @@ void Application::drawReadout(const std::string& text, float px, float py,
 // During a drag the eye is on the geometry, and a number at the bottom of the
 // window is somewhere the user is not looking.
 void Application::drawTransformReadout() {
+    if (filletTool_.active) {
+        char buf[128];
+        std::snprintf(buf, sizeof(buf), "Fillet  %.2f mm  (%d seg%s)",
+                      filletTool_.currentRadius,
+                      filletTool_.currentSegments,
+                      filletTool_.currentSegments == 1 ? "" : "s");
+        ImVec2 at(viewRect_.x + viewRect_.w * 0.5f, viewRect_.y + viewRect_.h * 0.5f);
+        if (ImGui::IsMousePosValid()) {
+            const ImVec2 m = ImGui::GetIO().MousePos;
+            at = ImVec2(m.x + 20.0f, m.y - 34.0f);
+        }
+        drawReadout(buf, at.x, at.y, /*emphasise=*/true);
+        return;
+    }
+
+    if (addPlaneState_.active) {
+        std::string pName = "XY Plane";
+        if (addPlaneState_.hoveredPlane == PlaneChoice::XZ) pName = "XZ Plane";
+        else if (addPlaneState_.hoveredPlane == PlaneChoice::YZ) pName = "YZ Plane";
+        else if (addPlaneState_.hoveredPlane == PlaneChoice::Face) pName = "Object Face";
+
+        std::string text = "Place " + std::string(primitiveName(addPlaneState_.kind)) + " on " + pName;
+        ImVec2 at(viewRect_.x + viewRect_.w * 0.5f, viewRect_.y + viewRect_.h * 0.5f);
+        if (ImGui::IsMousePosValid()) {
+            const ImVec2 m = ImGui::GetIO().MousePos;
+            at = ImVec2(m.x + 20.0f, m.y - 34.0f);
+        }
+        drawReadout(text, at.x, at.y, /*emphasise=*/true);
+        return;
+    }
+
     if (!tool_.active()) return;
     const std::string text = tool_.statusText();
     if (text.empty()) return;
@@ -498,6 +553,55 @@ void Application::handleShortcuts() {
     // A running transform owns the keyboard: X must constrain to an axis, not
     // delete the thing being moved.
     if (tool_.active()) { handleTransformKeys(); return; }
+
+    if (filletTool_.active) {
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) { abortFillet(); return; }
+        if (ImGui::IsKeyPressed(ImGuiKey_Enter, false) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false)) {
+            commitFillet();
+            return;
+        }
+        for (int d = 0; d <= 9; ++d) {
+            if (ImGui::IsKeyPressed(static_cast<ImGuiKey>(ImGuiKey_0 + d), false) ||
+                ImGui::IsKeyPressed(static_cast<ImGuiKey>(ImGuiKey_Keypad0 + d), false)) {
+                filletTool_.typedValue += static_cast<char>('0' + d);
+                updateFillet(true);
+            }
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_Period, false) ||
+            ImGui::IsKeyPressed(ImGuiKey_KeypadDecimal, false)) {
+            filletTool_.typedValue += '.';
+            updateFillet(true);
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_Backspace, false) && !filletTool_.typedValue.empty()) {
+            filletTool_.typedValue.pop_back();
+            updateFillet(true);
+        }
+        return;
+    }
+
+    if (addPlaneState_.active) {
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) { abortAddPlane(); return; }
+        if (ImGui::IsKeyPressed(ImGuiKey_Enter, false) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false)) {
+            commitAddPlane();
+            return;
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_1, false) || ImGui::IsKeyPressed(ImGuiKey_Keypad1, false)) {
+            addPlaneState_.hoveredPlane = PlaneChoice::XY;
+            addPlaneState_.planeNormal = Vec3{0, 0, 1};
+            addPlaneState_.planePoint = Vec3{0, 0, 0};
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_2, false) || ImGui::IsKeyPressed(ImGuiKey_Keypad2, false)) {
+            addPlaneState_.hoveredPlane = PlaneChoice::XZ;
+            addPlaneState_.planeNormal = Vec3{0, 1, 0};
+            addPlaneState_.planePoint = Vec3{0, 0, 0};
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_3, false) || ImGui::IsKeyPressed(ImGuiKey_Keypad3, false)) {
+            addPlaneState_.hoveredPlane = PlaneChoice::YZ;
+            addPlaneState_.planeNormal = Vec3{1, 0, 0};
+            addPlaneState_.planePoint = Vec3{0, 0, 0};
+        }
+        return;
+    }
 
     const bool ctrl  = io.KeyCtrl;
     const bool shift = io.KeyShift;
@@ -695,6 +799,7 @@ bool Application::editKeepsSolid(ObjectId id) {
 }
 
 void Application::commitTransform() {
+    justFinishedModal_ = true;
     std::unique_ptr<Command> cmd = tool_.confirm(scene_);
 
     if (pendingMeshObject_ != kNoObject) {
@@ -768,6 +873,7 @@ void Application::commitTransform() {
 }
 
 void Application::abortTransform() {
+    justFinishedModal_ = true;
     tool_.cancel(scene_);
 
     if (pendingMeshObject_ != kNoObject) {
@@ -848,47 +954,337 @@ Index edgeAlongSegment(const Mesh& mesh, Vec3 a, Vec3 b) {
 } // namespace
 
 void Application::filletSelectedEdges() {
+    beginFillet();
+}
+
+void Application::beginFillet() {
+    if (tool_.active() || filletTool_.active || addPlaneState_.active) return;
+
     const ObjectId id = scene_.contextObject();
     SceneObject* obj = scene_.find(id);
-    if (!obj) return;
-
-    const std::vector<Index> edges = scene_.selectedEdges(id);
-    if (edges.empty()) {
-        setNotice("Select one or more edges to fillet");
+    if (!obj) {
+        setNotice("Select an object to fillet");
         return;
     }
 
-    // Clamp to what the geometry can take, so the slider cannot ask for a
-    // radius that inverts a face.
-    const Real limit = maxBevelWidth(obj->mesh);
-    const Real width = std::min(view_.bevelWidth, limit * Real(0.95));
-    if (width <= 1e-4) { setNotice("No room for a fillet at this size"); return; }
+    std::vector<Index> edges = scene_.selectedEdges(id);
+    if (edges.empty()) {
+        // Requirement 1: Clicking F (or edge action) while a face is selected
+        // should perform the action on all edges connected to the selected face.
+        const std::vector<Index> faces = scene_.selectedFaces(id);
+        if (!faces.empty()) {
+            std::set<Index> faceEdges;
+            for (Index f : faces) {
+                if (f < obj->mesh.faceCount()) {
+                    const Index start = obj->mesh.faces[f].halfedge;
+                    Index h = start;
+                    if (h != kInvalid) {
+                        do {
+                            faceEdges.insert(std::min(h, obj->mesh.halfedges[h].twin));
+                            h = obj->mesh.halfedges[h].next;
+                        } while (h != start && h != kInvalid);
+                    }
+                }
+            }
+            edges.assign(faceEdges.begin(), faceEdges.end());
+        }
+    }
 
-    // Extend the fillet that is already there, rather than stacking a second
-    // one on it.
-    //
-    // This is the Fusion behaviour, and here it is also the difference between
-    // geometry that works and geometry that does not: two edges filleted
-    // together blend their shared corner once against the original faces, where
-    // filleting one after the other asks the second to cut into the first one's
-    // surface. Picking a neighbouring edge and pressing F again should give the
-    // solid the user pictures, not a refusal.
-    if (extendLastFillet(*obj, edges, width)) return;
+    if (edges.empty()) {
+        setNotice("Select edges or faces to fillet");
+        return;
+    }
+
+    // Requirement 2: If a fillet is attempted on an edge composed of multiple sections,
+    // extend selection to remaining sections and seamlessly act in unison.
+    edges = extendTangentChain(obj->mesh, edges);
+
+    // Test if any possible fillet would be accepted before presenting the interaction
+    bool anyAccepted = false;
+    Real initialWidth = 1.0;
+    const Real candidateRadii[] = {view_.bevelWidth, 1.0, 0.5, 0.2, 0.1, 0.05};
+    for (Real r : candidateRadii) {
+        if (r <= 0.0) continue;
+        Mesh testMesh = obj->mesh;
+        FilletSpec testSpec;
+        testSpec.segments = std::max(1, view_.bevelSegments);
+        for (Index e : edges) testSpec.edges.push_back({e, r});
+        if (filletEdges(testMesh, testSpec)) {
+            anyAccepted = true;
+            initialWidth = r;
+            break;
+        }
+    }
+
+    if (!anyAccepted) {
+        setNotice("No room for a fillet on selected edges");
+        return;
+    }
+
+    // Select all extended edges in the scene so the highlight displays them
+    scene_.clearElementSelection();
+    for (Index e : edges) {
+        scene_.selectElement({id, ElementKind::Edge, e}, true);
+    }
+
+    filletTool_.active = true;
+    filletTool_.objectId = id;
+    filletTool_.edges = edges;
+    filletTool_.baseRadius = initialWidth;
+    filletTool_.currentRadius = initialWidth;
+    filletTool_.currentSegments = std::max(1, view_.bevelSegments);
+    filletTool_.startMousePx = mouseInViewport();
+    filletTool_.meshBefore = obj->mesh;
+    filletTool_.chainBefore = obj->features;
+    filletTool_.typedValue.clear();
+
+    preEditSolid_ = obj->healthVersion == obj->meshVersion && obj->health.solid();
+
+    updateFillet(false);
+}
+
+void Application::updateFillet(bool snap) {
+    if (!filletTool_.active) return;
+    SceneObject* obj = scene_.find(filletTool_.objectId);
+    if (!obj) { abortFillet(); return; }
+
+    ImGuiIO& io = ImGui::GetIO();
+    if (io.MouseWheel != 0.0f) {
+        if (io.MouseWheel > 0.0f) filletTool_.currentSegments = std::min(32, filletTool_.currentSegments + 1);
+        else if (io.MouseWheel < 0.0f) filletTool_.currentSegments = std::max(1, filletTool_.currentSegments - 1);
+        view_.bevelSegments = filletTool_.currentSegments;
+    }
+
+    Real newR = filletTool_.baseRadius;
+    if (!filletTool_.typedValue.empty()) {
+        try {
+            newR = std::max(Real(0.01), Real(std::stod(filletTool_.typedValue)));
+        } catch (...) {}
+    } else {
+        const Vec2 curMouse = mouseInViewport();
+        const float dx = curMouse.x - filletTool_.startMousePx.x;
+        const float dy = curMouse.y - filletTool_.startMousePx.y;
+        const float delta = dx - dy;
+        newR = filletTool_.baseRadius + delta * 0.04;
+        if (snap) {
+            newR = std::round(newR * 2.0) / 2.0;
+        }
+        newR = std::max(Real(0.05), newR);
+    }
+
+    // Live preview on mesh without artificial whole-mesh bevel limits
+    Mesh scratch = filletTool_.meshBefore;
+    FilletSpec spec;
+    spec.segments = filletTool_.currentSegments;
+    for (Index e : filletTool_.edges) spec.edges.push_back({e, newR});
+    if (filletEdges(scratch, spec)) {
+        obj->mesh = std::move(scratch);
+        obj->refreshDerived();
+        filletTool_.currentRadius = newR;
+        view_.bevelWidth = newR;
+    } else {
+        filletTool_.currentRadius = newR;
+    }
+}
+
+void Application::commitFillet() {
+    if (!filletTool_.active) return;
+    const ObjectId id = filletTool_.objectId;
+    SceneObject* obj = scene_.find(id);
+    justFinishedModal_ = true;
+    filletTool_.active = false;
+
+    if (!obj) return;
+
+    if (extendLastFillet(*obj, filletTool_.edges, filletTool_.currentRadius)) {
+        return;
+    }
 
     Feature f;
     f.kind = FeatureKind::Bevel;
-    f.edges = nameEdges(obj->mesh, edges);
-    f.radii.assign(f.edges.count(), width);
-    f.width = width;
-    f.segments = view_.bevelSegments;
+    f.edges = nameEdges(filletTool_.meshBefore, filletTool_.edges);
+    f.radii.assign(f.edges.count(), filletTool_.currentRadius);
+    f.width = filletTool_.currentRadius;
+    f.segments = filletTool_.currentSegments;
 
-    std::vector<Feature> chainBefore = obj->features;
-    if (!scene_.addFeature(id, std::move(f))) {
+    std::vector<Feature> chainBefore = filletTool_.chainBefore;
+    obj->features = filletTool_.chainBefore;
+    if (scene_.addFeature(id, std::move(f)) && editKeepsSolid(id)) {
+        undo_.push(std::make_unique<FeatureCommand>(id, std::move(chainBefore),
+                                                    obj->features, "Fillet"));
+    } else {
+        obj->features = std::move(chainBefore);
+        obj->mesh = std::move(filletTool_.meshBefore);
+        obj->refreshDerived();
         setNotice("Fillet refused: radius too large for these edges");
-        return;
     }
-    undo_.push(std::make_unique<FeatureCommand>(id, std::move(chainBefore),
-                                                obj->features, "Fillet"));
+}
+
+void Application::abortFillet() {
+    if (!filletTool_.active) return;
+    const ObjectId id = filletTool_.objectId;
+    justFinishedModal_ = true;
+    filletTool_.active = false;
+
+    SceneObject* obj = scene_.find(id);
+    if (obj) {
+        obj->features = std::move(filletTool_.chainBefore);
+        obj->mesh = std::move(filletTool_.meshBefore);
+        obj->refreshDerived();
+    }
+}
+
+void Application::beginAddPrimitivePrompt(PrimitiveKind kind) {
+    if (tool_.active() || filletTool_.active) return;
+    addPlaneState_.active = true;
+    addPlaneState_.kind = kind;
+    addPlaneState_.hoveredPlane = PlaneChoice::XY;
+    addPlaneState_.planePoint = Vec3{0, 0, 0};
+    addPlaneState_.planeNormal = Vec3{0, 0, 1};
+    addPlaneState_.faceObject = kNoObject;
+    addPlaneState_.faceIndex = kInvalid;
+}
+
+void Application::updateAddPlane(Vec2 cursor) {
+    if (!addPlaneState_.active) return;
+    const Ray ray = camera_.rayThroughPixel(cursor.x, cursor.y);
+
+    const RayHit hit = scene_.raycast(ray);
+    if (hit.hit() && hit.face != kInvalid) {
+        const SceneObject* o = scene_.find(hit.object);
+        if (o) {
+            addPlaneState_.hoveredPlane = PlaneChoice::Face;
+            addPlaneState_.planePoint = hit.point;
+            const Mat4 model = o->modelMatrix();
+            const Vec3 localN = o->mesh.faceNormal(hit.face);
+            addPlaneState_.planeNormal = normalize(transformVector(normalMatrix(model), localN));
+            addPlaneState_.faceObject = hit.object;
+            addPlaneState_.faceIndex = hit.face;
+            return;
+        }
+    }
+
+    addPlaneState_.faceObject = kNoObject;
+    addPlaneState_.faceIndex = kInvalid;
+
+    auto hitPlane = [&](Vec3 p0, Vec3 N, Vec3& outPt, float& t) {
+        const float denom = dot(ray.dir, N);
+        if (std::fabs(denom) < 1e-6f) return false;
+        t = dot(p0 - ray.origin, N) / denom;
+        if (t < 0.0f) return false;
+        outPt = ray.origin + ray.dir * t;
+        return true;
+    };
+
+    float tXY = 1e9f, tXZ = 1e9f, tYZ = 1e9f;
+    Vec3 pXY{}, pXZ{}, pYZ{};
+    const bool okXY = hitPlane({0, 0, 0}, {0, 0, 1}, pXY, tXY);
+    const bool okXZ = hitPlane({0, 0, 0}, {0, 1, 0}, pXZ, tXZ);
+    const bool okYZ = hitPlane({0, 0, 0}, {1, 0, 0}, pYZ, tYZ);
+
+    float bestT = 1e9f;
+    PlaneChoice bestChoice = PlaneChoice::XY;
+    Vec3 bestPt{0, 0, 0};
+    Vec3 bestNorm{0, 0, 1};
+
+    if (okXY && tXY < bestT) { bestT = tXY; bestChoice = PlaneChoice::XY; bestPt = pXY; bestNorm = {0, 0, 1}; }
+    if (okXZ && tXZ < bestT) { bestT = tXZ; bestChoice = PlaneChoice::XZ; bestPt = pXZ; bestNorm = {0, 1, 0}; }
+    if (okYZ && tYZ < bestT) { bestT = tYZ; bestChoice = PlaneChoice::YZ; bestPt = pYZ; bestNorm = {1, 0, 0}; }
+
+    addPlaneState_.hoveredPlane = bestChoice;
+    addPlaneState_.planePoint = bestPt;
+    addPlaneState_.planeNormal = bestNorm;
+}
+
+void Application::commitAddPlane() {
+    if (!addPlaneState_.active) return;
+    justFinishedModal_ = true;
+    const PrimitiveKind kind = addPlaneState_.kind;
+    const Vec3 pt = addPlaneState_.planePoint;
+    const Vec3 norm = addPlaneState_.planeNormal;
+    addPlaneState_.active = false;
+
+    PrimitiveSpec spec;
+    spec.kind = kind;
+    const ObjectId id = scene_.addPrimitive(kind, spec, pt);
+    if (id == kNoObject) return;
+
+    SceneObject* obj = scene_.find(id);
+    if (obj) {
+        const Quat q = Quat::fromTo(Vec3{0, 0, 1}, norm);
+        obj->transform.rotation = q;
+        Real offset = 0.0;
+        switch (kind) {
+            case PrimitiveKind::Box: offset = obj->spec.box.height * 0.5; break;
+            case PrimitiveKind::Cylinder: offset = obj->spec.cylinder.height * 0.5; break;
+            case PrimitiveKind::Cone: offset = obj->spec.cone.height * 0.5; break;
+            case PrimitiveKind::Sphere: offset = obj->spec.sphere.radius; break;
+            case PrimitiveKind::Torus: offset = obj->spec.torus.minorRadius; break;
+            default: offset = 0.0; break;
+        }
+        obj->transform.position = pt + norm * offset;
+        scene_.select(id);
+        undo_.push(ExistenceCommand::forCreate(scene_, {id}));
+    }
+}
+
+void Application::abortAddPlane() {
+    if (!addPlaneState_.active) return;
+    justFinishedModal_ = true;
+    addPlaneState_.active = false;
+}
+
+void Application::drawAddPlaneOverlay() {
+    if (!addPlaneState_.active) return;
+
+    const float sz = 25.0f;
+    const Vec4 activeCol = toVec4(palette::kBrand, 0.8f);
+
+    // XY plane
+    const Vec4 colXY = (addPlaneState_.hoveredPlane == PlaneChoice::XY) ? activeCol : toVec4(palette::kBrand, 0.3f);
+    renderer_.addLine({-sz, -sz, 0}, {sz, -sz, 0}, colXY);
+    renderer_.addLine({sz, -sz, 0}, {sz, sz, 0}, colXY);
+    renderer_.addLine({sz, sz, 0}, {-sz, sz, 0}, colXY);
+    renderer_.addLine({-sz, sz, 0}, {-sz, -sz, 0}, colXY);
+    renderer_.addTriangle({-sz, -sz, 0}, {sz, -sz, 0}, {sz, sz, 0}, toVec4(palette::kBrand, 0.06f));
+    renderer_.addTriangle({-sz, -sz, 0}, {sz, sz, 0}, {-sz, sz, 0}, toVec4(palette::kBrand, 0.06f));
+
+    // XZ plane
+    const Vec4 colXZ = (addPlaneState_.hoveredPlane == PlaneChoice::XZ) ? activeCol : toVec4(palette::kGridAxisY, 0.3f);
+    renderer_.addLine({-sz, 0, -sz}, {sz, 0, -sz}, colXZ);
+    renderer_.addLine({sz, 0, -sz}, {sz, 0, sz}, colXZ);
+    renderer_.addLine({sz, 0, sz}, {-sz, 0, sz}, colXZ);
+    renderer_.addLine({-sz, 0, sz}, {-sz, 0, -sz}, colXZ);
+    renderer_.addTriangle({-sz, 0, -sz}, {sz, 0, -sz}, {sz, 0, sz}, toVec4(palette::kGridAxisY, 0.06f));
+    renderer_.addTriangle({-sz, 0, -sz}, {sz, 0, sz}, {-sz, 0, sz}, toVec4(palette::kGridAxisY, 0.06f));
+
+    // YZ plane
+    const Vec4 colYZ = (addPlaneState_.hoveredPlane == PlaneChoice::YZ) ? activeCol : toVec4(palette::kTextDim, 0.3f);
+    renderer_.addLine({0, -sz, -sz}, {0, sz, -sz}, colYZ);
+    renderer_.addLine({0, sz, -sz}, {0, sz, sz}, colYZ);
+    renderer_.addLine({0, sz, sz}, {0, -sz, sz}, colYZ);
+    renderer_.addLine({0, -sz, sz}, {0, -sz, -sz}, colYZ);
+    renderer_.addTriangle({0, -sz, -sz}, {0, sz, -sz}, {0, sz, sz}, toVec4(palette::kTextDim, 0.06f));
+    renderer_.addTriangle({0, -sz, -sz}, {0, sz, sz}, {0, -sz, sz}, toVec4(palette::kTextDim, 0.06f));
+
+    if (addPlaneState_.hoveredPlane == PlaneChoice::Face && addPlaneState_.faceObject != kNoObject) {
+        const SceneObject* o = scene_.find(addPlaneState_.faceObject);
+        if (o && addPlaneState_.faceIndex < o->mesh.faceCount()) {
+            const RenderMesh& rm = o->render;
+            const Mat4 model = o->modelMatrix();
+            for (size_t i = 0; i < rm.triangleFace.size(); ++i) {
+                if (rm.triangleFace[i] != addPlaneState_.faceIndex) continue;
+                renderer_.addTriangle(
+                    transformPoint(model, rm.positions[rm.triangles[i * 3 + 0]]),
+                    transformPoint(model, rm.positions[rm.triangles[i * 3 + 1]]),
+                    transformPoint(model, rm.positions[rm.triangles[i * 3 + 2]]),
+                    toVec4(palette::kBrand, 0.45f));
+            }
+            renderer_.addLine(addPlaneState_.planePoint,
+                              addPlaneState_.planePoint + addPlaneState_.planeNormal * 10.0f,
+                              toVec4(palette::kBrand, 1.0f));
+        }
+    }
 }
 
 // Folds `edges`, picked on the current mesh, into the fillet at the end of the
@@ -1012,45 +1408,171 @@ void Application::applyBoolean(BooleanOp op) {
 void Application::splitActiveObject() {
     const ObjectId id = scene_.contextObject();
     SceneObject* obj = scene_.find(id);
-    if (!obj) return;
-
-    std::vector<Mesh> bodies;
-    if (splitShells(obj->mesh, bodies) < 2) {
-        setNotice("This object is already a single body");
+    if (!obj) {
+        setNotice("Select an object to split");
         return;
     }
 
-    // The largest body keeps the original object; the rest become new ones.
-    // All of them lose their parametric history: the pieces are geometry, and
-    // no primitive describes them any more.
-    std::vector<Feature> chainBefore = obj->features;
+    // Check if a face is selected on the object to act as the splitting plane (Fusion 360 style)
+    const std::vector<Index> selFaces = scene_.selectedFaces(id);
+    if (!selFaces.empty()) {
+        const Index f = selFaces.front();
+        if (f < obj->mesh.faceCount()) {
+            const Vec3 norm = obj->mesh.faceNormal(f);
+            const Index h = obj->mesh.faces[f].halfedge;
+            const Vec3 pt = (h != kInvalid) ? obj->mesh.verts[obj->mesh.fromVertex(h)].position : Vec3{0,0,0};
 
-    std::vector<Feature> chain;
-    Feature base;
-    base.kind = FeatureKind::BaseMesh;
-    base.bakedMesh = bodies.front();
-    chain.push_back(std::move(base));
-    obj->features = std::move(chain);
-    scene_.reevaluate(id);
+            Mesh piece1, piece2;
+            if (splitBodyByPlane(obj->mesh, pt, norm, piece1, piece2)) {
+                std::vector<Feature> chainBefore = obj->features;
 
-    std::vector<ObjectId> created;
-    for (size_t i = 1; i < bodies.size(); ++i) {
-        const ObjectId copy = scene_.duplicateObject(id);
-        if (copy == kNoObject) continue;
-        SceneObject* piece = scene_.find(copy);
-        piece->features.front().bakedMesh = bodies[i];
-        scene_.reevaluate(copy);
-        created.push_back(copy);
+                std::vector<Feature> chain1;
+                Feature base1;
+                base1.kind = FeatureKind::BaseMesh;
+                base1.bakedMesh = std::move(piece1);
+                chain1.push_back(std::move(base1));
+                obj->features = std::move(chain1);
+                scene_.reevaluate(id);
+
+                const ObjectId copy = scene_.duplicateObject(id);
+                if (copy != kNoObject) {
+                    SceneObject* pieceObj = scene_.find(copy);
+                    if (pieceObj) {
+                        pieceObj->name = obj->name + " (Body 2)";
+                        pieceObj->features.front().bakedMesh = std::move(piece2);
+                        scene_.reevaluate(copy);
+                    }
+                }
+
+                std::vector<std::unique_ptr<Command>> parts;
+                parts.push_back(std::make_unique<FeatureCommand>(
+                    id, std::move(chainBefore), obj->features, "Split Body"));
+                if (copy != kNoObject)
+                    parts.push_back(ExistenceCommand::forCreate(scene_, {copy}));
+
+                undo_.push(std::make_unique<CompositeCommand>(std::move(parts), "Split Body"));
+                setNotice("Split " + obj->name + " into 2 bodies along face plane");
+                return;
+            }
+        }
     }
 
-    std::vector<std::unique_ptr<Command>> parts;
-    parts.push_back(std::make_unique<FeatureCommand>(
-        id, std::move(chainBefore), obj->features, "Split"));
-    if (!created.empty())
-        parts.push_back(ExistenceCommand::forCreate(scene_, created));
+    // If 2 objects are selected: Target body + Splitting plane / tool body
+    if (scene_.selection().size() == 2) {
+        const ObjectId targetId = scene_.selection().front();
+        const ObjectId toolId = scene_.selection().back();
+        SceneObject* targetObj = scene_.find(targetId);
+        SceneObject* toolObj = scene_.find(toolId);
+        if (targetObj && toolObj && targetId != toolId) {
+            const Mat4 toTargetLocal = inverse(targetObj->modelMatrix()) * toolObj->modelMatrix();
+            const Vec3 toolCenter = transformPoint(toTargetLocal, toolObj->mesh.bounds().center());
+            const Vec3 toolNorm = normalize(transformVector(normalMatrix(toTargetLocal), Vec3{0, 0, 1}));
 
-    undo_.push(std::make_unique<CompositeCommand>(std::move(parts), "Split"));
-    setNotice("Split into " + std::to_string(bodies.size()) + " bodies");
+            Mesh piece1, piece2;
+            if (splitBodyByPlane(targetObj->mesh, toolCenter, toolNorm, piece1, piece2)) {
+                std::vector<Feature> chainBefore = targetObj->features;
+
+                std::vector<Feature> chain1;
+                Feature base1;
+                base1.kind = FeatureKind::BaseMesh;
+                base1.bakedMesh = std::move(piece1);
+                chain1.push_back(std::move(base1));
+                targetObj->features = std::move(chain1);
+                scene_.reevaluate(targetId);
+
+                const ObjectId copy = scene_.duplicateObject(targetId);
+                if (copy != kNoObject) {
+                    SceneObject* pieceObj = scene_.find(copy);
+                    if (pieceObj) {
+                        pieceObj->name = targetObj->name + " (Split 2)";
+                        pieceObj->features.front().bakedMesh = std::move(piece2);
+                        scene_.reevaluate(copy);
+                    }
+                }
+
+                std::vector<std::unique_ptr<Command>> parts;
+                parts.push_back(std::make_unique<FeatureCommand>(
+                    targetId, std::move(chainBefore), targetObj->features, "Split Body"));
+                if (copy != kNoObject)
+                    parts.push_back(ExistenceCommand::forCreate(scene_, {copy}));
+
+                undo_.push(std::make_unique<CompositeCommand>(std::move(parts), "Split Body"));
+                setNotice("Split " + targetObj->name + " into 2 bodies with tool plane");
+                return;
+            }
+        }
+    }
+
+    // Check if body has disconnected shells
+    std::vector<Mesh> bodies;
+    if (splitShells(obj->mesh, bodies) >= 2) {
+        std::vector<Feature> chainBefore = obj->features;
+
+        std::vector<Feature> chain;
+        Feature base;
+        base.kind = FeatureKind::BaseMesh;
+        base.bakedMesh = bodies.front();
+        chain.push_back(std::move(base));
+        obj->features = std::move(chain);
+        scene_.reevaluate(id);
+
+        std::vector<ObjectId> created;
+        for (size_t i = 1; i < bodies.size(); ++i) {
+            const ObjectId copy = scene_.duplicateObject(id);
+            if (copy == kNoObject) continue;
+            SceneObject* piece = scene_.find(copy);
+            piece->features.front().bakedMesh = bodies[i];
+            scene_.reevaluate(copy);
+            created.push_back(copy);
+        }
+
+        std::vector<std::unique_ptr<Command>> parts;
+        parts.push_back(std::make_unique<FeatureCommand>(
+            id, std::move(chainBefore), obj->features, "Split"));
+        if (!created.empty())
+            parts.push_back(ExistenceCommand::forCreate(scene_, created));
+
+        undo_.push(std::make_unique<CompositeCommand>(std::move(parts), "Split"));
+        setNotice("Split into " + std::to_string(bodies.size()) + " bodies");
+        return;
+    }
+
+    // Single solid with no face selected: bisect through object center along XY plane
+    const Vec3 center = obj->mesh.bounds().center();
+    Mesh piece1, piece2;
+    if (splitBodyByPlane(obj->mesh, center, Vec3{0, 0, 1}, piece1, piece2)) {
+        std::vector<Feature> chainBefore = obj->features;
+
+        std::vector<Feature> chain1;
+        Feature base1;
+        base1.kind = FeatureKind::BaseMesh;
+        base1.bakedMesh = std::move(piece1);
+        chain1.push_back(std::move(base1));
+        obj->features = std::move(chain1);
+        scene_.reevaluate(id);
+
+        const ObjectId copy = scene_.duplicateObject(id);
+        if (copy != kNoObject) {
+            SceneObject* pieceObj = scene_.find(copy);
+            if (pieceObj) {
+                pieceObj->name = obj->name + " (Body 2)";
+                pieceObj->features.front().bakedMesh = std::move(piece2);
+                scene_.reevaluate(copy);
+            }
+        }
+
+        std::vector<std::unique_ptr<Command>> parts;
+        parts.push_back(std::make_unique<FeatureCommand>(
+            id, std::move(chainBefore), obj->features, "Split Body"));
+        if (copy != kNoObject)
+            parts.push_back(ExistenceCommand::forCreate(scene_, {copy}));
+
+        undo_.push(std::make_unique<CompositeCommand>(std::move(parts), "Split Body"));
+        setNotice("Split " + obj->name + " into 2 bodies at center");
+        return;
+    }
+
+    setNotice("Split Body could not cut this object");
 }
 
 // Returns true when the caller may proceed immediately. Otherwise a prompt is
@@ -1246,10 +1768,7 @@ void Application::applyActions() {
     if (a.redo) undo_.redo(scene_);
 
     if (a.addRequested) {
-        const size_t before = scene_.objectCount();
-        addPrimitiveAtCursor(a.addKind);
-        if (scene_.objectCount() > before)
-            undo_.push(ExistenceCommand::forCreate(scene_, {scene_.activeObject()}));
+        beginAddPrimitivePrompt(a.addKind);
     }
 
     if (a.duplicateSelected) {
@@ -1292,7 +1811,7 @@ void Application::applyActions() {
     if (a.extrude) extrudeSelection();
     if (a.bevel)   bevelActiveObject();
     if (a.split)   splitActiveObject();
-    if (a.fillet)  filletSelectedEdges();
+    if (a.fillet)  beginFillet();
     if (a.booleanRequested) applyBoolean(a.booleanOp);
 
     if (a.rebuildObject != kNoObject) {
@@ -1613,7 +2132,23 @@ int Application::run() {
         ui_.measurement = measureResult_;
         ui_.measurePicks = measure_.picks().size();
 
-        ui_.toolStatus = tool_.statusText();
+        if (filletTool_.active) {
+            char buf[128];
+            std::snprintf(buf, sizeof(buf), "Fillet  %.2f mm  (%d segments)   Wheel segments   type number   Click confirm   Esc cancel",
+                          filletTool_.currentRadius, filletTool_.currentSegments);
+            ui_.toolStatus = buf;
+        } else if (addPlaneState_.active) {
+            std::string pName = "XY Plane";
+            if (addPlaneState_.hoveredPlane == PlaneChoice::XZ) pName = "XZ Plane";
+            else if (addPlaneState_.hoveredPlane == PlaneChoice::YZ) pName = "YZ Plane";
+            else if (addPlaneState_.hoveredPlane == PlaneChoice::Face) pName = "Object Face";
+            ui_.toolStatus = "Select Origin Plane: " + pName + "   [1: XY, 2: XZ, 3: YZ, Click face] (Click to place, Esc cancel)";
+        } else if (tool_.active()) {
+            ui_.toolStatus = tool_.statusText();
+        } else {
+            ui_.toolStatus.clear();
+        }
+
         if (measure_.active() && ui_.toolStatus.empty()) {
             const size_t n = measure_.picks().size();
             ui_.toolStatus = n == 0 ? "Measure: click a vertex, edge or face"
@@ -1636,6 +2171,7 @@ int Application::run() {
         // Queued before the frame is drawn; the renderer flushes overlay lines
         // at the end of its pass.
         drawSelectionHighlights();
+        drawAddPlaneOverlay();
         measureResult_ = measure_.active() ? measure_.compute(scene_) : MeasureResult{};
         measure_.drawOverlay(renderer_, camera_, measureResult_);
         tool_.drawOverlay(renderer_, camera_);

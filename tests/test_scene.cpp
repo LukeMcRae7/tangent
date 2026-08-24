@@ -194,13 +194,24 @@ int main() {
             check(h.hit() && h.ref.kind == ElementKind::Vertex, "over a corner picks the vertex");
         }
 
-        // Missing the object entirely.
+        // Off-silhouette picking: cursor 5 pixels outside the boundary edge
+        // still picks the edge generously even when raycast misses the surface.
+        {
+            const Vec3 mid{10.0f, 0.0f, 10.0f};
+            const Vec2 px = pixelOf(mid) + Vec2{5.0f, 0.0f}; // 5px off-silhouette into empty space
+            const Ray ray{{500.0f, 500.0f, 200.0f}, {0, 0, -1}}; // ray misses surface
+            const ElementHit h = s.pickElement(ray, vp, W, H, px);
+            check(h.hit() && h.ref.kind == ElementKind::Edge, "off-silhouette click within tolerance picks edge");
+            check(h.ref.object == box, "reports the correct box object");
+        }
+
+        // Missing the object entirely (far outside tolerance).
         {
             const ElementHit h = s.pickElement(Ray{{500, 500, 200}, {0, 0, -1}}, vp, W, H,
                                                Vec2{0, 0});
-            check(!h.hit(), "a miss picks nothing");
+            check(!h.hit(), "a distant miss picks nothing");
         }
-        std::printf("[pick] vertex/edge/face priority ok\n");
+        std::printf("[pick] vertex/edge/face priority and generous picking ok\n");
     }
 
     // ---- Element selection bookkeeping -------------------------------------

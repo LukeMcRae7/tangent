@@ -287,54 +287,101 @@ ElementHit Scene::pickElement(const Ray& ray, const Mat4& viewProj,
     ElementHit out;
 
     const RayHit surface = raycast(ray);
-    if (!surface.hit()) return out;
+    if (surface.hit()) {
+        const SceneObject* obj = find(surface.object);
+        if (obj && surface.face != kInvalid) {
+            out.ref = {surface.object, ElementKind::Face, surface.face};
+            out.t = surface.t;
+            out.point = surface.point;
 
-    const SceneObject* obj = find(surface.object);
-    if (!obj || surface.face == kInvalid) return out;
+            const Mat4 model = obj->modelMatrix();
+            const Mesh& mesh = obj->mesh;
 
-    // Default to the face; a nearer vertex or edge overrides it below.
-    out.ref = {surface.object, ElementKind::Face, surface.face};
-    out.t = surface.t;
-    out.point = surface.point;
+            float bestVert = vertexTolPx, bestEdge = edgeTolPx;
+            Index vertPick = kInvalid, edgePick = kInvalid;
 
-    const Mat4 model = obj->modelMatrix();
-    const Mesh& mesh = obj->mesh;
+            const Index start = mesh.faces[surface.face].halfedge;
+            Index h = start;
+            do {
+                const Index v0 = mesh.fromVertex(h);
+                const Index v1 = mesh.halfedges[h].vertex;
 
-    // Only the edges and corners of the face actually under the cursor are
-    // considered. Every edge belongs to both of its faces, so whichever face
-    // the ray struck still contains the edge the user is aiming at.
+                Vec2 p0, p1;
+                const bool ok0 = projectPx(viewProj, viewportW, viewportH,
+                                           transformPoint(model, mesh.verts[v0].position), p0);
+                const bool ok1 = projectPx(viewProj, viewportW, viewportH,
+                                           transformPoint(model, mesh.verts[v1].position), p1);
+
+                if (ok0) {
+                    const float d = length(cursorPx - p0);
+                    if (d < bestVert) { bestVert = d; vertPick = v0; }
+                }
+                if (ok0 && ok1) {
+                    const float d = distToSegment(cursorPx, p0, p1);
+                    if (d < bestEdge) {
+                        bestEdge = d;
+                        edgePick = std::min(h, mesh.halfedges[h].twin);
+                    }
+                }
+                h = mesh.halfedges[h].next;
+            } while (h != start);
+
+            if (vertPick != kInvalid)      out.ref = {surface.object, ElementKind::Vertex, vertPick};
+            else if (edgePick != kInvalid) out.ref = {surface.object, ElementKind::Edge, edgePick};
+            return out;
+        }
+    }
+
+    // If raycast missed or didn't hit a surface, check nearby vertices and edges
+    // of visible objects on screen (off-silhouette generous picking).
     float bestVert = vertexTolPx, bestEdge = edgeTolPx;
+    ObjectId bestObj = kNoObject;
     Index vertPick = kInvalid, edgePick = kInvalid;
 
-    const Index start = mesh.faces[surface.face].halfedge;
-    Index h = start;
-    do {
-        const Index v0 = mesh.fromVertex(h);
-        const Index v1 = mesh.halfedges[h].vertex;
+    for (const auto& obj : objects_) {
+        if (!obj->visible || obj->mesh.empty()) continue;
+        const Mat4 model = obj->modelMatrix();
+        const Mesh& mesh = obj->mesh;
 
-        Vec2 p0, p1;
-        const bool ok0 = projectPx(viewProj, viewportW, viewportH,
-                                   transformPoint(model, mesh.verts[v0].position), p0);
-        const bool ok1 = projectPx(viewProj, viewportW, viewportH,
-                                   transformPoint(model, mesh.verts[v1].position), p1);
-
-        if (ok0) {
-            const float d = length(cursorPx - p0);
-            if (d < bestVert) { bestVert = d; vertPick = v0; }
-        }
-        if (ok0 && ok1) {
-            const float d = distToSegment(cursorPx, p0, p1);
-            if (d < bestEdge) {
-                bestEdge = d;
-                // Canonical half-edge so both directions name one edge.
-                edgePick = std::min(h, mesh.halfedges[h].twin);
+        for (Index v = 0; v < mesh.vertexCount(); ++v) {
+            Vec2 p;
+            if (projectPx(viewProj, viewportW, viewportH,
+                          transformPoint(model, mesh.verts[v].position), p)) {
+                const float d = length(cursorPx - p);
+                if (d < bestVert) {
+                    bestVert = d;
+                    vertPick = v;
+                    bestObj = obj->id;
+                }
             }
         }
-        h = mesh.halfedges[h].next;
-    } while (h != start);
 
-    if (vertPick != kInvalid)      out.ref = {surface.object, ElementKind::Vertex, vertPick};
-    else if (edgePick != kInvalid) out.ref = {surface.object, ElementKind::Edge, edgePick};
+        for (Index h = 0; h < mesh.halfedgeCount(); ++h) {
+            if (h > mesh.halfedges[h].twin) continue;
+            const Index v0 = mesh.fromVertex(h);
+            const Index v1 = mesh.halfedges[h].vertex;
+            Vec2 p0, p1;
+            const bool ok0 = projectPx(viewProj, viewportW, viewportH,
+                                       transformPoint(model, mesh.verts[v0].position), p0);
+            const bool ok1 = projectPx(viewProj, viewportW, viewportH,
+                                       transformPoint(model, mesh.verts[v1].position), p1);
+            if (ok0 && ok1) {
+                const float d = distToSegment(cursorPx, p0, p1);
+                if (d < bestEdge) {
+                    bestEdge = d;
+                    edgePick = h;
+                    bestObj = obj->id;
+                }
+            }
+        }
+    }
+
+    if (vertPick != kInvalid && bestObj != kNoObject) {
+        out.ref = {bestObj, ElementKind::Vertex, vertPick};
+    } else if (edgePick != kInvalid && bestObj != kNoObject) {
+        out.ref = {bestObj, ElementKind::Edge, edgePick};
+    }
+
     return out;
 }
 

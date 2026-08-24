@@ -182,7 +182,7 @@ public:
     // scene layer stays independent of the application layer.
     ElementHit pickElement(const Ray& ray, const Mat4& viewProj,
                            int viewportW, int viewportH, Vec2 cursorPx,
-                           float vertexTolPx = 9.0f, float edgeTolPx = 7.0f) const;
+                           float vertexTolPx = 16.0f, float edgeTolPx = 12.0f) const;
 
     // ---- Sub-object selection --------------------------------------------
     const std::vector<ElementRef>& elementSelection() const { return elements_; }

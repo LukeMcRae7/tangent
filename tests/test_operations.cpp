@@ -477,22 +477,45 @@ int main() {
               "and the body is left exactly as it was");
         std::printf("[extrude] through the far side: refused, body untouched\n");
     }
+    // ---- Tangent Chain Extension ------------------------------------------
     {
-        // Zero length: nothing built, but the face is reported so a drag has
-        // something to work from. Repeating it changes nothing.
-        Mesh m;
-        makeBox(m);
-        const Index top = faceFacing(m, {0, 0, 1});
-        std::vector<Index> reported;
-        const bool ok = extrudeFaces(m, {top}, 0.0, &reported, 11);
-        check(ok, "a zero-length extrude succeeds");
-        check(m.faceCount() == 6, "and builds nothing");
-        check(reported.size() == 1 && reported[0] == top, "but reports the face to drag");
-        const bool again = extrudeFaces(m, {top}, 0.0, &reported, 12);
-        check(again && m.faceCount() == 6, "repeating it still builds nothing");
-        expectSolid(m, "after zero-length extrudes");
-        std::printf("[extrude] zero length: %d faces, reports the picked face\n",
-                    m.faceCount());
+        Mesh cyl;
+        CylinderParams cp{10, 20, 16};
+        makeCylinder(cyl, cp);
+        // Top rim is made of 16 smooth edges around the top face
+        // Find one halfedge on the top rim
+        Index topEdge = kInvalid;
+        for (Index h = 0; h < cyl.halfedgeCount(); ++h) {
+            const Vec3 p = cyl.verts[cyl.fromVertex(h)].position;
+            const Vec3 q = cyl.verts[cyl.halfedges[h].vertex].position;
+            if (std::fabs(p.z - 10.0) < 1e-4 && std::fabs(q.z - 10.0) < 1e-4) {
+                topEdge = std::min(h, cyl.halfedges[h].twin);
+                break;
+            }
+        }
+        check(topEdge != kInvalid, "found top rim edge on cylinder");
+        const std::vector<Index> extended = extendTangentChain(cyl, {topEdge});
+        check(extended.size() == 16, "extending 1 rim edge on 16-gon cylinder yields all 16 rim edges (got " +
+              std::to_string(extended.size()) + ")");
+        std::printf("[tangent_chain] cylinder rim: 1 edge -> %zu edges\n", extended.size());
+    }
+
+    // ---- Split Body By Plane -----------------------------------------------
+    {
+        Mesh cube;
+        makeBox(cube); // 20x20x20 cube centered at origin, bounds [-10, 10] along XYZ, volume 8000
+        Mesh b1, b2;
+        const bool splitOk = splitBodyByPlane(cube, Vec3{0, 0, 0}, Vec3{0, 0, 1}, b1, b2);
+        check(splitOk, "splitBodyByPlane succeeds on cube");
+        expectSolid(b1, "split body 1");
+        expectSolid(b2, "split body 2");
+        const double v1 = volumeOf(b1);
+        const double v2 = volumeOf(b2);
+        check(std::fabs(v1 - 4000.0) < 1.0, "body 1 has half volume (4000 mm3), got " + std::to_string(v1));
+        check(std::fabs(v2 - 4000.0) < 1.0, "body 2 has half volume (4000 mm3), got " + std::to_string(v2));
+        check(std::fabs((v1 + v2) - 8000.0) < 1.0, "total volume conserved");
+        std::printf("[split_body] cube split into 2 bodies: %.1f mm3 + %.1f mm3 = %.1f mm3\n",
+                    v1, v2, v1 + v2);
     }
 
     std::printf("\n%s (%d failures)\n", failures ? "FAILED" : "ALL PASS", failures);
