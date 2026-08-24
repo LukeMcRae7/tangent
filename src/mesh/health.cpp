@@ -49,7 +49,7 @@ bool trianglesCross(const Tri& x, const Tri& y) {
     const Vec3 ys[3] = {y.pa, y.pb, y.pc};
     for (const Vec3& p : xs)
         for (const Vec3& q : ys)
-            if (p == q) return false;
+            if (lengthSq(p - q) < 1e-12) return false;
 
     return segmentHitsTriangle(x.pa, x.pb, y.pa, y.pb, y.pc) ||
            segmentHitsTriangle(x.pb, x.pc, y.pa, y.pb, y.pc) ||

@@ -2,6 +2,7 @@
 // against the contract that a result is either a valid solid or a refusal.
 #include "mesh/boolean.h"
 #include "mesh/health.h"
+#include "mesh/operations.h"
 #include "mesh/primitives.h"
 
 #include <cstdio>
@@ -332,6 +333,71 @@ int main() {
         check(seams <= 2, "at most two edges lie inside a flat region (" +
                               std::to_string(seams) + ")");
         std::printf("[bool] cube less a sphere: %d faces, %d seams\n", out.faceCount(), seams);
+
+        // ---- Downstream operations on boolean result -----------------------
+        // Fillet the bottom edges of the dished cube
+        {
+            std::vector<Index> bottomEdges;
+            for (Index h = 0; h < out.halfedgeCount(); ++h) {
+                if (h > out.halfedges[h].twin) continue;
+                const Vec3 p1 = out.verts[out.fromVertex(h)].position;
+                const Vec3 p2 = out.verts[out.halfedges[h].vertex].position;
+                if (std::fabs(p1.z - (-10)) < 1e-4 && std::fabs(p2.z - (-10)) < 1e-4)
+                    bottomEdges.push_back(h);
+            }
+            FilletSpec bspec;
+            bspec.segments = 4;
+            for (Index e : bottomEdges) bspec.edges.push_back({e, 2.0});
+            Mesh bFilleted = out;
+            check(filletEdges(bFilleted, bspec), "fillet bottom edges after boolean");
+            expectSolid(bFilleted, "filleted dished cube");
+        }
+
+        // Extrude a side face of the dished cube
+        {
+            Index sideFace = kInvalid;
+            for (Index f = 0; f < out.faceCount(); ++f) {
+                if (out.faceNormal(f).x > 0.99) { sideFace = f; break; }
+            }
+            check(sideFace != kInvalid, "found side face");
+            Mesh extruded = out;
+            check(extrudeFaces(extruded, {sideFace}, 5.0), "extrude side face after boolean");
+            expectSolid(extruded, "extruded dished cube");
+        }
+    }
+
+    // ---- Multiple overlapping curved booleans in sequence -------------------
+    {
+        Mesh cube, sphere;
+        makeBox(cube);
+        SphereParams sp;
+        sp.radius = 7;
+        sp.segments = 24;
+        sp.rings = 12;
+        makeSphere(sphere, sp);
+        for (auto& v : sphere.verts) v.position += Vec3{0, 0, 10};
+
+        Mesh cut1;
+        check(meshBoolean(cube, sphere, BooleanOp::Difference, cut1), "curved cut 1");
+        expectSolid(cut1, "cut 1");
+
+        // Second overlapping sphere cut on the curved geometry
+        Mesh sphere2 = sphere;
+        for (auto& v : sphere2.verts) v.position += Vec3{5, 0, 0};
+        Mesh cut2;
+        check(meshBoolean(cut1, sphere2, BooleanOp::Difference, cut2), "overlapping curved cut 2");
+        expectSolid(cut2, "cut 2");
+        check(volumeOf(cut2) < volumeOf(cut1), "second cut removes volume");
+
+        // Third overlapping sphere cut
+        Mesh sphere3 = sphere;
+        for (auto& v : sphere3.verts) v.position += Vec3{0, 5, 0};
+        Mesh cut3;
+        check(meshBoolean(cut2, sphere3, BooleanOp::Difference, cut3), "overlapping curved cut 3");
+        expectSolid(cut3, "cut 3");
+        check(volumeOf(cut3) < volumeOf(cut2), "third cut removes volume");
+        std::printf("[bool] 3 overlapping curved cuts: %.1f -> %.1f -> %.1f mm3\n",
+                    volumeOf(cut1), volumeOf(cut2), volumeOf(cut3));
     }
 
     std::printf("\n%s (%d failures)\n", failures ? "FAILED" : "ALL PASS", failures);

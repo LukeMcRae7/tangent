@@ -189,7 +189,7 @@ bool weldAndBuild(const std::vector<Poly>& polys, const Mesh& a, const Mesh& b,
     // Tolerance scaled to the model: absolute epsilons are wrong for a part
     // that might be 2mm or 2000mm across.
     const Real scale = std::max(maxComponent(bounds.size()), Real(1));
-    const Real weld = scale * 1e-9;
+    const Real weld = scale * 1e-8;
     const Real inv = 1.0 / weld;
 
     // Keyed on the exact quantised cell, never on a hash of it. Hashing the
@@ -266,8 +266,8 @@ bool weldAndBuild(const std::vector<Poly>& polys, const Mesh& a, const Mesh& b,
         // name their faces identically. Pieces that stay genuinely separate are
         // separated below, once it is known which those are.
         faceName.push_back((p.fromB && !trustBNames)
-                               ? nameId(salt, IdRole::Face, p.src, 1)
-                               : p.src);
+                                ? nameId(salt, IdRole::Face, p.src, 1)
+                                : p.src);
     }
 
     if (dbg) std::fprintf(stderr, "[bool] after weld: %zu verts, %zu faces\n",
@@ -285,7 +285,7 @@ bool weldAndBuild(const std::vector<Poly>& polys, const Mesh& a, const Mesh& b,
     // The fix is to insert any vertex lying on an edge into that edge. Vertices
     // are bucketed so each edge only examines the ones near it.
     {
-        const Real snap = weld * 100.0;   // generous: these are true coincidences
+        const Real snap = std::max(scale * 1e-6, weld * 100.0);
         const Real cellSize = std::max(scale / 64.0, snap * 4.0);
         std::map<std::array<int64_t, 3>, std::vector<uint32_t>> buckets;
         auto bucketOf = [&](const Vec3& p) {
@@ -319,7 +319,8 @@ bool weldAndBuild(const std::vector<Poly>& polys, const Mesh& a, const Mesh& b,
                 // Candidates from the cells the edge passes through.
                 AABB ebox; ebox.expand(A); ebox.expand(B);
                 std::vector<std::pair<Real, uint32_t>> onEdge;
-                const auto lo = bucketOf(ebox.min), hi = bucketOf(ebox.max);
+                const auto lo = bucketOf(ebox.min - Vec3{snap, snap, snap});
+                const auto hi = bucketOf(ebox.max + Vec3{snap, snap, snap});
                 for (int64_t x = lo[0]; x <= hi[0]; ++x)
                 for (int64_t y = lo[1]; y <= hi[1]; ++y)
                 for (int64_t z = lo[2]; z <= hi[2]; ++z) {
@@ -329,7 +330,7 @@ bool weldAndBuild(const std::vector<Poly>& polys, const Mesh& a, const Mesh& b,
                         if (v == ia || v == ib) continue;
                         const Vec3 P = positions[v];
                         const Real t = dot(P - A, ab) / len2;
-                        if (t <= 1e-9 || t >= 1.0 - 1e-9) continue;
+                        if (t <= 1e-7 || t >= 1.0 - 1e-7) continue;
                         if (lengthSq(P - (A + ab * t)) > snap * snap) continue;
                         onEdge.emplace_back(t, v);
                     }
@@ -337,14 +338,20 @@ bool weldAndBuild(const std::vector<Poly>& polys, const Mesh& a, const Mesh& b,
                 std::sort(onEdge.begin(), onEdge.end());
                 for (const auto& [t, v] : onEdge) {
                     (void)t;
-                    if (grown.back() != v) grown.push_back(v);
+                    if (grown.empty() || (grown.back() != v && v != ib)) grown.push_back(v);
                 }
             }
 
-            if (grown.size() < 3) continue;
+            std::vector<uint32_t> clean;
+            for (size_t i = 0; i < grown.size(); ++i) {
+                if (clean.empty() || clean.back() != grown[i]) clean.push_back(grown[i]);
+            }
+            while (clean.size() > 1 && clean.front() == clean.back()) clean.pop_back();
+            if (clean.size() < 3) continue;
+
             rebuiltNames.push_back(faceName[self]);
-            rebuiltSizes.push_back(static_cast<uint32_t>(grown.size()));
-            rebuiltIndices.insert(rebuiltIndices.end(), grown.begin(), grown.end());
+            rebuiltSizes.push_back(static_cast<uint32_t>(clean.size()));
+            rebuiltIndices.insert(rebuiltIndices.end(), clean.begin(), clean.end());
         }
         faceSizes.swap(rebuiltSizes);
         faceIndices.swap(rebuiltIndices);
@@ -475,7 +482,14 @@ bool weldAndBuild(const std::vector<Poly>& polys, const Mesh& a, const Mesh& b,
             int unpaired = 0, dupes = 0;
             for (const auto& [k, n] : dir) {
                 if (n > 1) ++dupes;
-                if (!dir.count({k.second, k.first})) ++unpaired;
+                if (!dir.count({k.second, k.first})) {
+                    ++unpaired;
+                    if (unpaired <= 10) {
+                        const Vec3 pa = positions[k.first], pb = positions[k.second];
+                        std::fprintf(stderr, "   unpaired edge (%u -> %u): (%.5f, %.5f, %.5f) -> (%.5f, %.5f, %.5f) len=%.6f\n",
+                                     k.first, k.second, pa.x, pa.y, pa.z, pb.x, pb.y, pb.z, length(pb - pa));
+                    }
+                }
             }
             std::fprintf(stderr,
                 "[bool] REJECTED: %zu polys, %zu verts, %zu faces, %d unpaired edges, "

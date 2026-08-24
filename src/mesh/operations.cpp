@@ -1057,6 +1057,14 @@ static bool filletEdgesDirect(Mesh& mesh, const FilletSpec& spec) {
         return posOf(mesh.halfedges[h].vertex) - posOf(mesh.fromVertex(h));
     };
 
+    auto isFlatEdge = [&](Index h) {
+        const Index tw = mesh.halfedges[h].twin;
+        if (tw == kInvalid) return false;
+        const Index f1 = mesh.halfedges[h].face, f2 = mesh.halfedges[tw].face;
+        if (f1 == kInvalid || f2 == kInvalid) return false;
+        return dot(faceNormals[f1], faceNormals[f2]) >= kFlatCos;
+    };
+
     // How many filleted edges arrive at each vertex. Two or more means the
     // rolling ball has to pivot there, and a blend surface exists; exactly one
     // means it rolls straight off the end and there is nothing to blend.
@@ -1069,10 +1077,11 @@ static bool filletEdgesDirect(Mesh& mesh, const FilletSpec& spec) {
     auto blendsAt = [&](Index v) { return filletsAt[v] >= 2; };
 
     // Unfilleted edges arriving at each vertex. One or more means the corner is
-    // a mitre rather than a ball; see the patch loop.
+    // a mitre rather than a ball; see the patch loop. Flat seams between coplanar
+    // faces do not count as sharp edges.
     std::vector<int> sharpAt(static_cast<size_t>(mesh.vertexCount()), 0);
     for (Index h = 0; h < heCount; ++h) {
-        if (beveled[h] || h > mesh.halfedges[h].twin) continue;
+        if (beveled[h] || isFlatEdge(h) || h > mesh.halfedges[h].twin) continue;
         ++sharpAt[mesh.fromVertex(h)];
         ++sharpAt[mesh.halfedges[h].vertex];
     }
@@ -1331,8 +1340,33 @@ static bool filletEdgesDirect(Mesh& mesh, const FilletSpec& spec) {
             d = (ballAt[v] - faceNormals[mesh.halfedges[h].face] * o) - posOf(v);
             return true;
         }
-        // No ball to solve against: fall back to the plain two-sided inset.
+
         const Index p = mesh.halfedges[h].prev;
+        if (filletsAt[v] == 2 && (!beveled[p] || !beveled[h])) {
+            Index b0 = kInvalid, b1 = kInvalid;
+            const Index start = mesh.verts[v].halfedge;
+            Index k = start;
+            do {
+                if (beveled[k]) { (b0 == kInvalid ? b0 : b1) = k; }
+                k = mesh.halfedges[mesh.halfedges[k].twin].next;
+            } while (k != start);
+
+            if (b0 != kInvalid && b1 != kInvalid) {
+                const Vec3 fn = faceNormals[mesh.halfedges[h].face];
+                const Vec3 e0 = normalize(dirOf(b0));
+                const Vec3 e1 = normalize(dirOf(b1));
+                if (std::fabs(dot(e0, fn)) < 1e-4 && std::fabs(dot(e1, fn)) < 1e-4) {
+                    const Vec3 prevE = (dot(cross(-e0, e1), fn) > 0.0) ? -e0 : -e1;
+                    const Vec3 nextE = (dot(cross(-e0, e1), fn) > 0.0) ? e1 : e0;
+                    const Real r0 = (prevE == -e0) ? radiusOf[b0] : radiusOf[b1];
+                    const Real r1 = (prevE == -e0) ? radiusOf[b1] : radiusOf[b0];
+                    if (cornerOffset(fn, prevE, nextE, r0, r1, d))
+                        return true;
+                }
+            }
+        }
+
+        // No ball to solve against: fall back to the plain two-sided inset.
         return cornerOffset(faceNormals[mesh.halfedges[h].face],
                             posOf(v) - posOf(mesh.fromVertex(p)), dirOf(h),
                             beveled[p] ? radiusOf[p] : 0.0,
@@ -1552,7 +1586,7 @@ static bool filletEdgesDirect(Mesh& mesh, const FilletSpec& spec) {
     // one, the larger wins: the corner has to clear both cuts.
     std::vector<Real> cutBack(static_cast<size_t>(heCount), 0.0);
     for (Index h = 0; h < heCount; ++h) {
-        if (beveled[h]) continue;
+        if (beveled[h] || isFlatEdge(h)) continue;
         const Vec3 dir = normalize(dirOf(h));
         Real t = 0.0;
 
@@ -1674,7 +1708,7 @@ static bool filletEdgesDirect(Mesh& mesh, const FilletSpec& spec) {
             // one. An unfilleted edge contributes the point it was cut back
             // to; a filleted one contributes the cross-section, which both of
             // them share when both are filleted.
-            if (!bevPrev) loop.push_back(edgePoint(mesh.halfedges[p].twin));
+            if (!bevPrev && !isFlatEdge(p)) loop.push_back(edgePoint(mesh.halfedges[p].twin));
 
             if (bevPrev || bevNext) {
                 Vec3 d;
@@ -1743,7 +1777,7 @@ static bool filletEdgesDirect(Mesh& mesh, const FilletSpec& spec) {
                 moved.push_back(soup.positions[edgePoint(mesh.halfedges[p].twin)]);
             }
 
-            if (!bevNext) {
+            if (!bevNext && !isFlatEdge(h)) {
                 const uint32_t idx = edgePoint(h);
                 if (loop.empty() || loop.back() != idx) loop.push_back(idx);
                 corner[h] = idx;
@@ -1901,6 +1935,7 @@ static bool filletEdgesDirect(Mesh& mesh, const FilletSpec& spec) {
         // A fan end has no cap: the trim curve is spliced straight into the
         // clipped faces, and the strip ends on it. Nothing is left open.
         if (fanAt[v] >= 0) continue;
+        if (filletsAt[v] == 2 && sharpAt[v] == 0) continue;
 
         // Running counters so every point and face a patch emits gets its own
         // name. The code path is deterministic, so re-evaluating names them the
@@ -2714,10 +2749,8 @@ int mergeCoplanarFaces(Mesh& mesh, Real toleranceDegrees) {
             }
             return best2;
         };
-        const size_t hi0 = 0, hi1 = H.size() / 2;
-        const size_t oi0 = nearestOuter(H[hi0]), oi1 = nearestOuter(H[hi1]);
 
-        if (H.size() < 3 || O.size() < 3 || hi0 == hi1 || oi0 == oi1) {
+        if (H.size() < 3 || O.size() < 3) {
             keepOriginals();
             continue;
         }
@@ -2732,11 +2765,6 @@ int mergeCoplanarFaces(Mesh& mesh, Real toleranceDegrees) {
             }
             return out;
         };
-
-        std::vector<Index> p1 = walk(O, oi0, oi1);
-        for (Index x : walk(H, hi1, hi0)) p1.push_back(x);
-        std::vector<Index> p2 = walk(O, oi1, oi0);
-        for (Index x : walk(H, hi0, hi1)) p2.push_back(x);
 
         // The cuts must not cross the outline or each other, or the two halves
         // would overlap. Cheaper to check than to repair.
@@ -2764,15 +2792,42 @@ int mergeCoplanarFaces(Mesh& mesh, Real toleranceDegrees) {
             return true;
         };
 
-        if (!simple(p1) || !simple(p2)) { keepOriginals(); continue; }
+        Real bestDist = 1e300;
+        std::vector<Index> bestP1, bestP2;
+        bool foundCut = false;
+        const size_t hCount = H.size();
 
-        // Both halves need a name. The second used to go out without one, and
-        // a nameless face is worse than an unnamed one: every reference to it
-        // stores nothing, and nothing matches the first nameless face in the
-        // mesh. Picking the bored top of a cut body and extruding moved some
-        // other face entirely.
-        soup.face(asSoup(p1), mesh.faces[best].id);
-        soup.face(asSoup(p2), nameId(0, IdRole::Split, mesh.faces[best].id));
+        for (size_t offset = 0; offset < hCount; ++offset) {
+            const size_t hi0 = offset;
+            const size_t hi1 = (offset + hCount / 2) % hCount;
+            if (hi0 == hi1) continue;
+
+            const size_t oi0 = nearestOuter(H[hi0]);
+            const size_t oi1 = nearestOuter(H[hi1]);
+            if (oi0 == oi1) continue;
+
+            std::vector<Index> p1 = walk(O, oi0, oi1);
+            for (Index x : walk(H, hi1, hi0)) p1.push_back(x);
+            std::vector<Index> p2 = walk(O, oi1, oi0);
+            for (Index x : walk(H, hi0, hi1)) p2.push_back(x);
+
+            if (!simple(p1) || !simple(p2)) continue;
+
+            const Real d = lengthSq(mesh.verts[O[oi0]].position - mesh.verts[H[hi0]].position) +
+                           lengthSq(mesh.verts[O[oi1]].position - mesh.verts[H[hi1]].position);
+            if (d < bestDist) {
+                bestDist = d;
+                bestP1 = std::move(p1);
+                bestP2 = std::move(p2);
+                foundCut = true;
+            }
+        }
+
+        if (!foundCut) { keepOriginals(); continue; }
+
+        // Both halves need a name.
+        soup.face(asSoup(bestP1), mesh.faces[best].id);
+        soup.face(asSoup(bestP2), nameId(0, IdRole::Split, mesh.faces[best].id));
         for (Index f : g.faces) emitted[f] = true;
         merged += static_cast<int>(g.faces.size()) - 2;
     }
@@ -2792,6 +2847,52 @@ int mergeCoplanarFaces(Mesh& mesh, Real toleranceDegrees) {
             std::fprintf(stderr, "[merge] rebuild REFUSED the merged soup\n");
         return 0;   // leave the mesh alone rather than risk it
     }
+
+    // Dissolve degree-2 collinear vertices created by plane slicing across flat boundaries
+    {
+        std::vector<std::vector<Index>> vertOutgoing(next.vertexCount());
+        for (Index h = 0; h < next.halfedgeCount(); ++h)
+            if (next.halfedges[h].face != kInvalid)
+                vertOutgoing[next.fromVertex(h)].push_back(h);
+
+        std::set<Index> toRemove;
+        for (Index v = 0; v < next.vertexCount(); ++v) {
+            if (vertOutgoing[v].size() != 2) continue;
+            const Index to1 = next.halfedges[vertOutgoing[v][0]].vertex;
+            const Index to2 = next.halfedges[vertOutgoing[v][1]].vertex;
+            if (to1 == to2 || to1 == v || to2 == v) continue;
+
+            const Vec3 p = next.verts[v].position;
+            const Vec3 d1 = next.verts[to1].position - p;
+            const Vec3 d2 = next.verts[to2].position - p;
+            const Real l1 = length(d1), l2 = length(d2);
+            if (l1 < 1e-12 || l2 < 1e-12) continue;
+
+            if (dot(d1 / l1, d2 / l2) < -1.0 + 1e-6)
+                toRemove.insert(v);
+        }
+
+        if (!toRemove.empty()) {
+            Soup cleanSoup;
+            cleanSoup.positions.reserve(next.verts.size());
+            for (const MeshVertex& mv : next.verts) cleanSoup.vertex(mv.position, mv.id);
+
+            for (Index f = 0; f < next.faceCount(); ++f) {
+                std::vector<Index> fv;
+                next.faceVertices(f, fv);
+                std::vector<uint32_t> loop;
+                for (Index v : fv)
+                    if (!toRemove.count(v)) loop.push_back(static_cast<uint32_t>(v));
+                if (loop.size() >= 3)
+                    cleanSoup.face(loop, next.faces[f].id);
+            }
+
+            Mesh cleaned;
+            if (cleanSoup.commit(cleaned))
+                next = std::move(cleaned);
+        }
+    }
+
     mesh = std::move(next);
     return merged;
 }
