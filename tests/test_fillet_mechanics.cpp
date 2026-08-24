@@ -30,30 +30,14 @@ using namespace tg;
 
 static int failures = 0;
 
-// Where we knowingly do something other than Blender. Recorded rather than
-// asserted, so the suite stays honest about it instead of quietly passing.
-//
-// There is one, and it is the same missing capability that stops an
-// already-filleted body being filleted again: trimming a surface against the
-// fillet arriving at it, rather than only moving the corners of the faces it
-// touches. It shows up wherever a fillet has to END at a vertex whose
-// surrounding faces meet at a crease -- every vertex of an octahedron, a sphere
-// or a torus. Blender builds a vertex mesh there; we refuse.
-//
-// Refusing is the safe half of the answer: what came out when it was attempted
-// was a cap spanning two planes that the triangulator folded, and a folded cap
-// is a self-intersecting model. Better to decline than to hand back a part that
-// looks right and will not print.
-static bool inKnownDivergence = false;
-static int divergences = 0;
-
+// Everything here is asserted against what a fillet means, or against what
+// Blender does. The divergences this file once recorded -- a fillet ending at
+// a vertex whose faces meet at creases -- now build (the fan-end section
+// below), so any case that stops building again is a failure, not a
+// difference of opinion. The one remaining known gap is filleting against an
+// existing fillet in a separate operation, recorded in test_fillet.cpp.
 static void check(bool ok, const std::string& what) {
     if (ok) return;
-    if (inKnownDivergence) {
-        std::printf("  BLENDER-DIFF: %s\n", what.c_str());
-        ++divergences;
-        return;
-    }
     std::printf("  FAIL: %s\n", what.c_str());
     ++failures;
 }
@@ -150,6 +134,51 @@ static bool makeOctahedron(Mesh& m, double r) {
                                 {2,0,5},{1,2,5},{3,1,5},{0,3,5}};
     for (const auto& t : tri) { sz.push_back(3); for (uint32_t v : t) ix.push_back(v); }
     return m.build(p, sz, ix);
+}
+
+// A square pyramid: a base edge's fillet ends against one slanted face, a
+// slant edge's fillet ends at the apex against three.
+static bool makePyramid(Mesh& m, double half, double h) {
+    std::vector<Vec3> p = {{-half,-half,0},{half,-half,0},{half,half,0},{-half,half,0},{0,0,h}};
+    std::vector<uint32_t> sz, ix;
+    sz.push_back(4);
+    for (int i = 3; i >= 0; --i) ix.push_back(static_cast<uint32_t>(i));
+    for (uint32_t i = 0; i < 4; ++i) {
+        sz.push_back(3);
+        ix.push_back(i); ix.push_back((i + 1) % 4); ix.push_back(4);
+    }
+    return m.build(p, sz, ix);
+}
+
+// A 20x20x10 block with an open slot across the top: 6 wide, 5 deep, the full
+// length. Its floor edges are concave and end against the front and back
+// walls -- the shape a boolean subtraction leaves.
+static bool makeSlot(Mesh& m) {
+    std::vector<Vec3> p = {
+        {-10,-10,0},{10,-10,0},{10,10,0},{-10,10,0},
+        {-10,-10,10},{-3,-10,10},{-3,-10,5},{3,-10,5},{3,-10,10},{10,-10,10},
+        {-10,10,10},{-3,10,10},{-3,10,5},{3,10,5},{3,10,10},{10,10,10}};
+    std::vector<uint32_t> sz, ix;
+    auto face = [&](std::initializer_list<uint32_t> l) {
+        sz.push_back(static_cast<uint32_t>(l.size()));
+        for (uint32_t v : l) ix.push_back(v);
+    };
+    face({0,3,2,1}); face({0,1,9,8,7,6,5,4}); face({2,3,10,11,12,13,14,15});
+    face({0,4,10,3}); face({1,2,15,9}); face({4,5,11,10}); face({8,9,15,14});
+    face({5,6,12,11}); face({6,7,13,12}); face({7,8,14,13});
+    return m.build(p, sz, ix);
+}
+
+// The edge whose endpoints are exactly a and b, as either half-edge.
+static Index edgeAt(const Mesh& m, Vec3 a, Vec3 b) {
+    for (Index h = 0; h < m.halfedgeCount(); ++h) {
+        if (h > m.halfedges[h].twin) continue;
+        const Vec3 p = m.verts[m.fromVertex(h)].position;
+        const Vec3 q = m.verts[m.halfedges[h].vertex].position;
+        if ((lengthSq(p - a) < 1e-12 && lengthSq(q - b) < 1e-12) ||
+            (lengthSq(p - b) < 1e-12 && lengthSq(q - a) < 1e-12)) return h;
+    }
+    return kInvalid;
 }
 
 // A wedge: a triangular prism with an apex angle of `apexDeg`, for edges far
@@ -757,16 +786,16 @@ int main() {
             } while (h != start);
         }
         check(two.size() == 2, "two opposite edges at the apex");
-        inKnownDivergence = true;
+        // This refused for a long time -- not because of the apex, but because
+        // each of the two fillets ends on a creased fan at the far vertex, and
+        // that end could not be trimmed. With fan ends built, the apex blend
+        // between them closes on its own.
         const bool ok = bevelEdges(m, two, 1.5, 6);
+        check(ok, "two filleted and two sharp at a four-edge vertex");
         if (ok) {
             expectSolid(m, "two of four at a vertex");
             std::printf("   two filleted and two sharp at a four-edge vertex: built\n");
-        } else {
-            std::printf("   two filleted and two sharp at a four-edge vertex: REFUSED\n");
         }
-        check(ok, "a fillet ending at a vertex whose faces meet at a crease");
-        inKnownDivergence = false;
     }
 
     // =====================================================================
@@ -849,9 +878,88 @@ int main() {
         }
     }
 
-    if (divergences)
-        std::printf("\n%d known difference%s from Blender (see the note above check)\n",
-                    divergences, divergences == 1 ? "" : "s");
+    // =====================================================================
+    // 14. A fillet ending on a creased fan
+    // =====================================================================
+    //
+    // One edge of an octahedron ends at vertices whose remaining faces meet
+    // at real creases; a pyramid's slant edge ends at an apex with three.
+    // Blender builds these. The construction trims the fillet's end against
+    // the whole fan at once: each face's plane crossed in that plane, each
+    // crease cut where its line pierces the fillet's cylinder, with the end
+    // ring, the clipped faces and the cut-back creases sharing one set of
+    // points -- which is what makes the result close without a cap.
+    {
+        std::printf("-- fan ends --\n");
+        Mesh base;
+        makeOctahedron(base, 10.0);
+        const double baseVol = volumeOf(base);
+
+        double prev = 0.0;
+        for (int segments : {1, 4, 8, 16}) {
+            Mesh m;
+            makeOctahedron(m, 10.0);
+            const std::string tag = "octahedron one edge, " + std::to_string(segments) + " seg";
+            check(bevelEdges(m, {edgeAt(m, {0,0,10}, {10,0,0})}, 1.5, segments), tag);
+            expectSolid(m, tag);
+            const double vol = volumeOf(m);
+            check(vol < baseVol - 1e-9, tag + ": removes material");
+            // More segments hug the round fillet closer and cut away less.
+            check(vol >= prev - 1e-9, tag + ": converges from below");
+            prev = vol;
+        }
+        std::printf("   octahedron edge: builds at 1..16 segments, %.4f of %.4f left\n",
+                    prev, baseVol);
+
+        for (int segments : {1, 4}) {
+            Mesh m;
+            makePyramid(m, 10.0, 12.0);
+            const double pyramidVol = volumeOf(m);
+            const std::string tag = "pyramid slant edge, " + std::to_string(segments) + " seg";
+            check(bevelEdges(m, {edgeAt(m, {10,-10,0}, {0,0,12})}, 1.0, segments), tag);
+            expectSolid(m, tag);
+            check(volumeOf(m) < pyramidVol, tag + ": removes material");
+        }
+        std::printf("   pyramid slant edge ends against three faces at the apex\n");
+    }
+
+    // =====================================================================
+    // 15. A concave edge ending against a wall
+    // =====================================================================
+    //
+    // The floor of a slot -- what a boolean subtraction leaves. The cove adds
+    // exactly the analytic cross-section along its whole length, because its
+    // ends are trimmed flat against the slot's end walls.
+    //
+    // This is the case that catches a wrong-sided corner ball. The ball at a
+    // concave edge's end sits in the cavity, not the material; solved on the
+    // material side it still yields a watertight body with a plausible volume
+    // -- the surface just passes through the solid where nothing can see it
+    // except an end wall, which is why the slot refuses what an L-prism,
+    // unbounded past its reflex edge, quietly absorbed.
+    {
+        std::printf("-- slot cove --\n");
+        Mesh base;
+        check(makeSlot(base), "slot builds");
+        const double baseVol = volumeOf(base);
+        check(std::fabs(baseVol - 3400.0) < 1e-9, "slot volume is 3400");
+
+        for (int segments : {1, 4, 8}) {
+            Mesh m = base;
+            const std::string tag = "slot cove, " + std::to_string(segments) + " seg";
+            check(bevelEdges(m, {edgeAt(m, {-3,-10,5}, {-3,10,5})}, 1.0, segments), tag);
+            expectSolid(m, tag);
+
+            const double added = volumeOf(m) - baseVol;
+            const double sector = 0.5 * segments * std::sin(kPi / (2.0 * segments));
+            const double predicted = 20.0 * (1.0 - sector);
+            check(std::fabs(added - predicted) < 1e-6,
+                  tag + ": added " + std::to_string(added) + ", analytic " +
+                      std::to_string(predicted));
+        }
+        std::printf("   concave floor edge fills its cove exactly at 1/4/8 segments\n");
+    }
+
     std::printf("%s (%d failures)\n", failures ? "FAILED" : "ALL PASS", failures);
     return failures ? 1 : 0;
 }

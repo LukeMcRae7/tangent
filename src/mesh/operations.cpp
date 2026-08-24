@@ -922,9 +922,20 @@ static bool filletEdgesDirect(Mesh& mesh, const FilletSpec& spec);
 bool filletEdges(Mesh& mesh, const FilletSpec& spec) {
     Mesh direct = mesh;
     const bool directOk = filletEdgesDirect(direct, spec);
-    if (directOk && checkHealth(direct).solid()) {
-        mesh = std::move(direct);
-        return true;
+    if (directOk) {
+        const MeshHealth h = checkHealth(direct);
+        if (h.solid()) {
+            mesh = std::move(direct);
+            return true;
+        }
+        // A build that is not a solid is refused silently by default, which
+        // makes this the one failure with no trace. Say what was wrong with it.
+        if (std::getenv("TANGENT_BEVEL_DEBUG"))
+            std::fprintf(stderr,
+                         "[bevel] built but not a solid: watertight=%d degenerate=%d "
+                         "shells=%zu selfint=%d volume=%.6f\n",
+                         h.watertight, h.degenerateFaces,
+                         static_cast<size_t>(h.shells), h.selfIntersections, h.volume);
     }
 
     // Held by where their ends are, not by name. Splitting moves no vertex and
@@ -1099,14 +1110,34 @@ static bool filletEdgesDirect(Mesh& mesh, const FilletSpec& spec) {
     std::vector<Vec3> ballAt(static_cast<size_t>(mesh.vertexCount()));
     std::vector<bool> ballOk(static_cast<size_t>(mesh.vertexCount()), false);
 
-    // Radius the corner ball uses against the face on the far side of `h` --
-    // the larger of the filleted edges bounding that face at this vertex.
-    auto faceRadiusAt = [&](Index h) {
+    // A convex edge's ball rolls inside the material and touches each face
+    // from behind; a concave edge's ball rolls in the cavity and touches from
+    // in front. Everything about the corner solve is the same except which
+    // side of the plane the centre sits on, so the side is carried as the
+    // sign of the target offset: n.u = -r convex, +r concave.
+    auto concaveEdge = [&](Index h) {
+        const Index tw = mesh.halfedges[h].twin;
+        return dot(cross(faceNormals[mesh.halfedges[h].face],
+                         faceNormals[mesh.halfedges[tw].face]), dirOf(h)) < 0.0;
+    };
+
+    // Signed target the corner ball uses against the face on the far side of
+    // `h` -- from the deeper of the filleted edges bounding that face at this
+    // vertex. False when no filleted edge runs along the face, or when a
+    // convex and a concave one both do: that blend reverses curvature across
+    // the corner, which one ball cannot represent.
+    auto faceTargetAt = [&](Index h, Real& o) {
         const Index p = mesh.halfedges[h].prev;
-        Real r = 0.0;
-        if (beveled[h]) r = std::max(r, radiusOf[h]);
-        if (beveled[p]) r = std::max(r, radiusOf[p]);
-        return r;
+        bool have = false;
+        o = 0.0;
+        for (const Index e : {h, p}) {
+            if (!beveled[e]) continue;
+            const Real oe = concaveEdge(e) ? radiusOf[e] : -radiusOf[e];
+            if (have && (oe > 0.0) != (o > 0.0)) return false;
+            if (!have || std::fabs(oe) > std::fabs(o)) o = oe;
+            have = true;
+        }
+        return have;
     };
 
     for (Index v = 0; v < mesh.vertexCount(); ++v) {
@@ -1121,20 +1152,23 @@ static bool filletEdgesDirect(Mesh& mesh, const FilletSpec& spec) {
 
         const Index start = mesh.verts[v].halfedge;
         Index h = start;
+        bool conflicted = false;
         do {
-            const Real r = faceRadiusAt(h);
-            if (r > 0.0) {
+            Real o;
+            if (faceTargetAt(h, o)) {
                 const Vec3 n = faceNormals[mesh.halfedges[h].face];
                 int at = -1;
                 for (int i = 0; i < planes; ++i)
                     if (dot(nrm[i], n) > 1.0 - 1e-12) { at = i; break; }
-                if (at >= 0) rad[at] = std::max(rad[at], r);
-                else if (planes < 16) { nrm[planes] = n; rad[planes] = r; ++planes; }
+                if (at >= 0) {
+                    if ((o > 0.0) != (rad[at] > 0.0)) conflicted = true;
+                    else if (std::fabs(o) > std::fabs(rad[at])) rad[at] = o;
+                } else if (planes < 16) { nrm[planes] = n; rad[planes] = o; ++planes; }
             }
             h = mesh.halfedges[mesh.halfedges[h].twin].next;
         } while (h != start);
 
-        if (planes < 2) continue;
+        if (planes < 2 || conflicted) continue;
 
         Vec3 u{};
         bool solved = false;
@@ -1147,7 +1181,7 @@ static bool filletEdgesDirect(Mesh& mesh, const FilletSpec& spec) {
                 const Vec3& n = nrm[i];
                 m[0] += n.x * n.x; m[1] += n.x * n.y; m[2] += n.x * n.z;
                 m[3] += n.y * n.y; m[4] += n.y * n.z; m[5] += n.z * n.z;
-                rhs -= n * rad[i];
+                rhs += n * rad[i];   // rad carries the signed target
             }
             const Real c00 = m[3] * m[5] - m[4] * m[4];
             const Real c01 = m[2] * m[4] - m[1] * m[5];
@@ -1187,8 +1221,8 @@ static bool filletEdgesDirect(Mesh& mesh, const FilletSpec& spec) {
             const Real c = dot(nrm[p0], nrm[p1]);
             const Real det = 1.0 - c * c;
             if (det < 1e-12) continue;   // parallel: no corner to speak of
-            const Real l0 = (-rad[p0] + c * rad[p1]) / det;
-            const Real l1 = (-rad[p1] + c * rad[p0]) / det;
+            const Real l0 = (rad[p0] - c * rad[p1]) / det;
+            const Real l1 = (rad[p1] - c * rad[p0]) / det;
             u = nrm[p0] * l0 + nrm[p1] * l1;
         }
 
@@ -1211,6 +1245,7 @@ static bool filletEdgesDirect(Mesh& mesh, const FilletSpec& spec) {
     // v and exactly one face there is clear of it.
     std::vector<Index> endFaceAt(static_cast<size_t>(mesh.vertexCount()), kInvalid);
     std::vector<Vec3>  endDirAt(static_cast<size_t>(mesh.vertexCount()));
+    std::vector<Index> fanCandidates;
     for (Index v = 0; v < mesh.vertexCount(); ++v) {
         if (filletsAt[v] != 1) continue;
 
@@ -1256,20 +1291,25 @@ static bool filletEdgesDirect(Mesh& mesh, const FilletSpec& spec) {
         // for lie in nearly the same plane. Across a real crease -- the corner
         // of a quad mesh, where they can be thirty degrees apart -- the cap
         // genuinely spans two planes, and trimming it into one puts geometry
-        // through the surface. Splitting a cap across a fan of faces is an
-        // operation we do not have, so refuse rather than build that.
+        // through the surface. Those ends get the piecewise trim below instead.
+        bool creased = false;
         h = start;
         do {
             if (!beveled[h] && !beveled[mesh.halfedges[h].prev]) {
                 const Index f = mesh.halfedges[h].face;
                 if (dot(faceNormals[f], faceNormals[clear]) < 0.996)   // five degrees
-                    return bail("fillet ends on a corner of several faces");
+                    creased = true;
             }
             h = mesh.halfedges[mesh.halfedges[h].twin].next;
         } while (h != start);
 
-        endFaceAt[v] = clear;
-        endDirAt[v] = dir;
+        if (creased) {
+            fanCandidates.push_back(v);
+            endDirAt[v] = dir;
+        } else {
+            endFaceAt[v] = clear;
+            endDirAt[v] = dir;
+        }
     }
 
     // Slides a point along the edge until it lands on the end face's plane.
@@ -1281,12 +1321,14 @@ static bool filletEdgesDirect(Mesh& mesh, const FilletSpec& spec) {
         return p + d * (dot(posOf(v) - p, n) / dot(d, n));
     };
 
-    // Where a face's corner moves: the point the corner ball touches it.
+    // Where a face's corner moves: the point the corner ball touches it --
+    // the ball centre dropped onto the face's plane, from whichever side the
+    // signed target put it.
     auto crossOffsetAt = [&](Index h, Vec3& d) {
         const Index v = mesh.fromVertex(h);
-        const Real r = faceRadiusAt(h);
-        if (ballOk[v] && r > 0.0) {
-            d = (ballAt[v] + faceNormals[mesh.halfedges[h].face] * r) - posOf(v);
+        Real o;
+        if (ballOk[v] && faceTargetAt(h, o)) {
+            d = (ballAt[v] - faceNormals[mesh.halfedges[h].face] * o) - posOf(v);
             return true;
         }
         // No ball to solve against: fall back to the plain two-sided inset.
@@ -1297,14 +1339,199 @@ static bool filletEdgesDirect(Mesh& mesh, const FilletSpec& spec) {
                             beveled[h] ? radiusOf[h] : 0.0, d);
     };
 
+    // Where a fillet ends against several faces meeting at real creases -- an
+    // octahedron's apex, the slant faces of a pyramid -- the cap is not one
+    // planar curve but a piecewise one: the fillet's cylinder crosses each
+    // face in that face's own plane and crosses each crease at the single
+    // point where the crease line pierces the cylinder.
+    //
+    // The whole difficulty of this configuration is coincidence: the clipped
+    // faces, the cut-back creases, and the fillet strip's end all have to meet
+    // along that curve, and computing each one separately puts them microns
+    // apart, which is a crack. So the trim curve is computed once, here, and
+    // everything downstream -- the end ring, the face boundaries, the crease
+    // cut-backs -- references the same entries, sharing vertices by
+    // construction rather than by welding.
+    struct FanEntry {
+        Real u = 0.0;       // parameter along the section arc, 0 at face(bev)
+        Vec3 pos;           // on the fan surface
+        int crease = -1;    // index into creases when this is a crossing
+    };
+    struct FanEnd {
+        Index bev = kInvalid;          // the one beveled half-edge leaving v
+        Index firstAcross = kInvalid;  // outgoing edge bounding face(twin(bev))
+        Vec3 dir;                      // along bev
+        std::vector<Index> wedgeFace;  // clear faces, face(bev) side first
+        std::vector<Index> creases;    // outgoing crease edges, ascending u
+        std::vector<Real> creaseT;     // cut distance along each crease
+        std::vector<FanEntry> ring;    // ascending u; ends are the cross points
+        std::vector<uint32_t> ringIdx; // soup indices, filled lazily at emission
+        std::vector<int> wedgeLo, wedgeHi;   // ring-entry range per wedge
+        ElementId crossName0 = kNoId, crossName1 = kNoId;
+    };
+    std::vector<FanEnd> fans;
+    std::vector<int> fanAt(static_cast<size_t>(mesh.vertexCount()), -1);
+
+    for (Index v : fanCandidates) {
+        FanEnd fe;
+        const Index vstart = mesh.verts[v].halfedge;
+        Index h = vstart;
+        do {
+            if (beveled[h]) fe.bev = h;
+            h = mesh.halfedges[mesh.halfedges[h].twin].next;
+        } while (h != vstart);
+        if (fe.bev == kInvalid) return bail("fan end lost its edge");
+        fe.dir = normalize(dirOf(fe.bev));
+
+        // Outgoing edges after the beveled one, in circulation order. The
+        // circulation steps from an edge to the one across its far face, so it
+        // runs from the face(twin(bev)) side round to the face(bev) side.
+        std::vector<Index> ks;
+        for (Index k = mesh.halfedges[mesh.halfedges[fe.bev].twin].next;
+             k != fe.bev; k = mesh.halfedges[mesh.halfedges[k].twin].next)
+            ks.push_back(k);
+        if (ks.size() < 3) return bail("fan end is not a fan");
+        fe.firstAcross = ks.front();
+
+        // Clear faces reordered to run from the face(bev) side, the way the
+        // ring parameter does; the creases between them likewise.
+        for (size_t i = ks.size(); i-- > 1; )
+            fe.wedgeFace.push_back(mesh.halfedges[ks[i]].face);
+        for (size_t i = ks.size() - 1; i-- > 1; )
+            fe.creases.push_back(ks[i]);
+
+        // The section arc at this end, from the same corner offsets the ring
+        // will use.
+        Vec3 d0, d1;
+        if (!crossOffsetAt(fe.bev, d0) || !crossOffsetAt(fe.firstAcross, d1))
+            return bail("fan end corner offset is undefined");
+        const Vec3 p0 = posOf(v) + d0;
+        const Vec3 p1 = posOf(v) + d1;
+        const Index f0 = mesh.halfedges[fe.bev].face;
+        const Index f1 = mesh.halfedges[mesh.halfedges[fe.bev].twin].face;
+        const Arc arc = solveArc(p0, p1, -faceNormals[f0], -faceNormals[f1]);
+        if (!arc.circular) return bail("fan end has no circular section");
+
+        const Vec3 axis = fe.dir;
+        const Vec3 u0 = p0 - arc.centre;
+        const Vec3 u1 = p1 - arc.centre;
+        const Real r0 = length(u0), r1 = length(u1);
+        const Real sweep = std::atan2(dot(cross(u0, u1), axis), dot(u0, u1));
+        if (std::fabs(sweep) < 1e-9) return bail("fan end section is flat");
+        const Real radius = radiusOf[fe.bev];
+
+        for (Index f : fe.wedgeFace)
+            if (std::fabs(dot(fe.dir, faceNormals[f])) < 1e-9)
+                return bail("fan face runs along the fillet");
+
+        // Where the trim curve crosses each crease: the crease line pierces
+        // the fillet's cylinder twice, and the crossing that belongs to the
+        // trim curve is the one lying within the section's sweep -- its arc
+        // parameter lands strictly between the two tangent ends. The vertex
+        // itself is always outside the cylinder (it sits on the edge, and the
+        // axis is set back further than the radius), so the sign of t alone
+        // cannot tell the two apart.
+        std::vector<Real> creaseU;
+        for (Index k : fe.creases) {
+            const Vec3 e = normalize(dirOf(k));
+            const Vec3 ap = e - axis * dot(e, axis);
+            const Vec3 w = posOf(v) - arc.centre;
+            const Vec3 bp = w - axis * dot(w, axis);
+            const Real aa = lengthSq(ap);
+            if (aa < 1e-18) return bail("fan crease runs along the fillet");
+            const Real bb = dot(ap, bp), cc = lengthSq(bp) - radius * radius;
+            const Real disc = bb * bb - aa * cc;
+            if (disc <= 0.0) return bail("fan crease misses the fillet");
+
+            Real t = 0.0, u = -1.0;
+            for (const Real root : {(-bb - std::sqrt(disc)) / aa,
+                                    (-bb + std::sqrt(disc)) / aa}) {
+                if (root <= 1e-12) continue;
+                const Vec3 wc = posOf(v) + e * root - arc.centre;
+                const Real ur = std::atan2(dot(cross(u0, wc), axis), dot(u0, wc)) / sweep;
+                if (ur < 1e-6 || ur > 1.0 - 1e-6) continue;
+                if (u >= 0.0) { u = -1.0; break; }   // both qualify: ambiguous
+                t = root; u = ur;
+            }
+            if (u < 0.0 || (!creaseU.empty() && u <= creaseU.back()))
+                return bail("fan creases out of order");
+            fe.creaseT.push_back(t);
+            creaseU.push_back(u);
+        }
+
+        // The full end ring: the arc's own samples plus the crease crossings,
+        // each sample slid along the edge onto the plane of the wedge it lands
+        // in. A sample landing on a crossing yields to it -- the crossing is
+        // the exact point, the sample only an approximation of it.
+        auto arcPointAt = [&](Real f) {
+            const Quat q = Quat::fromAxisAngle(axis, sweep * f);
+            Vec3 dd = rotate(q, u0);
+            const Real len = length(dd);
+            if (len < 1e-12) return lerp(p0, p1, f);
+            return arc.centre + dd * (lerpf(r0, r1, f) / len);
+        };
+        auto slideTo = [&](Vec3 p, Index face) {
+            const Vec3 n = faceNormals[face];
+            return p + fe.dir * (dot(posOf(v) - p, n) / dot(fe.dir, n));
+        };
+        auto creaseEntry = [&](size_t ci) {
+            return FanEntry{creaseU[ci],
+                            posOf(v) + normalize(dirOf(fe.creases[ci])) * fe.creaseT[ci],
+                            static_cast<int>(ci)};
+        };
+
+        fe.ring.push_back({0.0, slideTo(p0, fe.wedgeFace.front()), -1});
+        size_t ci = 0;
+        for (int s = 1; s < segments; ++s) {
+            const Real us = static_cast<Real>(s) / segments;
+            while (ci < creaseU.size() && creaseU[ci] < us - 1e-9)
+                fe.ring.push_back(creaseEntry(ci++));
+            if (ci < creaseU.size() && creaseU[ci] <= us + 1e-9) {
+                fe.ring.push_back(creaseEntry(ci++));
+                continue;
+            }
+            fe.ring.push_back({us, slideTo(arcPointAt(us), fe.wedgeFace[ci]), -1});
+        }
+        while (ci < creaseU.size())
+            fe.ring.push_back(creaseEntry(ci++));
+        fe.ring.push_back({1.0, slideTo(p1, fe.wedgeFace.back()), -1});
+        fe.ringIdx.assign(fe.ring.size(), ~0u);
+
+        // Which run of ring entries belongs to which wedge, bounded by the
+        // crossings either side.
+        fe.wedgeLo.assign(fe.wedgeFace.size(), 0);
+        fe.wedgeHi.assign(fe.wedgeFace.size(), static_cast<int>(fe.ring.size()) - 1);
+        for (size_t i = 0; i < fe.ring.size(); ++i) {
+            const int c = fe.ring[i].crease;
+            if (c < 0) continue;
+            fe.wedgeHi[static_cast<size_t>(c)] = static_cast<int>(i);
+            fe.wedgeLo[static_cast<size_t>(c) + 1] = static_cast<int>(i);
+        }
+
+        // The names the cross points would have carried anyway, so a fan end
+        // renames nothing.
+        fe.crossName0 = nameId(salt, IdRole::Cross, mesh.verts[v].id, mesh.faces[f0].id);
+        fe.crossName1 = nameId(salt, IdRole::Cross, mesh.verts[v].id, mesh.faces[f1].id);
+
+        fanAt[v] = static_cast<int>(fans.size());
+        fans.push_back(std::move(fe));
+    }
+
     // The same point, moved onto the plane of the face across the end. This is
     // the one that gets built; the untrimmed point above is what the section's
     // arc is solved from, so the fillet keeps its true radius and only its
-    // termination follows the end face.
+    // termination follows the end face. At a fan end the trim curve owns the
+    // point, so both faces adjacent to the fillet take its word for it.
     auto crossPointEmit = [&](Index h, Vec3& out) {
         Vec3 d;
         if (!crossOffsetAt(h, d)) return false;
         const Index v = mesh.fromVertex(h);
+        const int fi = fanAt[v];
+        if (fi >= 0) {
+            const FanEnd& fe = fans[static_cast<size_t>(fi)];
+            if (h == fe.bev)         { out = fe.ring.front().pos; return true; }
+            if (h == fe.firstAcross) { out = fe.ring.back().pos;  return true; }
+        }
         out = trimToEnd(v, posOf(v) + d);
         return true;
     };
@@ -1345,6 +1572,17 @@ static bool filletEdgesDirect(Mesh& mesh, const FilletSpec& spec) {
         cutBack[h] = std::max(t, 0.0);
     }
 
+    // A crease at a fan end is cut back to the trim curve's own crossing
+    // point, so the faces either side of it and the fillet's end all land on
+    // one vertex.
+    std::map<Index, std::pair<int, int>> fanCreaseAt;   // outgoing edge -> (fan, crease)
+    for (size_t fi = 0; fi < fans.size(); ++fi)
+        for (size_t j = 0; j < fans[fi].creases.size(); ++j) {
+            const Index k = fans[fi].creases[j];
+            cutBack[k] = std::max(cutBack[k], fans[fi].creaseT[j]);
+            fanCreaseAt[k] = {static_cast<int>(fi), static_cast<int>(j)};
+        }
+
     Soup soup;
 
     // One vertex per original vertex, used wherever nothing pulled it back.
@@ -1358,11 +1596,43 @@ static bool filletEdgesDirect(Mesh& mesh, const FilletSpec& spec) {
         return baseIdx[v];
     };
 
+    // One soup vertex per trim-curve entry at a fan end, created on first use
+    // whether that comes from a clipped face, a cut-back crease, or the ring.
+    auto fanEntryVertex = [&](int fi, int ei) {
+        FanEnd& fe = fans[static_cast<size_t>(fi)];
+        uint32_t& idx = fe.ringIdx[static_cast<size_t>(ei)];
+        if (idx != ~0u) return idx;
+        const FanEntry& en = fe.ring[static_cast<size_t>(ei)];
+        const Index v = mesh.fromVertex(fe.bev);
+        ElementId name;
+        if (ei == 0) name = fe.crossName0;
+        else if (ei + 1 == static_cast<int>(fe.ring.size())) name = fe.crossName1;
+        else if (en.crease >= 0)
+            name = nameId(salt, IdRole::Cross,
+                          mesh.edgeId(fe.creases[static_cast<size_t>(en.crease)]),
+                          mesh.verts[v].id);
+        else
+            name = nameId(salt, IdRole::Ring, mesh.edgeId(fe.bev),
+                          mesh.verts[v].id, static_cast<uint64_t>(ei));
+        idx = soup.vertex(en.pos, name);
+        return idx;
+    };
+
     // One shared vertex per (unbeveled edge, end), referenced from both faces.
     std::vector<uint32_t> sharedPt(static_cast<size_t>(heCount), 0u);
     std::vector<bool> sharedSet(static_cast<size_t>(heCount), false);
     auto edgePoint = [&](Index h) {
         if (sharedSet[h]) return sharedPt[h];
+        const auto fc = fanCreaseAt.find(h);
+        if (fc != fanCreaseAt.end() &&
+            cutBack[h] <= fans[static_cast<size_t>(fc->second.first)]
+                              .creaseT[static_cast<size_t>(fc->second.second)] + 1e-12) {
+            const FanEnd& fe = fans[static_cast<size_t>(fc->second.first)];
+            sharedPt[h] = fanEntryVertex(fc->second.first,
+                                         fe.wedgeHi[static_cast<size_t>(fc->second.second)]);
+            sharedSet[h] = true;
+            return sharedPt[h];
+        }
         const Index v = mesh.fromVertex(h);
         sharedPt[h] = cutBack[h] <= 1e-12
                     ? baseVertex(v)
@@ -1410,25 +1680,38 @@ static bool filletEdgesDirect(Mesh& mesh, const FilletSpec& spec) {
                 Vec3 d;
                 if (!crossOffsetAt(h, d)) return bail("corner offset is undefined");
                 const Vec3 ptTrue = posOf(v) + d;
-                const Vec3 pt = trimToEnd(v, ptTrue);
-
-                // Where the offset runs purely along an unfilleted edge, the
-                // cross-section lands exactly on that edge's cut-back point.
-                // They have to be one vertex, not two in the same place: a
-                // duplicate here leaves a zero-area sliver in the face and the
-                // edge fails to pair on the next operation.
+                const int fi = fanAt[v];
+                Vec3 pt;
                 uint32_t idx = kNoVertex;
-                if (!bevPrev) {
-                    const uint32_t e = edgePoint(mesh.halfedges[p].twin);
-                    if (lengthSq(soup.positions[e] - pt) < kWeldEps) idx = e;
+                if (fi >= 0) {
+                    // At a fan end the cross point is the trim curve's own
+                    // endpoint; taking its vertex is what makes the strip and
+                    // this face meet exactly.
+                    FanEnd& fe = fans[static_cast<size_t>(fi)];
+                    const int ei = (h == fe.bev) ? 0
+                                 : static_cast<int>(fe.ring.size()) - 1;
+                    idx = fanEntryVertex(fi, ei);
+                    pt = fe.ring[static_cast<size_t>(ei)].pos;
+                } else {
+                    pt = trimToEnd(v, ptTrue);
+
+                    // Where the offset runs purely along an unfilleted edge,
+                    // the cross-section lands exactly on that edge's cut-back
+                    // point. They have to be one vertex, not two in the same
+                    // place: a duplicate here leaves a zero-area sliver in the
+                    // face and the edge fails to pair on the next operation.
+                    if (!bevPrev) {
+                        const uint32_t e = edgePoint(mesh.halfedges[p].twin);
+                        if (lengthSq(soup.positions[e] - pt) < kWeldEps) idx = e;
+                    }
+                    if (idx == kNoVertex && !bevNext) {
+                        const uint32_t e = edgePoint(h);
+                        if (lengthSq(soup.positions[e] - pt) < kWeldEps) idx = e;
+                    }
+                    if (idx == kNoVertex)
+                        idx = soup.vertex(pt, nameId(salt, IdRole::Cross, mesh.verts[v].id,
+                                                     mesh.faces[mesh.halfedges[h].face].id));
                 }
-                if (idx == kNoVertex && !bevNext) {
-                    const uint32_t e = edgePoint(h);
-                    if (lengthSq(soup.positions[e] - pt) < kWeldEps) idx = e;
-                }
-                if (idx == kNoVertex)
-                    idx = soup.vertex(pt, nameId(salt, IdRole::Cross, mesh.verts[v].id,
-                                                 mesh.faces[mesh.halfedges[h].face].id));
 
                 if (loop.empty() || loop.back() != idx) loop.push_back(idx);
                 crossIdx[h] = idx;
@@ -1438,6 +1721,25 @@ static bool filletEdgesDirect(Mesh& mesh, const FilletSpec& spec) {
                 cornerPos[h] = pt;
                 moved.push_back(pt);
             } else {
+                // A face of a fan end is clipped against the fillet: its
+                // corner at v becomes the trim curve's run through this
+                // face's wedge, walked from the crease it entered on round to
+                // the crease it leaves by. The crossings themselves arrive as
+                // the creases' cut-back points, pushed either side of this.
+                const int fi = fanAt[v];
+                if (fi >= 0) {
+                    FanEnd& fe = fans[static_cast<size_t>(fi)];
+                    size_t wi = fe.wedgeFace.size();
+                    for (size_t i = 0; i < fe.wedgeFace.size(); ++i)
+                        if (fe.wedgeFace[i] == f) { wi = i; break; }
+                    if (wi < fe.wedgeFace.size()) {
+                        for (int ei = fe.wedgeHi[wi]; ei >= fe.wedgeLo[wi]; --ei) {
+                            if (fe.ring[static_cast<size_t>(ei)].crease >= 0) continue;
+                            const uint32_t idx = fanEntryVertex(fi, ei);
+                            if (loop.empty() || loop.back() != idx) loop.push_back(idx);
+                        }
+                    }
+                }
                 moved.push_back(soup.positions[edgePoint(mesh.halfedges[p].twin)]);
             }
 
@@ -1486,6 +1788,7 @@ static bool filletEdgesDirect(Mesh& mesh, const FilletSpec& spec) {
     // ringAt[h] runs from face(h)'s corner to face(twin(h))'s corner, at
     // fromVertex(h).
     std::vector<std::vector<uint32_t>> ringAt(static_cast<size_t>(heCount));
+    std::vector<std::vector<Real>> ringParamAt(static_cast<size_t>(heCount));
     std::vector<Arc> arcAt(static_cast<size_t>(heCount));
 
     for (Index h = 0; h < heCount; ++h) {
@@ -1508,38 +1811,75 @@ static bool filletEdgesDirect(Mesh& mesh, const FilletSpec& spec) {
         const Arc arc = solveArc(p0, p1, -faceNormals[f0], -faceNormals[f1]);
         arcAt[h] = arc;
 
+        std::vector<uint32_t>& ring = ringAt[h];
+        std::vector<Real>& params = ringParamAt[h];
+
+        // A fan end's ring is the trim curve, crossings and all; the strip
+        // walk below pairs it against the far ring by parameter.
+        const int fi = fanAt[mesh.fromVertex(h)];
+        if (fi >= 0) {
+            FanEnd& fe = fans[static_cast<size_t>(fi)];
+            for (size_t i = 0; i < fe.ring.size(); ++i) {
+                ring.push_back(fanEntryVertex(fi, static_cast<int>(i)));
+                params.push_back(fe.ring[i].u);
+            }
+            continue;
+        }
+
         std::vector<Vec3> pts;
         sampleArc(arc, p0, p1, axis, segments, pts);
 
-        std::vector<uint32_t>& ring = ringAt[h];
         ring.push_back(crossIdx[h]);
-        for (size_t i = 1; i + 1 < pts.size(); ++i)
+        params.push_back(0.0);
+        for (size_t i = 1; i + 1 < pts.size(); ++i) {
             ring.push_back(soup.vertex(
                 trimToEnd(mesh.fromVertex(h), pts[i]),
                 nameId(salt, IdRole::Ring, mesh.edgeId(h),
                        mesh.verts[mesh.fromVertex(h)].id, i)));
+            params.push_back(static_cast<Real>(i) / segments);
+        }
         ring.push_back(crossIdx[far]);
+        params.push_back(1.0);
     }
 
-    // One strip per beveled edge, emitted once per twin pair.
+    // One strip per beveled edge, emitted once per twin pair. The two end
+    // rings usually sample the same parameters and the strip is quads; a fan
+    // end inserts crease crossings at parameters of its own, and the walk
+    // emits a triangle wherever only one ring has a point.
     for (Index h = 0; h < heCount; ++h) {
         if (!beveled[h]) continue;
         const Index tw = mesh.halfedges[h].twin;
         if (tw < h) continue;
 
         // Ring at the far end, reversed so both rings run the same way across
-        // the strip.
+        // the strip; its parameters complemented to match.
         const std::vector<uint32_t>& a = ringAt[h];         // at fromVertex(h)
+        const std::vector<Real>& pa = ringParamAt[h];
         std::vector<uint32_t> b = ringAt[tw];               // at toVertex(h)
+        std::vector<Real> pb;
+        for (size_t i = ringParamAt[tw].size(); i-- > 0; )
+            pb.push_back(1.0 - ringParamAt[tw][i]);
         std::reverse(b.begin(), b.end());
-        if (a.size() != b.size() || a.size() < 2) return bail("strip rings disagree");
+        if (a.size() < 2 || b.size() < 2) return bail("strip rings disagree");
 
         // Wound so the strip faces out of the solid: running a-then-b in
         // index order gives the inward face, which build() then refuses as two
         // faces sharing a directed edge.
-        for (size_t s = 0; s + 1 < a.size(); ++s)
-            soup.face({a[s + 1], b[s + 1], b[s], a[s]},
-                      nameId(salt, IdRole::Strip, mesh.edgeId(h), 0, s));
+        size_t i = 0, j = 0;
+        uint64_t emitted = 0;
+        while (i + 1 < a.size() || j + 1 < b.size()) {
+            bool stepA, stepB;
+            if (i + 1 >= a.size())      { stepA = false; stepB = true; }
+            else if (j + 1 >= b.size()) { stepA = true;  stepB = false; }
+            else {
+                stepA = pa[i + 1] <= pb[j + 1] + 1e-9;
+                stepB = pb[j + 1] <= pa[i + 1] + 1e-9;
+            }
+            const ElementId nm = nameId(salt, IdRole::Strip, mesh.edgeId(h), 0, emitted++);
+            if (stepA && stepB) { soup.face({a[i + 1], b[j + 1], b[j], a[i]}, nm); ++i; ++j; }
+            else if (stepA)     { soup.face({a[i + 1], b[j], a[i]}, nm); ++i; }
+            else                { soup.face({a[i], b[j + 1], b[j]}, nm); ++j; }
+        }
     }
 
     // Vertex patches, wherever at least one incident edge was beveled.
@@ -1557,6 +1897,10 @@ static bool filletEdgesDirect(Mesh& mesh, const FilletSpec& spec) {
             h = mesh.halfedges[mesh.halfedges[h].twin].next;
         } while (h != start);
         if (!any) continue;
+
+        // A fan end has no cap: the trim curve is spliced straight into the
+        // clipped faces, and the strip ends on it. Nothing is left open.
+        if (fanAt[v] >= 0) continue;
 
         // Running counters so every point and face a patch emits gets its own
         // name. The code path is deterministic, so re-evaluating names them the
