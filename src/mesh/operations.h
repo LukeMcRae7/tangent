@@ -12,6 +12,16 @@
 
 namespace tg {
 
+enum class ExtrudeOp : uint32_t {
+    Auto = 0,      // Union if self-intersecting/bridging; Difference if cutting inward; Direct if into empty space
+    Join = 1,      // Always Union with body
+    Cut = 2,       // Always Difference (cut) from body
+    Intersect = 3, // Always Intersection with body
+    NewBody = 4    // Separate body from sweep
+};
+
+const char* extrudeOpName(ExtrudeOp op);
+
 // Pushes a set of faces along the region's area-weighted average normal,
 // walling in the sides. The moved faces are reported in `newFaces` (in the
 // same order as `faces`) so a caller can keep them selected.
@@ -21,7 +31,8 @@ namespace tg {
 // `salt` identifies the operation when naming what it creates; a feature
 // passes its own identity. See element_id.h.
 bool extrudeFaces(Mesh& mesh, const std::vector<Index>& faces, Real distance,
-                  std::vector<Index>* newFaces = nullptr, ElementId salt = 0);
+                  std::vector<Index>* newFaces = nullptr, ElementId salt = 0,
+                  ExtrudeOp op = ExtrudeOp::Auto);
 
 // Shrinks each face toward its own interior by `amount`, measured
 // perpendicular to every edge, and fills the gap with a rim of quads.

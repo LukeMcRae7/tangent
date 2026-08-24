@@ -395,6 +395,19 @@ struct AABB {
     Vec3 center() const { return valid() ? (min + max) * 0.5f : Vec3{}; }
     Vec3 size() const { return valid() ? max - min : Vec3{}; }
     Real radius() const { return valid() ? length(size()) * 0.5f : 0.0f; }
+
+    bool overlaps(const AABB& b, Real eps = 0.0) const {
+        return valid() && b.valid() &&
+               min.x <= b.max.x + eps && max.x >= b.min.x - eps &&
+               min.y <= b.max.y + eps && max.y >= b.min.y - eps &&
+               min.z <= b.max.z + eps && max.z >= b.min.z - eps;
+    }
+    bool contains(Vec3 p, Real eps = 0.0) const {
+        return valid() &&
+               p.x >= min.x - eps && p.x <= max.x + eps &&
+               p.y >= min.y - eps && p.y <= max.y + eps &&
+               p.z >= min.z - eps && p.z <= max.z + eps;
+    }
 };
 
 // Slab test. Returns nearest positive hit distance, or false if no hit.

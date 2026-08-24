@@ -144,6 +144,13 @@ public:
     Index fromVertex(Index he) const { return halfedges[halfedges[he].prev].vertex; }
 
     AABB bounds() const;
+    AABB faceBounds(Index f) const {
+        AABB box;
+        std::vector<Index> fv;
+        faceVertices(f, fv);
+        for (Index v : fv) box.expand(verts[v].position);
+        return box;
+    }
 
     // ---- Output ----------------------------------------------------------
     // Triangulates for display. Corner normals are averaged across adjacent

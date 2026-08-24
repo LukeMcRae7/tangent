@@ -461,10 +461,21 @@ void drawHistory(UiContext& ctx) {
             case FeatureKind::Primitive:
                 ImGui::TextColored(kDim, "Edit dimensions in the Inspector");
                 break;
-            case FeatureKind::Extrude:
+            case FeatureKind::Extrude: {
                 changed |= labeledDrag("Distance", f.distance, 0.1f, -10000.0f, 10000.0f);
+                const char* const opNames[] = {"Auto", "Join", "Cut", "Intersect"};
+                int currentOp = static_cast<int>(f.extrudeOp);
+                if (currentOp > 3) currentOp = 0;
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextUnformatted("Operation");
+                ImGui::SameLine();
+                if (ImGui::Combo("##ExtrudeOp", &currentOp, opNames, 4)) {
+                    f.extrudeOp = static_cast<ExtrudeOp>(currentOp);
+                    changed = true;
+                }
                 ImGui::TextColored(kDim, "%s", f.faces.describe("face").c_str());
                 break;
+            }
             case FeatureKind::Inset:
                 changed |= labeledDrag("Amount", f.amount, 0.05f, 0.01f, 10000.0f);
                 break;

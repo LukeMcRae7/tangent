@@ -37,8 +37,13 @@ std::string Feature::summary() const {
                           booleanOpName(booleanOp), bakedMesh.faceCount());
             break;
         case FeatureKind::Extrude:
-            std::snprintf(buf, sizeof(buf), "Extrude  %.2f mm  (%s)",
-                          static_cast<double>(distance), faces.describe("face").c_str());
+            if (extrudeOp == ExtrudeOp::Auto) {
+                std::snprintf(buf, sizeof(buf), "Extrude  %.2f mm  (%s)",
+                              static_cast<double>(distance), faces.describe("face").c_str());
+            } else {
+                std::snprintf(buf, sizeof(buf), "Extrude %s  %.2f mm  (%s)",
+                              extrudeOpName(extrudeOp), static_cast<double>(distance), faces.describe("face").c_str());
+            }
             break;
         case FeatureKind::Inset:
             std::snprintf(buf, sizeof(buf), "Inset  %.2f mm  (%s)",
@@ -245,7 +250,7 @@ bool evaluateFrom(std::vector<Feature>& features, size_t from,
             else if (!f.faces.resolveFaces(mesh, scratchFaces)) fail("faces no longer exist");
             // The operation is transactional, so a rejection leaves the mesh as
             // it was and the chain carries on from there.
-            else if (!extrudeFaces(mesh, scratchFaces, f.distance, nullptr, f.uid))
+            else if (!extrudeFaces(mesh, scratchFaces, f.distance, nullptr, f.uid, f.extrudeOp))
                 fail("extrude failed");
             break;
 

@@ -18,6 +18,7 @@
 
 #include "mesh/boolean.h"
 #include "mesh/primitives.h"
+#include "mesh/operations.h"
 
 #include <string>
 #include <vector>
@@ -106,6 +107,7 @@ struct Feature {
     // Extrude / Inset: which faces, by name as of this point in the chain.
     ElementRefs faces;
     Real distance = 5.0;    // Extrude, signed
+    ExtrudeOp extrudeOp = ExtrudeOp::Auto;
     Real amount   = 2.0;    // Inset
 
     // Bevel / fillet. `edges` empty means every edge of the body; otherwise

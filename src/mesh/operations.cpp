@@ -423,9 +423,106 @@ static bool sweptSolid(const Mesh& mesh, const std::unordered_set<Index>& region
 }
 
 
+const char* extrudeOpName(ExtrudeOp op) {
+    switch (op) {
+        case ExtrudeOp::Auto: return "Auto";
+        case ExtrudeOp::Join: return "Join";
+        case ExtrudeOp::Cut: return "Cut";
+        case ExtrudeOp::Intersect: return "Intersect";
+        case ExtrudeOp::NewBody: return "New Body";
+    }
+    return "Extrude";
+}
+
+static bool rayTriangleInterior(Vec3 orig, Vec3 dir, Vec3 a, Vec3 b, Vec3 c, Real maxDist, Real& tHit) {
+    const Vec3 e1 = b - a, e2 = c - a;
+    const Vec3 p = cross(dir, e2);
+    const Real det = dot(e1, p);
+    if (std::fabs(det) < 1e-12f) return false;
+    const Real invDet = 1.0f / det;
+    const Vec3 tv = orig - a;
+    const Real u = dot(tv, p) * invDet;
+    if (u < 1e-5f || u > 1.0f - 1e-5f) return false;
+    const Vec3 qv = cross(tv, e1);
+    const Real v = dot(dir, qv) * invDet;
+    if (v < 1e-5f || u + v > 1.0f - 1e-5f) return false;
+    const Real t = dot(e2, qv) * invDet;
+    if (t > 1e-4f && t < maxDist - 1e-4f) {
+        tHit = t;
+        return true;
+    }
+    return false;
+}
+
+static bool sweepIntersectsBody(const Mesh& mesh, const std::unordered_set<Index>& region,
+                                const std::vector<Index>& regionFaces, Real distance, Vec3 dir) {
+    const Vec3 offset = dir * distance;
+    const Real dist = length(offset);
+    if (dist < 1e-7) return false;
+    const Vec3 sweepDir = offset / dist;
+
+    std::unordered_set<Index> regionVerts;
+    for (Index f : region) {
+        std::vector<Index> fv;
+        mesh.faceVertices(f, fv);
+        for (Index v : fv) regionVerts.insert(v);
+    }
+
+    RenderMesh rm;
+    mesh.buildRenderMesh(rm);
+
+    for (Index v : regionVerts) {
+        const Vec3 orig = mesh.verts[v].position;
+        for (size_t i = 0; i < rm.triangles.size(); i += 3) {
+            const Vec3 a = rm.positions[rm.triangles[i]];
+            const Vec3 b = rm.positions[rm.triangles[i + 1]];
+            const Vec3 c = rm.positions[rm.triangles[i + 2]];
+            Real tHit = 0.0;
+            if (rayTriangleInterior(orig, sweepDir, a, b, c, dist, tHit)) {
+                return true;
+            }
+        }
+    }
+
+    for (Index rf : regionFaces) {
+        const Vec3 orig = mesh.faceCentroid(rf);
+        for (size_t i = 0; i < rm.triangles.size(); i += 3) {
+            const Vec3 a = rm.positions[rm.triangles[i]];
+            const Vec3 b = rm.positions[rm.triangles[i + 1]];
+            const Vec3 c = rm.positions[rm.triangles[i + 2]];
+            Real tHit = 0.0;
+            if (rayTriangleInterior(orig, sweepDir, a, b, c, dist, tHit)) {
+                return true;
+            }
+        }
+    }
+
+    for (Index f = 0; f < mesh.faceCount(); ++f) {
+        if (region.count(f)) continue;
+        const Vec3 nMesh = mesh.faceNormal(f);
+        const Real dMesh = dot(nMesh, mesh.faceCentroid(f));
+
+        for (Index rf : regionFaces) {
+            const Vec3 topCentroid = mesh.faceCentroid(rf) + offset;
+            const Real dTop = dot(nMesh, topCentroid);
+            if (dot(nMesh, sweepDir) < -0.99f && std::fabs(dMesh - dTop) < 1e-3f) {
+                AABB topBox;
+                std::vector<Index> rfv;
+                mesh.faceVertices(rf, rfv);
+                for (Index v : rfv) topBox.expand(mesh.verts[v].position + offset);
+                if (mesh.faceBounds(f).overlaps(topBox, 1e-3f)) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    return false;
+}
+
 // ---------------------------------------------------------------------------
 bool extrudeFaces(Mesh& mesh, const std::vector<Index>& faces, Real distance,
-                  std::vector<Index>* newFaces, ElementId salt) {
+                  std::vector<Index>* newFaces, ElementId salt, ExtrudeOp op) {
     if (faces.empty() || mesh.empty()) return false;
 
     std::unordered_set<Index> region(faces.begin(), faces.end());
@@ -439,64 +536,33 @@ bool extrudeFaces(Mesh& mesh, const std::vector<Index>& faces, Real distance,
     dir = normalize(dir);
     const Vec3 offset = dir * distance;
 
-    // An extrude is the solid the face sweeps out, combined with the body.
-    //
-    // Lifting the face and stitching walls onto it is only the same thing while
-    // the sweep meets nothing. Push a face into the body and the walls fold back
-    // through it, leaving a shell inside the solid rather than the face simply
-    // moving back. Push one into another part of the same body and the two
-    // surfaces pass through each other instead of joining. Sweeping and then
-    // combining has neither problem: material added is a union, material removed
-    // is a difference, and anything the sweep runs into is resolved rather than
-    // ignored.
-    //
-    // A zero-length extrude has no solid to sweep and keeps the old path: it is
-    // the deliberate one, duplicating a face without moving it.
     const Real scale = std::max(length(mesh.bounds().size()), Real(1.0));
 
-    // A zero-length extrude leaves the mesh alone and simply reports the face
-    // back, so pressing extrude and then dragging works from the face already
-    // there.
-    //
-    // It used to build the extrusion anyway, which at zero length meant four
-    // walls of no area wrapped around a face in its original position: geometry
-    // that is not on the model, cannot be selected, and a slicer will reject.
-    // Doing it twice stacked another four. Reporting the face and stopping gives
-    // the same behaviour to drag against with none of that.
     if (std::fabs(distance) <= scale * 1e-9) {
         if (newFaces) *newFaces = faces;
         return true;
     }
 
-    // Combining only means anything for a closed solid. An open surface -- a
-    // plane, a sheet -- has no inside for a union or a difference to be about,
-    // so it is lifted and walled directly, which is all an extrude of a sheet
-    // is anyway.
     bool closed = true;
     for (Index h = 0; h < mesh.halfedgeCount() && closed; ++h)
         if (mesh.halfedges[h].face == kInvalid) closed = false;
 
-    Mesh sweep;
-    if (closed && std::fabs(distance) > scale * 1e-9 &&
-        sweptSolid(mesh, region, offset, salt, sweep)) {
-        Mesh combined;
-        const bool combinedOk =
-            meshBoolean(mesh, sweep,
-                        distance > 0 ? BooleanOp::Union : BooleanOp::Difference,
-                        combined, nameId(salt, IdRole::Wall, 0), true);
+    const bool isCut = (op == ExtrudeOp::Cut) || (op == ExtrudeOp::Auto && distance < -scale * 1e-9);
+    const bool isIntersect = (op == ExtrudeOp::Intersect);
+    const bool isExplicitJoin = (op == ExtrudeOp::Join);
 
-        // Cutting away at least as much as there was leaves nothing to model,
-        // and a face driven clean through the far side is that. Refuse it --
-        // the old path answered with a shell turned inside out, which is not a
-        // solid and is exactly what should never be produced.
-        if (!combinedOk || combined.empty() || checkVolume(combined) <= 0.0)
-            return false;
+    if (closed && (isCut || isIntersect || isExplicitJoin)) {
+        Mesh sweep;
+        if (sweptSolid(mesh, region, offset, salt, sweep)) {
+            Mesh combined;
+            BooleanOp bop = isCut ? BooleanOp::Difference : (isIntersect ? BooleanOp::Intersection : BooleanOp::Union);
+            const bool combinedOk =
+                meshBoolean(mesh, sweep, bop, combined, nameId(salt, IdRole::Wall, 0), true);
 
-        {
+            if (!combinedOk || combined.empty() || checkVolume(combined) <= 0.0)
+                return false;
 
             if (newFaces) {
-                // The face the user goes on to drag: whatever now lies in the
-                // plane the sweep ended at, facing the way it swept.
                 newFaces->clear();
                 const Vec3 target = mesh.faceCentroid(*region.begin()) + offset;
                 for (Index f = 0; f < combined.faceCount(); ++f) {
@@ -511,6 +577,37 @@ bool extrudeFaces(Mesh& mesh, const std::vector<Index>& faces, Real distance,
         }
     }
 
+    // For ExtrudeOp::Auto with distance > 0:
+    // If extruding into other parts of the body (self-intersection/bridge), union with itself by default!
+    if (closed && op == ExtrudeOp::Auto && distance > scale * 1e-9) {
+        if (sweepIntersectsBody(mesh, region, faces, distance, dir)) {
+            Mesh sweep;
+            if (sweptSolid(mesh, region, offset, salt, sweep)) {
+                Mesh combined;
+                const bool combinedOk =
+                    meshBoolean(mesh, sweep, BooleanOp::Union, combined, nameId(salt, IdRole::Wall, 0), true);
+
+                if (combinedOk && !combined.empty() && checkVolume(combined) > 0.0) {
+                    if (newFaces) {
+                        newFaces->clear();
+                        const Vec3 target = mesh.faceCentroid(*region.begin()) + offset;
+                        for (Index f = 0; f < combined.faceCount(); ++f) {
+                            if (dot(combined.faceNormal(f), dir) < 0.999) continue;
+                            if (std::fabs(dot(combined.faceCentroid(f) - target, dir)) > scale * 1e-7)
+                                continue;
+                            newFaces->push_back(f);
+                        }
+                    }
+                    mesh = std::move(combined);
+                    return true;
+                }
+            }
+        }
+    }
+
+    // Default outward extrusion into empty space: direct topological extrusion
+    // preserves the boundary edges of the previous end point so every geometric edge
+    // remains a selectable, editable edge on the model.
     Soup soup;
     soup.positions.reserve(mesh.verts.size() * 2);
     for (const MeshVertex& v : mesh.verts) soup.vertex(v.position, v.id);
@@ -560,7 +657,7 @@ bool extrudeFaces(Mesh& mesh, const std::vector<Index>& faces, Real distance,
                           nameId(salt, IdRole::Wall, mesh.edgeId(h)));
             }
             h = mesh.halfedges[h].next;
-        } while (h != start);
+        } while (h != start && h != kInvalid);
     }
 
     if (!soup.commit(mesh)) return false;

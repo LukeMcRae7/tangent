@@ -4,6 +4,7 @@
 // they are visible on screen.
 #include "mesh/operations.h"
 #include "mesh/primitives.h"
+#include "mesh/boolean.h"
 
 #include <cstdio>
 #include <string>
@@ -74,13 +75,23 @@ int main() {
               "moved face still points up");
         check(std::fabs(m.faceCentroid(moved[0]).z - 20.0f) < 1e-3f,
               "moved face sits 10mm higher");
-        // Pushing a box's whole top out gives a taller box, and a taller box
-        // has six faces. The new side walls are in the same planes as the walls
-        // they grew out of, and are merged into them -- the seam between them is
-        // in the data, not on the model.
-        check(m.faceCount() == 6, "extruding a whole face leaves a taller box, "
-                                  "not one with seams down its sides");
-        std::printf("[extrude] volume %.1f, %d faces\n", volumeOf(m), m.faceCount());
+        // An extrude always keeps the boundary edges of the previous end point,
+        // giving 5 base faces + 1 lifted top face + 4 side walls = 10 faces,
+        // with the boundary edges around the previous end point selectable.
+        check(m.faceCount() == 10, "extrude preserves 10 faces (5 base + 1 top + 4 walls)");
+        // Check that 4 edges exist at z = 10 (the previous end point)
+        int midEdges = 0;
+        for (Index h = 0; h < m.halfedgeCount(); ++h) {
+            if (h >= m.halfedges[h].twin) continue;
+            const Vec3 p = m.verts[m.fromVertex(h)].position;
+            const Vec3 q = m.verts[m.halfedges[h].vertex].position;
+            if (std::fabs(p.z - 10.0f) < 1e-3f && std::fabs(q.z - 10.0f) < 1e-3f) {
+                ++midEdges;
+            }
+        }
+        check(midEdges == 4, "boundary edges of the previous end point are kept (4 edges at z=10)");
+        std::printf("[extrude] volume %.1f, %d faces, %d boundary edges at seam\n",
+                    volumeOf(m), m.faceCount(), midEdges);
     }
 
     // Extruding inward removes volume.
@@ -516,6 +527,56 @@ int main() {
         check(std::fabs((v1 + v2) - 8000.0) < 1.0, "total volume conserved");
         std::printf("[split_body] cube split into 2 bodies: %.1f mm3 + %.1f mm3 = %.1f mm3\n",
                     v1, v2, v1 + v2);
+    }
+
+    // ---- Extrude Self-Intersection (Bridge Union) -------------------------
+    {
+        // Build a U-shaped solid: base [-20, 20] x [-10, 10] x [-10, 0] with two pillars
+        // Left pillar: [-20, -10] x [-10, 10] x [0, 20]
+        // Right pillar: [10, 20] x [-10, 10] x [0, 20]
+        Mesh baseBox, leftPillar, rightPillar;
+        BoxParams bBase{40, 20, 10};
+        makeBox(baseBox, bBase);
+        for (auto& v : baseBox.verts) v.position.z -= 5.0f;
+
+        BoxParams bLeft{10, 20, 20};
+        makeBox(leftPillar, bLeft);
+        for (auto& v : leftPillar.verts) {
+            v.position.x -= 15.0f;
+            v.position.z += 10.0f;
+        }
+
+        BoxParams bRight{10, 20, 20};
+        makeBox(rightPillar, bRight);
+        for (auto& v : rightPillar.verts) {
+            v.position.x += 15.0f;
+            v.position.z += 10.0f;
+        }
+
+        Mesh uShape, temp;
+        check(meshBoolean(baseBox, leftPillar, BooleanOp::Union, temp), "union left pillar");
+        check(meshBoolean(temp, rightPillar, BooleanOp::Union, uShape), "union right pillar");
+
+        Index inwardFace = kInvalid;
+        for (Index f = 0; f < uShape.faceCount(); ++f) {
+            const Vec3 n = uShape.faceNormal(f);
+            const Vec3 c = uShape.faceCentroid(f);
+            if (std::fabs(n.x - 1.0f) < 1e-3 && std::fabs(c.x - (-10.0f)) < 1e-2 && c.z > 5.0f) {
+                inwardFace = f;
+                break;
+            }
+        }
+        check(inwardFace != kInvalid, "found inward face on left pillar");
+
+        // Extrude inward face by 20mm towards right pillar (distance = 20)
+        // With ExtrudeOp::Auto, it should automatically detect collision and union with itself!
+        Mesh bridge = uShape;
+        check(extrudeFaces(bridge, {inwardFace}, 20.0f, nullptr), "bridge extrude succeeds");
+        expectSolid(bridge, "bridge extruded solid");
+        const double vBridge = volumeOf(bridge);
+        check(std::fabs(vBridge - 24000.0) < 1.0, "bridge union creates 24000 mm3 solid (got " +
+              std::to_string(vBridge) + ")");
+        std::printf("[extrude_self_union] U-shape bridge extrude -> volume %.1f mm3, solid=yes\n", vBridge);
     }
 
     std::printf("\n%s (%d failures)\n", failures ? "FAILED" : "ALL PASS", failures);

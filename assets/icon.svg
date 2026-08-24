@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!-- Created with Inkscape (http://www.inkscape.org/) -->
+
+<svg
+   width="74.999977mm"
+   height="74.999977mm"
+   viewBox="0 0 74.999977 74.999977"
+   version="1.1"
+   id="svg1"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg">
+  <defs
+     id="defs1">
+    <marker
+       style="overflow:visible"
+       id="marker5"
+       refX="0"
+       refY="0"
+       orient="auto-start-reverse"
+       markerWidth="0.2"
+       markerHeight="0.27000001"
+       viewBox="0 0 1 1"
+       preserveAspectRatio="none">
+      <path
+         transform="scale(0.7)"
+         d="m -0.21114562,-4.1055728 6.42229122,3.21114561 a 1,1 90 0 1 0,1.78885438 L -0.21114562,4.1055728 A 1.236068,1.236068 31.717474 0 1 -2,3 v -6 a 1.236068,1.236068 148.28253 0 1 1.78885438,-1.1055728 z"
+         style="fill:context-stroke;fill-rule:evenodd;stroke:none"
+         id="path5" />
+    </marker>
+    <marker
+       style="overflow:visible"
+       id="RoundedArrow"
+       refX="0"
+       refY="0"
+       orient="auto-start-reverse"
+       markerWidth="0.2"
+       markerHeight="0.27000001"
+       viewBox="0 0 1 1"
+       preserveAspectRatio="none">
+      <path
+         transform="scale(0.7)"
+         d="m -0.21114562,-4.1055728 6.42229122,3.21114561 a 1,1 90 0 1 0,1.78885438 L -0.21114562,4.1055728 A 1.236068,1.236068 31.717474 0 1 -2,3 v -6 a 1.236068,1.236068 148.28253 0 1 1.78885438,-1.1055728 z"
+         style="fill:context-stroke;fill-rule:evenodd;stroke:none"
+         id="path8" />
+    </marker>
+    <linearGradient
+       id="swatch4">
+      <stop
+         style="stop-color:#f34425;stop-opacity:1;"
+         offset="0"
+         id="stop4" />
+    </linearGradient>
+  </defs>
+  <g
+     id="layer1"
+     transform="translate(-49.965015,-83.881881)">
+    <rect
+       style="fill:#1d1d1e;fill-opacity:1;fill-rule:evenodd;stroke:#1d1d1e;stroke-width:11.5514;stroke-linecap:round;stroke-linejoin:round;stroke-miterlimit:4.1;stroke-dasharray:none;stroke-opacity:1;paint-order:stroke fill markers"
+       id="rect5"
+       width="63.448578"
+       height="63.44857"
+       x="55.740719"
+       y="89.657578" />
+    <path
+       style="display:inline;fill:none;fill-rule:evenodd;stroke:#f5f5f5;stroke-width:10;stroke-linecap:round;stroke-linejoin:round;stroke-miterlimit:4.1;stroke-dasharray:none;stroke-opacity:1;marker-start:url(#marker5);paint-order:stroke fill markers"
+       d="m 101.64188,145.91167 c -16.675628,7.94078 -16.675627,-5.75706 -16.675627,-5.75706 v -26.60158 h 15.683027"
+       id="path3" />
+    <path
+       style="fill:none;fill-opacity:1;fill-rule:evenodd;stroke:#1d1d1e;stroke-width:14.9;stroke-linecap:round;stroke-linejoin:round;stroke-miterlimit:4.1;stroke-dasharray:none;stroke-opacity:1;paint-order:stroke fill markers"
+       d="m 71.655303,113.94083 h 6.55114 c 0,0 6.55114,0.79407 6.55114,-5.36003 V 98.45632"
+       id="path4-3" />
+    <path
+       style="fill:none;fill-opacity:1;fill-rule:evenodd;stroke:#f34425;stroke-width:10;stroke-linecap:round;stroke-linejoin:round;stroke-miterlimit:4.1;stroke-dasharray:none;stroke-opacity:1;marker-end:url(#RoundedArrow);paint-order:stroke fill markers"
+       d="m 71.665461,113.95007 7.919785,-0.0702 c 0,0 5.182488,0.79407 5.182488,-5.28983 V 98.465565"
+       id="path4" />
+  </g>
+</svg>
