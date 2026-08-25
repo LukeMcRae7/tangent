@@ -579,6 +579,88 @@ int main() {
         std::printf("[extrude_self_union] U-shape bridge extrude -> volume %.1f mm3, solid=yes\n", vBridge);
     }
 
+    // ---- Extrude Pocket Flush With Top (Coplanar Join Auto-Union) ---------
+    {
+        Mesh box, cutter, pocket;
+        BoxParams bBox{20, 20, 20};
+        makeBox(box, bBox);
+        BoxParams bCut{10, 20, 10};
+        makeBox(cutter, bCut);
+        for (auto& v : cutter.verts) {
+            v.position.x += 5.0f;
+            v.position.z += 5.0f;
+        }
+        check(meshBoolean(box, cutter, BooleanOp::Difference, pocket), "cut corner pocket");
+        mergeCoplanarFaces(pocket);
+
+        Index pocketFloor = kInvalid;
+        for (Index f = 0; f < pocket.faceCount(); ++f) {
+            const Vec3 n = pocket.faceNormal(f);
+            const Vec3 c = pocket.faceCentroid(f);
+            if (std::fabs(n.z - 1.0f) < 1e-3 && std::fabs(c.z - 0.0f) < 1e-3 && c.x > 0.0f) {
+                pocketFloor = f;
+                break;
+            }
+        }
+        check(pocketFloor != kInvalid, "found pocket floor face");
+
+        // Extrude pocket floor up by 10mm so it is flush with the top face
+        Mesh unpocketed = pocket;
+        check(extrudeFaces(unpocketed, {pocketFloor}, 10.0f, nullptr), "extrude pocket floor flush with top");
+        expectSolid(unpocketed, "unpocketed solid");
+        check(unpocketed.faceCount() == 6, "merged coplanar faces back to 6-faced cube (got " +
+              std::to_string(unpocketed.faceCount()) + " faces)");
+        const double vCube = volumeOf(unpocketed);
+        check(std::fabs(vCube - 8000.0) < 1.0, "restores full 8000 mm3 cube volume (got " +
+              std::to_string(vCube) + ")");
+        std::printf("[extrude_coplanar_join] pocket floor extruded flush -> 6 faces, volume %.1f mm3\n", vCube);
+    }
+
+    // ---- Disjoint Coplanar Face Islands (Prevent Diagonal Lines) ----------
+    {
+        // Two pillars on a base block whose tops lie in the same plane z=10.
+        // In previous versions, mergeCoplanarFaces lumped all faces on z=10
+        // into one plane group, saw 2 loops, mistook them for a hole, and aborted,
+        // leaving triangular facets and diagonal lines on both pillar tops.
+        BoxParams bBase{40, 20, 10};
+        Mesh baseBox;
+        makeBox(baseBox, bBase);
+        for (auto& v : baseBox.verts) v.position.z -= 5.0f;
+
+        BoxParams bLeft{10, 20, 10};
+        Mesh leftBox;
+        makeBox(leftBox, bLeft);
+        for (auto& v : leftBox.verts) { v.position.x -= 15.0f; v.position.z += 5.0f; }
+
+        BoxParams bRight{10, 20, 10};
+        Mesh rightBox;
+        makeBox(rightBox, bRight);
+        for (auto& v : rightBox.verts) { v.position.x += 15.0f; v.position.z += 5.0f; }
+
+        Mesh uShape, temp;
+        check(meshBoolean(baseBox, leftBox, BooleanOp::Union, temp), "union left pillar");
+        check(meshBoolean(temp, rightBox, BooleanOp::Union, uShape), "union right pillar");
+        expectSolid(uShape, "uShape solid");
+
+        // Both pillar tops at z=10 should be 4-vertex quads, NOT 3-vertex triangles
+        int pillarTopQuads = 0;
+        int pillarTopTris = 0;
+        for (Index f = 0; f < uShape.faceCount(); ++f) {
+            const Vec3 n = uShape.faceNormal(f);
+            const Vec3 c = uShape.faceCentroid(f);
+            if (dot(n, Vec3{0, 0, 1}) > 0.99f && std::fabs(c.z - 10.0f) < 1e-2) {
+                if (uShape.faceDegree(f) == 4) ++pillarTopQuads;
+                if (uShape.faceDegree(f) == 3) ++pillarTopTris;
+            }
+        }
+        check(pillarTopQuads == 2, "both disjoint pillar tops merged into quads (got " +
+              std::to_string(pillarTopQuads) + " quads)");
+        check(pillarTopTris == 0, "no residual diagonal triangle faces on coplanar tops (got " +
+              std::to_string(pillarTopTris) + " tris)");
+        std::printf("[coplanar_islands] 2 disjoint coplanar tops -> %d quads, %d tris\n",
+                    pillarTopQuads, pillarTopTris);
+    }
+
     std::printf("\n%s (%d failures)\n", failures ? "FAILED" : "ALL PASS", failures);
     return failures ? 1 : 0;
 }

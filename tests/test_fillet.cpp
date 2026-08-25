@@ -9,6 +9,7 @@
 //
 // Every case is also checked against the analytic solid, since a 90-degree
 // fillet of radius r removes exactly r^2 - (quarter disc) per unit of edge.
+#include "mesh/boolean.h"
 #include "mesh/health.h"
 #include "mesh/operations.h"
 #include "mesh/primitives.h"
@@ -767,6 +768,91 @@ int main() {
         std::printf("[order] twelve edges one at a time: %d faces, %d verts, %.4f -- "
                     "identical to all at once\n",
                     current.faceCount(), current.vertexCount(), volumeOf(current));
+    }
+
+    // ---- Concave fillet with through-hole and coplanar seams ----------------
+    {
+        Mesh block, cutter, solid;
+        BoxParams bBlock{40, 20, 40};
+        makeBox(block, bBlock);
+        BoxParams bCut{20, 30, 15};
+        makeBox(cutter, bCut);
+        for (auto& v : cutter.verts) v.position.z += 5.0f;
+
+        check(meshBoolean(block, cutter, BooleanOp::Difference, solid), "cut through-hole");
+        mergeCoplanarFaces(solid);
+
+        Index concaveEdge = kInvalid;
+        for (Index h = 0; h < solid.halfedgeCount(); ++h) {
+            const Index tw = solid.halfedges[h].twin;
+            if (tw == kInvalid || tw < h) continue;
+            const Vec3 p = solid.verts[solid.fromVertex(h)].position;
+            const Vec3 q = solid.verts[solid.halfedges[h].vertex].position;
+            if (std::fabs(p.x - (-10.0f)) < 1e-3 && std::fabs(q.x - (-10.0f)) < 1e-3 &&
+                std::fabs(p.z - (-2.5f)) < 1e-3 && std::fabs(q.z - (-2.5f)) < 1e-3) {
+                concaveEdge = h;
+                break;
+            }
+        }
+        check(concaveEdge != kInvalid, "found concave hole edge");
+
+        FilletSpec spec;
+        spec.edges.push_back({concaveEdge, 4.0});
+        spec.segments = 8;
+        spec.salt = 1234;
+
+        Mesh filleted = solid;
+        check(filletEdges(filleted, spec), "fillet concave edge in through-hole");
+        const MeshHealth h = checkHealth(filleted);
+        check(h.solid(), "concave fillet solid is watertight and printable");
+        check(h.boundaryEdges == 0, "no boundary edges / zero-thickness sheets");
+        check(h.degenerateFaces == 0, "no degenerate faces");
+        std::printf("[concave_hole] concave fillet in through-hole: %d faces, volume %.2f\n",
+                    filleted.faceCount(), h.volume);
+    }
+
+    // ---- Arch / bridge through-hole rim fillets and collinear segmented edges ----
+    {
+        Mesh m;
+        BoxParams bp{20.0, 30.02, 45.02};
+        makeBox(m, bp);
+
+        // Cut central hole
+        Mesh holeCutter;
+        BoxParams bpCut{40.0, 15.0, 20.0};
+        makeBox(holeCutter, bpCut);
+        for (auto& v : holeCutter.verts) v.position.z += 5.0f;
+        Mesh arch;
+        check(meshBoolean(m, holeCutter, BooleanOp::Difference, arch), "cut arch hole");
+        mergeCoplanarFaces(arch);
+
+        // Find vertical rim edge in the hole
+        Index rimEdge = kInvalid;
+        for (Index h = 0; h < arch.halfedgeCount(); ++h) {
+            const Index tw = arch.halfedges[h].twin;
+            if (tw == kInvalid || tw < h) continue;
+            const Vec3 p = arch.verts[arch.fromVertex(h)].position;
+            const Vec3 q = arch.verts[arch.halfedges[h].vertex].position;
+            if (std::fabs(p.x - 10.0) < 1e-3 && std::fabs(q.x - 10.0) < 1e-3 &&
+                std::fabs(p.y - 7.5) < 1e-3 && std::fabs(q.y - 7.5) < 1e-3) {
+                rimEdge = h;
+                break;
+            }
+        }
+        check(rimEdge != kInvalid, "found arch hole vertical rim edge");
+
+        FilletSpec spec;
+        spec.edges.push_back({rimEdge, 1.0});
+        spec.segments = 4;
+        spec.salt = 1234;
+
+        Mesh filletedArch = arch;
+        check(filletEdges(filletedArch, spec), "fillet arch hole rim edge");
+        const MeshHealth h = checkHealth(filletedArch);
+        check(h.solid(), "arch hole rim fillet is solid and watertight");
+        check(h.boundaryEdges == 0, "arch hole rim fillet has no open boundary edges");
+        std::printf("[arch_rim] arch rim edge fillet: %d faces, volume %.2f\n",
+                    filletedArch.faceCount(), h.volume);
     }
 
     if (gaps)

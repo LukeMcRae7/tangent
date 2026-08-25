@@ -517,6 +517,27 @@ static bool sweepIntersectsBody(const Mesh& mesh, const std::unordered_set<Index
         }
     }
 
+    // Check if any wall of the sweep coincides with or touches an adjacent face outside the region
+    for (Index f : region) {
+        const Index start = mesh.faces[f].halfedge;
+        Index h = start;
+        do {
+            const Index tw = mesh.halfedges[h].twin;
+            const Index twinFace = (tw != kInvalid) ? mesh.halfedges[tw].face : kInvalid;
+            if (twinFace != kInvalid && !region.count(twinFace)) {
+                const Vec3 v0 = mesh.verts[mesh.fromVertex(h)].position;
+                const Vec3 v1 = mesh.verts[mesh.halfedges[h].vertex].position;
+                const Vec3 edgeDir = v1 - v0;
+                const Vec3 wallNormal = normalize(cross(edgeDir, sweepDir));
+                const Vec3 nTwin = mesh.faceNormal(twinFace);
+                if (dot(wallNormal, nTwin) < -0.9f) {
+                    return true;
+                }
+            }
+            h = mesh.halfedges[h].next;
+        } while (h != start && h != kInvalid);
+    }
+
     return false;
 }
 
@@ -1027,12 +1048,22 @@ bool filletEdges(Mesh& mesh, const FilletSpec& spec) {
         }
         // A build that is not a solid is refused silently by default, which
         // makes this the one failure with no trace. Say what was wrong with it.
-        if (std::getenv("TANGENT_BEVEL_DEBUG"))
+        if (std::getenv("TANGENT_BEVEL_DEBUG")) {
             std::fprintf(stderr,
                          "[bevel] built but not a solid: watertight=%d degenerate=%d "
                          "shells=%zu selfint=%d volume=%.6f\n",
                          h.watertight, h.degenerateFaces,
                          static_cast<size_t>(h.shells), h.selfIntersections, h.volume);
+            for (Index he = 0; he < direct.halfedgeCount(); ++he) {
+                Index tw = direct.halfedges[he].twin;
+                if (tw == kInvalid || direct.halfedges[he].face == kInvalid || direct.halfedges[tw].face == kInvalid) {
+                    Vec3 p = direct.verts[direct.fromVertex(he)].position;
+                    Vec3 q = direct.verts[direct.halfedges[he].vertex].position;
+                    std::fprintf(stderr, "   open he %d (tw %d): (%.2f,%.2f,%.2f) -> (%.2f,%.2f,%.2f)\n",
+                                 he, tw, p.x, p.y, p.z, q.x, q.y, q.z);
+                }
+            }
+        }
     }
 
     // Held by where their ends are, not by name. Splitting moves no vertex and
@@ -1403,8 +1434,10 @@ static bool filletEdgesDirect(Mesh& mesh, const FilletSpec& spec) {
         do {
             if (!beveled[h] && !beveled[mesh.halfedges[h].prev]) {
                 const Index f = mesh.halfedges[h].face;
-                if (dot(faceNormals[f], faceNormals[clear]) < 0.996)   // five degrees
-                    creased = true;
+                if (std::fabs(dot(dir, faceNormals[f])) > 1e-4) {
+                    if (dot(faceNormals[f], faceNormals[clear]) < 0.996)   // five degrees
+                        creased = true;
+                }
             }
             h = mesh.halfedges[mesh.halfedges[h].twin].next;
         } while (h != start);
@@ -1667,10 +1700,23 @@ static bool filletEdgesDirect(Mesh& mesh, const FilletSpec& spec) {
         return true;
     };
 
-    // True when either edge at this corner is being filleted, so the corner
-    // has a cross-section point at all.
-    auto cornerActive = [&](Index h) {
-        return beveled[h] || beveled[mesh.halfedges[h].prev];
+    // True when either edge at this corner is being filleted, or adjacent across a flat seam.
+    auto activeCrossPoint = [&](Index h, Vec3& pt) -> bool {
+        if (beveled[h] || beveled[mesh.halfedges[h].prev])
+            return crossPointEmit(h, pt);
+        const Index v = mesh.fromVertex(h);
+        const Index vstart = mesh.verts[v].halfedge;
+        Index k = vstart;
+        do {
+            if (beveled[k] || beveled[mesh.halfedges[k].prev]) {
+                const Index f = mesh.halfedges[k].face;
+                if (dot(faceNormals[f], faceNormals[mesh.halfedges[h].face]) >= kFlatCos) {
+                    return crossPointEmit(k, pt);
+                }
+            }
+            k = mesh.halfedges[mesh.halfedges[k].twin].next;
+        } while (k != vstart);
+        return false;
     };
 
     // How far back an *unbeveled* edge is cut at each of its ends.
@@ -1689,15 +1735,12 @@ static bool filletEdgesDirect(Mesh& mesh, const FilletSpec& spec) {
 
         // Both faces meeting along this edge get a say; the deeper cut wins,
         // because the corner has to clear every fillet arriving at it.
-        if (cornerActive(h)) {
-            Vec3 pt;
-            if (!crossPointEmit(h, pt)) return bail("corner offset is undefined");
+        Vec3 pt;
+        if (activeCrossPoint(h, pt)) {
             t = std::max(t, dot(pt - posOf(mesh.fromVertex(h)), dir));
         }
         const Index across = mesh.halfedges[mesh.halfedges[h].twin].next;
-        if (cornerActive(across)) {
-            Vec3 pt;
-            if (!crossPointEmit(across, pt)) return bail("corner offset is undefined");
+        if (activeCrossPoint(across, pt)) {
             t = std::max(t, dot(pt - posOf(mesh.fromVertex(across)), dir));
         }
         cutBack[h] = std::max(t, 0.0);
@@ -1773,19 +1816,105 @@ static bool filletEdgesDirect(Mesh& mesh, const FilletSpec& spec) {
         return sharedPt[h];
     };
 
+    // The cross-section point face(h) contributes at fromVertex(h).
+    constexpr uint32_t kNoVertex = ~0u;
+    constexpr Real kWeldEps = 1e-18;   // squared; a nanometre at model scale
+    std::vector<uint32_t> crossIdx(static_cast<size_t>(heCount), kNoVertex);
+    std::vector<Vec3> crossPos(static_cast<size_t>(heCount));
+    std::vector<bool> hasCross(static_cast<size_t>(heCount), false);
+
+    for (Index h = 0; h < heCount; ++h) {
+        const Index p = mesh.halfedges[h].prev;
+        const Index v = mesh.fromVertex(h);
+        const bool bevPrev = beveled[p], bevNext = beveled[h];
+        if (!bevPrev && !bevNext) continue;
+
+        Vec3 d;
+        if (!crossOffsetAt(h, d)) return bail("corner offset is undefined");
+        const Vec3 ptTrue = posOf(v) + d;
+        const int fi = fanAt[v];
+        Vec3 pt;
+        uint32_t idx = kNoVertex;
+        if (fi >= 0) {
+            FanEnd& fe = fans[static_cast<size_t>(fi)];
+            const int ei = (h == fe.bev) ? 0 : static_cast<int>(fe.ring.size()) - 1;
+            idx = fanEntryVertex(fi, ei);
+            pt = fe.ring[static_cast<size_t>(ei)].pos;
+        } else {
+            pt = trimToEnd(v, ptTrue);
+            if (!bevPrev) {
+                const uint32_t e = edgePoint(mesh.halfedges[p].twin);
+                if (lengthSq(soup.positions[e] - pt) < kWeldEps) idx = e;
+            }
+            if (idx == kNoVertex && !bevNext) {
+                const uint32_t e = edgePoint(h);
+                if (lengthSq(soup.positions[e] - pt) < kWeldEps) idx = e;
+            }
+            if (idx == kNoVertex)
+                idx = soup.vertex(pt, nameId(salt, IdRole::Cross, mesh.verts[v].id,
+                                             mesh.faces[mesh.halfedges[h].face].id));
+        }
+
+        crossIdx[h] = idx;
+        crossPos[h] = ptTrue;
+        hasCross[h] = true;
+    }
+
+    // Arc points along each beveled edge, at both ends, keyed by half-edge so
+    // the vertex patches and end faces can pick them up in the right order.
+    std::vector<std::vector<uint32_t>> ringAt(static_cast<size_t>(heCount));
+    std::vector<std::vector<Real>> ringParamAt(static_cast<size_t>(heCount));
+    std::vector<Arc> arcAt(static_cast<size_t>(heCount));
+
+    for (Index h = 0; h < heCount; ++h) {
+        if (!beveled[h]) continue;
+        const Index tw = mesh.halfedges[h].twin;
+        const Index f0 = mesh.halfedges[h].face;
+        const Index f1 = mesh.halfedges[tw].face;
+
+        const Index far = mesh.halfedges[tw].next;
+        if (!hasCross[h] || !hasCross[far]) return bail("edge has no cross-section");
+        const Vec3 p0 = crossPos[h];
+        const Vec3 p1 = crossPos[far];
+        const Vec3 axis = normalize(mesh.verts[mesh.halfedges[h].vertex].position -
+                                    mesh.verts[mesh.fromVertex(h)].position);
+
+        const Arc arc = solveArc(p0, p1, -faceNormals[f0], -faceNormals[f1]);
+        arcAt[h] = arc;
+
+        std::vector<uint32_t>& ring = ringAt[h];
+        std::vector<Real>& params = ringParamAt[h];
+
+        const int fi = fanAt[mesh.fromVertex(h)];
+        if (fi >= 0) {
+            FanEnd& fe = fans[static_cast<size_t>(fi)];
+            for (size_t i = 0; i < fe.ring.size(); ++i) {
+                ring.push_back(fanEntryVertex(fi, static_cast<int>(i)));
+                params.push_back(fe.ring[i].u);
+            }
+            continue;
+        }
+
+        std::vector<Vec3> pts;
+        sampleArc(arc, p0, p1, axis, segments, pts);
+
+        ring.push_back(crossIdx[h]);
+        params.push_back(0.0);
+        for (size_t i = 1; i + 1 < pts.size(); ++i) {
+            ring.push_back(soup.vertex(
+                trimToEnd(mesh.fromVertex(h), pts[i]),
+                nameId(salt, IdRole::Ring, mesh.edgeId(h),
+                       mesh.verts[mesh.fromVertex(h)].id, i)));
+            params.push_back(static_cast<Real>(i) / segments);
+        }
+        ring.push_back(crossIdx[far]);
+        params.push_back(1.0);
+    }
+
     // corner[h] is the point face(h) contributes on the *next* side of its
     // corner at fromVertex(h) -- the one the strip along edge(h) attaches to.
     std::vector<uint32_t> corner(static_cast<size_t>(heCount), 0u);
     std::vector<Vec3> cornerPos(static_cast<size_t>(heCount));
-
-    // The cross-section point face(h) contributes at fromVertex(h), kept apart
-    // from corner[] because a corner can now carry both a cross-section and a
-    // cut-back point, and the vertex patch has to walk both.
-    constexpr uint32_t kNoVertex = ~0u;
-    constexpr Real kWeldEps = 1e-18;   // squared; a nanometre at model scale
-    std::vector<uint32_t> crossIdx(static_cast<size_t>(heCount), 0u);
-    std::vector<Vec3> crossPos(static_cast<size_t>(heCount));
-    std::vector<bool> hasCross(static_cast<size_t>(heCount), false);
 
     for (Index f = 0; f < mesh.faceCount(); ++f) {
         const Index start = mesh.faces[f].halfedge;
@@ -1805,58 +1934,16 @@ static bool filletEdgesDirect(Mesh& mesh, const FilletSpec& spec) {
             // one. An unfilleted edge contributes the point it was cut back
             // to; a filleted one contributes the cross-section, which both of
             // them share when both are filleted.
-            if (!bevPrev && !isFlatEdge(p)) loop.push_back(edgePoint(mesh.halfedges[p].twin));
+            if (!bevPrev && !isFlatEdge(p) && !(fanAt[v] < 0 && filletsAt[v] == 1)) loop.push_back(edgePoint(mesh.halfedges[p].twin));
 
             if (bevPrev || bevNext) {
-                Vec3 d;
-                if (!crossOffsetAt(h, d)) return bail("corner offset is undefined");
-                const Vec3 ptTrue = posOf(v) + d;
-                const int fi = fanAt[v];
-                Vec3 pt;
-                uint32_t idx = kNoVertex;
-                if (fi >= 0) {
-                    // At a fan end the cross point is the trim curve's own
-                    // endpoint; taking its vertex is what makes the strip and
-                    // this face meet exactly.
-                    FanEnd& fe = fans[static_cast<size_t>(fi)];
-                    const int ei = (h == fe.bev) ? 0
-                                 : static_cast<int>(fe.ring.size()) - 1;
-                    idx = fanEntryVertex(fi, ei);
-                    pt = fe.ring[static_cast<size_t>(ei)].pos;
-                } else {
-                    pt = trimToEnd(v, ptTrue);
-
-                    // Where the offset runs purely along an unfilleted edge,
-                    // the cross-section lands exactly on that edge's cut-back
-                    // point. They have to be one vertex, not two in the same
-                    // place: a duplicate here leaves a zero-area sliver in the
-                    // face and the edge fails to pair on the next operation.
-                    if (!bevPrev) {
-                        const uint32_t e = edgePoint(mesh.halfedges[p].twin);
-                        if (lengthSq(soup.positions[e] - pt) < kWeldEps) idx = e;
-                    }
-                    if (idx == kNoVertex && !bevNext) {
-                        const uint32_t e = edgePoint(h);
-                        if (lengthSq(soup.positions[e] - pt) < kWeldEps) idx = e;
-                    }
-                    if (idx == kNoVertex)
-                        idx = soup.vertex(pt, nameId(salt, IdRole::Cross, mesh.verts[v].id,
-                                                     mesh.faces[mesh.halfedges[h].face].id));
-                }
-
+                const uint32_t idx = crossIdx[h];
+                const Vec3 pt = soup.positions[idx];
                 if (loop.empty() || loop.back() != idx) loop.push_back(idx);
-                crossIdx[h] = idx;
-                crossPos[h] = ptTrue;
-                hasCross[h] = true;
                 corner[h] = idx;
                 cornerPos[h] = pt;
                 moved.push_back(pt);
             } else {
-                // A face of a fan end is clipped against the fillet: its
-                // corner at v becomes the trim curve's run through this
-                // face's wedge, walked from the crease it entered on round to
-                // the crease it leaves by. The crossings themselves arrive as
-                // the creases' cut-back points, pushed either side of this.
                 const int fi = fanAt[v];
                 if (fi >= 0) {
                     FanEnd& fe = fans[static_cast<size_t>(fi)];
@@ -1870,11 +1957,80 @@ static bool filletEdgesDirect(Mesh& mesh, const FilletSpec& spec) {
                             if (loop.empty() || loop.back() != idx) loop.push_back(idx);
                         }
                     }
+                } else if (filletsAt[v] == 1) {
+                    // Find the single beveled halfedge leaving v
+                    Index bev = kInvalid;
+                    const Index vstart = mesh.verts[v].halfedge;
+                    Index k = vstart;
+                    do {
+                        if (beveled[k]) { bev = k; break; }
+                        k = mesh.halfedges[mesh.halfedges[k].twin].next;
+                    } while (k != vstart);
+
+                    if (bev != kInvalid && !ringAt[bev].empty()) {
+                        const std::vector<uint32_t>& ring = ringAt[bev];
+                        const uint32_t r0 = ring.front();
+                        const uint32_t r1 = ring.back();
+                        const Index f0 = mesh.halfedges[bev].face;
+                        const Index f1 = mesh.halfedges[mesh.halfedges[bev].twin].face;
+
+                        const bool coplanar0 = dot(faceNormals[f], faceNormals[f0]) >= kFlatCos;
+                        const bool coplanar1 = dot(faceNormals[f], faceNormals[f1]) >= kFlatCos;
+
+                        if (coplanar0) {
+                            if (loop.empty() || loop.back() != r0) loop.push_back(r0);
+                        } else if (coplanar1) {
+                            if (loop.empty() || loop.back() != r1) loop.push_back(r1);
+                        } else {
+                            // End face: determine traversal direction
+                            const Index inFace = (p != kInvalid && mesh.halfedges[p].twin != kInvalid)
+                                               ? mesh.halfedges[mesh.halfedges[p].twin].face : kInvalid;
+                            const Index outFace = (h != kInvalid && mesh.halfedges[h].twin != kInvalid)
+                                                ? mesh.halfedges[mesh.halfedges[h].twin].face : kInvalid;
+
+                            const bool inIs0 = inFace != kInvalid && dot(faceNormals[inFace], faceNormals[f0]) >= kFlatCos;
+                            const bool inIs1 = inFace != kInvalid && dot(faceNormals[inFace], faceNormals[f1]) >= kFlatCos;
+                            const bool outIs0 = outFace != kInvalid && dot(faceNormals[outFace], faceNormals[f0]) >= kFlatCos;
+                            const bool outIs1 = outFace != kInvalid && dot(faceNormals[outFace], faceNormals[f1]) >= kFlatCos;
+
+                            if (isFlatEdge(p)) {
+                                if (outIs1) {
+                                    for (size_t ri = 0; ri < ring.size(); ++ri) {
+                                        const uint32_t idx = ring[ri];
+                                        if (loop.empty() || loop.back() != idx) loop.push_back(idx);
+                                    }
+                                } else if (outIs0) {
+                                    if (loop.empty() || loop.back() != r0) loop.push_back(r0);
+                                }
+                            } else if (isFlatEdge(h)) {
+                                if (inIs1) {
+                                    for (size_t ri = ring.size(); ri-- > 0;) {
+                                        const uint32_t idx = ring[ri];
+                                        if (loop.empty() || loop.back() != idx) loop.push_back(idx);
+                                    }
+                                } else if (inIs0) {
+                                    if (loop.empty() || loop.back() != r0) loop.push_back(r0);
+                                }
+                            } else {
+                                if (inIs0 || outIs1) {
+                                    for (size_t ri = 0; ri < ring.size(); ++ri) {
+                                        const uint32_t idx = ring[ri];
+                                        if (loop.empty() || loop.back() != idx) loop.push_back(idx);
+                                    }
+                                } else {
+                                    for (size_t ri = ring.size(); ri-- > 0;) {
+                                        const uint32_t idx = ring[ri];
+                                        if (loop.empty() || loop.back() != idx) loop.push_back(idx);
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
                 moved.push_back(soup.positions[edgePoint(mesh.halfedges[p].twin)]);
             }
 
-            if (!bevNext && !isFlatEdge(h)) {
+            if (!bevNext && !isFlatEdge(h) && !(fanAt[v] < 0 && filletsAt[v] == 1)) {
                 const uint32_t idx = edgePoint(h);
                 if (loop.empty() || loop.back() != idx) loop.push_back(idx);
                 corner[h] = idx;
@@ -1912,65 +2068,6 @@ static bool filletEdgesDirect(Mesh& mesh, const FilletSpec& spec) {
 
         // Shrunk, not replaced: it is the same face and keeps its name.
         soup.face(loop, mesh.faces[f].id);
-    }
-
-    // Arc points along each beveled edge, at both ends, keyed by half-edge so
-    // the vertex patches can pick them up in the right order.
-    // ringAt[h] runs from face(h)'s corner to face(twin(h))'s corner, at
-    // fromVertex(h).
-    std::vector<std::vector<uint32_t>> ringAt(static_cast<size_t>(heCount));
-    std::vector<std::vector<Real>> ringParamAt(static_cast<size_t>(heCount));
-    std::vector<Arc> arcAt(static_cast<size_t>(heCount));
-
-    for (Index h = 0; h < heCount; ++h) {
-        if (!beveled[h]) continue;
-        const Index tw = mesh.halfedges[h].twin;
-        const Index f0 = mesh.halfedges[h].face;
-        const Index f1 = mesh.halfedges[tw].face;
-
-        // Both ends of the cross-section must be the *cross-section* points,
-        // not whatever else those corners carry. The far face's corner can now
-        // also hold a cut-back point for an unfilleted edge, and attaching the
-        // strip to that is what skews the section.
-        const Index far = mesh.halfedges[tw].next;
-        if (!hasCross[h] || !hasCross[far]) return bail("edge has no cross-section");
-        const Vec3 p0 = crossPos[h];
-        const Vec3 p1 = crossPos[far];
-        const Vec3 axis = normalize(mesh.verts[mesh.halfedges[h].vertex].position -
-                                    mesh.verts[mesh.fromVertex(h)].position);
-
-        const Arc arc = solveArc(p0, p1, -faceNormals[f0], -faceNormals[f1]);
-        arcAt[h] = arc;
-
-        std::vector<uint32_t>& ring = ringAt[h];
-        std::vector<Real>& params = ringParamAt[h];
-
-        // A fan end's ring is the trim curve, crossings and all; the strip
-        // walk below pairs it against the far ring by parameter.
-        const int fi = fanAt[mesh.fromVertex(h)];
-        if (fi >= 0) {
-            FanEnd& fe = fans[static_cast<size_t>(fi)];
-            for (size_t i = 0; i < fe.ring.size(); ++i) {
-                ring.push_back(fanEntryVertex(fi, static_cast<int>(i)));
-                params.push_back(fe.ring[i].u);
-            }
-            continue;
-        }
-
-        std::vector<Vec3> pts;
-        sampleArc(arc, p0, p1, axis, segments, pts);
-
-        ring.push_back(crossIdx[h]);
-        params.push_back(0.0);
-        for (size_t i = 1; i + 1 < pts.size(); ++i) {
-            ring.push_back(soup.vertex(
-                trimToEnd(mesh.fromVertex(h), pts[i]),
-                nameId(salt, IdRole::Ring, mesh.edgeId(h),
-                       mesh.verts[mesh.fromVertex(h)].id, i)));
-            params.push_back(static_cast<Real>(i) / segments);
-        }
-        ring.push_back(crossIdx[far]);
-        params.push_back(1.0);
     }
 
     // One strip per beveled edge, emitted once per twin pair. The two end
@@ -2031,7 +2128,8 @@ static bool filletEdgesDirect(Mesh& mesh, const FilletSpec& spec) {
 
         // A fan end has no cap: the trim curve is spliced straight into the
         // clipped faces, and the strip ends on it. Nothing is left open.
-        if (fanAt[v] >= 0) continue;
+        // An end with a single fillet ending at a face is directly spliced into that face above.
+        if (fanAt[v] >= 0 || filletsAt[v] == 1) continue;
         if (filletsAt[v] == 2 && sharpAt[v] == 0) continue;
 
         // Running counters so every point and face a patch emits gets its own
@@ -2649,8 +2747,18 @@ static bool filletEdgesDirect(Mesh& mesh, const FilletSpec& spec) {
             }
             int unpaired = 0, dupes = 0;
             for (const auto& [k,n] : dir) {
-                if (n > 1) ++dupes;
-                if (!dir.count({k.second, k.first})) ++unpaired;
+                if (n > 1) {
+                    ++dupes;
+                    const Vec3 a = soup.positions[k.first], b = soup.positions[k.second];
+                    std::fprintf(stderr, "   dupe: %u(%.2f,%.2f,%.2f) -> %u(%.2f,%.2f,%.2f) count=%d\n",
+                                 k.first, a.x, a.y, a.z, k.second, b.x, b.y, b.z, n);
+                }
+                if (!dir.count({k.second, k.first})) {
+                    ++unpaired;
+                    const Vec3 a = soup.positions[k.first], b = soup.positions[k.second];
+                    std::fprintf(stderr, "   unpaired: %u(%.2f,%.2f,%.2f) -> %u(%.2f,%.2f,%.2f)\n",
+                                 k.first, a.x, a.y, a.z, k.second, b.x, b.y, b.z);
+                }
             }
             std::fprintf(stderr, "[bevel] rebuild refused: %zu verts %zu faces, "
                          "%d unpaired, %d duplicated\n",
@@ -2732,201 +2840,241 @@ int mergeCoplanarFaces(Mesh& mesh, Real toleranceDegrees) {
     std::vector<Index> fv;
 
     for (const PlaneGroup& g : groups) {
-        auto keepOriginals = [&] {
-            for (Index f : g.faces) {
-                if (emitted[f]) continue;
-                emitted[f] = true;
-                soup.face(faceLoop(mesh, f), mesh.faces[f].id);
-            }
-        };
+        if (g.faces.empty()) continue;
 
-        if (g.faces.size() == 1) { keepOriginals(); continue; }
+        // Partition the faces of this plane group into connected components of
+        // edge-adjacent faces. Multiple disjoint islands in the same geometric
+        // plane (e.g. separate pillar tops, step sills, or pocket floors) must
+        // be merged independently rather than tangled into one multi-loop region.
+        std::unordered_set<Index> groupFaceSet(g.faces.begin(), g.faces.end());
+        std::vector<std::vector<Index>> components;
+        std::unordered_set<Index> visited;
 
-        // Directed edges, with the interior ones cancelled.
-        std::map<std::pair<Index, Index>, int> dir;
         for (Index f : g.faces) {
-            mesh.faceVertices(f, fv);
-            for (size_t i = 0; i < fv.size(); ++i)
-                ++dir[{fv[i], fv[(i + 1) % fv.size()]}];
-        }
-        std::map<Index, std::vector<Index>> outgoing;
-        bool ambiguous = false;
-        for (const auto& [e, n] : dir) {
-            if (n != 1) { ambiguous = true; break; }
-            if (dir.count({e.second, e.first})) continue;   // interior: cancels
-            outgoing[e.first].push_back(e.second);
-        }
-        // A vertex the outline passes through twice cannot be chained without
-        // guessing which way to go, so that region is left as it came.
-        for (const auto& [from, to] : outgoing)
-            if (to.size() != 1) { ambiguous = true; break; }
-        if (ambiguous || outgoing.empty()) { keepOriginals(); continue; }
+            if (visited.count(f)) continue;
+            std::vector<Index> comp;
+            std::vector<Index> stack{f};
+            visited.insert(f);
 
-        // Chain the outline into closed loops.
-        std::vector<std::vector<Index>> loops;
-        std::set<Index> used;
-        bool broken = false;
-        for (const auto& [from, to] : outgoing) {
-            if (used.count(from)) continue;
-            std::vector<Index> loop;
-            Index at = from;
-            while (!used.count(at)) {
-                used.insert(at);
-                loop.push_back(at);
-                auto it = outgoing.find(at);
-                if (it == outgoing.end()) { broken = true; break; }
-                at = it->second.front();
+            while (!stack.empty()) {
+                Index cur = stack.back();
+                stack.pop_back();
+                comp.push_back(cur);
+
+                const Index start = mesh.faces[cur].halfedge;
+                Index h = start;
+                do {
+                    const Index tw = mesh.halfedges[h].twin;
+                    if (tw != kInvalid) {
+                        const Index nf = mesh.halfedges[tw].face;
+                        if (nf != kInvalid && groupFaceSet.count(nf) && !visited.count(nf)) {
+                            visited.insert(nf);
+                            stack.push_back(nf);
+                        }
+                    }
+                    h = mesh.halfedges[h].next;
+                } while (h != start && h != kInvalid);
             }
-            if (broken || at != from || loop.size() < 3) { broken = true; break; }
-            loops.push_back(std::move(loop));
-        }
-        if (broken || loops.empty()) { keepOriginals(); continue; }
-
-        // Keep the name of the largest piece: it is the one the user is most
-        // likely to have selected, and the merged face is the same surface.
-        Index best = g.faces.front();
-        for (Index f : g.faces) if (mesh.faceArea(f) > mesh.faceArea(best)) best = f;
-
-        auto asSoup = [&](const std::vector<Index>& l) {
-            std::vector<uint32_t> out;
-            out.reserve(l.size());
-            for (Index v : l) out.push_back(static_cast<uint32_t>(v));
-            return out;
-        };
-
-        if (loops.size() == 1) {
-            soup.face(asSoup(loops[0]), mesh.faces[best].id);
-            for (Index f : g.faces) emitted[f] = true;
-            merged += static_cast<int>(g.faces.size()) - 1;
-            continue;
+            components.push_back(std::move(comp));
         }
 
-        // A region with a hole needs a face with a hole, and this mesh cannot
-        // hold one. It can hold two faces that share two edges, though, so cut
-        // the ring across in two places. That is two edges where the surface
-        // does not really turn -- against the dozens the fan had -- and it is
-        // the face a slot or a drilled hole leaves behind, which is the case
-        // that matters.
-        //
-        // Anything more tangled than one hole is left alone rather than guessed
-        // at.
-        Vec3 pu, pv;
-        planeBasis(g.normal, pu, pv);
-        auto flat = [&](Index vtx) {
-            const Vec3 p = mesh.verts[vtx].position;
-            return Vec2{dot(p, pu), dot(p, pv)};
-        };
-        auto areaOf = [&](const std::vector<Index>& l) {
-            Real s = 0.0;
-            for (size_t i = 0; i < l.size(); ++i) {
-                const Vec2 a = flat(l[i]), b = flat(l[(i + 1) % l.size()]);
-                s += a.x * b.y - b.x * a.y;
-            }
-            return s * 0.5;
-        };
-
-        int outerAt = -1, holeAt = -1;
-        bool tangled = loops.size() != 2;
-        for (size_t i = 0; !tangled && i < loops.size(); ++i)
-            ((areaOf(loops[i]) > 0.0) ? outerAt : holeAt) = static_cast<int>(i);
-        if (tangled || outerAt < 0 || holeAt < 0) { keepOriginals(); continue; }
-
-        const std::vector<Index>& O = loops[outerAt];
-        const std::vector<Index>& H = loops[holeAt];
-
-        // Two cuts, from opposite sides of the hole to whichever outer vertex
-        // is nearest. Opposite sides so the two halves are both substantial
-        // rather than one being a sliver.
-        auto nearestOuter = [&](Index h) {
-            size_t best2 = 0;
-            Real bd = 1e300;
-            for (size_t i = 0; i < O.size(); ++i) {
-                const Real d = lengthSq(mesh.verts[O[i]].position - mesh.verts[h].position);
-                if (d < bd) { bd = d; best2 = i; }
-            }
-            return best2;
-        };
-
-        if (H.size() < 3 || O.size() < 3) {
-            keepOriginals();
-            continue;
-        }
-
-        auto walk = [](const std::vector<Index>& l, size_t from, size_t to) {
-            std::vector<Index> out;
-            size_t i = from;
-            for (;;) {
-                out.push_back(l[i]);
-                if (i == to) break;
-                i = (i + 1) % l.size();
-            }
-            return out;
-        };
-
-        // The cuts must not cross the outline or each other, or the two halves
-        // would overlap. Cheaper to check than to repair.
-        auto simple = [&](const std::vector<Index>& l) {
-            const size_t n = l.size();
-            if (n < 3) return false;
-            auto seg = [&](size_t i, Vec2& a, Vec2& b) {
-                a = flat(l[i]); b = flat(l[(i + 1) % n]);
+        for (const std::vector<Index>& compFaces : components) {
+            auto keepCompOriginals = [&] {
+                for (Index f : compFaces) {
+                    if (emitted[f]) continue;
+                    emitted[f] = true;
+                    soup.face(faceLoop(mesh, f), mesh.faces[f].id);
+                }
             };
-            for (size_t i = 0; i < n; ++i) {
-                Vec2 a, b; seg(i, a, b);
-                for (size_t j = i + 1; j < n; ++j) {
-                    if (j == i || (j + 1) % n == i || (i + 1) % n == j) continue;
-                    Vec2 c, d; seg(j, c, d);
-                    auto side = [](Vec2 p, Vec2 q, Vec2 r) {
-                        return (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x);
-                    };
-                    const Real d1 = side(a, b, c), d2 = side(a, b, d);
-                    const Real d3 = side(c, d, a), d4 = side(c, d, b);
-                    if (((d1 > 1e-12 && d2 < -1e-12) || (d1 < -1e-12 && d2 > 1e-12)) &&
-                        ((d3 > 1e-12 && d4 < -1e-12) || (d3 < -1e-12 && d4 > 1e-12)))
-                        return false;
+
+            if (compFaces.size() == 1) { keepCompOriginals(); continue; }
+
+            // Directed edges, with the interior ones cancelled.
+            std::map<std::pair<Index, Index>, int> dir;
+            for (Index f : compFaces) {
+                mesh.faceVertices(f, fv);
+                for (size_t i = 0; i < fv.size(); ++i)
+                    ++dir[{fv[i], fv[(i + 1) % fv.size()]}];
+            }
+            std::map<Index, std::vector<Index>> outgoing;
+            bool ambiguous = false;
+            for (const auto& [e, n] : dir) {
+                if (n != 1) { ambiguous = true; break; }
+                if (dir.count({e.second, e.first})) continue;   // interior: cancels
+                outgoing[e.first].push_back(e.second);
+            }
+            // A vertex the outline passes through twice cannot be chained without
+            // guessing which way to go, so that region is left as it came.
+            for (const auto& [from, to] : outgoing)
+                if (to.size() != 1) { ambiguous = true; break; }
+            if (ambiguous || outgoing.empty()) { keepCompOriginals(); continue; }
+
+            // Chain the outline into closed loops.
+            std::vector<std::vector<Index>> loops;
+            std::set<Index> used;
+            bool broken = false;
+            for (const auto& [from, to] : outgoing) {
+                if (used.count(from)) continue;
+                std::vector<Index> loop;
+                Index at = from;
+                while (!used.count(at)) {
+                    used.insert(at);
+                    loop.push_back(at);
+                    auto it = outgoing.find(at);
+                    if (it == outgoing.end()) { broken = true; break; }
+                    at = it->second.front();
+                }
+                if (broken || at != from || loop.size() < 3) { broken = true; break; }
+                loops.push_back(std::move(loop));
+            }
+            if (broken || loops.empty()) { keepCompOriginals(); continue; }
+
+            // Keep the name of the largest piece: it is the one the user is most
+            // likely to have selected, and the merged face is the same surface.
+            Index best = compFaces.front();
+            for (Index f : compFaces) if (mesh.faceArea(f) > mesh.faceArea(best)) best = f;
+
+            auto asSoup = [&](const std::vector<Index>& l) {
+                std::vector<uint32_t> out;
+                out.reserve(l.size());
+                for (Index v : l) out.push_back(static_cast<uint32_t>(v));
+                return out;
+            };
+
+            if (loops.size() == 1) {
+                soup.face(asSoup(loops[0]), mesh.faces[best].id);
+                for (Index f : compFaces) emitted[f] = true;
+                merged += static_cast<int>(compFaces.size()) - 1;
+                continue;
+            }
+
+            // A region with a hole needs a face with a hole, and this mesh cannot
+            // hold one. It can hold two faces that share two edges, though, so cut
+            // the ring across in two places. That is two edges where the surface
+            // does not really turn -- against the dozens the fan had -- and it is
+            // the face a slot or a drilled hole leaves behind, which is the case
+            // that matters.
+            //
+            // Anything more tangled than one hole is left alone rather than guessed
+            // at.
+            Vec3 pu, pv;
+            planeBasis(g.normal, pu, pv);
+            auto flat = [&](Index vtx) {
+                const Vec3 p = mesh.verts[vtx].position;
+                return Vec2{dot(p, pu), dot(p, pv)};
+            };
+            auto areaOf = [&](const std::vector<Index>& l) {
+                Real s = 0.0;
+                for (size_t i = 0; i < l.size(); ++i) {
+                    const Vec2 a = flat(l[i]), b = flat(l[(i + 1) % l.size()]);
+                    s += a.x * b.y - b.x * a.y;
+                }
+                return s * 0.5;
+            };
+
+            int outerAt = -1, holeAt = -1;
+            bool tangled = loops.size() != 2;
+            for (size_t i = 0; !tangled && i < loops.size(); ++i)
+                ((areaOf(loops[i]) > 0.0) ? outerAt : holeAt) = static_cast<int>(i);
+            if (tangled || outerAt < 0 || holeAt < 0) { keepCompOriginals(); continue; }
+
+            const std::vector<Index>& O = loops[outerAt];
+            const std::vector<Index>& H = loops[holeAt];
+
+            // Two cuts, from opposite sides of the hole to whichever outer vertex
+            // is nearest. Opposite sides so the two halves are both substantial
+            // rather than one being a sliver.
+            auto nearestOuter = [&](Index h) {
+                size_t best2 = 0;
+                Real bd = 1e300;
+                for (size_t i = 0; i < O.size(); ++i) {
+                    const Real d = lengthSq(mesh.verts[O[i]].position - mesh.verts[h].position);
+                    if (d < bd) { bd = d; best2 = i; }
+                }
+                return best2;
+            };
+
+            if (H.size() < 3 || O.size() < 3) {
+                keepCompOriginals();
+                continue;
+            }
+
+            auto walk = [](const std::vector<Index>& l, size_t from, size_t to) {
+                std::vector<Index> out;
+                size_t i = from;
+                for (;;) {
+                    out.push_back(l[i]);
+                    if (i == to) break;
+                    i = (i + 1) % l.size();
+                }
+                return out;
+            };
+
+            // The cuts must not cross the outline or each other, or the two halves
+            // would overlap. Cheaper to check than to repair.
+            auto simple = [&](const std::vector<Index>& l) {
+                const size_t n = l.size();
+                if (n < 3) return false;
+                auto seg = [&](size_t i, Vec2& a, Vec2& b) {
+                    a = flat(l[i]); b = flat(l[(i + 1) % n]);
+                };
+                for (size_t i = 0; i < n; ++i) {
+                    Vec2 a, b; seg(i, a, b);
+                    for (size_t j = i + 1; j < n; ++j) {
+                        if (j == i || (j + 1) % n == i || (i + 1) % n == j) continue;
+                        Vec2 c, d; seg(j, c, d);
+                        auto side = [](Vec2 p, Vec2 q, Vec2 r) {
+                            return (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x);
+                        };
+                        const Real d1 = side(a, b, c), d2 = side(a, b, d);
+                        const Real d3 = side(c, d, a), d4 = side(c, d, b);
+                        if (((d1 > 1e-12 && d2 < -1e-12) || (d1 < -1e-12 && d2 > 1e-12)) &&
+                            ((d3 > 1e-12 && d4 < -1e-12) || (d3 < -1e-12 && d4 > 1e-12)))
+                            return false;
+                    }
+                }
+                return true;
+            };
+
+            Real bestDist = 1e300;
+            std::vector<Index> bestP1, bestP2;
+            bool foundCut = false;
+            const size_t hCount = H.size();
+
+            for (size_t offset = 0; offset < hCount; ++offset) {
+                const size_t hi0 = offset;
+                const size_t hi1 = (offset + hCount / 2) % hCount;
+                if (hi0 == hi1) continue;
+
+                const size_t oi0 = nearestOuter(H[hi0]);
+                const size_t oi1 = nearestOuter(H[hi1]);
+                if (oi0 == oi1) continue;
+
+                std::vector<Index> p1 = walk(O, oi0, oi1);
+                for (Index x : walk(H, hi1, hi0)) p1.push_back(x);
+                std::vector<Index> p2 = walk(O, oi1, oi0);
+                for (Index x : walk(H, hi0, hi1)) p2.push_back(x);
+
+                if (!simple(p1) || !simple(p2)) continue;
+
+                const Real d = lengthSq(mesh.verts[O[oi0]].position - mesh.verts[H[hi0]].position) +
+                               lengthSq(mesh.verts[O[oi1]].position - mesh.verts[H[hi1]].position);
+                if (d < bestDist) {
+                    bestDist = d;
+                    bestP1 = std::move(p1);
+                    bestP2 = std::move(p2);
+                    foundCut = true;
                 }
             }
-            return true;
-        };
 
-        Real bestDist = 1e300;
-        std::vector<Index> bestP1, bestP2;
-        bool foundCut = false;
-        const size_t hCount = H.size();
+            if (!foundCut) { keepCompOriginals(); continue; }
 
-        for (size_t offset = 0; offset < hCount; ++offset) {
-            const size_t hi0 = offset;
-            const size_t hi1 = (offset + hCount / 2) % hCount;
-            if (hi0 == hi1) continue;
-
-            const size_t oi0 = nearestOuter(H[hi0]);
-            const size_t oi1 = nearestOuter(H[hi1]);
-            if (oi0 == oi1) continue;
-
-            std::vector<Index> p1 = walk(O, oi0, oi1);
-            for (Index x : walk(H, hi1, hi0)) p1.push_back(x);
-            std::vector<Index> p2 = walk(O, oi1, oi0);
-            for (Index x : walk(H, hi0, hi1)) p2.push_back(x);
-
-            if (!simple(p1) || !simple(p2)) continue;
-
-            const Real d = lengthSq(mesh.verts[O[oi0]].position - mesh.verts[H[hi0]].position) +
-                           lengthSq(mesh.verts[O[oi1]].position - mesh.verts[H[hi1]].position);
-            if (d < bestDist) {
-                bestDist = d;
-                bestP1 = std::move(p1);
-                bestP2 = std::move(p2);
-                foundCut = true;
-            }
+            // Both halves need a name.
+            soup.face(asSoup(bestP1), mesh.faces[best].id);
+            soup.face(asSoup(bestP2), nameId(0, IdRole::Split, mesh.faces[best].id));
+            for (Index f : compFaces) emitted[f] = true;
+            merged += static_cast<int>(compFaces.size()) - 2;
         }
-
-        if (!foundCut) { keepOriginals(); continue; }
-
-        // Both halves need a name.
-        soup.face(asSoup(bestP1), mesh.faces[best].id);
-        soup.face(asSoup(bestP2), nameId(0, IdRole::Split, mesh.faces[best].id));
-        for (Index f : g.faces) emitted[f] = true;
-        merged += static_cast<int>(g.faces.size()) - 2;
     }
 
     // Faces too small to have a reliable plane were never grouped.
