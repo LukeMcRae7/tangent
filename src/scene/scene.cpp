@@ -74,6 +74,29 @@ ObjectId Scene::addPrimitive(PrimitiveKind kind, const PrimitiveSpec& spec, Vec3
     return id;
 }
 
+ObjectId Scene::addMesh(Mesh mesh, Vec3 position, const std::string& name) {
+    if (mesh.empty()) return kNoObject;
+    auto obj = std::make_unique<SceneObject>();
+    obj->spec.kind = PrimitiveKind::Custom;
+    obj->mesh = std::move(mesh);
+
+    Feature base;
+    base.kind = FeatureKind::BaseMesh;
+    base.bakedMesh = obj->mesh;
+    base.uid = nextFeatureUid_++;
+    obj->features.push_back(base);
+
+    obj->id = nextId_++;
+    obj->name = uniqueName(name.empty() ? "Object" : name);
+    obj->transform.position = position;
+    obj->mesh.buildRenderMesh(obj->render);
+    obj->localBounds = obj->mesh.bounds();
+
+    const ObjectId id = obj->id;
+    objects_.push_back(std::move(obj));
+    return id;
+}
+
 bool Scene::removeObject(ObjectId id) {
     auto it = std::find_if(objects_.begin(), objects_.end(),
                            [&](const auto& o) { return o->id == id; });

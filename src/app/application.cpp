@@ -270,12 +270,17 @@ void Application::handleViewportMouse() {
         }
     }
 
-    // Add primitive plane selection modal mode:
-    if (addPlaneState_.active) {
-        updateAddPlane(mouseInViewport());
+    // Interactive Object Creation & Sketching Tool:
+    if (createTool_.active()) {
+        createTool_.update(scene_, camera_, mouseInViewport(), !io.KeyCtrl);
         if (!io.WantCaptureMouse) {
-            if (ImGui::IsMouseClicked(ImGuiMouseButton_Left))      commitAddPlane();
-            else if (ImGui::IsMouseClicked(ImGuiMouseButton_Right)) abortAddPlane();
+            if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                createTool_.handleLeftClick(scene_, camera_, undo_);
+                if (!createTool_.active()) justFinishedModal_ = true;
+            } else if (ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+                createTool_.handleRightClick(camera_);
+                if (!createTool_.active()) justFinishedModal_ = true;
+            }
         }
         return;
     }
@@ -402,21 +407,6 @@ void Application::drawTransformReadout() {
         return;
     }
 
-    if (addPlaneState_.active) {
-        std::string pName = "XY Plane";
-        if (addPlaneState_.hoveredPlane == PlaneChoice::XZ) pName = "XZ Plane";
-        else if (addPlaneState_.hoveredPlane == PlaneChoice::YZ) pName = "YZ Plane";
-        else if (addPlaneState_.hoveredPlane == PlaneChoice::Face) pName = "Object Face";
-
-        std::string text = "Place " + std::string(primitiveName(addPlaneState_.kind)) + " on " + pName;
-        ImVec2 at(viewRect_.x + viewRect_.w * 0.5f, viewRect_.y + viewRect_.h * 0.5f);
-        if (ImGui::IsMousePosValid()) {
-            const ImVec2 m = ImGui::GetIO().MousePos;
-            at = ImVec2(m.x + 20.0f, m.y - 34.0f);
-        }
-        drawReadout(text, at.x, at.y, /*emphasise=*/true);
-        return;
-    }
 
     if (!tool_.active()) return;
     const std::string text = tool_.statusText();
@@ -579,26 +569,24 @@ void Application::handleShortcuts() {
         return;
     }
 
-    if (addPlaneState_.active) {
-        if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) { abortAddPlane(); return; }
-        if (ImGui::IsKeyPressed(ImGuiKey_Enter, false) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false)) {
-            commitAddPlane();
+    if (createTool_.active()) {
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) { createTool_.cancel(camera_); return; }
+        if (ImGui::IsKeyPressed(ImGuiKey_Enter, false) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false) ||
+            ImGui::IsKeyPressed(ImGuiKey_Space, false)) {
+            createTool_.handleKey(13, io.KeyShift, io.KeyCtrl, camera_);
             return;
         }
         if (ImGui::IsKeyPressed(ImGuiKey_1, false) || ImGui::IsKeyPressed(ImGuiKey_Keypad1, false)) {
-            addPlaneState_.hoveredPlane = PlaneChoice::XY;
-            addPlaneState_.planeNormal = Vec3{0, 0, 1};
-            addPlaneState_.planePoint = Vec3{0, 0, 0};
-        }
-        if (ImGui::IsKeyPressed(ImGuiKey_2, false) || ImGui::IsKeyPressed(ImGuiKey_Keypad2, false)) {
-            addPlaneState_.hoveredPlane = PlaneChoice::XZ;
-            addPlaneState_.planeNormal = Vec3{0, 1, 0};
-            addPlaneState_.planePoint = Vec3{0, 0, 0};
+            createTool_.handleKey('1', io.KeyShift, io.KeyCtrl, camera_);
+            return;
         }
         if (ImGui::IsKeyPressed(ImGuiKey_3, false) || ImGui::IsKeyPressed(ImGuiKey_Keypad3, false)) {
-            addPlaneState_.hoveredPlane = PlaneChoice::YZ;
-            addPlaneState_.planeNormal = Vec3{1, 0, 0};
-            addPlaneState_.planePoint = Vec3{0, 0, 0};
+            createTool_.handleKey('3', io.KeyShift, io.KeyCtrl, camera_);
+            return;
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_7, false) || ImGui::IsKeyPressed(ImGuiKey_Keypad7, false)) {
+            createTool_.handleKey('7', io.KeyShift, io.KeyCtrl, camera_);
+            return;
         }
         return;
     }
@@ -958,7 +946,7 @@ void Application::filletSelectedEdges() {
 }
 
 void Application::beginFillet() {
-    if (tool_.active() || filletTool_.active || addPlaneState_.active) return;
+    if (tool_.active() || filletTool_.active || createTool_.active()) return;
 
     const ObjectId id = scene_.contextObject();
     SceneObject* obj = scene_.find(id);
@@ -1135,156 +1123,8 @@ void Application::abortFillet() {
 }
 
 void Application::beginAddPrimitivePrompt(PrimitiveKind kind) {
-    if (tool_.active() || filletTool_.active) return;
-    addPlaneState_.active = true;
-    addPlaneState_.kind = kind;
-    addPlaneState_.hoveredPlane = PlaneChoice::XY;
-    addPlaneState_.planePoint = Vec3{0, 0, 0};
-    addPlaneState_.planeNormal = Vec3{0, 0, 1};
-    addPlaneState_.faceObject = kNoObject;
-    addPlaneState_.faceIndex = kInvalid;
-}
-
-void Application::updateAddPlane(Vec2 cursor) {
-    if (!addPlaneState_.active) return;
-    const Ray ray = camera_.rayThroughPixel(cursor.x, cursor.y);
-
-    const RayHit hit = scene_.raycast(ray);
-    if (hit.hit() && hit.face != kInvalid) {
-        const SceneObject* o = scene_.find(hit.object);
-        if (o) {
-            addPlaneState_.hoveredPlane = PlaneChoice::Face;
-            addPlaneState_.planePoint = hit.point;
-            const Mat4 model = o->modelMatrix();
-            const Vec3 localN = o->mesh.faceNormal(hit.face);
-            addPlaneState_.planeNormal = normalize(transformVector(normalMatrix(model), localN));
-            addPlaneState_.faceObject = hit.object;
-            addPlaneState_.faceIndex = hit.face;
-            return;
-        }
-    }
-
-    addPlaneState_.faceObject = kNoObject;
-    addPlaneState_.faceIndex = kInvalid;
-
-    auto hitPlane = [&](Vec3 p0, Vec3 N, Vec3& outPt, float& t) {
-        const float denom = dot(ray.dir, N);
-        if (std::fabs(denom) < 1e-6f) return false;
-        t = dot(p0 - ray.origin, N) / denom;
-        if (t < 0.0f) return false;
-        outPt = ray.origin + ray.dir * t;
-        return true;
-    };
-
-    float tXY = 1e9f, tXZ = 1e9f, tYZ = 1e9f;
-    Vec3 pXY{}, pXZ{}, pYZ{};
-    const bool okXY = hitPlane({0, 0, 0}, {0, 0, 1}, pXY, tXY);
-    const bool okXZ = hitPlane({0, 0, 0}, {0, 1, 0}, pXZ, tXZ);
-    const bool okYZ = hitPlane({0, 0, 0}, {1, 0, 0}, pYZ, tYZ);
-
-    float bestT = 1e9f;
-    PlaneChoice bestChoice = PlaneChoice::XY;
-    Vec3 bestPt{0, 0, 0};
-    Vec3 bestNorm{0, 0, 1};
-
-    if (okXY && tXY < bestT) { bestT = tXY; bestChoice = PlaneChoice::XY; bestPt = pXY; bestNorm = {0, 0, 1}; }
-    if (okXZ && tXZ < bestT) { bestT = tXZ; bestChoice = PlaneChoice::XZ; bestPt = pXZ; bestNorm = {0, 1, 0}; }
-    if (okYZ && tYZ < bestT) { bestT = tYZ; bestChoice = PlaneChoice::YZ; bestPt = pYZ; bestNorm = {1, 0, 0}; }
-
-    addPlaneState_.hoveredPlane = bestChoice;
-    addPlaneState_.planePoint = bestPt;
-    addPlaneState_.planeNormal = bestNorm;
-}
-
-void Application::commitAddPlane() {
-    if (!addPlaneState_.active) return;
-    justFinishedModal_ = true;
-    const PrimitiveKind kind = addPlaneState_.kind;
-    const Vec3 pt = addPlaneState_.planePoint;
-    const Vec3 norm = addPlaneState_.planeNormal;
-    addPlaneState_.active = false;
-
-    PrimitiveSpec spec;
-    spec.kind = kind;
-    const ObjectId id = scene_.addPrimitive(kind, spec, pt);
-    if (id == kNoObject) return;
-
-    SceneObject* obj = scene_.find(id);
-    if (obj) {
-        const Quat q = Quat::fromTo(Vec3{0, 0, 1}, norm);
-        obj->transform.rotation = q;
-        Real offset = 0.0;
-        switch (kind) {
-            case PrimitiveKind::Box: offset = obj->spec.box.height * 0.5; break;
-            case PrimitiveKind::Cylinder: offset = obj->spec.cylinder.height * 0.5; break;
-            case PrimitiveKind::Cone: offset = obj->spec.cone.height * 0.5; break;
-            case PrimitiveKind::Sphere: offset = obj->spec.sphere.radius; break;
-            case PrimitiveKind::Torus: offset = obj->spec.torus.minorRadius; break;
-            default: offset = 0.0; break;
-        }
-        obj->transform.position = pt + norm * offset;
-        scene_.select(id);
-        undo_.push(ExistenceCommand::forCreate(scene_, {id}));
-    }
-}
-
-void Application::abortAddPlane() {
-    if (!addPlaneState_.active) return;
-    justFinishedModal_ = true;
-    addPlaneState_.active = false;
-}
-
-void Application::drawAddPlaneOverlay() {
-    if (!addPlaneState_.active) return;
-
-    const float sz = 25.0f;
-    const Vec4 activeCol = toVec4(palette::kBrand, 0.8f);
-
-    // XY plane
-    const Vec4 colXY = (addPlaneState_.hoveredPlane == PlaneChoice::XY) ? activeCol : toVec4(palette::kBrand, 0.3f);
-    renderer_.addLine({-sz, -sz, 0}, {sz, -sz, 0}, colXY);
-    renderer_.addLine({sz, -sz, 0}, {sz, sz, 0}, colXY);
-    renderer_.addLine({sz, sz, 0}, {-sz, sz, 0}, colXY);
-    renderer_.addLine({-sz, sz, 0}, {-sz, -sz, 0}, colXY);
-    renderer_.addTriangle({-sz, -sz, 0}, {sz, -sz, 0}, {sz, sz, 0}, toVec4(palette::kBrand, 0.06f));
-    renderer_.addTriangle({-sz, -sz, 0}, {sz, sz, 0}, {-sz, sz, 0}, toVec4(palette::kBrand, 0.06f));
-
-    // XZ plane
-    const Vec4 colXZ = (addPlaneState_.hoveredPlane == PlaneChoice::XZ) ? activeCol : toVec4(palette::kGridAxisY, 0.3f);
-    renderer_.addLine({-sz, 0, -sz}, {sz, 0, -sz}, colXZ);
-    renderer_.addLine({sz, 0, -sz}, {sz, 0, sz}, colXZ);
-    renderer_.addLine({sz, 0, sz}, {-sz, 0, sz}, colXZ);
-    renderer_.addLine({-sz, 0, sz}, {-sz, 0, -sz}, colXZ);
-    renderer_.addTriangle({-sz, 0, -sz}, {sz, 0, -sz}, {sz, 0, sz}, toVec4(palette::kGridAxisY, 0.06f));
-    renderer_.addTriangle({-sz, 0, -sz}, {sz, 0, sz}, {-sz, 0, sz}, toVec4(palette::kGridAxisY, 0.06f));
-
-    // YZ plane
-    const Vec4 colYZ = (addPlaneState_.hoveredPlane == PlaneChoice::YZ) ? activeCol : toVec4(palette::kTextDim, 0.3f);
-    renderer_.addLine({0, -sz, -sz}, {0, sz, -sz}, colYZ);
-    renderer_.addLine({0, sz, -sz}, {0, sz, sz}, colYZ);
-    renderer_.addLine({0, sz, sz}, {0, -sz, sz}, colYZ);
-    renderer_.addLine({0, -sz, sz}, {0, -sz, -sz}, colYZ);
-    renderer_.addTriangle({0, -sz, -sz}, {0, sz, -sz}, {0, sz, sz}, toVec4(palette::kTextDim, 0.06f));
-    renderer_.addTriangle({0, -sz, -sz}, {0, sz, sz}, {0, -sz, sz}, toVec4(palette::kTextDim, 0.06f));
-
-    if (addPlaneState_.hoveredPlane == PlaneChoice::Face && addPlaneState_.faceObject != kNoObject) {
-        const SceneObject* o = scene_.find(addPlaneState_.faceObject);
-        if (o && addPlaneState_.faceIndex < o->mesh.faceCount()) {
-            const RenderMesh& rm = o->render;
-            const Mat4 model = o->modelMatrix();
-            for (size_t i = 0; i < rm.triangleFace.size(); ++i) {
-                if (rm.triangleFace[i] != addPlaneState_.faceIndex) continue;
-                renderer_.addTriangle(
-                    transformPoint(model, rm.positions[rm.triangles[i * 3 + 0]]),
-                    transformPoint(model, rm.positions[rm.triangles[i * 3 + 1]]),
-                    transformPoint(model, rm.positions[rm.triangles[i * 3 + 2]]),
-                    toVec4(palette::kBrand, 0.45f));
-            }
-            renderer_.addLine(addPlaneState_.planePoint,
-                              addPlaneState_.planePoint + addPlaneState_.planeNormal * 10.0f,
-                              toVec4(palette::kBrand, 1.0f));
-        }
-    }
+    if (tool_.active() || filletTool_.active || createTool_.active()) return;
+    createTool_.start(kind);
 }
 
 // Folds `edges`, picked on the current mesh, into the fillet at the end of the
@@ -1926,6 +1766,11 @@ void Application::buildUi() {
     drawMeasurePanel(ui_);
     drawMeasureLabel();
     drawTransformReadout();
+    if (createTool_.active()) {
+        bool finished = false;
+        createTool_.drawHud(scene_, camera_, undo_, finished);
+        if (finished) justFinishedModal_ = true;
+    }
 
     if (openAddMenu_) {
         ImGui::OpenPopup("##addmenu");
@@ -2137,12 +1982,18 @@ int Application::run() {
             std::snprintf(buf, sizeof(buf), "Fillet  %.2f mm  (%d segments)   Wheel segments   type number   Click confirm   Esc cancel",
                           filletTool_.currentRadius, filletTool_.currentSegments);
             ui_.toolStatus = buf;
-        } else if (addPlaneState_.active) {
-            std::string pName = "XY Plane";
-            if (addPlaneState_.hoveredPlane == PlaneChoice::XZ) pName = "XZ Plane";
-            else if (addPlaneState_.hoveredPlane == PlaneChoice::YZ) pName = "YZ Plane";
-            else if (addPlaneState_.hoveredPlane == PlaneChoice::Face) pName = "Object Face";
-            ui_.toolStatus = "Select Origin Plane: " + pName + "   [1: XY, 2: XZ, 3: YZ, Click face] (Click to place, Esc cancel)";
+        } else if (createTool_.active()) {
+            if (createTool_.stage() == CreateStage::SelectPlane) {
+                ui_.toolStatus = "Select Plane: Click origin tile or object face [1: XZ, 3: YZ, 7: XY] (Esc cancel)";
+            } else if (createTool_.stage() == CreateStage::DrawProfile_Pt1) {
+                ui_.toolStatus = "Step 1: Click first point/center on plane (Esc cancel)";
+            } else if (createTool_.stage() == CreateStage::DrawProfile_Pt2) {
+                ui_.toolStatus = "Step 2: Move mouse to set dimensions, click to confirm (Esc cancel)";
+            } else if (createTool_.stage() == CreateStage::AdjustProfile) {
+                ui_.toolStatus = "Adjust: Drag edge handles or corner fillet handles, press Enter/OK to extrude (Esc cancel)";
+            } else if (createTool_.stage() == CreateStage::ExtrudeDepth) {
+                ui_.toolStatus = "Extrude: Move mouse to set depth (positive=solid/join, negative=cut), click to finish (Esc cancel)";
+            }
         } else if (tool_.active()) {
             ui_.toolStatus = tool_.statusText();
         } else {
@@ -2171,7 +2022,7 @@ int Application::run() {
         // Queued before the frame is drawn; the renderer flushes overlay lines
         // at the end of its pass.
         drawSelectionHighlights();
-        drawAddPlaneOverlay();
+        if (createTool_.active()) createTool_.drawOverlay(scene_, camera_, renderer_);
         measureResult_ = measure_.active() ? measure_.compute(scene_) : MeasureResult{};
         measure_.drawOverlay(renderer_, camera_, measureResult_);
         tool_.drawOverlay(renderer_, camera_);

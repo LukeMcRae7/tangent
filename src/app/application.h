@@ -2,6 +2,7 @@
 #pragma once
 
 #include "app/camera.h"
+#include "app/create_tool.h"
 #include "app/measure.h"
 #include "mesh/export_stl.h"
 #include "scene/serialize.h"
@@ -154,24 +155,9 @@ private:
     void commitFillet();
     void abortFillet();
 
-    // Origin plane selection when adding an object (Fusion 360 style)
-    enum class PlaneChoice { None, XY, XZ, YZ, Face };
-    struct AddPlaneState {
-        bool active = false;
-        PrimitiveKind kind = PrimitiveKind::Box;
-        PlaneChoice hoveredPlane = PlaneChoice::XY;
-        Vec3 planePoint{0, 0, 0};
-        Vec3 planeNormal{0, 0, 1};
-        ObjectId faceObject = kNoObject;
-        Index faceIndex = kInvalid;
-    };
-    AddPlaneState addPlaneState_;
+    CreateTool createTool_;
 
     void beginAddPrimitivePrompt(PrimitiveKind kind);
-    void updateAddPlane(Vec2 cursor);
-    void commitAddPlane();
-    void abortAddPlane();
-    void drawAddPlaneOverlay();
 
     bool justFinishedModal_ = false;
 

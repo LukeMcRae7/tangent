@@ -46,6 +46,7 @@ add_executable(tangent
   src/app/application.cpp
   src/app/camera.cpp
   src/app/transform_tool.cpp
+  src/app/create_tool.cpp
   src/app/measure.cpp
   src/app/undo.cpp
   src/mesh/halfedge.cpp
@@ -170,6 +171,16 @@ add_executable(test_io tests/test_io.cpp
 target_include_directories(test_io PRIVATE src)
 target_compile_options(test_io PRIVATE -Wall -Wextra)
 add_test(NAME io COMMAND test_io)
+
+add_executable(test_create_tool tests/test_create_tool.cpp
+  src/app/create_tool.cpp src/app/camera.cpp src/app/undo.cpp
+  src/scene/scene.cpp src/scene/feature.cpp src/mesh/boolean.cpp
+  src/mesh/health.cpp src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp
+  src/render/renderer.cpp src/render/shader.cpp src/render/gpu_mesh.cpp)
+target_include_directories(test_create_tool PRIVATE src ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/backends)
+target_link_libraries(test_create_tool PRIVATE imgui PkgConfig::EPOXY)
+target_compile_options(test_create_tool PRIVATE -Wall -Wextra -Wno-unused-parameter)
+add_test(NAME create_tool COMMAND test_create_tool)
 
 # Not a test: a stopwatch for the heavy paths. Run it by hand.
 add_executable(bench EXCLUDE_FROM_ALL tests/bench.cpp

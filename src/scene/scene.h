@@ -108,6 +108,7 @@ public:
     // ---- Contents --------------------------------------------------------
     ObjectId addPrimitive(PrimitiveKind kind, const PrimitiveSpec& spec = {},
                           Vec3 position = {});
+    ObjectId addMesh(Mesh mesh, Vec3 position = {}, const std::string& name = "Object");
     bool     removeObject(ObjectId id);
     ObjectId duplicateObject(ObjectId id);
 
