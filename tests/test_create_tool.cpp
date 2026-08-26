@@ -259,6 +259,74 @@ void testSection1_ProfileGeneration() {
         const double expA3 = 0.5 * 64.0 * 3600.0 * std::sin(kTwoPi / 64.0);
         check(nearRel(polygonArea2D(c3), expA3, 0.001), "64-gon offset circle area exact");
     }
+
+    // 1.4 Individual Corner Fillets & Selective Edge Fillets
+    {
+        const Real W = 40.0, H = 30.0;
+
+        // One corner only: Corner 0 (Bottom-Right) with r = 5.0 mm
+        {
+            const Real r[4] = {5.0, 0.0, 0.0, 0.0};
+            std::vector<Vec2> p = CreateTool::makeRectPolygon({0, 0}, {W, H}, r, 8);
+            check(p.size() > 4, "single corner filleted poly generated");
+            const double expectedArea = (W * H) - (1.0 - kPi * 0.25) * 25.0;
+            check(nearRel(polygonArea2D(p), expectedArea, 0.01), "single corner fillet area exact");
+
+            Mesh prism;
+            bool ok = CreateTool::makePrismMesh(p, {0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {0, 0, 1}, 0.0, 20.0, prism);
+            check(ok, "single corner prism generated");
+            expectSolid(prism, "single corner filleted prism");
+            check(nearRel(volumeOf(prism), expectedArea * 20.0, 0.01), "single corner filleted prism volume exact");
+        }
+
+        // Two corners on top edge: Corner 1 (TR) and Corner 2 (TL) with r = 6.0 mm
+        {
+            const Real r[4] = {0.0, 6.0, 6.0, 0.0};
+            std::vector<Vec2> p = CreateTool::makeRectPolygon({0, 0}, {W, H}, r, 8);
+            const double expectedArea = (W * H) - 2.0 * (1.0 - kPi * 0.25) * 36.0;
+            check(nearRel(polygonArea2D(p), expectedArea, 0.01), "two corner edge fillet area exact");
+
+            Mesh prism;
+            bool ok = CreateTool::makePrismMesh(p, {0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {0, 0, 1}, 0.0, 15.0, prism);
+            check(ok, "two corner edge prism generated");
+            expectSolid(prism, "two corner edge filleted prism");
+        }
+
+        // All 4 distinct corner radii: r0=2.0, r1=4.0, r2=6.0, r3=8.0
+        {
+            const Real r[4] = {2.0, 4.0, 6.0, 8.0};
+            std::vector<Vec2> p = CreateTool::makeRectPolygon({0, 0}, {W, H}, r, 8);
+            const double sumR2 = 4.0 + 16.0 + 36.0 + 64.0; // 120
+            const double expectedArea = (W * H) - (1.0 - kPi * 0.25) * sumR2;
+            check(nearRel(polygonArea2D(p), expectedArea, 0.01), "4 distinct corner radii area exact");
+
+            Mesh prism;
+            bool ok = CreateTool::makePrismMesh(p, {0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {0, 0, 1}, 0.0, 10.0, prism);
+            check(ok, "4 distinct corner radii prism generated");
+            expectSolid(prism, "4 distinct corner radii prism");
+            check(nearRel(volumeOf(prism), expectedArea * 10.0, 0.01), "4 distinct corner radii prism volume exact");
+        }
+    }
+
+    // 1.5 Fillet Radius Measured From Mouse Distance
+    {
+        const Vec2 cornerUV{40.0, 0.0}; // Corner 0 (Bottom-Right)
+
+        // Mouse directly on corner -> 0 fillet
+        const Vec2 mouseOnCorner = cornerUV;
+        const Real dist0 = length(mouseOnCorner - cornerUV);
+        check(near(dist0, 0.0), "mouse on corner creates 0 fillet distance");
+
+        // Mouse 6 mm away in +X direction -> 6mm fillet
+        const Vec2 mouseRight = cornerUV + Vec2{6.0, 0.0};
+        const Real dist6 = length(mouseRight - cornerUV);
+        check(near(dist6, 6.0), "mouse 6mm away in +X creates 6mm fillet distance");
+
+        // Mouse 8 mm away diagonally in (-X, -Y) direction -> 8mm fillet
+        const Vec2 mouseDiag = cornerUV + Vec2{-4.8, -6.4};
+        const Real dist8 = length(mouseDiag - cornerUV);
+        check(near(dist8, 8.0), "mouse 8mm away in diagonal creates 8mm fillet distance");
+    }
 }
 
 // ===========================================================================
@@ -877,6 +945,69 @@ void testSection8_SceneLifecycleAndTransforms() {
         check(near(volumeOf(baseObj->mesh), 64000.0), "undo restores uncut transformed box volume");
         undo.redo(scene);
         check(near(volumeOf(baseObj->mesh), expVol), "redo restores pocket cut volume");
+    }
+
+    // 8.4 Standalone Solid with Single Corner Fillet in Scene
+    {
+        Scene scene;
+        Camera camera;
+        UndoStack undo;
+
+        CreateTool tool;
+        tool.start(PrimitiveKind::Box);
+        tool.setHoveredPlane(PlaneChoice::XY, {0, 0, 0}, {0, 0, 1});
+        tool.commitPlaneSelection(camera);
+
+        const Real r[4] = {6.0, 0.0, 0.0, 0.0}; // Corner 0 only filleted
+        tool.setProfileRect({-20, -15}, {20, 15}, r);
+        tool.setExtrudeDepth(20.0);
+        tool.setStage(CreateStage::ExtrudeDepth);
+
+        bool finished = tool.finishCreation(scene, camera, undo);
+        check(finished, "finishCreation on single-corner filleted box succeeds");
+        check(scene.objectCount() == 1, "scene contains single-corner filleted box");
+
+        ObjectId id = scene.objects().front()->id;
+        SceneObject* obj = scene.find(id);
+        check(obj != nullptr, "single-corner filleted object found");
+        if (obj) {
+            expectSolid(obj->mesh, "single-corner filleted object solid");
+            const double expVol = (40.0 * 30.0 - (1.0 - kPi * 0.25) * 36.0) * 20.0;
+            check(nearRel(volumeOf(obj->mesh), expVol, 0.01), "single-corner filleted object volume exact");
+        }
+    }
+
+    // 8.5 Keyboard Shortcut Navigation (E for Extrude, F for Fillet, Enter)
+    {
+        Scene scene;
+        Camera camera;
+        UndoStack undo;
+
+        CreateTool tool;
+        tool.start(PrimitiveKind::Box);
+        check(tool.stage() == CreateStage::SelectPlane, "starts in SelectPlane");
+
+        // Key '7' selects Top (XY) plane
+        tool.handleKey('7', false, false, camera, scene, undo);
+        check(tool.stage() == CreateStage::DrawProfile_Pt1, "'7' advances to DrawProfile_Pt1");
+
+        // Key 'E' / Enter advances to Pt2
+        tool.handleKey('E', false, false, camera, scene, undo);
+        check(tool.stage() == CreateStage::DrawProfile_Pt2, "'E' advances to DrawProfile_Pt2");
+
+        // Key 'E' / Enter advances to AdjustProfile
+        tool.setProfileRect({0, 0}, {30, 20}, 0.0);
+        tool.handleKey('E', false, false, camera, scene, undo);
+        check(tool.stage() == CreateStage::AdjustProfile, "'E' advances to AdjustProfile");
+
+        // Key 'E' in AdjustProfile advances to ExtrudeDepth
+        tool.handleKey('E', false, false, camera, scene, undo);
+        check(tool.stage() == CreateStage::ExtrudeDepth, "'E' advances to ExtrudeDepth");
+
+        // Key 'E' in ExtrudeDepth finishes creation
+        tool.handleKey('E', false, false, camera, scene, undo);
+        check(tool.stage() == CreateStage::None, "'E' finishes creation");
+        check(scene.objectCount() == 1, "object created via E shortcuts");
     }
 }
 

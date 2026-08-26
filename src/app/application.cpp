@@ -275,8 +275,10 @@ void Application::handleViewportMouse() {
         createTool_.update(scene_, camera_, mouseInViewport(), !io.KeyCtrl);
         if (!io.WantCaptureMouse) {
             if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-                createTool_.handleLeftClick(scene_, camera_, undo_);
+                createTool_.handleMouseDown(mouseInViewport(), scene_, camera_, undo_);
                 if (!createTool_.active()) justFinishedModal_ = true;
+            } else if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+                createTool_.handleMouseUp(mouseInViewport(), camera_);
             } else if (ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
                 createTool_.handleRightClick(camera_);
                 if (!createTool_.active()) justFinishedModal_ = true;
@@ -572,20 +574,24 @@ void Application::handleShortcuts() {
     if (createTool_.active()) {
         if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) { createTool_.cancel(camera_); return; }
         if (ImGui::IsKeyPressed(ImGuiKey_Enter, false) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false) ||
-            ImGui::IsKeyPressed(ImGuiKey_Space, false)) {
-            createTool_.handleKey(13, io.KeyShift, io.KeyCtrl, camera_);
+            ImGui::IsKeyPressed(ImGuiKey_Space, false) || ImGui::IsKeyPressed(ImGuiKey_E, false)) {
+            createTool_.handleKey('E', io.KeyShift, io.KeyCtrl, camera_, scene_, undo_);
+            return;
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_F, false)) {
+            createTool_.handleKey('F', io.KeyShift, io.KeyCtrl, camera_, scene_, undo_);
             return;
         }
         if (ImGui::IsKeyPressed(ImGuiKey_1, false) || ImGui::IsKeyPressed(ImGuiKey_Keypad1, false)) {
-            createTool_.handleKey('1', io.KeyShift, io.KeyCtrl, camera_);
+            createTool_.handleKey('1', io.KeyShift, io.KeyCtrl, camera_, scene_, undo_);
             return;
         }
         if (ImGui::IsKeyPressed(ImGuiKey_3, false) || ImGui::IsKeyPressed(ImGuiKey_Keypad3, false)) {
-            createTool_.handleKey('3', io.KeyShift, io.KeyCtrl, camera_);
+            createTool_.handleKey('3', io.KeyShift, io.KeyCtrl, camera_, scene_, undo_);
             return;
         }
         if (ImGui::IsKeyPressed(ImGuiKey_7, false) || ImGui::IsKeyPressed(ImGuiKey_Keypad7, false)) {
-            createTool_.handleKey('7', io.KeyShift, io.KeyCtrl, camera_);
+            createTool_.handleKey('7', io.KeyShift, io.KeyCtrl, camera_, scene_, undo_);
             return;
         }
         return;
