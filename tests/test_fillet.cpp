@@ -937,6 +937,132 @@ int main() {
         std::printf("[holed_chains] successfully tested all %d tangent chains on holed body\n", chainCount);
     }
 
+    // ---- Filleting a body an earlier operation built ----------------------
+    //
+    // The suite used to fillet primitives and boolean results only, and never a
+    // body that came out of extrudeFaces -- which is most of them. That gap hid
+    // two separate failures, so both directions are pinned here.
+    {
+        // 1. A body carrying section lines rounds like any other.
+        //
+        // An extrude deliberately leaves the boundary of the previous end point
+        // behind, so a raised wall is two faces with a line between them. The
+        // fillet has to cope with that, and it did not: the vertex where two
+        // such lines met was one the face rewriter emitted no corner for, and
+        // *no* edge of the body would round at *any* radius.
+        Mesh box;
+        makeBox(box, {20.0, 20.0, 20.0});
+        Index top = kInvalid;
+        for (Index f = 0; f < box.faceCount(); ++f)
+            if (dot(box.faceNormal(f), Vec3{0, 0, 1}) > 0.99) top = f;
+        check(top != kInvalid, "found the top of the box");
+
+        Mesh raised = box;
+        check(extrudeFaces(raised, {top}, 6.0), "raise the top of a box");
+        check(raised.faceCount() == 10, "the raised box carries its section line");
+
+        int rounded = 0, tried = 0;
+        std::set<Index> seen;
+        for (Index he = 0; he < raised.halfedgeCount(); ++he) {
+            if (he > raised.halfedges[he].twin) continue;
+            const Index f1 = raised.halfedges[he].face;
+            const Index f2 = raised.halfedges[raised.halfedges[he].twin].face;
+            if (f1 == kInvalid || f2 == kInvalid) continue;
+            if (dot(raised.faceNormal(f1), raised.faceNormal(f2)) > 0.999) continue;
+            std::vector<Index> chain = extendTangentChain(raised, {he});
+            if (!seen.insert(*std::min_element(chain.begin(), chain.end())).second) continue;
+            ++tried;
+            Mesh m = raised;
+            FilletSpec spec;
+            spec.segments = 4;
+            for (Index e : chain) spec.edges.push_back({e, 1.0});
+            if (filletEdges(m, spec) && checkHealth(m).solid()) ++rounded;
+        }
+        check(tried == 12, "a raised box has twelve edges to round");
+        check(rounded == tried, "every edge of an extruded body can be rounded");
+        // The section line itself is flush, so it is not an edge to round and
+        // is not counted above -- but it is still there to be picked.
+        check(raised.faceCount() == 10, "and the section line is still there afterwards");
+        std::printf("[extruded_body] %d of %d edge chains round cleanly\n", rounded, tried);
+
+        // Two extrudes in a row is the case that was reported: the second one
+        // makes a vertex with two section lines meeting at it, and one of the
+        // edges arriving there is the concave inner corner of the L -- the
+        // hardest of the set, because the fillet ends against a wall that the
+        // first extrude had already divided in two.
+        Index side = kInvalid;
+        for (Index f = 0; f < raised.faceCount(); ++f)
+            if (dot(raised.faceNormal(f), Vec3{0, 1, 0}) > 0.99) side = f;
+        check(side != kInvalid, "found a wall of the raised box");
+
+        Mesh twice = raised;
+        check(extrudeFaces(twice, {side}, 14.0), "extrude a wall of the raised box");
+        expectSolid(twice, "twice-extruded body");
+
+        int rounded2 = 0, tried2 = 0;
+        std::set<Index> seen2;
+        for (Index he = 0; he < twice.halfedgeCount(); ++he) {
+            if (he > twice.halfedges[he].twin) continue;
+            const Index f1 = twice.halfedges[he].face;
+            const Index f2 = twice.halfedges[twice.halfedges[he].twin].face;
+            if (f1 == kInvalid || f2 == kInvalid) continue;
+            if (dot(twice.faceNormal(f1), twice.faceNormal(f2)) > 0.999) continue;
+            std::vector<Index> chain = extendTangentChain(twice, {he});
+            if (!seen2.insert(*std::min_element(chain.begin(), chain.end())).second) continue;
+            ++tried2;
+            Mesh m = twice;
+            FilletSpec spec;
+            spec.segments = 4;
+            for (Index e : chain) spec.edges.push_back({e, 1.0});
+            if (filletEdges(m, spec) && checkHealth(m).solid()) ++rounded2;
+        }
+        check(tried2 > 0, "the twice-extruded body has edges to round");
+        check(rounded2 == tried2, "every edge still rounds after a second extrude");
+        std::printf("[extruded_twice] %d of %d edge chains round cleanly\n", rounded2, tried2);
+    }
+
+    {
+        // 2. Seams the extrude no longer makes still arrive from elsewhere -- a
+        // boolean shreds the faces it cuts, and its repair pass gives up on a
+        // face with two holes. The corner fallback is what keeps those bodies
+        // filletable at all; without it this count is zero.
+        Mesh box;
+        makeBox(box, {20.0, 20.0, 20.0});
+        Mesh cur = box;
+        bool cutsOk = true;
+        for (int i = 0; i < 2 && cutsOk; ++i) {
+            Mesh cutter;
+            makeBox(cutter, {5.0, 5.0, 30.0});
+            const Vec3 at{i ? 6.0 : -6.0, i ? 6.0 : -6.0, 0.0};
+            for (MeshVertex& v : cutter.verts) v.position += at;
+            Mesh out;
+            cutsOk = meshBoolean(cur, cutter, BooleanOp::Difference, out, 10 + i);
+            if (cutsOk) cur = std::move(out);
+        }
+        check(cutsOk, "two slots cut through a box");
+
+        int rounded = 0, tried = 0;
+        std::set<Index> seen;
+        for (Index he = 0; he < cur.halfedgeCount(); ++he) {
+            if (he > cur.halfedges[he].twin) continue;
+            const Index f1 = cur.halfedges[he].face;
+            const Index f2 = cur.halfedges[cur.halfedges[he].twin].face;
+            if (f1 == kInvalid || f2 == kInvalid) continue;
+            if (dot(cur.faceNormal(f1), cur.faceNormal(f2)) > 0.999) continue;
+            std::vector<Index> chain = extendTangentChain(cur, {he});
+            if (!seen.insert(*std::min_element(chain.begin(), chain.end())).second) continue;
+            ++tried;
+            Mesh m = cur;
+            FilletSpec spec;
+            spec.segments = 4;
+            for (Index e : chain) spec.edges.push_back({e, 1.0});
+            if (filletEdges(m, spec) && checkHealth(m).solid()) ++rounded;
+        }
+        check(tried > 0, "the slotted box has edges to round");
+        check(rounded > 0, "a boolean-seamed body can still be filleted");
+        std::printf("[boolean_seams] %d of %d edge chains round cleanly\n", rounded, tried);
+    }
+
     if (gaps)
         std::printf("\n%d known gaps, all from filleting against an existing "
                     "fillet (see the note above `check`).\n", gaps);

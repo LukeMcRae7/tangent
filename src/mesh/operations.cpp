@@ -632,9 +632,20 @@ bool extrudeFaces(Mesh& mesh, const std::vector<Index>& faces, Real distance,
         }
     }
 
-    // Default outward extrusion into empty space: direct topological extrusion
-    // preserves the boundary edges of the previous end point so every geometric edge
-    // remains a selectable, editable edge on the model.
+    // Default outward extrusion into empty space: sweep the region and wall in
+    // its boundary directly, with no boolean.
+    //
+    // The boundary of the previous end point stays as a section line, so the
+    // wall a raise grew out of and the wall it grew into remain two faces the
+    // user can pick and act on separately. That is deliberate, and it is what
+    // most modelling software does.
+    //
+    // It costs nothing structurally -- a section line is a selectable
+    // subdivision and nothing more. It cost a great deal by accident, because
+    // the fillet's face rewriter used to drop the corner where two of them met
+    // (see the corner fallback in filletEdgesDirect), which is what made a
+    // twice-extruded body unfilletable at any radius. That was the fillet's
+    // bug, not this one's, and the section line stays.
     Soup soup;
     soup.positions.reserve(mesh.verts.size() * 2);
     for (const MeshVertex& v : mesh.verts) soup.vertex(v.position, v.id);
@@ -2035,13 +2046,29 @@ static bool filletEdgesDirect(Mesh& mesh, const FilletSpec& spec, std::string* r
                             const bool outIs0 = outFace != kInvalid && dot(faceNormals[outFace], faceNormals[f0]) >= kFlatCos;
                             const bool outIs1 = outFace != kInvalid && dot(faceNormals[outFace], faceNormals[f1]) >= kFlatCos;
 
+                            // A section line at this corner is shared with a
+                            // face coplanar with this one, and that face has
+                            // nothing of the fillet to put here -- it emits the
+                            // original vertex. So this face has to pass through
+                            // that vertex too, on the section line's side of
+                            // whatever the fillet contributes, or the two stop
+                            // agreeing where their shared edge ends. That
+                            // disagreement is why a fillet ending against a wall
+                            // an extrude had divided came back unwatertight.
+                            auto keepBase = [&] {
+                                const uint32_t idx = baseVertex(v);
+                                if (loop.empty() || loop.back() != idx) loop.push_back(idx);
+                            };
+
                             if (isFlatEdge(p)) {
                                 if (outIs1) {
+                                    keepBase();
                                     for (size_t ri = 0; ri < ring.size(); ++ri) {
                                         const uint32_t idx = ring[ri];
                                         if (loop.empty() || loop.back() != idx) loop.push_back(idx);
                                     }
                                 } else if (outIs0) {
+                                    keepBase();
                                     if (loop.empty() || loop.back() != r0) loop.push_back(r0);
                                 }
                             } else if (isFlatEdge(h)) {
@@ -2050,8 +2077,10 @@ static bool filletEdgesDirect(Mesh& mesh, const FilletSpec& spec, std::string* r
                                         const uint32_t idx = ring[ri];
                                         if (loop.empty() || loop.back() != idx) loop.push_back(idx);
                                     }
+                                    keepBase();
                                 } else if (inIs0) {
                                     if (loop.empty() || loop.back() != r0) loop.push_back(r0);
+                                    keepBase();
                                 }
                             } else {
                                 if (inIs0 || outIs1) {

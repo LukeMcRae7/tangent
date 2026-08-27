@@ -47,6 +47,19 @@ static void expectSolid(const Mesh& m, const char* what, int genus = 0) {
     check(volumeOf(m) > 0.0, std::string(what) + ": inside out");
 }
 
+// Edges lying wholly in the plane z = zv -- the section line an extrude leaves
+// at the old end point, or the ring round the base of a boss.
+static int seamRing(const Mesh& m, float zv) {
+    int n = 0;
+    for (Index h = 0; h < m.halfedgeCount(); ++h) {
+        if (h >= m.halfedges[h].twin) continue;
+        const Vec3 p = m.verts[m.fromVertex(h)].position;
+        const Vec3 q = m.verts[m.halfedges[h].vertex].position;
+        if (std::fabs(p.z - zv) < 1e-3f && std::fabs(q.z - zv) < 1e-3f) ++n;
+    }
+    return n;
+}
+
 // Which face of a box points most strongly along `dir`.
 static Index faceFacing(const Mesh& m, Vec3 dir) {
     Index best = kInvalid;
@@ -75,23 +88,47 @@ int main() {
               "moved face still points up");
         check(std::fabs(m.faceCentroid(moved[0]).z - 20.0f) < 1e-3f,
               "moved face sits 10mm higher");
-        // An extrude always keeps the boundary edges of the previous end point,
-        // giving 5 base faces + 1 lifted top face + 4 side walls = 10 faces,
-        // with the boundary edges around the previous end point selectable.
-        check(m.faceCount() == 10, "extrude preserves 10 faces (5 base + 1 top + 4 walls)");
-        // Check that 4 edges exist at z = 10 (the previous end point)
-        int midEdges = 0;
-        for (Index h = 0; h < m.halfedgeCount(); ++h) {
-            if (h >= m.halfedges[h].twin) continue;
-            const Vec3 p = m.verts[m.fromVertex(h)].position;
-            const Vec3 q = m.verts[m.halfedges[h].vertex].position;
-            if (std::fabs(p.z - 10.0f) < 1e-3f && std::fabs(q.z - 10.0f) < 1e-3f) {
-                ++midEdges;
-            }
-        }
-        check(midEdges == 4, "boundary edges of the previous end point are kept (4 edges at z=10)");
-        std::printf("[extrude] volume %.1f, %d faces, %d boundary edges at seam\n",
-                    volumeOf(m), m.faceCount(), midEdges);
+        // An extrude leaves the boundary of the previous end point behind as a
+        // section line, so the wall it grew out of and the wall it grew into
+        // stay two faces the user can pick and act on separately: 5 base faces
+        // + 1 lifted top + 4 new walls = 10 faces, with a 4-edge ring at z = 10.
+        //
+        // That is all a section line is meant to do. It once did much more by
+        // accident -- a vertex where two of them met was one the fillet could
+        // not emit a corner for, and a fillet ending against a divided wall left
+        // the two halves disagreeing where their shared edge ended -- and
+        // between them those made a twice-extruded body unfilletable at any
+        // radius. Both were the fillet's bugs and are fixed there; see the
+        // extruded-body cases in test_fillet.cpp, which round every edge of a
+        // body carrying these lines.
+        check(m.faceCount() == 10, "extrude leaves a section line (5 base + 1 top + 4 walls)");
+        check(seamRing(m, 10.0f) == 4, "the section line at the previous end point is kept");
+        std::printf("[extrude] volume %.1f, %d faces, %d edges at the old end point\n",
+                    volumeOf(m), m.faceCount(), seamRing(m, 10.0f));
+    }
+
+    // A section line divides a flat wall. An edge the surface actually turns at
+    // is a different thing and must survive just as surely: a boss stands proud
+    // of the face it grew from, so the ring round its base is a real edge, and
+    // it is what the user reaches for to fillet the boss on.
+    {
+        Mesh m;
+        makeBox(m);
+        std::vector<Index> inner;
+        check(insetFaces(m, {faceFacing(m, {0, 0, 1})}, 4.0f, &inner), "inset for boss");
+        const int ringBefore = seamRing(m, 10.0f);
+
+        std::vector<Index> moved;
+        check(extrudeFaces(m, inner, 10.0f, &moved), "boss extrude succeeds");
+        expectSolid(m, "boss on a box");
+        check(std::fabs(volumeOf(m) - (8000.0 + 144.0 * 10.0)) < 1e-2,
+              "a 12x12 boss 10mm tall adds 1440mm^3");
+        check(seamRing(m, 10.0f) == ringBefore,
+              "the ring round the boss base is a real edge and is kept");
+        check(moved.size() == 1 && std::fabs(m.faceArea(moved[0]) - 144.0f) < 1e-2f,
+              "the boss top is reported and is still 12x12");
+        std::printf("[extrude] boss -> %d faces, %d edges round its base\n",
+                    m.faceCount(), seamRing(m, 10.0f));
     }
 
     // Extruding inward removes volume.
