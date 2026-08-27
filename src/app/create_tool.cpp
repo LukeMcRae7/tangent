@@ -297,6 +297,7 @@ Mesh CreateTool::buildCurrentSolid(Real depth) const {
 // ---------------------------------------------------------------------------
 
 void CreateTool::start(PrimitiveKind kind) {
+    lastError_.clear();
     kind_ = kind;
     stage_ = CreateStage::SelectPlane;
     hoveredPlane_ = PlaneChoice::XY;
@@ -860,9 +861,6 @@ bool CreateTool::finishCreation(Scene& scene, Camera& camera, UndoStack& undo) {
         }
 
         if (target) {
-            Mesh meshBefore = target->mesh;
-            PrimitiveSpec specBefore = target->spec;
-
             // Extend cutter slightly outside the entrance face to ensure clean, non-degenerate intersection
             Mesh cutter;
             const std::vector<Vec2> prof = getCurrentProfile();
@@ -872,47 +870,83 @@ bool CreateTool::finishCreation(Scene& scene, Camera& camera, UndoStack& undo) {
             const Mat4 toLocal = inverse(target->modelMatrix());
             for (MeshVertex& v : cutter.verts) v.position = transformPoint(toLocal, v.position);
 
-            Mesh result;
-            if (meshBoolean(target->mesh, cutter, BooleanOp::Difference, result)) {
-                mergeCoplanarFaces(result);
-                target->mesh = std::move(result);
-                target->spec.kind = PrimitiveKind::Custom;
-                target->refreshDerived();
-                undo.push(std::make_unique<MeshCommand>(target->id, std::move(meshBefore),
-                                                        target->mesh, specBefore, target->spec,
-                                                        "Extrude Cut"));
-                scene.select(target->id);
+            // The cut goes into the history, not over the mesh.
+            //
+            // Assigning target->mesh here left the feature chain still
+            // describing the body as it was before the cut, and featureCache
+            // holding that same stale body. Everything downstream trusted it:
+            // committing a fillet replayed the chain and either failed to find
+            // the edges it had just previewed, or found them on the uncut body
+            // and threw the cut away. Re-evaluating for any other reason -- a
+            // History checkbox, a dimension nudged in the Inspector -- deleted
+            // the cut outright.
+            const ObjectId targetId = target->id;
+            std::vector<Feature> chainBefore = target->features;
+
+            Feature f;
+            f.kind = FeatureKind::Boolean;
+            f.booleanOp = BooleanOp::Difference;
+            f.bakedMesh = std::move(cutter);
+
+            std::string why;
+            if (scene.addFeature(targetId, std::move(f), &why)) {
+                SceneObject* cutObj = scene.find(targetId);
+                undo.push(std::make_unique<FeatureCommand>(
+                    targetId, std::move(chainBefore), cutObj->features, "Extrude Cut"));
+                scene.select(targetId);
                 stage_ = CreateStage::None;
                 return true;
             }
+
+            // Refuse, rather than falling through to "add as a new object" and
+            // dropping the cutter into the scene as a solid.
+            lastError_ = why.empty() ? "Cut failed: no valid solid came out of it"
+                                     : "Cut failed: " + why;
+            stage_ = CreateStage::None;
+            return false;
         }
+
+        lastError_ = "Nothing there to cut into";
+        stage_ = CreateStage::None;
+        return false;
     }
 
     // Positive Extrude on an existing face (auto-join)
     if (depth > 0.0 && faceObject_ != kNoObject) {
         SceneObject* target = scene.find(faceObject_);
         if (target) {
-            Mesh meshBefore = target->mesh;
-            PrimitiveSpec specBefore = target->spec;
-
             // Transform solid into target object's local coordinate space
             const Mat4 toLocal = inverse(target->modelMatrix());
             Mesh localSolid = solid;
             for (MeshVertex& v : localSolid.verts) v.position = transformPoint(toLocal, v.position);
 
-            Mesh unionResult;
-            if (meshBoolean(target->mesh, localSolid, BooleanOp::Union, unionResult)) {
-                mergeCoplanarFaces(unionResult);
-                target->mesh = std::move(unionResult);
-                target->spec.kind = PrimitiveKind::Custom;
-                target->refreshDerived();
-                undo.push(std::make_unique<MeshCommand>(target->id, std::move(meshBefore),
-                                                        target->mesh, specBefore, target->spec,
-                                                        "Extrude Join"));
-                scene.select(target->id);
+            // As with the cut above: through the chain, so the history keeps
+            // describing the body the user can see.
+            const ObjectId targetId = target->id;
+            std::vector<Feature> chainBefore = target->features;
+
+            Feature f;
+            f.kind = FeatureKind::Boolean;
+            f.booleanOp = BooleanOp::Union;
+            f.bakedMesh = std::move(localSolid);
+
+            std::string why;
+            if (scene.addFeature(targetId, std::move(f), &why)) {
+                SceneObject* joined = scene.find(targetId);
+                undo.push(std::make_unique<FeatureCommand>(
+                    targetId, std::move(chainBefore), joined->features, "Extrude Join"));
+                scene.select(targetId);
                 stage_ = CreateStage::None;
                 return true;
             }
+
+            // The join is the operation that was asked for, so a failure is a
+            // failure -- not grounds for leaving a separate body floating in
+            // the same place, which is what falling through would do.
+            lastError_ = why.empty() ? "Join failed: no valid solid came out of it"
+                                     : "Join failed: " + why;
+            stage_ = CreateStage::None;
+            return false;
         }
     }
 

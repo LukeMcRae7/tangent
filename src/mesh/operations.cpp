@@ -14,9 +14,17 @@
 #include <functional>
 #include <utility>
 #include <unordered_set>
+#include <string>
 
 namespace tg {
 namespace {
+
+// Basis for measuring inside a plane.
+inline void planeBasis(Vec3 n, Vec3& u, Vec3& v) {
+    const Vec3 seed = std::fabs(n.z) < 0.9 ? Vec3{0, 0, 1} : Vec3{1, 0, 0};
+    u = normalize(cross(seed, n));
+    v = cross(n, u);
+}
 
 // Polygon soup under construction, with the vertex compaction every operation
 // needs at the end (faces get replaced, orphaning their old vertices).
@@ -317,16 +325,14 @@ Real signedArea(const std::vector<Vec3>& poly, Vec3 normal) {
 
 // Has the inset overshot the polygon's interior?
 //
-// Signed area alone does NOT answer this. Offsetting a square past its centre
-// shrinks it to a point and then re-expands it -- congruent, and still wound
-// counter-clockwise, so the area comes back positive and a sign test happily
-// accepts a face that has turned itself inside out. What actually changes is
-// that each edge reverses direction, so that is what we check, along with the
-// area to catch the degenerate moment at the centre.
+// Offsetting a shape past its centre can invert both axes simultaneously,
+// leaving positive signed area even though every edge has reversed direction.
+// We verify that no edge flips orientation (>90 degrees reversal) and the
+// resulting polygon retains positive signed area.
 bool insetIsValid(const std::vector<Vec3>& orig, const std::vector<Vec3>& inset,
                   Vec3 normal) {
     const size_t n = orig.size();
-    if (inset.size() != n) return false;
+    if (inset.size() != n || n < 3) return false;
     if (signedArea(inset, normal) <= 1e-6f) return false;
 
     for (size_t i = 0; i < n; ++i) {
@@ -334,7 +340,7 @@ bool insetIsValid(const std::vector<Vec3>& orig, const std::vector<Vec3>& inset,
         const Vec3 before = orig[j] - orig[i];
         const Vec3 after  = inset[j] - inset[i];
         if (lengthSq(after) < 1e-12f) return false;
-        if (dot(normalize(before), normalize(after)) <= 0.0f) return false;
+        if (lengthSq(before) > 1e-12f && dot(before, after) <= 0.0f) return false;
     }
     return true;
 }
@@ -1019,7 +1025,22 @@ static bool splitNonPlanarFaces(Mesh& mesh, const std::vector<bool>& beveled, Re
     return true;
 }
 
-static bool filletEdgesDirect(Mesh& mesh, const FilletSpec& spec);
+static bool filletEdgesDirect(Mesh& mesh, const FilletSpec& spec, std::string* reason);
+
+// A mesh that built but is not a solid, said in the terms the printability
+// check itself uses. This is the one failure with no message of its own: the
+// fillet ran to completion and the result is simply not printable.
+static std::string describeNotSolid(const MeshHealth& h) {
+    if (!h.watertight)
+        return "the rounded surface does not close (" + std::to_string(h.boundaryEdges) +
+               " open edge" + (h.boundaryEdges == 1 ? ")" : "s)");
+    if (h.selfIntersections > 0) return "the result would pass through itself";
+    if (h.degenerateFaces > 0)
+        return "the result has " + std::to_string(h.degenerateFaces) + " zero-area face" +
+               (h.degenerateFaces == 1 ? "" : "s");
+    if (h.volume <= 0.0) return "the result comes out inside out";
+    return "the result is not a printable solid";
+}
 
 // Faces that are not flat have no single plane for the ball to touch, so they
 // can be split into triangles first -- but only where that helps.
@@ -1037,15 +1058,22 @@ static bool filletEdgesDirect(Mesh& mesh, const FilletSpec& spec);
 // and keep the one that is a solid. Nothing is paid for it on a body whose
 // faces are already flat, which is nearly all of them: there is nothing to
 // split, so there is only ever one attempt.
-bool filletEdges(Mesh& mesh, const FilletSpec& spec) {
+bool filletEdges(Mesh& mesh, const FilletSpec& spec, std::string* reason) {
+    // The direct attempt is the representative one -- the split attempt below
+    // only runs on a body with non-planar faces -- so its reason is the one
+    // worth reporting if both fail.
+    std::string why;
+
     Mesh direct = mesh;
-    const bool directOk = filletEdgesDirect(direct, spec);
+    const bool directOk = filletEdgesDirect(direct, spec, &why);
     if (directOk) {
         const MeshHealth h = checkHealth(direct);
         if (h.solid()) {
             mesh = std::move(direct);
+            if (reason) reason->clear();
             return true;
         }
+        why = describeNotSolid(h);
         // A build that is not a solid is refused silently by default, which
         // makes this the one failure with no trace. Say what was wrong with it.
         if (std::getenv("TANGENT_BEVEL_DEBUG")) {
@@ -1108,24 +1136,33 @@ bool filletEdges(Mesh& mesh, const FilletSpec& spec) {
             again.edges.push_back({at, w.radius});
         }
 
-        if (found && filletEdgesDirect(flattened, again) && checkHealth(flattened).solid()) {
+        std::string flatWhy;
+        if (found && filletEdgesDirect(flattened, again, &flatWhy) &&
+            checkHealth(flattened).solid()) {
             mesh = std::move(flattened);
+            if (reason) reason->clear();
             return true;
         }
+        if (why.empty()) why = flatWhy;
     }
 
     // Neither way gave a solid, so neither is an answer. Handing back the one
     // that merely built would be handing back a part that looks right and will
     // not print, which is the one thing this must not do.
     (void)directOk;
+    if (reason) *reason = why;
     return false;
 }
 
-static bool filletEdgesDirect(Mesh& mesh, const FilletSpec& spec) {
+static bool filletEdgesDirect(Mesh& mesh, const FilletSpec& spec, std::string* reason) {
     const int segments = spec.segments;
     const ElementId salt = spec.salt;
     const bool dbg = std::getenv("TANGENT_BEVEL_DEBUG") != nullptr;
-    auto bail = [&](const char* why) { if (dbg) std::fprintf(stderr, "[bevel] %s\n", why); return false; };
+    auto bail = [&](const char* why) {
+        if (dbg) std::fprintf(stderr, "[bevel] %s\n", why);
+        if (reason) *reason = why;
+        return false;
+    };
     if (mesh.empty() || spec.edges.empty() || segments < 1) return bail("bad arguments");
 
     const Index heCount = mesh.halfedgeCount();
@@ -1420,9 +1457,13 @@ static bool filletEdgesDirect(Mesh& mesh, const FilletSpec& spec) {
             h = mesh.halfedges[mesh.halfedges[h].twin].next;
         } while (h != start);
 
-        // Every face across the end runs parallel to the edge, so the fillet
-        // never reaches one and there is nothing to trim against.
-        if (clear == kInvalid) return bail("fillet ends without a face to stop at");
+        // If no non-parallel end face exists at v (e.g. collinear edge or open end),
+        // the fillet terminates perpendicular to the edge direction at v.
+        if (clear == kInvalid) {
+            endFaceAt[v] = kInvalid;
+            endDirAt[v] = dir;
+            continue;
+        }
 
         // Taking the nearest is only defensible while the faces it stands in
         // for lie in nearly the same plane. Across a real crease -- the corner
@@ -1927,6 +1968,7 @@ static bool filletEdgesDirect(Mesh& mesh, const FilletSpec& spec) {
             const Index p = mesh.halfedges[h].prev;
             const Index v = mesh.fromVertex(h);
             const bool bevPrev = beveled[p], bevNext = beveled[h];
+            const size_t loopWas = loop.size();
 
             poly.push_back(posOf(v));
 
@@ -2035,6 +2077,25 @@ static bool filletEdgesDirect(Mesh& mesh, const FilletSpec& spec) {
                 if (loop.empty() || loop.back() != idx) loop.push_back(idx);
                 corner[h] = idx;
                 cornerPos[h] = soup.positions[idx];
+            }
+
+            // Every corner has to contribute a point. The two branches either
+            // side of this both decline when their edge is a flat seam, so a
+            // corner whose *both* edges are seams -- which is what an extrude
+            // leaves wherever three coplanar faces meet -- fell through and the
+            // face came out a corner short. Its coplanar neighbour, having one
+            // sharp edge there, kept its own, so the two no longer shared an
+            // edge and the result was not watertight. That failed for every
+            // edge of the body, at every radius, however far from the seam,
+            // and surfaced as "no room for a fillet".
+            //
+            // This is the narrow fix: emit the untouched vertex when nothing
+            // else claimed the corner. The wider one is not to carry the seams
+            // in the first place -- see mergeCoplanarFaces, which extrude does
+            // not call.
+            if (loop.size() == loopWas) {
+                const uint32_t idx = baseVertex(v);
+                if (loop.empty() || loop.back() != idx) loop.push_back(idx);
             }
 
             h = mesh.halfedges[h].next;
@@ -2785,13 +2846,6 @@ struct PlaneGroup {
     Real offset = 0.0;
     std::vector<Index> faces;
 };
-
-// Basis for measuring inside a plane.
-void planeBasis(Vec3 n, Vec3& u, Vec3& v) {
-    const Vec3 seed = std::fabs(n.z) < 0.9 ? Vec3{0, 0, 1} : Vec3{1, 0, 0};
-    u = normalize(cross(seed, n));
-    v = cross(n, u);
-}
 
 } // namespace
 

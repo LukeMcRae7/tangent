@@ -37,12 +37,18 @@
 //    - Boss-then-Cut (through-hole drilled through boss and base)
 //    - Orthogonal multi-face cuts on all sides of a body
 //    - Precision volume and topological invariant verifications
+//  Section 9: Cuts and joins belong to the feature history
+//    - The tool's cut/join land in the chain, not over obj->mesh
+//    - Re-evaluating for any reason preserves them
+//    - A fillet committed afterwards is neither refused nor loses the cut
+//    - A cut with nothing to cut into refuses instead of adding a body
 #include "app/create_tool.h"
 #include "app/undo.h"
 #include "mesh/boolean.h"
 #include "mesh/health.h"
 #include "mesh/operations.h"
 #include "mesh/primitives.h"
+#include "scene/feature.h"
 #include "scene/scene.h"
 
 #include <cmath>
@@ -1012,6 +1018,195 @@ void testSection8_SceneLifecycleAndTransforms() {
 }
 
 // ===========================================================================
+// SECTION 9: Cuts and Joins Belong to the Feature History
+//
+// The tool used to assign target->mesh and leave features/featureCache
+// describing the body as it was before the operation. Everything downstream
+// trusted the stale chain: re-evaluating deleted the cut, and committing a
+// fillet either failed to resolve edges it had just previewed or applied them
+// to the uncut body and discarded the cut. These check the chain, not just the
+// mesh, because the mesh looked right the whole time.
+// ===========================================================================
+void testSection9_EditsLandInTheHistory() {
+    std::printf("\n--- Section 9: Cuts & Joins Belong to the Feature History ---\n");
+
+    // Builds a 36x20x20 box sitting on the plate and cuts a 10x10x8 pocket into
+    // its top face with the create tool, the way the interface does.
+    auto pocketedBox = [](Scene& scene, Camera& camera, UndoStack& undo) {
+        PrimitiveSpec ps;
+        ps.kind = PrimitiveKind::Box;
+        ps.box.width = 36.0; ps.box.depth = 20.0; ps.box.height = 20.0;
+        const ObjectId id = scene.addPrimitive(PrimitiveKind::Box, ps, {0, 0, 10});
+
+        CreateTool tool;
+        tool.start(PrimitiveKind::Box);
+        tool.setHoveredPlane(PlaneChoice::Face, {0, 0, 20}, {0, 0, 1}, id, 1);
+        tool.commitPlaneSelection(camera);
+        tool.setProfileRect({-5, -5}, {5, 5}, 0.0);
+        tool.setExtrudeDepth(-8.0);
+        tool.setStage(CreateStage::ExtrudeDepth);
+        const bool ok = tool.finishCreation(scene, camera, undo);
+        return ok ? id : kNoObject;
+    };
+
+    const double kBox    = 36.0 * 20.0 * 20.0;              // 14400
+    const double kPocket = kBox - 10.0 * 10.0 * 8.0;        // 13600
+
+    // 9.1 The cut is a feature, and the cache agrees with what is on screen
+    {
+        Scene scene; Camera camera; UndoStack undo;
+        const ObjectId id = pocketedBox(scene, camera, undo);
+        check(id != kNoObject, "tool cut succeeds");
+        SceneObject* obj = scene.find(id);
+        check(obj != nullptr, "cut object present");
+        if (!obj) return;
+
+        check(near(volumeOf(obj->mesh), kPocket), "pocket volume is 13600 mm3");
+        expectSolid(obj->mesh, "pocketed box");
+        check(obj->features.size() == 2, "the chain has two features");
+        check(obj->features.size() == 2 &&
+              obj->features[1].kind == FeatureKind::Boolean &&
+              obj->features[1].booleanOp == BooleanOp::Difference,
+              "the cut is recorded as a Boolean difference");
+        check(obj->featureCache.size() == obj->features.size() &&
+              !obj->featureCache.empty() &&
+              near(volumeOf(obj->featureCache.back()), kPocket),
+              "featureCache matches the visible mesh");
+    }
+
+    // 9.2 Re-evaluating must not delete the cut
+    {
+        Scene scene; Camera camera; UndoStack undo;
+        const ObjectId id = pocketedBox(scene, camera, undo);
+        SceneObject* obj = scene.find(id);
+        if (!obj) { check(false, "cut object present for re-evaluation"); return; }
+
+        check(scene.reevaluate(id) && near(volumeOf(obj->mesh), kPocket),
+              "reevaluate keeps the pocket");
+        check(scene.rebuild(id) && near(volumeOf(obj->mesh), kPocket),
+              "rebuild keeps the pocket");
+
+        // The base is still a parametric box, so changing its width re-cuts.
+        obj->spec.box.width = 50.0;
+        check(scene.rebuild(id) &&
+              near(volumeOf(obj->mesh), 50.0 * 20.0 * 20.0 - 10.0 * 10.0 * 8.0),
+              "widening the box re-cuts the pocket");
+
+        undo.undo(scene);
+        check(near(volumeOf(obj->mesh), kBox), "undo restores the uncut box");
+        undo.redo(scene);
+        check(near(volumeOf(obj->mesh), kPocket), "redo restores the pocket");
+    }
+
+    // 9.3 A fillet committed on the cut body is neither refused nor destructive
+    {
+        Scene scene; Camera camera; UndoStack undo;
+        const ObjectId id = pocketedBox(scene, camera, undo);
+        SceneObject* obj = scene.find(id);
+        if (!obj) { check(false, "cut object present for filleting"); return; }
+
+        const Mesh before = obj->mesh;
+        int previewed = 0, refused = 0, lostTheCut = 0;
+
+        for (Index he = 0; he < before.halfedgeCount(); ++he) {
+            if (he > before.halfedges[he].twin) continue;
+            const Index fa = before.halfedges[he].face;
+            const Index fb = before.halfedges[before.halfedges[he].twin].face;
+            if (fa == kInvalid || fb == kInvalid) continue;
+            if (dot(before.faceNormal(fa), before.faceNormal(fb)) > 0.999) continue;
+
+            const std::vector<Index> edges = extendTangentChain(before, {he});
+
+            // What the interactive preview computes.
+            Mesh scratch = before;
+            FilletSpec spec;
+            spec.segments = 4;
+            for (Index e : edges) spec.edges.push_back({e, 1.0});
+            if (!filletEdges(scratch, spec)) continue;
+            ++previewed;
+
+            // What committing it computes: named edges, replayed chain.
+            const std::vector<Feature> chainBefore = obj->features;
+            const std::vector<Mesh> cacheBefore = obj->featureCache;
+
+            Feature f;
+            f.kind = FeatureKind::Bevel;
+            f.edges = nameEdges(before, edges);
+            f.radii.assign(f.edges.count(), 1.0);
+            f.width = 1.0;
+            f.segments = 4;
+
+            std::string why;
+            if (!scene.addFeature(id, std::move(f), &why)) {
+                ++refused;
+                std::printf("      chain at he %d refused on commit: %s\n", he, why.c_str());
+            } else if (volumeOf(obj->mesh) > kPocket + 400.0) {
+                // A fillet moves the volume by a few mm3 either way; the pocket
+                // vanishing is an 800 mm3 jump, so halfway is a safe line.
+                ++lostTheCut;
+                std::printf("      chain at he %d committed onto the uncut body (vol %.1f)\n",
+                            he, volumeOf(obj->mesh));
+            }
+
+            obj->features = chainBefore;
+            obj->featureCache = cacheBefore;
+            scene.reevaluate(id);
+        }
+
+        check(previewed > 0, "some fillets preview on the cut body");
+        check(refused == 0, "no previewed fillet is refused on commit");
+        check(lostTheCut == 0, "no committed fillet discards the cut");
+    }
+
+    // 9.4 A cut with nothing to cut into refuses rather than adding the cutter
+    {
+        Scene scene; Camera camera; UndoStack undo;
+        CreateTool tool;
+        tool.start(PrimitiveKind::Box);
+        tool.setHoveredPlane(PlaneChoice::XY, {0, 0, 0}, {0, 0, 1});
+        tool.commitPlaneSelection(camera);
+        tool.setProfileRect({-10, -10}, {10, 10}, 0.0);
+        tool.setExtrudeDepth(-10.0);
+        tool.setStage(CreateStage::ExtrudeDepth);
+
+        const bool ok = tool.finishCreation(scene, camera, undo);
+        check(!ok, "a cut into nothing is refused");
+        check(scene.objectCount() == 0, "the cutter is not added to the scene as a body");
+        check(!tool.takeError().empty(), "the refusal carries a reason");
+        check(tool.takeError().empty(), "reading the reason clears it");
+    }
+
+    // 9.5 A join lands in the chain too
+    {
+        Scene scene; Camera camera; UndoStack undo;
+        PrimitiveSpec ps;
+        ps.kind = PrimitiveKind::Box;
+        ps.box.width = ps.box.depth = ps.box.height = 20.0;
+        const ObjectId id = scene.addPrimitive(PrimitiveKind::Box, ps, {0, 0, 10});
+
+        CreateTool tool;
+        tool.start(PrimitiveKind::Box);
+        tool.setHoveredPlane(PlaneChoice::Face, {0, 0, 20}, {0, 0, 1}, id, 1);
+        tool.commitPlaneSelection(camera);
+        tool.setProfileRect({-5, -5}, {5, 5}, 0.0);
+        tool.setExtrudeDepth(10.0);
+        tool.setStage(CreateStage::ExtrudeDepth);
+        check(tool.finishCreation(scene, camera, undo), "tool join succeeds");
+
+        SceneObject* obj = scene.find(id);
+        if (!obj) { check(false, "joined object present"); return; }
+        const double expected = 20.0 * 20.0 * 20.0 + 10.0 * 10.0 * 10.0;
+        check(near(volumeOf(obj->mesh), expected), "boss volume is 9000 mm3");
+        check(obj->features.size() == 2 &&
+              obj->features[1].kind == FeatureKind::Boolean &&
+              obj->features[1].booleanOp == BooleanOp::Union,
+              "the join is recorded as a Boolean union");
+        check(scene.reevaluate(id) && near(volumeOf(obj->mesh), expected),
+              "reevaluate keeps the boss");
+    }
+}
+
+// ===========================================================================
 // MAIN ENTRY POINT
 // ===========================================================================
 int main() {
@@ -1027,6 +1222,7 @@ int main() {
     testSection6_NegativeExtrudeCuts();
     testSection7_MultiOperationSequences();
     testSection8_SceneLifecycleAndTransforms();
+    testSection9_EditsLandInTheHistory();
 
     std::printf("\n=========================================================\n");
     std::printf("  Test Suite Summary: %s\n", gFailures == 0 ? "ALL PASS" : "FAILED");

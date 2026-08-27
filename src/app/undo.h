@@ -86,9 +86,17 @@ private:
     PrimitiveSpec before_, after_;
 };
 
-// A mesh edit (extrude, inset, bevel...). Holds full before/after meshes:
+// A mesh edit that is not in the feature chain. Holds full before/after meshes:
 // operations rewrite connectivity wholesale, so there is no compact delta to
 // store, and a print-design mesh is small enough for this to be cheap.
+//
+// Nothing constructs one at present, and reaching for it should be a decision
+// rather than a convenience. It writes obj->mesh and leaves obj->features and
+// obj->featureCache describing the body as it was, so the next re-evaluation --
+// a feature toggled in the History panel, a dimension nudged in the Inspector,
+// a fillet committed -- rebuilds from the chain and discards the edit. Route
+// the operation through Scene::addFeature instead, or replace the chain with a
+// single BaseMesh feature holding the result.
 class MeshCommand : public Command {
 public:
     MeshCommand(ObjectId id, Mesh before, Mesh after,

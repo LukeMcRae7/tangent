@@ -273,7 +273,11 @@ bool evaluateFrom(std::vector<Feature>& features, size_t from,
             spec.edges.reserve(scratchEdges.size());
             for (size_t i = 0; i < scratchEdges.size(); ++i)
                 spec.edges.push_back({scratchEdges[i], f.radiusFor(i)});
-            if (!filletEdges(mesh, spec)) fail("radius too large for these edges");
+            // The radius is only one of the two dozen reasons a fillet refuses,
+            // and naming it unconditionally was wrong far more often than right.
+            std::string reason;
+            if (!filletEdges(mesh, spec, &reason))
+                fail(reason.empty() ? "the fillet could not be built" : reason.c_str());
             break;
         }
 

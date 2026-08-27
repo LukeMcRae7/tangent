@@ -202,7 +202,8 @@ bool Scene::reevaluateFrom(ObjectId id, size_t fromFeature) {
     return true;
 }
 
-bool Scene::addFeature(ObjectId id, Feature feature) {
+bool Scene::addFeature(ObjectId id, Feature feature, std::string* error) {
+    if (error) error->clear();
     SceneObject* obj = find(id);
     if (!obj) return false;
 
@@ -213,12 +214,14 @@ bool Scene::addFeature(ObjectId id, Feature feature) {
     Mesh next;
     if (!evaluateFrom(obj->features, obj->features.size() - 1,
                       obj->featureCache, next)) {
+        if (error) *error = obj->features.back().error;
         obj->features.pop_back();
         return false;
     }
     // A feature that evaluated but errored did nothing; keeping it would leave
     // a step in the timeline that has no effect and cannot be fixed.
     if (obj->features.back().errored) {
+        if (error) *error = obj->features.back().error;
         obj->features.pop_back();
         obj->featureCache.resize(obj->features.size());
         return false;

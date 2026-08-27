@@ -85,7 +85,13 @@ struct FilletSpec {
 //
 // Fails without modifying the mesh if a radius is too large for the geometry
 // -- that is, if any face would invert.
-bool filletEdges(Mesh& mesh, const FilletSpec& spec);
+//
+// `reason` gets a short phrase saying which of the two dozen ways this can fail
+// actually happened, so a caller has something to show besides "it didn't
+// work". Cleared on success. Without it the only trace is the TANGENT_BEVEL_DEBUG
+// stream, and the interface is left guessing -- which is how "radius too large"
+// came to be printed for failures that have nothing to do with the radius.
+bool filletEdges(Mesh& mesh, const FilletSpec& spec, std::string* reason = nullptr);
 
 // One radius for the whole selection.
 bool bevelEdges(Mesh& mesh, const std::vector<Index>& edges, Real width,

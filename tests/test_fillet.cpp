@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -853,6 +854,87 @@ int main() {
         check(h.boundaryEdges == 0, "arch hole rim fillet has no open boundary edges");
         std::printf("[arch_rim] arch rim edge fillet: %d faces, volume %.2f\n",
                     filletedArch.faceCount(), h.volume);
+    }
+
+    // ---- Multi-edge concave through-hole fillets with bridge seams ----
+    {
+        Mesh cube;
+        makeBox(cube, {40.0, 40.0, 40.0});
+        Mesh cutter;
+        makeBox(cutter, {16.0, 16.0, 50.0});
+        Mesh holed;
+        check(meshBoolean(cube, cutter, BooleanOp::Difference, holed), "cut square through-hole");
+        mergeCoplanarFaces(holed);
+
+        // Find all concave internal corner edges
+        std::vector<Index> concaveEdges;
+        for (Index h = 0; h < holed.halfedgeCount(); ++h) {
+            if (h > holed.halfedges[h].twin) continue;
+            const Index f1 = holed.halfedges[h].face;
+            const Index f2 = holed.halfedges[holed.halfedges[h].twin].face;
+            if (f1 == kInvalid || f2 == kInvalid) continue;
+            const Vec3 n1 = holed.faceNormal(f1);
+            const Vec3 n2 = holed.faceNormal(f2);
+            const Vec3 eDir = normalize(holed.verts[holed.halfedges[h].vertex].position -
+                                        holed.verts[holed.fromVertex(h)].position);
+            const Real c = dot(cross(n1, n2), eDir);
+            if (c < -0.5) concaveEdges.push_back(h);
+        }
+        check(concaveEdges.size() == 4, "found 4 concave through-hole edges");
+
+        // 1. Fillet 2 opposite concave corners
+        {
+            FilletSpec spec;
+            spec.edges.push_back({concaveEdges[0], 1.5});
+            spec.edges.push_back({concaveEdges[2], 1.5});
+            spec.segments = 4;
+            Mesh m = holed;
+            check(filletEdges(m, spec), "fillet 2 opposite concave corners");
+            const MeshHealth h = checkHealth(m);
+            check(h.solid(), "2-corner concave fillet is solid and watertight");
+            check(h.boundaryEdges == 0, "no open boundary edges");
+        }
+
+        // 2. Fillet all 4 concave corners simultaneously
+        {
+            FilletSpec spec;
+            for (Index e : concaveEdges) spec.edges.push_back({e, 2.0});
+            spec.segments = 4;
+            Mesh m = holed;
+            check(filletEdges(m, spec), "fillet all 4 concave corners");
+            const MeshHealth h = checkHealth(m);
+            check(h.solid(), "4-corner concave fillet is solid and watertight");
+            check(h.boundaryEdges == 0, "no open boundary edges");
+            std::printf("[holed_seams] 4-corner concave fillet: %d faces, volume %.2f\n",
+                        m.faceCount(), h.volume);
+        }
+
+        // 3. Fillet all tangent chains on the holed model
+        int chainCount = 0;
+        std::set<Index> testedChains;
+        for (Index he = 0; he < holed.halfedgeCount(); ++he) {
+            if (he > holed.halfedges[he].twin) continue;
+            const Index f1 = holed.halfedges[he].face;
+            const Index f2 = holed.halfedges[holed.halfedges[he].twin].face;
+            if (f1 == kInvalid || f2 == kInvalid) continue;
+            if (dot(holed.faceNormal(f1), holed.faceNormal(f2)) > 0.999) continue;
+
+            std::vector<Index> chain = extendTangentChain(holed, {he});
+            Index minEdge = *std::min_element(chain.begin(), chain.end());
+            if (testedChains.count(minEdge)) continue;
+            testedChains.insert(minEdge);
+
+            FilletSpec spec;
+            spec.segments = 4;
+            for (Index e : chain) spec.edges.push_back({e, 1.0});
+            Mesh m = holed;
+            check(filletEdges(m, spec), "tangent chain fillet on holed model");
+            const MeshHealth health = checkHealth(m);
+            check(health.solid(), "tangent chain fillet produces a solid mesh");
+            ++chainCount;
+        }
+        check(chainCount == 24, "tested all 24 distinct tangent chains");
+        std::printf("[holed_chains] successfully tested all %d tangent chains on holed body\n", chainCount);
     }
 
     if (gaps)

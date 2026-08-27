@@ -71,6 +71,12 @@ public:
     // Execute final creation (solid creation or boolean cut)
     bool finishCreation(Scene& scene, Camera& camera, UndoStack& undo);
 
+    // Why the last finishCreation refused, or empty. A cut that cannot be made
+    // has to say so: it used to fall through and add the cutter to the scene as
+    // a solid body, which looks like the tool working and is the opposite of
+    // what was asked for. Reading it clears it.
+    std::string takeError() { std::string e; e.swap(lastError_); return e; }
+
     // Configuration / Testing setters
     void setProfileRect(Vec2 p1, Vec2 p2, Real cornerRadius = 0.0) {
         pt1_ = p1;
@@ -168,6 +174,9 @@ private:
 
     // Numeric input buffer
     std::string typedValue_;
+
+    // Set by finishCreation when it refuses; drained by the application.
+    std::string lastError_;
 
     // Helpers
     void computePlaneBasis(Vec3 normal);

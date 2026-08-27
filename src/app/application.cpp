@@ -996,6 +996,10 @@ void Application::beginFillet() {
     // Test if any possible fillet would be accepted before presenting the interaction
     bool anyAccepted = false;
     Real initialWidth = 1.0;
+    // The reason from the last, smallest attempt. At 0.05 mm "too large" is
+    // ruled out, so whatever is left is the real obstruction -- which is what
+    // the user needs to hear, rather than "no room".
+    std::string why;
     const Real candidateRadii[] = {view_.bevelWidth, 1.0, 0.5, 0.2, 0.1, 0.05};
     for (Real r : candidateRadii) {
         if (r <= 0.0) continue;
@@ -1003,7 +1007,7 @@ void Application::beginFillet() {
         FilletSpec testSpec;
         testSpec.segments = std::max(1, view_.bevelSegments);
         for (Index e : edges) testSpec.edges.push_back({e, r});
-        if (filletEdges(testMesh, testSpec)) {
+        if (filletEdges(testMesh, testSpec, &why)) {
             anyAccepted = true;
             initialWidth = r;
             break;
@@ -1011,7 +1015,8 @@ void Application::beginFillet() {
     }
 
     if (!anyAccepted) {
-        setNotice("No room for a fillet on selected edges");
+        setNotice(why.empty() ? "No room for a fillet on selected edges"
+                              : "Cannot fillet these edges: " + why);
         return;
     }
 
@@ -1077,7 +1082,32 @@ void Application::updateFillet(bool snap) {
         filletTool_.currentRadius = newR;
         view_.bevelWidth = newR;
     } else {
-        filletTool_.currentRadius = newR;
+        // Clamp to the highest valid radius so the preview remains accurate and responsive
+        Real validR = 0.05;
+        Real lo = 0.05, hi = newR;
+        for (int iter = 0; iter < 6; ++iter) {
+            const Real mid = 0.5 * (lo + hi);
+            Mesh test = filletTool_.meshBefore;
+            FilletSpec testSpec;
+            testSpec.segments = filletTool_.currentSegments;
+            for (Index e : filletTool_.edges) testSpec.edges.push_back({e, mid});
+            if (filletEdges(test, testSpec)) {
+                validR = mid;
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        Mesh best = filletTool_.meshBefore;
+        FilletSpec bestSpec;
+        bestSpec.segments = filletTool_.currentSegments;
+        for (Index e : filletTool_.edges) bestSpec.edges.push_back({e, validR});
+        if (filletEdges(best, bestSpec)) {
+            obj->mesh = std::move(best);
+            obj->refreshDerived();
+            filletTool_.currentRadius = validR;
+            view_.bevelWidth = validR;
+        }
     }
 }
 
@@ -1103,14 +1133,18 @@ void Application::commitFillet() {
 
     std::vector<Feature> chainBefore = filletTool_.chainBefore;
     obj->features = filletTool_.chainBefore;
-    if (scene_.addFeature(id, std::move(f)) && editKeepsSolid(id)) {
+    std::string why;
+    if (scene_.addFeature(id, std::move(f), &why) && editKeepsSolid(id)) {
         undo_.push(std::make_unique<FeatureCommand>(id, std::move(chainBefore),
                                                     obj->features, "Fillet"));
     } else {
         obj->features = std::move(chainBefore);
         obj->mesh = std::move(filletTool_.meshBefore);
         obj->refreshDerived();
-        setNotice("Fillet refused: radius too large for these edges");
+        // An empty reason means the feature built and editKeepsSolid turned it
+        // down, which is the one case where the mesh itself is the problem.
+        setNotice(why.empty() ? "Fillet refused: it would make the model unprintable"
+                              : "Fillet refused: " + why);
     }
 }
 
@@ -2023,6 +2057,13 @@ int Application::run() {
         buildUi();
         handleViewportMouse();
         handleShortcuts();
+
+        // The create tool can refuse from any of the three above -- the HUD's
+        // Finish button, a click in the viewport, or the E shortcut -- so it is
+        // drained once here rather than at each of them.
+        if (std::string createErr = createTool_.takeError(); !createErr.empty())
+            setNotice(createErr);
+
         applyActions();
 
         // Queued before the frame is drawn; the renderer flushes overlay lines

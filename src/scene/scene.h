@@ -131,7 +131,11 @@ public:
 
     // Appends a feature and re-evaluates. On failure the feature is removed
     // again, so a rejected operation cannot leave a dead entry in the timeline.
-    bool addFeature(ObjectId id, Feature feature);
+    //
+    // `error` gets the rejected feature's own reason, which is otherwise
+    // discarded along with the feature and leaves the caller with nothing to
+    // tell the user beyond "refused".
+    bool addFeature(ObjectId id, Feature feature, std::string* error = nullptr);
 
     // For serialisation, which has to preserve the counter alongside the
     // features it has already handed numbers to.
