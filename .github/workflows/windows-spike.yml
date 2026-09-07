@@ -13,7 +13,6 @@ on:
   workflow_dispatch:
   push:
     branches: [spike/occt]
-    paths: ['spike/**', '.github/workflows/windows-spike.yml']
 
 jobs:
   spike:
