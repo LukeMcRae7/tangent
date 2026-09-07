@@ -1,0 +1,11 @@
+{
+  "name": "tangent-spike",
+  "version-string": "0.0.1",
+  "description": "Stage 0 spike: OpenCASCADE modelling only, no visualization.",
+  "dependencies": [
+    {
+      "name": "opencascade",
+      "default-features": false
+    }
+  ]
+}

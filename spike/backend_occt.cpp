@@ -37,7 +37,9 @@ namespace {
 
 constexpr double kTol = 1e-6;
 
-bool near(double a, double b, double tol = 1e-6) { return std::fabs(a - b) < tol; }
+// Not called near(): <minwindef.h> defines that as a macro, and MSVC would
+// take the name before this file ever got a chance to.
+bool sameAs(double a, double b, double tol = 1e-6) { return std::fabs(a - b) < tol; }
 
 TopoDS_Shape boxAt(double cx, double cy, double z0, double w, double d, double h) {
     return BRepPrimAPI_MakeBox(gp_Pnt(cx - w / 2, cy - d / 2, z0), w, d, h).Shape();
@@ -78,7 +80,7 @@ bool combine(TopoDS_Shape& shape, const TopoDS_Shape& tool, bool cut, std::strin
 double bodyTopZ(const PartSpec& s, double x, double y) {
     double z = s.plateH;
     for (const Boss& b : s.bosses)
-        if (near(b.x, x, 1e-3) && near(b.y, y, 1e-3)) z = s.plateH + b.height;
+        if (sameAs(b.x, x, 1e-3) && sameAs(b.y, y, 1e-3)) z = s.plateH + b.height;
     return z;
 }
 
@@ -100,9 +102,9 @@ std::vector<TopoDS_Edge> selectEdges(const TopoDS_Shape& shape, const PartSpec& 
                 const gp_Circ circ = c.Circle();
                 const gp_Pnt ctr = circ.Location();
                 for (const Bore& b : s.bores) {
-                    if (near(ctr.X(), b.x, 1e-3) && near(ctr.Y(), b.y, 1e-3) &&
-                        near(ctr.Z(), bodyTopZ(s, b.x, b.y), 1e-3) &&
-                        near(circ.Radius(), b.dia / 2, 1e-3)) {
+                    if (sameAs(ctr.X(), b.x, 1e-3) && sameAs(ctr.Y(), b.y, 1e-3) &&
+                        sameAs(ctr.Z(), bodyTopZ(s, b.x, b.y), 1e-3) &&
+                        sameAs(circ.Radius(), b.dia / 2, 1e-3)) {
                         picked.push_back(e);
                         break;
                     }
@@ -114,9 +116,9 @@ std::vector<TopoDS_Edge> selectEdges(const TopoDS_Shape& shape, const PartSpec& 
             if (c.GetType() != GeomAbs_Line) continue;
             const gp_Pnt a = BRep_Tool::Pnt(TopExp::FirstVertex(e));
             const gp_Pnt b = BRep_Tool::Pnt(TopExp::LastVertex(e));
-            if (!near(a.Z(), s.plateH, 1e-6) || !near(b.Z(), s.plateH, 1e-6)) continue;
+            if (!sameAs(a.Z(), s.plateH, 1e-6) || !sameAs(b.Z(), s.plateH, 1e-6)) continue;
             const double mx = (a.X() + b.X()) / 2, my = (a.Y() + b.Y()) / 2;
-            if (near(std::fabs(mx), s.plateW / 2, 1e-6) || near(std::fabs(my), s.plateD / 2, 1e-6))
+            if (sameAs(std::fabs(mx), s.plateW / 2, 1e-6) || sameAs(std::fabs(my), s.plateD / 2, 1e-6))
                 picked.push_back(e);
         }
     }

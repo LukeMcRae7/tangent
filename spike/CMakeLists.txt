@@ -16,6 +16,14 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
 endif()
 
+# MSVC does not know the GCC warning flags, and the spike has to build on both.
+if(MSVC)
+  set(SPIKE_WARNINGS /W4)
+  add_compile_definitions(_USE_MATH_DEFINES NOMINMAX)
+else()
+  set(SPIKE_WARNINGS -Wall -Wextra)
+endif()
+
 find_package(OpenCASCADE REQUIRED CONFIG)
 message(STATUS "OpenCASCADE ${OpenCASCADE_VERSION} from ${OpenCASCADE_INSTALL_PREFIX}")
 
@@ -28,7 +36,7 @@ set(OCCT_LIBS
 
 add_executable(occt_probe occt_probe.cpp)
 target_link_libraries(occt_probe PRIVATE ${OCCT_LIBS})
-target_compile_options(occt_probe PRIVATE -Wall -Wextra)
+target_compile_options(occt_probe PRIVATE ${SPIKE_WARNINGS})
 
 # The comparison harness. It links the shipping mesh kernel straight out of
 # ../src so that the control is the code that actually runs today, not a copy
@@ -40,23 +48,23 @@ add_executable(compare
   ${TG}/mesh/boolean.cpp ${TG}/mesh/health.cpp)
 target_include_directories(compare PRIVATE ${TG} ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(compare PRIVATE ${OCCT_LIBS})
-target_compile_options(compare PRIVATE -Wall -Wextra)
+target_compile_options(compare PRIVATE ${SPIKE_WARNINGS})
 
 # The naming experiment: the one piece of the spike whose result decides
 # whether a parametric history can be carried on a B-rep at all.
 add_executable(naming naming_main.cpp naming.cpp)
 target_include_directories(naming PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(naming PRIVATE ${OCCT_LIBS})
-target_compile_options(naming PRIVATE -Wall -Wextra)
+target_compile_options(naming PRIVATE ${SPIKE_WARNINGS})
 
 add_executable(tess tess.cpp)
 target_link_libraries(tess PRIVATE ${OCCT_LIBS})
-target_compile_options(tess PRIVATE -Wall -Wextra)
+target_compile_options(tess PRIVATE ${SPIKE_WARNINGS})
 
 add_executable(tess2 tess2.cpp)
 target_link_libraries(tess2 PRIVATE ${OCCT_LIBS})
-target_compile_options(tess2 PRIVATE -Wall -Wextra)
+target_compile_options(tess2 PRIVATE ${SPIKE_WARNINGS})
 
 add_executable(bool_perf bool_perf.cpp)
 target_link_libraries(bool_perf PRIVATE ${OCCT_LIBS})
-target_compile_options(bool_perf PRIVATE -Wall -Wextra)
+target_compile_options(bool_perf PRIVATE ${SPIKE_WARNINGS})

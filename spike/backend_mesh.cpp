@@ -21,7 +21,9 @@ using namespace tg;
 namespace spike {
 namespace {
 
-bool near(double a, double b, double tol = 1e-4) { return std::fabs(a - b) < tol; }
+// Not called near(): <minwindef.h> defines that as a macro, and MSVC would
+// take the name before this file ever got a chance to.
+bool sameAs(double a, double b, double tol = 1e-4) { return std::fabs(a - b) < tol; }
 
 void translate(Mesh& m, double x, double y, double z) {
     for (MeshVertex& v : m.verts)
@@ -47,7 +49,7 @@ Mesh cylAt(double cx, double cy, double z0, double dia, double h, int segments) 
 double bodyTopZ(const PartSpec& s, double x, double y) {
     double z = s.plateH;
     for (const Boss& b : s.bosses)
-        if (near(b.x, x, 1e-3) && near(b.y, y, 1e-3)) z = s.plateH + b.height;
+        if (sameAs(b.x, x, 1e-3) && sameAs(b.y, y, 1e-3)) z = s.plateH + b.height;
     return z;
 }
 
@@ -72,20 +74,20 @@ std::vector<Index> selectEdges(const Mesh& m, const PartSpec& s) {
             bool hit = false;
             for (const Bore& bore : s.bores) {
                 const double top = bodyTopZ(s, bore.x, bore.y);
-                if (!near(a.z, top, 1e-3) || !near(b.z, top, 1e-3)) continue;
+                if (!sameAs(a.z, top, 1e-3) || !sameAs(b.z, top, 1e-3)) continue;
                 const double ra = std::hypot(a.x - bore.x, a.y - bore.y);
                 const double rb = std::hypot(b.x - bore.x, b.y - bore.y);
                 // A faceted bore's rim vertices sit on the circle; the tolerance
                 // is on the radius, not on a facet count this code should not
                 // have to know.
-                if (near(ra, bore.dia / 2, 1e-3) && near(rb, bore.dia / 2, 1e-3)) { hit = true; break; }
+                if (sameAs(ra, bore.dia / 2, 1e-3) && sameAs(rb, bore.dia / 2, 1e-3)) { hit = true; break; }
             }
             if (hit) { picked.push_back(h); continue; }
         }
         if (s.target == FilletTarget::TopOuterEdges || s.target == FilletTarget::AllTopEdges) {
-            if (!near(a.z, s.plateH, 1e-4) || !near(b.z, s.plateH, 1e-4)) continue;
+            if (!sameAs(a.z, s.plateH, 1e-4) || !sameAs(b.z, s.plateH, 1e-4)) continue;
             const double mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
-            if (near(std::fabs(mx), s.plateW / 2, 1e-4) || near(std::fabs(my), s.plateD / 2, 1e-4))
+            if (sameAs(std::fabs(mx), s.plateW / 2, 1e-4) || sameAs(std::fabs(my), s.plateD / 2, 1e-4))
                 picked.push_back(h);
         }
     }
