@@ -30,9 +30,17 @@ message(STATUS "OpenCASCADE ${OpenCASCADE_VERSION} from ${OpenCASCADE_INSTALL_PR
 # Only the modelling stack. Deliberately no visualization library: the whole
 # dependency question for this project is whether the geometry libraries can be
 # taken without dragging in vtk, tcl/tk, freetype and X.
+#
+# Taken from the three module variables the config file exports rather than
+# listed by hand, because OCCT moves toolkits between releases and a hand-written
+# list is a link error on the next version rather than on this one.
 set(OCCT_LIBS
-  TKernel TKMath TKG2d TKG3d TKGeomBase TKGeomAlgo TKBRep TKTopAlgo
-  TKPrim TKBO TKBool TKFillet TKOffset TKShHealing TKMesh)
+  ${OpenCASCADE_FoundationClasses_LIBRARIES}
+  ${OpenCASCADE_ModelingData_LIBRARIES}
+  ${OpenCASCADE_ModelingAlgorithms_LIBRARIES})
+if(NOT OCCT_LIBS)
+  message(FATAL_ERROR "OpenCASCADE config exported no modelling libraries")
+endif()
 
 add_executable(occt_probe occt_probe.cpp)
 target_link_libraries(occt_probe PRIVATE ${OCCT_LIBS})
