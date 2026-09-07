@@ -36,14 +36,8 @@ float snapTo(float v, float step) {
     return step > 0.0f ? std::round(v / step) * step : v;
 }
 
-// Snap increment sized so one step is about the same distance on screen at any
-// zoom, then rounded to a value a person would pick. Without the zoom term a
-// fixed 1mm step is uselessly fine when zoomed out to a whole plate and far too
-// coarse when zoomed in on a 0.4mm wall.
-constexpr float kSnapPixels = 42.0f;
-
 float snapStepFor(const Camera& camera, Vec3 at) {
-    return niceStep(camera.pixelWorldSize(at) * kSnapPixels);
+    return camera.snapStep(at);
 }
 
 } // namespace
@@ -100,11 +94,11 @@ bool TransformTool::begin(TransformMode mode, Scene& scene, const Camera& camera
         const SceneObject* obj = scene.find(elementObject_);
         if (!obj) return false;
 
-        std::vector<bool> seen(static_cast<size_t>(obj->mesh.vertexCount()), false);
-        auto take = [&](Index v) {
-            if (v < 0 || v >= obj->mesh.vertexCount() || seen[v]) return;
+        std::vector<bool> seen(static_cast<size_t>(obj->body.vertexCount()), false);
+        auto take = [&](VertexId v) {
+            if (!obj->body.hasVertex(v) || seen[v]) return;
             seen[v] = true;
-            vertexEntries_.push_back({v, obj->mesh.verts[v].position});
+            vertexEntries_.push_back({v, obj->body.vertexPosition(v)});
         };
 
         for (const ElementRef& e : scene.elementSelection()) {
@@ -113,16 +107,18 @@ bool TransformTool::begin(TransformMode mode, Scene& scene, const Camera& camera
             switch (e.kind) {
             case ElementKind::Vertex: take(e.index); break;
             case ElementKind::Edge:
-                if (e.index < obj->mesh.halfedgeCount()) {
-                    take(obj->mesh.fromVertex(e.index));
-                    take(obj->mesh.halfedges[e.index].vertex);
+                if (obj->body.hasEdge(e.index)) {
+                    VertexId a = kInvalid, b = kInvalid;
+                    obj->body.edgeEnds(e.index, a, b);
+                    take(a);
+                    take(b);
                 }
                 break;
             case ElementKind::Face:
-                if (e.index < obj->mesh.faceCount()) {
-                    std::vector<Index> verts;
-                    obj->mesh.faceVertices(e.index, verts);
-                    for (Index v : verts) take(v);
+                if (obj->body.hasFace(e.index)) {
+                    std::vector<VertexId> verts;
+                    obj->body.faceVertices(e.index, verts);
+                    for (VertexId v : verts) take(v);
                 }
                 break;
             case ElementKind::None: break;
@@ -312,9 +308,9 @@ void TransformTool::apply(Scene& scene, const Camera& camera, Vec2 mousePx, bool
         const Mat4 model = obj->modelMatrix();
         const Mat4 inv = inverse(model);
         for (const VertexEntry& ve : vertexEntries_) {
-            if (ve.vertex >= obj->mesh.vertexCount()) continue;
+            if (!obj->body.hasVertex(ve.vertex)) continue;
             const Vec3 world = transformPoint(model, ve.before);
-            obj->mesh.verts[ve.vertex].position = transformPoint(inv, mapWorld(world));
+            obj->body.setVertexPosition(ve.vertex, transformPoint(inv, mapWorld(world)));
         }
         obj->refreshDerived();
         return;
@@ -366,11 +362,11 @@ std::unique_ptr<Command> TransformTool::confirm(Scene& scene) {
         const SceneObject* obj = scene.find(id);
         if (!obj) return nullptr;
 
-        std::vector<Index> verts;
+        std::vector<VertexId> verts;
         std::vector<Vec3> before, after;
         for (const VertexEntry& ve : moved) {
-            if (ve.vertex >= obj->mesh.vertexCount()) continue;
-            const Vec3 now = obj->mesh.verts[ve.vertex].position;
+            if (!obj->body.hasVertex(ve.vertex)) continue;
+            const Vec3 now = obj->body.vertexPosition(ve.vertex);
             if (now == ve.before) continue;
             verts.push_back(ve.vertex);
             before.push_back(ve.before);
@@ -406,8 +402,8 @@ void TransformTool::cancel(Scene& scene) {
     if (target_ == TransformTarget::Elements) {
         if (SceneObject* obj = scene.find(elementObject_)) {
             for (const VertexEntry& ve : vertexEntries_)
-                if (ve.vertex < obj->mesh.vertexCount())
-                    obj->mesh.verts[ve.vertex].position = ve.before;
+                if (obj->body.hasVertex(ve.vertex))
+                    obj->body.setVertexPosition(ve.vertex, ve.before);
             obj->refreshDerived();
         }
     } else {

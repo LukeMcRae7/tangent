@@ -128,6 +128,30 @@ int main() {
         printf("[non-manifold] correctly rejected\n");
     }
 
+    // Face area on a shape the first corner cannot see all of.
+    //
+    // faceArea used to fan from that corner and add unsigned triangle areas.
+    // Where the fan leaves the polygon, the triangles overlap and their areas
+    // add instead of cancelling. Every primitive is convex, so this stayed
+    // hidden until mergeCoplanarFaces began bridging holes -- a bridged face
+    // wraps around its hole and is never convex. A bored plate's top face
+    // measured 25% over.
+    {
+        // A C-shape: a 6x6 square with a 4x2 bite out of the right side = 28.
+        // Fanning from (0,0) covers the bite twice.
+        Mesh c;
+        std::vector<Vec3> pos = {{0,0,0},{6,0,0},{6,2,0},{2,2,0},
+                                 {2,4,0},{6,4,0},{6,6,0},{0,6,0}};
+        check(c.build(pos, {8}, {0,1,2,3,4,5,6,7}), "build C-shape");
+        printf("[C-shape] area=%.4f (expect 28.0)\n", c.faceArea(0));
+        check(std::fabs(c.faceArea(0) - 28.0) < 1e-9, "C-shaped face area wrong");
+
+        Mesh sq;
+        std::vector<Vec3> p2 = {{0,0,0},{2,0,0},{2,2,0},{0,2,0}};
+        check(sq.build(p2, {4}, {0,1,2,3}), "build square");
+        check(std::fabs(sq.faceArea(0) - 4.0) < 1e-9, "convex face area wrong");
+    }
+
     printf("\n%s (%d failures)\n", failures ? "FAILED" : "ALL PASS", failures);
     return failures ? 1 : 0;
 }

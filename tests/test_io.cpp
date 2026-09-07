@@ -166,19 +166,19 @@ int main() {
         // A chain with something of every interesting kind in it.
         Feature ext;
         ext.kind = FeatureKind::Extrude;
-        ext.faces = nameFaces(s.find(id)->mesh, {0});
+        ext.faces = nameFaces(s.find(id)->body, {0});
         ext.distance = 6.0;
         check(s.addFeature(id, ext), "extrude added");
 
         Feature fil;
         fil.kind = FeatureKind::Bevel;
-        fil.edges.ids = {s.find(id)->mesh.edgeId(0), s.find(id)->mesh.edgeId(2)};
+        fil.edges.ids = {s.find(id)->body.edgeName(0), s.find(id)->body.edgeName(2)};
         fil.radii = {2.0, 3.5};   // a radius per edge, as Fusion's fillet has
         fil.width = 2.0;
         fil.segments = 4;
         check(s.addFeature(id, fil), "fillet added");
 
-        const int facesBefore = s.find(id)->mesh.faceCount();
+        const int facesBefore = s.find(id)->body.faceCount();
         const AABB boundsBefore = s.find(id)->localBounds;
         const size_t chainBefore = s.find(id)->features.size();
 
@@ -202,11 +202,11 @@ int main() {
             check(f.radii.size() == 2 && near(f.radii[0], 2.0) && near(f.radii[1], 3.5),
                   "each edge kept its own radius");
         }
-        check(o->mesh.faceCount() == facesBefore, "re-evaluates to the same mesh");
+        check(o->body.faceCount() == facesBefore, "re-evaluates to the same mesh");
         check(near(o->localBounds.size().z, boundsBefore.size().z, 1e-9),
               "same dimensions");
         std::printf("[project] round trip: %zu features, %d faces\n",
-                    o->features.size(), o->mesh.faceCount());
+                    o->features.size(), o->body.faceCount());
 
         // And it is still parametric after loading.
         SceneObject* rw = loaded.find(o->id);
@@ -228,15 +228,15 @@ int main() {
         Feature b;
         b.kind = FeatureKind::Boolean;
         b.booleanOp = BooleanOp::Difference;
-        b.bakedMesh = tool;
+        b.bakedBody = Body(tool);
         check(s.addFeature(a, b), "boolean added");
-        const int facesBefore = s.find(a)->mesh.faceCount();
+        const int facesBefore = s.find(a)->body.faceCount();
 
         const std::string path = tmp("bool.tangent");
         check(saveProject(s, path).ok, "save");
         Scene loaded;
         check(loadProject(loaded, path).ok, "load");
-        check(loaded.objects().front()->mesh.faceCount() == facesBefore,
+        check(loaded.objects().front()->body.faceCount() == facesBefore,
               "baked tool body survived");
         std::printf("[project] baked boolean body survived (%d faces)\n", facesBefore);
     }

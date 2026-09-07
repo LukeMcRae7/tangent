@@ -38,11 +38,11 @@ struct SceneObject {
     // primitive; later entries are operations applied in order.
     std::vector<Feature> features;
 
-    // featureCache[i] is the mesh as it stood after feature i, so an edit only
+    // featureCache[i] is the body as it stood after feature i, so an edit only
     // has to re-run from the feature it touched.
-    std::vector<Mesh> featureCache;
+    std::vector<Body> featureCache;
 
-    Mesh       mesh;
+    Body       body;
     RenderMesh render;
     AABB       localBounds;
     bool       visible = true;
@@ -61,8 +61,8 @@ struct SceneObject {
     // Recomputes everything derived from `mesh` and marks the GPU copy stale.
     // Any code that edits vertex positions must call this.
     void refreshDerived() {
-        mesh.buildRenderMesh(render);
-        localBounds = mesh.bounds();
+        body.tessellate(render);
+        localBounds = body.bounds();
         ++meshVersion;
     }
     AABB worldBounds() const;
@@ -108,7 +108,7 @@ public:
     // ---- Contents --------------------------------------------------------
     ObjectId addPrimitive(PrimitiveKind kind, const PrimitiveSpec& spec = {},
                           Vec3 position = {});
-    ObjectId addMesh(Mesh mesh, Vec3 position = {}, const std::string& name = "Object");
+    ObjectId addBody(Body body, Vec3 position = {}, const std::string& name = "Object");
     bool     removeObject(ObjectId id);
     ObjectId duplicateObject(ObjectId id);
 
@@ -192,15 +192,19 @@ public:
     // ---- Sub-object selection --------------------------------------------
     const std::vector<ElementRef>& elementSelection() const { return elements_; }
     bool isElementSelected(const ElementRef& e) const;
+    // Every piece of the face `e` names: itself, plus anything it was split
+    // from because a face cannot hold a hole. Anything else is just `e`.
+    std::vector<ElementRef> faceGroup(const ElementRef& e) const;
+
     void selectElement(const ElementRef& e, bool additive = false);
     void toggleElement(const ElementRef& e);
     void clearElementSelection() { elements_.clear(); }
 
-    // Faces currently selected on one object, for feeding the mesh operations.
-    std::vector<Index> selectedFaces(ObjectId id) const;
+    // Faces currently selected on one object, for feeding the operations.
+    std::vector<FaceId> selectedFaces(ObjectId id) const;
 
-    // Selected edges on one object, named by canonical half-edge.
-    std::vector<Index> selectedEdges(ObjectId id) const;
+    // Selected edges on one object, as canonical edge handles.
+    std::vector<EdgeId> selectedEdges(ObjectId id) const;
 
     // Drops any element selection referring to geometry that no longer exists.
     // Mesh edits renumber faces wholesale, so stale refs must not survive one.

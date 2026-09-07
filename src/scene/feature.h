@@ -16,9 +16,8 @@
 // shows which step gave up rather than silently producing wrong geometry.
 #pragma once
 
-#include "mesh/boolean.h"
-#include "mesh/primitives.h"
-#include "mesh/operations.h"
+#include "geom/body.h"
+#include "geom/operations.h"
 
 #include <string>
 #include <vector>
@@ -70,26 +69,26 @@ struct ElementRefs {
              : false;
     }
 
-    // Resolves to half-edge indices in `mesh`. Returns false if anything named
+    // Resolves to handles into `body`. Returns false if anything named
     // here has gone; a feature that cannot find what it acts on is errored, not
     // quietly re-pointed at whatever now sits at those numbers.
-    bool resolveEdges(const Mesh& mesh, std::vector<Index>& out) const;
+    bool resolveEdges(const Body& body, std::vector<EdgeId>& out) const;
 
     // Resolves to face indices.
-    bool resolveFaces(const Mesh& mesh, std::vector<Index>& out) const;
+    bool resolveFaces(const Body& body, std::vector<FaceId>& out) const;
 };
 
-// Records a selection made on `mesh` as something that will still mean the
+// Records a selection made on `body` as something that will still mean the
 // same thing later.
-ElementRefs nameFaces(const Mesh& mesh, const std::vector<Index>& faces);
+ElementRefs nameFaces(const Body& body, const std::vector<FaceId>& faces);
 
 // As above, and additionally: if the chosen edges are exactly the boundary of
 // one face, that is recorded instead of the list. It is what the user meant --
 // they picked a rim, not sixteen edges that happen to be there today -- and it
 // is the only form that survives the face being retessellated under them.
-ElementRefs nameEdges(const Mesh& mesh, const std::vector<Index>& edges);
+ElementRefs nameEdges(const Body& body, const std::vector<EdgeId>& edges);
 
-std::vector<ElementId> nameVertices(const Mesh& mesh, const std::vector<Index>& verts);
+std::vector<ElementId> nameVertices(const Body& body, const std::vector<VertexId>& verts);
 
 struct Feature {
     FeatureKind kind = FeatureKind::Primitive;
@@ -142,7 +141,7 @@ struct Feature {
     BooleanOp booleanOp = BooleanOp::Difference;
 
     // Boolean's tool body, or BaseMesh's geometry.
-    Mesh bakedMesh;
+    Body bakedBody;
 
     // VertexEdit: a free-form drag, recorded as explicit offsets. Not
     // parametric in any meaningful sense, but it has to live in the chain so
@@ -161,10 +160,10 @@ struct Feature {
 // Runs the chain, leaving the result in `out`. Marks failing features and keeps
 // going, so one bad step does not destroy the rest of the model. Returns false
 // only if nothing at all could be produced.
-bool evaluateFeatures(std::vector<Feature>& features, Mesh& out);
+bool evaluateFeatures(std::vector<Feature>& features, Body& out);
 
 // Re-runs the chain from `from` onward, reusing `cache[from - 1]` as the
-// starting point. `cache[i]` holds the mesh as it stood after feature i.
+// starting point. `cache[i]` holds the body as it stood after feature i.
 //
 // This is what keeps editing responsive on a heavy model: adding a bevel to a
 // 100k-triangle part, or dragging the distance slider on the last feature,
@@ -172,6 +171,6 @@ bool evaluateFeatures(std::vector<Feature>& features, Mesh& out);
 // every step since. Falls back to a full evaluation if the cache cannot
 // supply the requested starting point.
 bool evaluateFrom(std::vector<Feature>& features, size_t from,
-                  std::vector<Mesh>& cache, Mesh& out);
+                  std::vector<Body>& cache, Body& out);
 
 } // namespace tg

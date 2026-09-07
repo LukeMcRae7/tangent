@@ -91,7 +91,7 @@ private:
 // store, and a print-design mesh is small enough for this to be cheap.
 //
 // Nothing constructs one at present, and reaching for it should be a decision
-// rather than a convenience. It writes obj->mesh and leaves obj->features and
+// rather than a convenience. It writes obj->body and leaves obj->features and
 // obj->featureCache describing the body as it was, so the next re-evaluation --
 // a feature toggled in the History panel, a dimension nudged in the Inspector,
 // a fillet committed -- rebuilds from the chain and discards the edit. Route
@@ -99,7 +99,7 @@ private:
 // single BaseMesh feature holding the result.
 class MeshCommand : public Command {
 public:
-    MeshCommand(ObjectId id, Mesh before, Mesh after,
+    MeshCommand(ObjectId id, Body before, Body after,
                 PrimitiveSpec specBefore, PrimitiveSpec specAfter, std::string what)
         : id_(id), before_(std::move(before)), after_(std::move(after)),
           specBefore_(specBefore), specAfter_(specAfter), what_(std::move(what)) {}
@@ -109,10 +109,10 @@ public:
     std::string label() const override { return what_; }
 
 private:
-    void apply(Scene& scene, const Mesh& mesh, const PrimitiveSpec& spec);
+    void apply(Scene& scene, const Body& body, const PrimitiveSpec& spec);
 
     ObjectId      id_;
-    Mesh          before_, after_;
+    Body          before_, after_;
     PrimitiveSpec specBefore_, specAfter_;
     std::string   what_;
 };
@@ -122,7 +122,7 @@ private:
 // rather than two full copies of it.
 class VertexCommand : public Command {
 public:
-    VertexCommand(ObjectId id, std::vector<Index> verts,
+    VertexCommand(ObjectId id, std::vector<VertexId> verts,
                   std::vector<Vec3> before, std::vector<Vec3> after, std::string what)
         : id_(id), verts_(std::move(verts)), before_(std::move(before)),
           after_(std::move(after)), what_(std::move(what)) {}
@@ -134,15 +134,15 @@ public:
 
     // Lets the application turn a completed drag into a history entry.
     ObjectId object() const { return id_; }
-    const std::vector<Index>& vertices() const { return verts_; }
+    const std::vector<VertexId>& vertices() const { return verts_; }
     const std::vector<Vec3>& beforePositions() const { return before_; }
     const std::vector<Vec3>& afterPositions() const { return after_; }
 
 private:
     void apply(Scene& scene, const std::vector<Vec3>& positions);
 
-    ObjectId           id_;
-    std::vector<Index> verts_;
+    ObjectId              id_;
+    std::vector<VertexId> verts_;
     std::vector<Vec3>  before_, after_;
     std::string        what_;
 };

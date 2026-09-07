@@ -3031,15 +3031,21 @@ int mergeCoplanarFaces(Mesh& mesh, Real toleranceDegrees) {
                 continue;
             }
 
-            // A region with a hole needs a face with a hole, and this mesh cannot
-            // hold one. It can hold two faces that share two edges, though, so cut
-            // the ring across in two places. That is two edges where the surface
-            // does not really turn -- against the dozens the fan had -- and it is
-            // the face a slot or a drilled hole leaves behind, which is the case
-            // that matters.
+            // A region with holes needs faces with holes, and this mesh cannot
+            // hold one. It can hold faces that share an edge, though, so each
+            // hole is bridged to the boundary around it by two cuts, which
+            // splits the region it sits in into two. Repeat until no piece has
+            // a hole left, and n holes come out as n+1 simple faces joined
+            // along 2n edges where the surface does not really turn.
             //
-            // Anything more tangled than one hole is left alone rather than guessed
-            // at.
+            // One hole was handled before; two or more were given up on, and
+            // that is the whole of the reported symptom. A boolean shreds every
+            // face it cuts -- a bore through a 40mm plate can arrive here as
+            // 6848 fragments -- and this pass is what puts them back. Give up
+            // and every one of those fragments stays on the model as a visible
+            // line across a flat face. It repaired the first hole in a face and
+            // abandoned the second, so a plate with two holes in it came back
+            // with one tidy face and one covered in shards.
             Vec3 pu, pv;
             planeBasis(g.normal, pu, pv);
             auto flat = [&](Index vtx) {
@@ -3055,29 +3061,23 @@ int mergeCoplanarFaces(Mesh& mesh, Real toleranceDegrees) {
                 return s * 0.5;
             };
 
-            int outerAt = -1, holeAt = -1;
-            bool tangled = loops.size() != 2;
-            for (size_t i = 0; !tangled && i < loops.size(); ++i)
-                ((areaOf(loops[i]) > 0.0) ? outerAt : holeAt) = static_cast<int>(i);
-            if (tangled || outerAt < 0 || holeAt < 0) { keepCompOriginals(); continue; }
-
-            const std::vector<Index>& O = loops[outerAt];
-            const std::vector<Index>& H = loops[holeAt];
-
-            // Two cuts, from opposite sides of the hole to whichever outer vertex
-            // is nearest. Opposite sides so the two halves are both substantial
-            // rather than one being a sliver.
-            auto nearestOuter = [&](Index h) {
-                size_t best2 = 0;
-                Real bd = 1e300;
-                for (size_t i = 0; i < O.size(); ++i) {
-                    const Real d = lengthSq(mesh.verts[O[i]].position - mesh.verts[h].position);
-                    if (d < bd) { bd = d; best2 = i; }
+            // The outline winds positive, every hole negative.
+            int outerAt = -1;
+            std::vector<size_t> holeIds;
+            bool tangled = false;
+            for (size_t i = 0; i < loops.size(); ++i) {
+                if (areaOf(loops[i]) > 0.0) {
+                    if (outerAt >= 0) { tangled = true; break; }   // two outlines
+                    outerAt = static_cast<int>(i);
+                } else if (loops[i].size() >= 3) {
+                    holeIds.push_back(i);
+                } else {
+                    tangled = true;
+                    break;
                 }
-                return best2;
-            };
-
-            if (H.size() < 3 || O.size() < 3) {
+            }
+            if (tangled || outerAt < 0 || holeIds.empty() ||
+                loops[static_cast<size_t>(outerAt)].size() < 3) {
                 keepCompOriginals();
                 continue;
             }
@@ -3093,70 +3093,179 @@ int mergeCoplanarFaces(Mesh& mesh, Real toleranceDegrees) {
                 return out;
             };
 
-            // The cuts must not cross the outline or each other, or the two halves
-            // would overlap. Cheaper to check than to repair.
+            auto sideOf = [](Vec2 p, Vec2 q, Vec2 r) {
+                return (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x);
+            };
+            auto segmentsCross = [&](Vec2 a, Vec2 b, Vec2 c, Vec2 d) {
+                const Real d1 = sideOf(a, b, c), d2 = sideOf(a, b, d);
+                const Real d3 = sideOf(c, d, a), d4 = sideOf(c, d, b);
+                return ((d1 > 1e-12 && d2 < -1e-12) || (d1 < -1e-12 && d2 > 1e-12)) &&
+                       ((d3 > 1e-12 && d4 < -1e-12) || (d3 < -1e-12 && d4 > 1e-12));
+            };
+
+            // The cuts must not cross the outline or each other, or the two
+            // halves would overlap. Cheaper to check than to repair.
             auto simple = [&](const std::vector<Index>& l) {
                 const size_t n = l.size();
                 if (n < 3) return false;
-                auto seg = [&](size_t i, Vec2& a, Vec2& b) {
-                    a = flat(l[i]); b = flat(l[(i + 1) % n]);
-                };
                 for (size_t i = 0; i < n; ++i) {
-                    Vec2 a, b; seg(i, a, b);
+                    const Vec2 a = flat(l[i]), b = flat(l[(i + 1) % n]);
                     for (size_t j = i + 1; j < n; ++j) {
-                        if (j == i || (j + 1) % n == i || (i + 1) % n == j) continue;
-                        Vec2 c, d; seg(j, c, d);
-                        auto side = [](Vec2 p, Vec2 q, Vec2 r) {
-                            return (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x);
-                        };
-                        const Real d1 = side(a, b, c), d2 = side(a, b, d);
-                        const Real d3 = side(c, d, a), d4 = side(c, d, b);
-                        if (((d1 > 1e-12 && d2 < -1e-12) || (d1 < -1e-12 && d2 > 1e-12)) &&
-                            ((d3 > 1e-12 && d4 < -1e-12) || (d3 < -1e-12 && d4 > 1e-12)))
-                            return false;
+                        if ((j + 1) % n == i || (i + 1) % n == j) continue;
+                        const Vec2 c = flat(l[j]), d = flat(l[(j + 1) % n]);
+                        if (segmentsCross(a, b, c, d)) return false;
                     }
                 }
                 return true;
             };
 
-            Real bestDist = 1e300;
-            std::vector<Index> bestP1, bestP2;
-            bool foundCut = false;
-            const size_t hCount = H.size();
-
-            for (size_t offset = 0; offset < hCount; ++offset) {
-                const size_t hi0 = offset;
-                const size_t hi1 = (offset + hCount / 2) % hCount;
-                if (hi0 == hi1) continue;
-
-                const size_t oi0 = nearestOuter(H[hi0]);
-                const size_t oi1 = nearestOuter(H[hi1]);
-                if (oi0 == oi1) continue;
-
-                std::vector<Index> p1 = walk(O, oi0, oi1);
-                for (Index x : walk(H, hi1, hi0)) p1.push_back(x);
-                std::vector<Index> p2 = walk(O, oi1, oi0);
-                for (Index x : walk(H, hi0, hi1)) p2.push_back(x);
-
-                if (!simple(p1) || !simple(p2)) continue;
-
-                const Real d = lengthSq(mesh.verts[O[oi0]].position - mesh.verts[H[hi0]].position) +
-                               lengthSq(mesh.verts[O[oi1]].position - mesh.verts[H[hi1]].position);
-                if (d < bestDist) {
-                    bestDist = d;
-                    bestP1 = std::move(p1);
-                    bestP2 = std::move(p2);
-                    foundCut = true;
+            // A cut that runs back along a boundary edge leaves the polygon
+            // doubling back on itself: a corner of zero angle, and a sliver of
+            // zero width beside it. The area is still positive and the mesh
+            // still validates, so nothing downstream complains -- until the
+            // next boolean has to classify against that sliver, and rejects the
+            // whole operation. simple() does not see it, because the two edges
+            // overlap rather than cross.
+            auto noSpike = [&](const std::vector<Index>& l) {
+                const size_t n = l.size();
+                for (size_t i = 0; i < n; ++i) {
+                    const Vec2 a2 = flat(l[(i + n - 1) % n]);
+                    const Vec2 b2 = flat(l[i]);
+                    const Vec2 c2 = flat(l[(i + 1) % n]);
+                    const Vec2 u{a2.x - b2.x, a2.y - b2.y};
+                    const Vec2 v{c2.x - b2.x, c2.y - b2.y};
+                    const Real lu = length(u), lv = length(v);
+                    if (lu < 1e-12 || lv < 1e-12) return false;
+                    if (dot(u, v) / (lu * lv) > 1.0 - 1e-9) return false;
                 }
+                return true;
+            };
+
+            // Ray crossing, to decide which half a hole ended up in.
+            auto insidePolygon = [&](const std::vector<Index>& poly, Vec2 q) {
+                bool in = false;
+                const size_t n = poly.size();
+                for (size_t i = 0, j = n - 1; i < n; j = i++) {
+                    const Vec2 a = flat(poly[i]), b = flat(poly[j]);
+                    if ((a.y > q.y) != (b.y > q.y) &&
+                        q.x < (b.x - a.x) * (q.y - a.y) / (b.y - a.y) + a.x)
+                        in = !in;
+                }
+                return in;
+            };
+
+            // One piece of the region: its boundary, and the holes still in it.
+            struct Piece {
+                std::vector<Index> outline;
+                std::vector<size_t> holes;
+            };
+
+            std::vector<Piece> pending{
+                Piece{loops[static_cast<size_t>(outerAt)], holeIds}};
+            std::vector<std::vector<Index>> finished;
+            bool bridgedAll = true;
+
+            while (!pending.empty() && bridgedAll) {
+                Piece cur = std::move(pending.back());
+                pending.pop_back();
+                if (cur.holes.empty()) { finished.push_back(std::move(cur.outline)); continue; }
+
+                // Bridge whichever hole can be reached most cheaply.
+                const std::vector<Index>& O = cur.outline;
+
+                Real bestDist = 1e300;
+                std::vector<Index> bestP1, bestP2;
+                size_t bestHole = 0;
+                bool foundCut = false;
+
+                for (size_t hk = 0; hk < cur.holes.size(); ++hk) {
+                    const std::vector<Index>& H = loops[cur.holes[hk]];
+                    const size_t hCount = H.size();
+
+                    auto nearestOuter = [&](Index h) {
+                        size_t at = 0;
+                        Real bd = 1e300;
+                        for (size_t i = 0; i < O.size(); ++i) {
+                            const Real d = lengthSq(mesh.verts[O[i]].position -
+                                                    mesh.verts[h].position);
+                            if (d < bd) { bd = d; at = i; }
+                        }
+                        return at;
+                    };
+
+                    // Two cuts, from opposite sides of the hole to whichever
+                    // outer vertex is nearest. Opposite sides so the two halves
+                    // are both substantial rather than one being a sliver.
+                    for (size_t offset = 0; offset < hCount; ++offset) {
+                        const size_t hi0 = offset;
+                        const size_t hi1 = (offset + hCount / 2) % hCount;
+                        if (hi0 == hi1) continue;
+
+                        const size_t oi0 = nearestOuter(H[hi0]);
+                        const size_t oi1 = nearestOuter(H[hi1]);
+                        if (oi0 == oi1) continue;
+
+                        const Real d =
+                            lengthSq(mesh.verts[O[oi0]].position - mesh.verts[H[hi0]].position) +
+                            lengthSq(mesh.verts[O[oi1]].position - mesh.verts[H[hi1]].position);
+                        if (d >= bestDist) continue;
+
+                        // Neither cut may pass through a hole that is still to
+                        // be bridged, or that hole would straddle the two
+                        // halves and belong to neither.
+                        bool blocked = false;
+                        for (size_t ok2 = 0; ok2 < cur.holes.size() && !blocked; ++ok2) {
+                            if (ok2 == hk) continue;
+                            const std::vector<Index>& other = loops[cur.holes[ok2]];
+                            for (size_t i = 0; i < other.size() && !blocked; ++i) {
+                                const Vec2 c = flat(other[i]);
+                                const Vec2 e = flat(other[(i + 1) % other.size()]);
+                                if (segmentsCross(flat(O[oi0]), flat(H[hi0]), c, e) ||
+                                    segmentsCross(flat(O[oi1]), flat(H[hi1]), c, e))
+                                    blocked = true;
+                            }
+                        }
+                        if (blocked) continue;
+
+                        std::vector<Index> p1 = walk(O, oi0, oi1);
+                        for (Index x : walk(H, hi1, hi0)) p1.push_back(x);
+                        std::vector<Index> p2 = walk(O, oi1, oi0);
+                        for (Index x : walk(H, hi0, hi1)) p2.push_back(x);
+                        if (!simple(p1) || !simple(p2)) continue;
+                        if (!noSpike(p1) || !noSpike(p2)) continue;
+
+                        bestDist = d;
+                        bestP1 = std::move(p1);
+                        bestP2 = std::move(p2);
+                        bestHole = hk;
+                        foundCut = true;
+                    }
+                }
+
+                if (!foundCut) { bridgedAll = false; break; }
+
+                // Each remaining hole lies wholly within one half or the other,
+                // since the two halves partition the region between them.
+                Piece a{std::move(bestP1), {}};
+                Piece b{std::move(bestP2), {}};
+                for (size_t hk = 0; hk < cur.holes.size(); ++hk) {
+                    if (hk == bestHole) continue;
+                    const std::vector<Index>& other = loops[cur.holes[hk]];
+                    (insidePolygon(a.outline, flat(other[0])) ? a : b).holes.push_back(cur.holes[hk]);
+                }
+                pending.push_back(std::move(a));
+                pending.push_back(std::move(b));
             }
 
-            if (!foundCut) { keepCompOriginals(); continue; }
+            if (!bridgedAll || finished.empty()) { keepCompOriginals(); continue; }
 
-            // Both halves need a name.
-            soup.face(asSoup(bestP1), mesh.faces[best].id);
-            soup.face(asSoup(bestP2), nameId(0, IdRole::Split, mesh.faces[best].id));
+            // Every piece needs a name; the largest original keeps its own.
+            for (size_t i = 0; i < finished.size(); ++i)
+                soup.face(asSoup(finished[i]),
+                          i == 0 ? mesh.faces[best].id
+                                 : nameId(0, IdRole::Split, mesh.faces[best].id, 0, i));
             for (Index f : compFaces) emitted[f] = true;
-            merged += static_cast<int>(compFaces.size()) - 2;
+            merged += static_cast<int>(compFaces.size()) - static_cast<int>(finished.size());
         }
     }
 

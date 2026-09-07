@@ -3,9 +3,7 @@
 #include "app/camera.h"
 #include "app/undo.h"
 #include "core/palette.h"
-#include "mesh/boolean.h"
-#include "mesh/operations.h"
-#include "mesh/primitives.h"
+#include "geom/operations.h"
 #include "render/renderer.h"
 #include "scene/scene.h"
 
@@ -16,6 +14,27 @@
 #include <cstdio>
 
 namespace tg {
+
+const char* createOpName(CreateOp op) {
+    switch (op) {
+        case CreateOp::Auto:    return "Auto";
+        case CreateOp::Join:    return "Join";
+        case CreateOp::Cut:     return "Cut";
+        case CreateOp::NewBody: return "New Body";
+    }
+    return "Auto";
+}
+
+CreateOp CreateTool::resolvedOp() const {
+    if (op_ != CreateOp::Auto) return op_;
+    // Pushing into the plane cuts, whether the profile was drawn on a face or
+    // on an origin plane above a part -- the second is how a hole gets drilled
+    // from a construction plane, and the cut finds its target by overlap.
+    if (extrudeDepth_ < 0.0) return CreateOp::Cut;
+    // Pushing out of a face grows that body; out of an origin plane there is
+    // nothing to grow, so it is a new one.
+    return faceObject_ != kNoObject ? CreateOp::Join : CreateOp::NewBody;
+}
 
 namespace {
 
@@ -279,17 +298,17 @@ std::vector<Vec2> CreateTool::getCurrentProfile() const {
     }
 }
 
-Mesh CreateTool::buildCurrentSolid(Real depth) const {
+Body CreateTool::buildCurrentSolid(Real depth) const {
     Mesh out;
     const std::vector<Vec2> prof = getCurrentProfile();
-    if (prof.empty() || std::fabs(depth) < 1e-4) return out;
+    if (prof.empty() || std::fabs(depth) < 1e-4) return Body{};
 
     if (depth > 0.0) {
         makePrismMesh(prof, planeOrigin_, planeU_, planeV_, planeNormal_, 0.0, depth, out);
     } else {
         makePrismMesh(prof, planeOrigin_, planeU_, planeV_, planeNormal_, depth, 0.0, out);
     }
-    return out;
+    return Body(std::move(out));
 }
 
 // ---------------------------------------------------------------------------
@@ -298,6 +317,7 @@ Mesh CreateTool::buildCurrentSolid(Real depth) const {
 
 void CreateTool::start(PrimitiveKind kind) {
     lastError_.clear();
+    op_ = CreateOp::Auto;
     kind_ = kind;
     stage_ = CreateStage::SelectPlane;
     hoveredPlane_ = PlaneChoice::XY;
@@ -409,6 +429,14 @@ void CreateTool::choosePlane(PlaneChoice choice, Camera& camera, const Scene& sc
 void CreateTool::update(const Scene& scene, const Camera& camera, Vec2 mousePx, bool snap) {
     if (stage_ == CreateStage::None) return;
 
+    // One increment for the whole tool, sized to the zoom the way every other
+    // gesture in the application is. The fixed 5mm, 1mm and 0.5mm steps this
+    // used to carry were three different answers to the same question, and all
+    // three were wrong at some zoom: 5mm is coarse enough to be unusable on a
+    // 6mm boss and far too fine when laying out a 300mm plate.
+    const Real step = snap ? camera.snapStep(planeOrigin_) : 0.0;
+    auto quantise = [step](Real v) { return step > 0.0 ? std::round(v / step) * step : v; };
+
     if (stage_ == CreateStage::SelectPlane) {
         // Raycast against scene objects first
         const Ray ray = camera.rayThroughPixel(mousePx.x, mousePx.y);
@@ -417,14 +445,14 @@ void CreateTool::update(const Scene& scene, const Camera& camera, Vec2 mousePx, 
             const SceneObject* o = scene.find(hit.object);
             if (o) {
                 const Mat4 model = o->modelMatrix();
-                const Vec3 localN = o->mesh.faceNormal(hit.face);
+                const Vec3 localN = o->body.faceNormal(hit.face);
                 const Vec3 worldN = normalize(transformVector(normalMatrix(model), localN));
 
                 // Compute face center in local space and transform to world space
-                std::vector<Index> fv;
-                o->mesh.faceVertices(hit.face, fv);
+                std::vector<VertexId> fv;
+                o->body.faceVertices(hit.face, fv);
                 Vec3 localCenter{0, 0, 0};
-                for (Index v : fv) localCenter += o->mesh.verts[v].position;
+                for (VertexId v : fv) localCenter += o->body.vertexPosition(v);
                 if (!fv.empty()) localCenter *= (1.0f / static_cast<float>(fv.size()));
                 const Vec3 worldCenter = transformPoint(model, localCenter);
 
@@ -465,11 +493,7 @@ void CreateTool::update(const Scene& scene, const Camera& camera, Vec2 mousePx, 
     if (stage_ == CreateStage::DrawProfile_Pt1) {
         Vec2 uv{0, 0};
         if (unprojectToPlane(camera, mousePx, uv)) {
-            if (snap) {
-                const Real gridStep = 5.0;
-                uv.x = std::round(uv.x / gridStep) * gridStep;
-                uv.y = std::round(uv.y / gridStep) * gridStep;
-            }
+            uv = {quantise(uv.x), quantise(uv.y)};
             pt1_ = uv;
             pt2_ = uv;
         }
@@ -479,11 +503,7 @@ void CreateTool::update(const Scene& scene, const Camera& camera, Vec2 mousePx, 
     if (stage_ == CreateStage::DrawProfile_Pt2) {
         Vec2 uv{0, 0};
         if (unprojectToPlane(camera, mousePx, uv)) {
-            if (snap) {
-                const Real gridStep = 5.0;
-                uv.x = std::round(uv.x / gridStep) * gridStep;
-                uv.y = std::round(uv.y / gridStep) * gridStep;
-            }
+            uv = {quantise(uv.x), quantise(uv.y)};
             pt2_ = uv;
             if (kind_ == PrimitiveKind::Cylinder) {
                 currentRadius_ = std::max(length(pt2_ - pt1_), Real(1.0));
@@ -503,32 +523,26 @@ void CreateTool::update(const Scene& scene, const Camera& camera, Vec2 mousePx, 
             if (isFilleting_) {
                 // Fillet measured from mouse distance away from reference point!
                 // Mouse on corner/reference point creates 0 fillet (sharp), further away creates more fillet!
-                Real dist = length(currentUV - filletRefUV_);
-                if (snap) dist = std::round(dist / 0.5) * 0.5;
+                Real dist = quantise(length(currentUV - filletRefUV_));
                 const Real maxDim = std::min(currentWidth_, currentDepth_) * 0.499f;
                 const Real newR = clampf(dist, 0.0f, maxDim);
                 for (int c : activeFilletCorners_) {
                     cornerRadii_[c] = newR;
                 }
             } else if (kind_ == PrimitiveKind::Cylinder && activeHandle_ == HandleId::RadiusHandle) {
-                currentRadius_ = std::max(length(currentUV - pt1_), Real(1.0));
-                if (snap) currentRadius_ = std::round(currentRadius_ / 1.0) * 1.0;
+                currentRadius_ = std::max(quantise(length(currentUV - pt1_)), Real(0.1));
                 pt2_ = pt1_ + Vec2{currentRadius_, 0};
             } else {
                 // Edge dragging (held mouse button):
                 // pt1_ is always (uMin, vMin) and pt2_ is always (uMax, vMax)
                 if (activeHandle_ == HandleId::EdgeLeft) {
-                    pt1_.x = std::min(currentUV.x, dragStartPt2_.x - 1.0);
-                    if (snap) pt1_.x = std::round(pt1_.x / 1.0) * 1.0;
+                    pt1_.x = std::min(quantise(currentUV.x), dragStartPt2_.x - 1.0);
                 } else if (activeHandle_ == HandleId::EdgeRight) {
-                    pt2_.x = std::max(currentUV.x, dragStartPt1_.x + 1.0);
-                    if (snap) pt2_.x = std::round(pt2_.x / 1.0) * 1.0;
+                    pt2_.x = std::max(quantise(currentUV.x), dragStartPt1_.x + 1.0);
                 } else if (activeHandle_ == HandleId::EdgeBottom) {
-                    pt1_.y = std::min(currentUV.y, dragStartPt2_.y - 1.0);
-                    if (snap) pt1_.y = std::round(pt1_.y / 1.0) * 1.0;
+                    pt1_.y = std::min(quantise(currentUV.y), dragStartPt2_.y - 1.0);
                 } else if (activeHandle_ == HandleId::EdgeTop) {
-                    pt2_.y = std::max(currentUV.y, dragStartPt1_.y + 1.0);
-                    if (snap) pt2_.y = std::round(pt2_.y / 1.0) * 1.0;
+                    pt2_.y = std::max(quantise(currentUV.y), dragStartPt1_.y + 1.0);
                 }
                 currentWidth_ = pt2_.x - pt1_.x;
                 currentDepth_ = pt2_.y - pt1_.y;
@@ -581,11 +595,8 @@ void CreateTool::update(const Scene& scene, const Camera& camera, Vec2 mousePx, 
     }
 
     if (stage_ == CreateStage::ExtrudeDepth) {
-        Real d = rayPlaneExtrudeDepth(camera, mousePx);
-        if (snap) {
-            d = std::round(d / 1.0) * 1.0;
-        }
-        if (std::fabs(d) > 0.1) extrudeDepth_ = d;
+        const Real d = quantise(rayPlaneExtrudeDepth(camera, mousePx));
+        if (std::fabs(d) > 1e-4) extrudeDepth_ = d;
         return;
     }
 }
@@ -808,6 +819,14 @@ bool CreateTool::handleKey(int key, bool shift, bool ctrl, Camera& camera, Scene
         }
     }
 
+    // Operation, while the depth is being set and there is a body to act on.
+    if (stage_ == CreateStage::ExtrudeDepth && hasTargetBody()) {
+        if (key == 'A' || key == 'a') { op_ = CreateOp::Auto;    return true; }
+        if (key == 'J' || key == 'j') { op_ = CreateOp::Join;    return true; }
+        if (key == 'D' || key == 'd') { op_ = CreateOp::Cut;     return true; }
+        if (key == 'N' || key == 'n') { op_ = CreateOp::NewBody; return true; }
+    }
+
     // Number keys for direct plane selection in SelectPlane
     if (stage_ == CreateStage::SelectPlane) {
         if (key == '1') { setHoveredPlane(PlaneChoice::XZ, {0, 0, 0}, {0, -1, 0}); commitPlaneSelection(camera); return true; }
@@ -837,14 +856,15 @@ bool CreateTool::finishCreation(Scene& scene, Camera& camera, UndoStack& undo) {
         return false;
     }
 
-    const Mesh solid = buildCurrentSolid(depth);
+    const Body solid = buildCurrentSolid(depth);
     if (solid.empty()) {
         cancel(camera);
         return false;
     }
 
-    if (depth < 0.0) {
-        // Negative Extrude = Boolean Difference Cut
+    const CreateOp op = resolvedOp();
+
+    if (op == CreateOp::Cut) {
         SceneObject* target = nullptr;
         if (faceObject_ != kNoObject) {
             target = scene.find(faceObject_);
@@ -862,17 +882,28 @@ bool CreateTool::finishCreation(Scene& scene, Camera& camera, UndoStack& undo) {
 
         if (target) {
             // Extend cutter slightly outside the entrance face to ensure clean, non-degenerate intersection
+            // Overshoot past the face it enters by a little, so the entry is a
+            // clean crossing rather than a coincident plane. Which side that is
+            // depends on the direction the profile was pushed, which Cut no
+            // longer assumes: cutting outward from a face is a legitimate way to
+            // trim a boss back.
             Mesh cutter;
             const std::vector<Vec2> prof = getCurrentProfile();
-            makePrismMesh(prof, planeOrigin_, planeU_, planeV_, planeNormal_, depth, 1.0, cutter);
+            const Real overshoot = std::max(std::fabs(depth) * 0.05, Real(1.0));
+            if (depth < 0.0)
+                makePrismMesh(prof, planeOrigin_, planeU_, planeV_, planeNormal_,
+                              depth, overshoot, cutter);
+            else
+                makePrismMesh(prof, planeOrigin_, planeU_, planeV_, planeNormal_,
+                              -overshoot, depth, cutter);
 
             // Transform cutter into target object's local coordinate space
-            const Mat4 toLocal = inverse(target->modelMatrix());
-            for (MeshVertex& v : cutter.verts) v.position = transformPoint(toLocal, v.position);
+            Body cutterBody(std::move(cutter));
+            cutterBody.transform(inverse(target->modelMatrix()));
 
             // The cut goes into the history, not over the mesh.
             //
-            // Assigning target->mesh here left the feature chain still
+            // Assigning target->body here left the feature chain still
             // describing the body as it was before the cut, and featureCache
             // holding that same stale body. Everything downstream trusted it:
             // committing a fillet replayed the chain and either failed to find
@@ -886,7 +917,7 @@ bool CreateTool::finishCreation(Scene& scene, Camera& camera, UndoStack& undo) {
             Feature f;
             f.kind = FeatureKind::Boolean;
             f.booleanOp = BooleanOp::Difference;
-            f.bakedMesh = std::move(cutter);
+            f.bakedBody = std::move(cutterBody);
 
             std::string why;
             if (scene.addFeature(targetId, std::move(f), &why)) {
@@ -911,14 +942,20 @@ bool CreateTool::finishCreation(Scene& scene, Camera& camera, UndoStack& undo) {
         return false;
     }
 
-    // Positive Extrude on an existing face (auto-join)
-    if (depth > 0.0 && faceObject_ != kNoObject) {
+    if (op == CreateOp::Join && faceObject_ == kNoObject) {
+        lastError_ = "Nothing there to join onto";
+        stage_ = CreateStage::None;
+        return false;
+    }
+
+    // Join onto the face the profile was drawn on.
+    if (op == CreateOp::Join && faceObject_ != kNoObject) {
         SceneObject* target = scene.find(faceObject_);
         if (target) {
             // Transform solid into target object's local coordinate space
             const Mat4 toLocal = inverse(target->modelMatrix());
-            Mesh localSolid = solid;
-            for (MeshVertex& v : localSolid.verts) v.position = transformPoint(toLocal, v.position);
+            Body localSolid = solid;
+            localSolid.transform(toLocal);
 
             // As with the cut above: through the chain, so the history keeps
             // describing the body the user can see.
@@ -928,7 +965,7 @@ bool CreateTool::finishCreation(Scene& scene, Camera& camera, UndoStack& undo) {
             Feature f;
             f.kind = FeatureKind::Boolean;
             f.booleanOp = BooleanOp::Union;
-            f.bakedMesh = std::move(localSolid);
+            f.bakedBody = std::move(localSolid);
 
             std::string why;
             if (scene.addFeature(targetId, std::move(f), &why)) {
@@ -977,7 +1014,7 @@ bool CreateTool::finishCreation(Scene& scene, Camera& camera, UndoStack& undo) {
         id = scene.addPrimitive(PrimitiveKind::Cylinder, spec, pos);
     } else {
         // Any rounded rectangle with fillet, or arbitrary plane, or custom profile
-        id = scene.addMesh(solid, {0, 0, 0}, kind_ == PrimitiveKind::Box ? "Box" : "Cylinder");
+        id = scene.addBody(solid, {0, 0, 0}, kind_ == PrimitiveKind::Box ? "Box" : "Cylinder");
     }
 
     if (id != kNoObject) {
@@ -1030,7 +1067,7 @@ void CreateTool::drawOverlay(const Scene& scene, const Camera& camera, Renderer&
         // Object Face Highlight
         if (hoveredPlane_ == PlaneChoice::Face && faceObject_ != kNoObject) {
             const SceneObject* o = scene.find(faceObject_);
-            if (o && faceIndex_ < o->mesh.faceCount()) {
+            if (o && faceIndex_ < o->body.faceCount()) {
                 const RenderMesh& rm = o->render;
                 const Mat4 model = o->modelMatrix();
                 for (size_t i = 0; i < rm.triangleFace.size(); ++i) {
@@ -1136,28 +1173,29 @@ void CreateTool::drawOverlay(const Scene& scene, const Camera& camera, Renderer&
 
     // 3D Extrusion Solid Preview
     if (stage_ == CreateStage::ExtrudeDepth && std::fabs(extrudeDepth_) > 0.05) {
-        const Mesh solid = buildCurrentSolid(extrudeDepth_);
+        const Body solid = buildCurrentSolid(extrudeDepth_);
         if (!solid.empty()) {
             const Vec4 wireCol = (extrudeDepth_ < 0.0) ? Vec4{1.0f, 0.4f, 0.3f, 0.9f} : toVec4(palette::kBrand, 0.9f);
             const Vec4 faceTint = (extrudeDepth_ < 0.0) ? kCutCol : kCreateCol;
 
-            for (Index h = 0; h < solid.halfedgeCount(); ++h) {
-                const Index tw = solid.halfedges[h].twin;
-                if (h < tw || tw == kInvalid) {
-                    const Vec3 pA = solid.verts[solid.fromVertex(h)].position;
-                    const Vec3 pB = solid.verts[solid.halfedges[h].vertex].position;
-                    renderer.addLine(pA, pB, wireCol);
-                }
+            std::vector<EdgeId> edges;
+            solid.allEdges(edges);
+            for (EdgeId e : edges) {
+                Vec3 pA, pB;
+                solid.edgePositions(e, pA, pB);
+                renderer.addLine(pA, pB, wireCol);
             }
 
-            for (Index f = 0; f < solid.faceCount(); ++f) {
-                std::vector<Index> fv;
+            std::vector<FaceId> faces;
+            std::vector<VertexId> fv;
+            solid.allFaces(faces);
+            for (FaceId f : faces) {
                 solid.faceVertices(f, fv);
                 if (fv.size() < 3) continue;
-                const Vec3 v0 = solid.verts[fv[0]].position;
-                for (size_t i = 1; i + 1 < fv.size(); ++i) {
-                    renderer.addTriangle(v0, solid.verts[fv[i]].position, solid.verts[fv[i + 1]].position, faceTint);
-                }
+                const Vec3 v0 = solid.vertexPosition(fv[0]);
+                for (size_t i = 1; i + 1 < fv.size(); ++i)
+                    renderer.addTriangle(v0, solid.vertexPosition(fv[i]),
+                                         solid.vertexPosition(fv[i + 1]), faceTint);
             }
         }
     }
@@ -1249,13 +1287,43 @@ bool CreateTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& ou
             ImGui::SameLine();
             if (ImGui::Button("Cancel (Esc)")) cancel(camera);
         } else if (stage_ == CreateStage::ExtrudeDepth) {
-            if (extrudeDepth_ >= 0.0) {
-                ImGui::TextColored(kAccentIm, "Extrude: +%.2f mm (Solid / Join)", extrudeDepth_);
-            } else {
-                ImGui::TextColored(ImVec4(0.95f, 0.35f, 0.25f, 1.0f), "Extrude: %.2f mm (Boolean Cut)", extrudeDepth_);
+            // Say what will happen, not what was asked for: with Auto the
+            // operation follows the sign of the depth, and the user should be
+            // able to read the outcome before committing to it.
+            const CreateOp shown = resolvedOp();
+            const SceneObject* target = hasTargetBody() ? scene.find(faceObject_) : nullptr;
+            const ImVec4 cutCol(0.95f, 0.35f, 0.25f, 1.0f);
+            ImGui::TextColored(shown == CreateOp::Cut ? cutCol : kAccentIm,
+                               "%s  %+.2f mm", createOpName(shown), extrudeDepth_);
+            if (target) {
+                ImGui::SameLine();
+                ImGui::TextDisabled(shown == CreateOp::Cut   ? "from %s"
+                                  : shown == CreateOp::Join  ? "onto %s"
+                                                             : "beside %s", target->name.c_str());
             }
+
             ImGui::SameLine();
-            ImGui::TextDisabled("| Move mouse, click/E to finalize");
+            ImGui::SetNextItemWidth(110.0f);
+            ImGui::DragScalar("##depth", ImGuiDataType_Double, &extrudeDepth_, 0.1f,
+                              nullptr, nullptr, "%.2f mm");
+
+            if (hasTargetBody()) {
+                ImGui::Spacing();
+                ImGui::TextDisabled("Operation");
+                const struct { CreateOp op; const char* label; } modes[] = {
+                    {CreateOp::Auto,    "Auto (A)"},
+                    {CreateOp::Join,    "Join (J)"},
+                    {CreateOp::Cut,     "Cut (D)"},
+                    {CreateOp::NewBody, "New Body (N)"},
+                };
+                for (const auto& m : modes) {
+                    ImGui::SameLine();
+                    const bool on = op_ == m.op;
+                    if (on) ImGui::PushStyleColor(ImGuiCol_Button, kAccentIm);
+                    if (ImGui::Button(m.label)) op_ = m.op;
+                    if (on) ImGui::PopStyleColor();
+                }
+            }
             ImGui::Spacing();
             ImGui::PushStyleColor(ImGuiCol_Button, kAccentIm);
             if (ImGui::Button("  Finish (Click / E)  ")) {

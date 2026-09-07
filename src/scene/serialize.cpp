@@ -126,6 +126,12 @@ void writeMesh(Writer& w, const Mesh& m) {
     }
 }
 
+// A body is written with a tag for which representation it is, so a file
+// written before a second backend exists still reads afterwards, and one
+// written with a B-rep body fails loudly on a build that has no backend for it
+// rather than being misread as a mesh.
+enum : uint32_t { kBodyMesh = 1 };
+
 bool readMesh(Reader& r, Mesh& out) {
     const uint32_t vertCount = r.u32();
     if (r.bad || !r.need(static_cast<size_t>(vertCount) * 24)) return false;
@@ -197,7 +203,8 @@ void writeFeature(Writer& w, const Feature& f) {
     w.ids(f.verts);
     w.u32(static_cast<uint32_t>(f.offsets.size()));
     for (const Vec3& o : f.offsets) w.vec3(o);
-    writeMesh(w, f.bakedMesh);
+    w.u32(kBodyMesh);
+    writeMesh(w, f.bakedBody.mesh());
 }
 
 bool readFeature(Reader& r, Feature& f) {
@@ -228,7 +235,12 @@ bool readFeature(Reader& r, Feature& f) {
     f.offsets.clear();
     f.offsets.reserve(offsetCount);
     for (uint32_t i = 0; i < offsetCount; ++i) f.offsets.push_back(r.vec3());
-    if (!readMesh(r, f.bakedMesh)) return false;
+    if (r.u32() != kBodyMesh) return false;
+    {
+        Mesh m;
+        if (!readMesh(r, m)) return false;
+        f.bakedBody = Body(std::move(m));
+    }
     return !r.bad;
 }
 

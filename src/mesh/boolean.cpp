@@ -556,14 +556,37 @@ enum class Side { Outside, Inside, OnSurface };
 // solid's surface reads differently on its two sides, and that is the case that
 // has to be recognised rather than guessed at: it is a shared skin, and which
 // copy survives is a question about the operation, not about geometry.
-Side sideOf(const Poly& frag, const std::vector<Poly>& otherTris, Real eps,
+// `otherPlanes` holds the distinct planes of the other solid's surface. A
+// fragment can only be lying *in* that surface if its own plane is one of them,
+// either way up -- and when it is not, which is almost always, the two probes
+// cannot disagree and one of them answers the question. Comparing against a
+// hundred plane equations is nothing beside a second solid-angle sum over every
+// triangle of the other solid.
+Side sideOf(const Poly& frag, const std::vector<Poly>& otherTris, const AABB& otherBox,
+            const std::vector<std::pair<Vec3, Real>>& otherPlanes, Real eps, Real slack,
             bool* sameFacing = nullptr) {
     Vec3 c{};
     for (const Vec3& q : frag.v) c += q;
     c = c / static_cast<Real>(frag.v.size());
 
-    const bool behind = pointInside(otherTris, c - frag.normal * eps);
-    const bool ahead  = pointInside(otherTris, c + frag.normal * eps);
+    // A point outside the other solid's bounding box is outside the solid, and
+    // saying so costs six comparisons against a solid-angle sum over every one
+    // of its triangles. Most probes are of this kind: a cut splits a whole face
+    // into slabs edge to edge, and the great majority of them lie nowhere near
+    // the cutter. Exact, not an approximation -- the solid is inside its box.
+    const Vec3 pb = c - frag.normal * eps;
+    const bool behind = otherBox.contains(pb) && pointInside(otherTris, pb);
+
+    bool mayShare = false;
+    for (const auto& [pn, pw] : otherPlanes) {
+        const Real d = dot(pn, frag.normal);
+        if ((d > 0.9999999 && std::fabs(pw - frag.w) < slack) ||
+            (d < -0.9999999 && std::fabs(pw + frag.w) < slack)) { mayShare = true; break; }
+    }
+    if (!mayShare) return behind ? Side::Inside : Side::Outside;
+
+    const Vec3 pa = c + frag.normal * eps;
+    const bool ahead  = otherBox.contains(pa) && pointInside(otherTris, pa);
     if (behind == ahead) return behind ? Side::Inside : Side::Outside;
 
     // Material behind it means the other solid's surface faces the same way
@@ -600,6 +623,22 @@ void classify(const std::vector<Poly>& faces, const std::vector<Poly>& otherTris
     const Real slack = scale * 1e-9;
     const Real eps   = scale * 1e-6;
 
+    // One bounding box per triangle of the other solid, not one per pair with a
+    // face: the two loops below each wanted every triangle's box, and both were
+    // recomputing it from the corners every time.
+    std::vector<AABB> otherBounds;
+    otherBounds.reserve(otherTris.size());
+    for (const Poly& t : otherTris) otherBounds.push_back(polyBounds(t));
+
+    // The distinct planes of the other solid's surface, gathered once.
+    std::vector<std::pair<Vec3, Real>> otherPlanes;
+    for (const Poly& t : otherTris) {
+        bool seen = false;
+        for (const auto& [pn, pw] : otherPlanes)
+            if (dot(pn, t.normal) > 0.9999999 && std::fabs(pw - t.w) < slack) { seen = true; break; }
+        if (!seen) otherPlanes.emplace_back(t.normal, t.w);
+    }
+
     const bool dbgc = std::getenv("TANGENT_BOOL_DEBUG") != nullptr;
     size_t whole = 0;
 
@@ -609,15 +648,15 @@ void classify(const std::vector<Poly>& faces, const std::vector<Poly>& otherTris
 
         bool touches = false;
         if (boxesOverlap(fb, otherBox, slack))
-            for (const Poly& t : otherTris)
-                if (boxesOverlap(fb, polyBounds(t), slack)) { touches = true; break; }
+            for (size_t ti = 0; ti < otherTris.size(); ++ti)
+                if (boxesOverlap(fb, otherBounds[ti], slack)) { touches = true; break; }
 
         if (!touches) {
             ++whole;
             // Nothing of the other solid comes near it, so the whole face is on
             // one side and one probe settles which.
             bool sameFacing = false;
-            const Side s = sideOf(f, otherTris, eps, &sameFacing);
+            const Side s = sideOf(f, otherTris, otherBox, otherPlanes, eps, slack, &sameFacing);
             if (s == Side::OnSurface) {
                 if (ownsShared && sameFacing) out.push_back(f);
             } else if ((s == Side::Inside) == keepInside) {
@@ -641,8 +680,9 @@ void classify(const std::vector<Poly>& faces, const std::vector<Poly>& otherTris
         const AABB fb = polyBounds(f);
 
         std::vector<std::pair<Vec3, Real>> planes;
-        for (const Poly& t : otherTris) {
-            if (!boxesOverlap(fb, polyBounds(t), slack)) continue;
+        for (size_t ti = 0; ti < otherTris.size(); ++ti) {
+            if (!boxesOverlap(fb, otherBounds[ti], slack)) continue;
+            const Poly& t = otherTris[ti];
             bool seen = false;
             for (const auto& [pn, pw] : planes)
                 if (dot(pn, t.normal) > 0.9999999 && std::fabs(pw - t.w) < slack) {
@@ -652,11 +692,34 @@ void classify(const std::vector<Poly>& faces, const std::vector<Poly>& otherTris
             if (!seen) planes.emplace_back(t.normal, t.w);
         }
 
+        // Split, but stop as soon as a piece cannot be cut into anything that
+        // would classify differently.
+        //
+        // Splitting exists to make each piece wholly inside or wholly outside,
+        // and a piece clear of the other solid's bounding box is already wholly
+        // outside it. Every further plane still crosses it -- planes are
+        // infinite, which is the whole difficulty here -- but the cuts tell us
+        // nothing, and each one doubles the work for the ones after it. Boring a
+        // 96-sided hole through a 40mm plate used to cut the four faces it
+        // touched into 208 pieces, nearly all of them slabs of untouched plate
+        // far from the bore, and then classify every one of them.
+        //
+        // The bounding box is the conservative test, not the tight one: a piece
+        // inside it may still be nowhere near the surface, and pays for a split
+        // it did not need. Exact where it matters -- nothing outside the box can
+        // be inside the solid -- and it costs one box per piece per plane.
         std::vector<Poly> cur{f}, next;
         for (const auto& [pn, pw] : planes) {
             next.clear();
-            for (const Poly& p : cur) splitPolygon(p, pn, pw, next, next, next, next);
+            for (Poly& p : cur) {
+                if (!boxesOverlap(polyBounds(p), otherBox, slack)) {
+                    pieces.push_back(std::move(p));
+                    continue;
+                }
+                splitPolygon(p, pn, pw, next, next, next, next);
+            }
             cur.swap(next);
+            if (cur.empty()) break;
         }
         for (Poly& p : cur) pieces.push_back(std::move(p));
     }
@@ -664,7 +727,7 @@ void classify(const std::vector<Poly>& faces, const std::vector<Poly>& otherTris
     size_t kept = 0, shared = 0;
     for (const Poly& p : pieces) {
         bool sameFacing = false;
-        const Side s = sideOf(p, otherTris, eps, &sameFacing);
+        const Side s = sideOf(p, otherTris, otherBox, otherPlanes, eps, slack, &sameFacing);
         if (s == Side::OnSurface) {
             // Back-to-back surfaces are an internal wall in every operation and
             // belong to neither result.

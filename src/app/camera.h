@@ -67,6 +67,17 @@ public:
     // hit-test tolerances constant on screen regardless of zoom.
     float pixelWorldSize(Vec3 atPoint) const;
 
+    // The snap increment to use for a gesture happening near `atPoint`.
+    //
+    // Sized so one step is about the same distance on screen at any zoom, then
+    // rounded to a value a person would pick: a fixed 1mm step is uselessly
+    // fine when zoomed out to a whole plate and far too coarse when zoomed in
+    // on a 0.4mm wall. Lives here so every tool snaps the same way -- the
+    // create tool used to carry its own hardcoded 5mm, 1mm and 0.5mm steps.
+    float snapStep(Vec3 atPoint) const {
+        return static_cast<float>(niceStep(pixelWorldSize(atPoint) * 42.0f));
+    }
+
     // ---- Smoothing -------------------------------------------------------
     // Only view *snaps* animate. Orbit, pan and dolly are applied immediately:
     // easing direct manipulation puts the view behind the cursor by the

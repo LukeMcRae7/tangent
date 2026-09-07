@@ -77,7 +77,7 @@ private:
 
     // Object-space vertex positions captured at the start of the gesture.
     struct VertexEntry {
-        Index vertex;
+        VertexId vertex;
         Vec3  before;
     };
 

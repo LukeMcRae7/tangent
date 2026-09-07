@@ -37,6 +37,22 @@ struct MeshVertex {
     ElementId id   = kNoId;     // stable across re-evaluation; see element_id.h
 };
 
+// One boundary loop per face, and no inner ones.
+//
+// A drilled face genuinely has an inner boundary, so this is a real
+// restriction, not an oversight: a plate with a hole through it cannot be one
+// face here. The cost is that such a region has to be cut into pieces --
+// mergeCoplanarFaces bridges each hole to the boundary around it with two cuts,
+// so n holes come back as n+1 faces joined along 2n edges the surface does not
+// really turn at.
+//
+// Kept deliberately. Inner loops would touch build's twin pairing and its
+// manifold checks, triangulation, picking, and every operation that walks a
+// face, and the whole of what they would buy is those 2n edges: n+1 faces for a
+// region with n holes is already the minimum this representation allows, and it
+// is reached in every case measured. The restriction is worth revisiting if
+// faces with many holes become common -- a plate on a bolt circle, say -- and
+// not before.
 struct MeshFace {
     Index halfedge = kInvalid;  // one half-edge bounding this face
     ElementId id   = kNoId;
@@ -86,9 +102,9 @@ public:
     Index findEdge(ElementId id) const;   // returns a half-edge
 
     // Ear-clips one face into triangles, as corner indices local to the face.
-    // Public because a boolean has to feed the BSP convex pieces: the classic
-    // split routine assumes a plane cuts a polygon in two, which is only true
-    // if it is convex, and this mesh's faces need not be.
+    // Public because a boolean works on triangles: the split routine it uses
+    // assumes a plane cuts a polygon in two, which is only true if the polygon
+    // is convex, and this mesh's faces need not be.
     void triangulateFacePublic(Index f, std::vector<Index>& out) const {
         triangulateFace(f, out);
     }
@@ -140,6 +156,35 @@ public:
         return halfedges[he].face == kInvalid ||
                halfedges[halfedges[he].twin].face == kInvalid;
     }
+
+    // Is this edge only there because a face cannot have a hole?
+    //
+    // A region with a hole in it has to be cut into pieces here (see MeshFace),
+    // and the cuts are edges the surface does not turn at -- the two lines a
+    // drilled face comes back with, running from the bore to the rim. Nothing
+    // on the model corresponds to them, and they should be neither drawn nor
+    // offered to a click.
+    //
+    // Two coplanar faces sharing *more than one* edge is what says so. One
+    // shared edge is the section line an extrude leaves, which is deliberate and
+    // stays; a bridged hole always leaves its two halves joined along both of
+    // its cuts. mergeCoplanarFaces has already absorbed every coplanar pair that
+    // could be merged by the time anyone asks, so what is left sharing one edge
+    // is there on purpose.
+    bool isBridgeEdge(Index he, Real toleranceDegrees = 0.5) const;
+
+    // The faces `f` was split into because a face cannot have a hole -- itself,
+    // plus everything reachable from it across bridge edges only. One face for
+    // anything that was not split that way.
+    //
+    // Crossing *only* bridge edges is the whole point. A split the user made is
+    // a face they meant to have, and it stays its own face: raise part of a wall
+    // and the section line divides it into two pieces that are picked, moved and
+    // extruded separately. A split this representation forced is not a face at
+    // all, and picking any of its pieces should reach the surface the user sees.
+    // The two are told apart by how many edges the pieces share -- see above.
+    void coplanarFaceGroup(Index f, std::vector<Index>& out,
+                           Real toleranceDegrees = 0.5) const;
     // Vertex the half-edge starts from.
     Index fromVertex(Index he) const { return halfedges[halfedges[he].prev].vertex; }
 

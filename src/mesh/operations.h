@@ -100,21 +100,30 @@ bool bevelEdges(Mesh& mesh, const std::vector<Index>& edges, Real width,
 // Every edge at once. This is the whole-part rounding pass.
 bool bevelAllEdges(Mesh& mesh, Real width, int segments = 1);
 
-// Merges neighbouring faces that lie in the same plane, so a surface that is
-// geometrically flat is one face rather than several with seams across it.
+// Rebuilds each flat region of the mesh from its own outline, so a surface a
+// boolean arrived at in pieces comes back as few faces as this representation
+// allows.
 //
-// Operations leave these behind routinely. Raise part of a solid and the wall
-// of the raised part is coplanar with the wall it grew out of, but they are two
-// faces with an edge between them -- an edge that is not on the model, only in
-// the data. Picking one of them selects half of what the user sees as a face.
+// This is what makes booleans usable. A cut shreds every face it touches --
+// boring a 96-sided hole through a 40mm plate can produce thousands of
+// fragments -- and none of that is on the model; it is an artefact of clipping
+// against infinite planes. Every fragment left behind is a line the user can
+// see across a flat face, and a face the user cannot select as a whole.
 //
-// Only pairs sharing exactly one edge are merged, and only when the result is a
-// simple polygon. That is what keeps it safe: merging along two shared edges
-// would pinch the face, and merging a ring closed would need a face with a
-// hole, which this mesh cannot represent. Both cases are left alone, so a ring
-// of coplanar faces merges as far as it can and stops.
+// Note what it does to a section line. An extrude deliberately leaves one where
+// the wall it grew out of meets the wall it grew into, and that line is wanted
+// -- but the two faces either side of it are coplanar and edge-adjacent, so
+// this pass treats them as one region and dissolves it. Nothing here can tell a
+// section line from a boolean's shrapnel; they are the same thing to look at.
+// So a body keeps its section lines until the first boolean touches it, and
+// loses them then. That is a real inconsistency and it is not resolved here.
 //
-// Returns the number of merges performed.
+// Regions with holes are cut into pieces rather than represented as one face
+// with inner loops, which MeshFace cannot hold: each hole is bridged to the
+// boundary around it by two cuts, so n holes give n+1 faces. See MeshFace in
+// halfedge.h for why that restriction is kept.
+//
+// Returns the number of faces it removed.
 int mergeCoplanarFaces(Mesh& mesh, Real toleranceDegrees = 0.5);
 
 // Splits a mesh into its connected bodies, in descending order of face count.

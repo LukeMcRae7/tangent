@@ -7,7 +7,7 @@
 #include "mesh/export_stl.h"
 #include "scene/serialize.h"
 #include "app/transform_tool.h"
-#include "mesh/operations.h"
+#include "geom/operations.h"
 #include "app/undo.h"
 #include "render/renderer.h"
 #include "scene/scene.h"
@@ -143,8 +143,7 @@ private:
         Real baseRadius = 1.0;
         Real currentRadius = 1.0;
         int currentSegments = 3;
-        Vec2 startMousePx{0, 0};
-        Mesh meshBefore;
+        Body meshBefore;
         std::vector<Feature> chainBefore;
         std::string typedValue;
     };
@@ -239,7 +238,7 @@ private:
     // Set while a transform is finishing an operation that also changed
     // topology, so commit records one undo entry covering both.
     ObjectId             pendingMeshObject_ = kNoObject;
-    Mesh                 pendingMeshBefore_;
+    Body                 pendingMeshBefore_;
     std::vector<Feature> pendingChainBefore_;
     std::vector<Index>   pendingExtrudeFaces_;
     std::vector<Index>   pendingNewFaces_;

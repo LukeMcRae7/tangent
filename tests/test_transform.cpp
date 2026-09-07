@@ -77,7 +77,7 @@ int main() {
 
         // Deleting and undoing must bring back the same object, mesh included:
         // selections and later feature references are held by id.
-        const int facesBefore = s.find(a)->mesh.faceCount();
+        const int facesBefore = s.find(a)->body.faceCount();
         s.find(a)->transform.position = {7, 8, 9};
         u.push(ExistenceCommand::forDelete(s, {a}));
         check(s.objectCount() == 0, "delete removes");
@@ -87,7 +87,7 @@ int main() {
         check(s.objectCount() == 1, "undo restores the deleted object");
         const SceneObject* back = s.find(a);
         check(back != nullptr, "restored with the original id");
-        check(back && back->mesh.faceCount() == facesBefore, "mesh survived the round trip");
+        check(back && back->body.faceCount() == facesBefore, "mesh survived the round trip");
         check(back && nearV(back->transform.position, {7, 8, 9}), "transform survived");
 
         // A restored id must not collide with a later creation.
@@ -355,8 +355,8 @@ int main() {
 
         // Top face, found by normal.
         Index top = kInvalid;
-        for (Index f = 0; f < s.find(id)->mesh.faceCount(); ++f)
-            if (dot(s.find(id)->mesh.faceNormal(f), Vec3{0, 0, 1}) > 0.99f) top = f;
+        for (Index f = 0; f < s.find(id)->body.faceCount(); ++f)
+            if (dot(s.find(id)->body.faceNormal(f), Vec3{0, 0, 1}) > 0.99f) top = f;
         check(top != kInvalid, "found the top face");
 
         s.selectElement({id, ElementKind::Face, top});
@@ -417,8 +417,8 @@ int main() {
         o->transform.scale = {2.0f, 1.0f, 1.0f};
 
         Index top = kInvalid;
-        for (Index f = 0; f < o->mesh.faceCount(); ++f)
-            if (dot(o->mesh.faceNormal(f), Vec3{0, 0, 1}) > 0.99f) top = f;
+        for (Index f = 0; f < o->body.faceCount(); ++f)
+            if (dot(o->body.faceNormal(f), Vec3{0, 0, 1}) > 0.99f) top = f;
         s.selectElement({id, ElementKind::Face, top});
 
         tool.begin(TransformMode::Translate, s, cam, {500, 400});
@@ -440,14 +440,14 @@ int main() {
         Camera cam = makeCamera();
         TransformTool tool;
         const ObjectId id = s.addPrimitive(PrimitiveKind::Box);
-        const int vertsBefore = s.find(id)->mesh.vertexCount();
+        const int vertsBefore = s.find(id)->body.vertexCount();
 
         // Snapshot every position rather than testing a coordinate threshold:
         // which end of the box half-edge 0 happens to lie on is an internal
         // detail of the generator, not something the test should assume.
         std::vector<Vec3> original;
         for (Index v = 0; v < vertsBefore; ++v)
-            original.push_back(s.find(id)->mesh.verts[v].position);
+            original.push_back(s.find(id)->body.vertexPosition(v));
 
         s.selectElement({id, ElementKind::Edge, 0});
         tool.begin(TransformMode::Translate, s, cam, {500, 400});
@@ -455,10 +455,10 @@ int main() {
         for (char ch : std::string("5")) tool.typeCharacter(ch);
         tool.update(s, cam, {500, 400}, false);
 
-        check(s.find(id)->mesh.vertexCount() == vertsBefore, "no vertices added");
+        check(s.find(id)->body.vertexCount() == vertsBefore, "no vertices added");
         int moved = 0;
         for (Index v = 0; v < vertsBefore; ++v) {
-            const Vec3 now = s.find(id)->mesh.verts[v].position;
+            const Vec3 now = s.find(id)->body.vertexPosition(v);
             if (now != original[v]) {
                 ++moved;
                 check(near(now.z - original[v].z, 5.0f), "moved exactly 5mm along Z");

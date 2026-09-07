@@ -22,24 +22,28 @@ Entity resolve(const Scene& scene, const ElementRef& ref) {
     if (!obj) return e;
 
     const Mat4 model = obj->modelMatrix();
-    const Mesh& m = obj->mesh;
+    const Body& body = obj->body;
 
     switch (ref.kind) {
     case ElementKind::Vertex:
-        if (ref.index >= m.vertexCount()) return e;
-        e.pts.push_back(transformPoint(model, m.verts[ref.index].position));
+        if (!body.hasVertex(ref.index)) return e;
+        e.pts.push_back(transformPoint(model, body.vertexPosition(ref.index)));
         break;
-    case ElementKind::Edge:
-        if (ref.index >= m.halfedgeCount()) return e;
-        e.pts.push_back(transformPoint(model, m.verts[m.fromVertex(ref.index)].position));
-        e.pts.push_back(transformPoint(model, m.verts[m.halfedges[ref.index].vertex].position));
+    case ElementKind::Edge: {
+        if (!body.hasEdge(ref.index)) return e;
+        Vec3 a, b;
+        body.edgePositions(ref.index, a, b);
+        e.pts.push_back(transformPoint(model, a));
+        e.pts.push_back(transformPoint(model, b));
         break;
+    }
     case ElementKind::Face: {
-        if (ref.index >= m.faceCount()) return e;
-        std::vector<Index> verts;
-        m.faceVertices(ref.index, verts);
-        for (Index v : verts) e.pts.push_back(transformPoint(model, m.verts[v].position));
-        e.normal = normalize(transformVector(normalMatrix(model), m.faceNormal(ref.index)));
+        if (!body.hasFace(ref.index)) return e;
+        std::vector<VertexId> verts;
+        body.faceVertices(ref.index, verts);
+        for (VertexId v : verts)
+            e.pts.push_back(transformPoint(model, body.vertexPosition(v)));
+        e.normal = normalize(transformVector(normalMatrix(model), body.faceNormal(ref.index)));
         break;
     }
     case ElementKind::None:

@@ -124,7 +124,7 @@ bool Application::init() {
 
     if (filletDemoSegments_ > 0 && !scene_.objects().empty()) {
         const ObjectId id = scene_.objects().front()->id;
-        const Mesh& m = scene_.find(id)->mesh;
+        const Body& m = scene_.find(id)->body;
         // Edges of the top face, so the demo covers both a lone edge and a
         // loop whose corners have to be patched.
         Index top = 0;
@@ -134,15 +134,14 @@ bool Application::init() {
         if (filletDemoEdges_ <= 0) {
             // Every edge, not a walk around one face -- which only ever
             // reaches that face's own edges.
-            for (Index e = 0; e < m.halfedgeCount(); ++e)
-                if (e < m.halfedges[e].twin)
-                    scene_.selectElement({id, ElementKind::Edge, e}, true);
+            std::vector<EdgeId> all;
+            m.allEdges(all);
+            for (EdgeId e : all) scene_.selectElement({id, ElementKind::Edge, e}, true);
         } else {
-            Index h = m.faces[top].halfedge;
-            for (int i = 0; i < filletDemoEdges_; ++i) {
-                scene_.selectElement({id, ElementKind::Edge, h}, true);
-                h = m.halfedges[h].next;
-            }
+            std::vector<EdgeId> fe;
+            m.faceEdges(top, fe);
+            for (int i = 0; i < filletDemoEdges_ && i < static_cast<int>(fe.size()); ++i)
+                scene_.selectElement({id, ElementKind::Edge, fe[i]}, true);
         }
         view_.bevelWidth = 4.0;
         view_.bevelSegments = filletDemoSegments_;
@@ -173,7 +172,7 @@ bool Application::init() {
 
     if (measureDemo_ && !scene_.objects().empty()) {
         const ObjectId id = scene_.objects().front()->id;
-        const Mesh& m = scene_.find(id)->mesh;
+        const Body& m = scene_.find(id)->body;
         Index top = 0, bottom = 0;
         for (Index f = 0; f < m.faceCount(); ++f) {
             if (dot(m.faceNormal(f), Vec3{0, 0, 1}) > 0.99) top = f;
@@ -461,7 +460,7 @@ void Application::drawSelectionHighlights() {
 
         switch (e.kind) {
         case ElementKind::Face: {
-            if (e.index >= o->mesh.faceCount()) break;
+            if (!o->body.hasFace(e.index)) break;
             const RenderMesh& rm = o->render;
             for (size_t i = 0; i < rm.triangleFace.size(); ++i) {
                 if (rm.triangleFace[i] != e.index) continue;
@@ -472,28 +471,27 @@ void Application::drawSelectionHighlights() {
                     faceTint);
             }
             // Outline it too, so a face on a busy mesh still reads clearly.
-            const Index start = o->mesh.faces[e.index].halfedge;
-            Index h = start;
-            do {
-                renderer_.addLine(
-                    lift(transformPoint(model, o->mesh.verts[o->mesh.fromVertex(h)].position)),
-                    lift(transformPoint(model, o->mesh.verts[o->mesh.halfedges[h].vertex].position)),
-                    edgeCol);
-                h = o->mesh.halfedges[h].next;
-            } while (h != start);
+            std::vector<EdgeId> fe;
+            o->body.faceEdges(e.index, fe);
+            for (EdgeId edge : fe) {
+                Vec3 a, b;
+                o->body.edgePositions(edge, a, b);
+                renderer_.addLine(lift(transformPoint(model, a)),
+                                  lift(transformPoint(model, b)), edgeCol);
+            }
             break;
         }
         case ElementKind::Edge: {
-            if (e.index >= o->mesh.halfedgeCount()) break;
-            const Vec3 a = o->mesh.verts[o->mesh.fromVertex(e.index)].position;
-            const Vec3 b = o->mesh.verts[o->mesh.halfedges[e.index].vertex].position;
+            if (!o->body.hasEdge(e.index)) break;
+            Vec3 a, b;
+            o->body.edgePositions(e.index, a, b);
             renderer_.addLine(lift(transformPoint(model, a)),
                               lift(transformPoint(model, b)), edgeCol);
             break;
         }
         case ElementKind::Vertex: {
-            if (e.index >= o->mesh.vertexCount()) break;
-            const Vec3 p = lift(transformPoint(model, o->mesh.verts[e.index].position));
+            if (!o->body.hasVertex(e.index)) break;
+            const Vec3 p = lift(transformPoint(model, o->body.vertexPosition(e.index)));
             const float s = camera_.pixelWorldSize(p) * 4.0f;
             renderer_.addLine(p - Vec3{s, 0, 0}, p + Vec3{s, 0, 0}, edgeCol);
             renderer_.addLine(p - Vec3{0, s, 0}, p + Vec3{0, s, 0}, edgeCol);
@@ -581,6 +579,14 @@ void Application::handleShortcuts() {
         if (ImGui::IsKeyPressed(ImGuiKey_F, false)) {
             createTool_.handleKey('F', io.KeyShift, io.KeyCtrl, camera_, scene_, undo_);
             return;
+        }
+        // Operation, while the depth is being set. handleKey declines these in
+        // any other stage, so the key falls through rather than being eaten.
+        for (const auto& [imKey, ch] : {std::pair{ImGuiKey_A, 'A'}, std::pair{ImGuiKey_J, 'J'},
+                                        std::pair{ImGuiKey_D, 'D'}, std::pair{ImGuiKey_N, 'N'}}) {
+            if (ImGui::IsKeyPressed(imKey, false) &&
+                createTool_.handleKey(ch, io.KeyShift, io.KeyCtrl, camera_, scene_, undo_))
+                return;
         }
         if (ImGui::IsKeyPressed(ImGuiKey_1, false) || ImGui::IsKeyPressed(ImGuiKey_Keypad1, false)) {
             createTool_.handleKey('1', io.KeyShift, io.KeyCtrl, camera_, scene_, undo_);
@@ -737,23 +743,23 @@ void Application::extrudeSelection() {
 
     // Direction to push, taken before the mesh changes underneath us.
     Vec3 normal{};
-    for (Index f : faces) normal += obj->mesh.faceNormal(f) * obj->mesh.faceArea(f);
+    for (Index f : faces) normal += obj->body.faceNormal(f) * obj->body.faceArea(f);
     if (lengthSq(normal) < 1e-12f) return;
     normal = normalize(normal);
     const Vec3 worldNormal = normalize(transformVector(normalMatrix(obj->modelMatrix()), normal));
 
-    Mesh before = obj->mesh;
+    Body before = obj->body;
     std::vector<Feature> chainBefore = obj->features;
 
     constexpr float kSeed = 0.01f;   // mm
-    Mesh next = obj->mesh;
+    Body next = obj->body;
     std::vector<Index> newFaces;
     if (!extrudeFaces(next, faces, kSeed, &newFaces)) return;
 
     // The drag edits the mesh directly for immediate feedback; on commit the
     // whole gesture is replaced by one Extrude feature, so the history stays
     // the authority rather than accumulating baked-in geometry.
-    obj->mesh = std::move(next);
+    obj->body = std::move(next);
     obj->refreshDerived();
 
     // The moved faces stay selected, so the drag acts on them and so the user
@@ -762,7 +768,7 @@ void Application::extrudeSelection() {
     for (Index f : newFaces) scene_.selectElement({id, ElementKind::Face, f}, true);
 
     if (!tool_.begin(TransformMode::Translate, scene_, camera_, mouseInViewport())) {
-        obj->mesh = std::move(before);
+        obj->body = std::move(before);
         obj->refreshDerived();
         return;
     }
@@ -781,7 +787,7 @@ bool Application::editKeepsSolid(ObjectId id) {
     SceneObject* obj = scene_.find(id);
     if (!obj) return true;
 
-    const MeshHealth after = checkHealth(obj->mesh);
+    const MeshHealth after = obj->body.health();
     obj->health = after;
     obj->healthVersion = obj->meshVersion;
 
@@ -807,7 +813,7 @@ void Application::commitTransform() {
             // an object-space distance along the face normal, which differ as
             // soon as the object carries a scale.
             const Vec3 fromC = pendingMeshBefore_.faceCentroid(pendingExtrudeFaces_[0]);
-            const Vec3 toC   = obj->mesh.faceCentroid(pendingNewFaces_[0]);
+            const Vec3 toC   = obj->body.faceCentroid(pendingNewFaces_[0]);
             const float distance = dot(toC - fromC, pendingLocalNormal_);
 
             Feature f;
@@ -828,7 +834,7 @@ void Application::commitTransform() {
                 setNotice("Extrude refused: it would make the model self-intersect");
             }
         }
-        pendingMeshBefore_ = Mesh{};
+        pendingMeshBefore_ = Body{};
         pendingChainBefore_.clear();
         pendingExtrudeFaces_.clear();
         pendingNewFaces_.clear();
@@ -850,7 +856,7 @@ void Application::commitTransform() {
         if (obj) {
             Feature f;
             f.kind = FeatureKind::VertexEdit;
-            f.verts = nameVertices(obj->mesh, vc->vertices());
+            f.verts = nameVertices(obj->body, vc->vertices());
             for (size_t i = 0; i < f.verts.size(); ++i)
                 f.offsets.push_back(vc->afterPositions()[i] - vc->beforePositions()[i]);
 
@@ -873,12 +879,12 @@ void Application::abortTransform() {
     if (pendingMeshObject_ != kNoObject) {
         if (SceneObject* obj = scene_.find(pendingMeshObject_)) {
             obj->features = pendingChainBefore_;
-            obj->mesh = std::move(pendingMeshBefore_);
+            obj->body = std::move(pendingMeshBefore_);
             obj->refreshDerived();
             scene_.clearElementSelection();
         }
         pendingMeshObject_ = kNoObject;
-        pendingMeshBefore_ = Mesh{};
+        pendingMeshBefore_ = Body{};
         pendingChainBefore_.clear();
         pendingExtrudeFaces_.clear();
         pendingNewFaces_.clear();
@@ -892,7 +898,7 @@ void Application::bevelActiveObject() {
 
     // Clamp to what the geometry can actually take, so the slider cannot ask
     // for a bevel that inverts a face.
-    const float limit = maxBevelWidth(obj->mesh);
+    const float limit = static_cast<float>(maxFilletRadius(obj->body));
     const Real width = std::min(view_.bevelWidth, limit * Real(0.95));
     if (width <= 1e-4f) return;
 
@@ -916,18 +922,18 @@ namespace {
 // edge that fillet was applied to, so matching endpoints does not find it and
 // matching the line it lies on does. Ambiguity is reported rather than guessed
 // at: two candidates means the caller should not merge.
-Index edgeAlongSegment(const Mesh& mesh, Vec3 a, Vec3 b) {
+EdgeId edgeAlongSegment(const Body& body, Vec3 a, Vec3 b) {
     const Vec3 ab = b - a;
     const Real span = length(ab);
     if (span < 1e-9) return kInvalid;
     const Vec3 dir = ab / span;
 
-    Index found = kInvalid;
-    for (Index h = 0; h < mesh.halfedgeCount(); ++h) {
-        const Index tw = mesh.halfedges[h].twin;
-        if (h > tw) continue;
-        const Vec3 p = mesh.verts[mesh.fromVertex(h)].position;
-        const Vec3 q = mesh.verts[mesh.halfedges[h].vertex].position;
+    EdgeId found = kInvalid;
+    std::vector<EdgeId> all;
+    body.allEdges(all);
+    for (EdgeId h : all) {
+        Vec3 p, q;
+        body.edgePositions(h, p, q);
 
         auto covers = [&](Vec3 x) {
             const Real t = dot(x - p, normalize(q - p));
@@ -969,15 +975,10 @@ void Application::beginFillet() {
         if (!faces.empty()) {
             std::set<Index> faceEdges;
             for (Index f : faces) {
-                if (f < obj->mesh.faceCount()) {
-                    const Index start = obj->mesh.faces[f].halfedge;
-                    Index h = start;
-                    if (h != kInvalid) {
-                        do {
-                            faceEdges.insert(std::min(h, obj->mesh.halfedges[h].twin));
-                            h = obj->mesh.halfedges[h].next;
-                        } while (h != start && h != kInvalid);
-                    }
+                if (f < obj->body.faceCount()) {
+                    std::vector<EdgeId> fe;
+                    obj->body.faceEdges(f, fe);
+                    faceEdges.insert(fe.begin(), fe.end());
                 }
             }
             edges.assign(faceEdges.begin(), faceEdges.end());
@@ -991,7 +992,7 @@ void Application::beginFillet() {
 
     // Requirement 2: If a fillet is attempted on an edge composed of multiple sections,
     // extend selection to remaining sections and seamlessly act in unison.
-    edges = extendTangentChain(obj->mesh, edges);
+    edges = extendTangentChain(obj->body, edges);
 
     // Test if any possible fillet would be accepted before presenting the interaction
     bool anyAccepted = false;
@@ -1003,7 +1004,7 @@ void Application::beginFillet() {
     const Real candidateRadii[] = {view_.bevelWidth, 1.0, 0.5, 0.2, 0.1, 0.05};
     for (Real r : candidateRadii) {
         if (r <= 0.0) continue;
-        Mesh testMesh = obj->mesh;
+        Body testMesh = obj->body;
         FilletSpec testSpec;
         testSpec.segments = std::max(1, view_.bevelSegments);
         for (Index e : edges) testSpec.edges.push_back({e, r});
@@ -1029,11 +1030,13 @@ void Application::beginFillet() {
     filletTool_.active = true;
     filletTool_.objectId = id;
     filletTool_.edges = edges;
+    // Only a fallback now: the first updateFillet replaces it with the distance
+    // from the cursor to the edge, so the preview starts where the pointer is
+    // rather than jumping to an arbitrary width.
     filletTool_.baseRadius = initialWidth;
     filletTool_.currentRadius = initialWidth;
     filletTool_.currentSegments = std::max(1, view_.bevelSegments);
-    filletTool_.startMousePx = mouseInViewport();
-    filletTool_.meshBefore = obj->mesh;
+    filletTool_.meshBefore = obj->body;
     filletTool_.chainBefore = obj->features;
     filletTool_.typedValue.clear();
 
@@ -1060,24 +1063,59 @@ void Application::updateFillet(bool snap) {
             newR = std::max(Real(0.01), Real(std::stod(filletTool_.typedValue)));
         } catch (...) {}
     } else {
+        // The radius is how far the cursor is from the edge being rounded.
+        //
+        // It used to be an accumulated screen delta times 0.04 -- a number with
+        // no relation to the model, the zoom, or where the pointer actually was,
+        // so the same drag gave a different radius at every zoom level and the
+        // cursor told you nothing about the result. Measuring the gap to the
+        // edge is the same gesture the profile fillet in the create tool uses:
+        // sit on the edge for nothing, pull away for more, and the distance you
+        // see is the radius you get.
+        //
+        // Measured on screen and converted to millimetres at the edge's own
+        // depth, rather than by unprojecting onto a plane through the edge,
+        // because that plane degenerates when you happen to be sighting along
+        // the edge -- which is a normal thing to be doing.
         const Vec2 curMouse = mouseInViewport();
-        const float dx = curMouse.x - filletTool_.startMousePx.x;
-        const float dy = curMouse.y - filletTool_.startMousePx.y;
-        const float delta = dx - dy;
-        newR = filletTool_.baseRadius + delta * 0.04;
-        if (snap) {
-            newR = std::round(newR * 2.0) / 2.0;
+        const Mat4 model = obj->modelMatrix();
+        const Body& m = filletTool_.meshBefore;
+
+        Real bestPx = -1.0;
+        Vec3 bestAt{};
+        for (EdgeId e : filletTool_.edges) {
+            if (!m.hasEdge(e)) continue;
+            Vec3 aL, bL;
+            m.edgePositions(e, aL, bL);
+            const Vec3 aW = transformPoint(model, aL);
+            const Vec3 bW = transformPoint(model, bL);
+            Vec2 aPx, bPx;
+            if (!camera_.projectToPixel(aW, aPx) || !camera_.projectToPixel(bW, bPx)) continue;
+
+            const Vec2 ab = bPx - aPx;
+            const Real len2 = lengthSq(ab);
+            const Real t = len2 > 1e-9 ? clampf(dot(curMouse - aPx, ab) / len2, 0.0, 1.0) : 0.0;
+            const Real d = length(curMouse - (aPx + ab * t));
+            if (bestPx < 0.0 || d < bestPx) { bestPx = d; bestAt = lerp(aW, bW, t); }
+        }
+
+        if (bestPx >= 0.0) {
+            newR = bestPx * camera_.pixelWorldSize(bestAt);
+            if (snap) {
+                const Real step = camera_.snapStep(bestAt);
+                if (step > 0.0) newR = std::round(newR / step) * step;
+            }
         }
         newR = std::max(Real(0.05), newR);
     }
 
     // Live preview on mesh without artificial whole-mesh bevel limits
-    Mesh scratch = filletTool_.meshBefore;
+    Body scratch = filletTool_.meshBefore;
     FilletSpec spec;
     spec.segments = filletTool_.currentSegments;
     for (Index e : filletTool_.edges) spec.edges.push_back({e, newR});
     if (filletEdges(scratch, spec)) {
-        obj->mesh = std::move(scratch);
+        obj->body = std::move(scratch);
         obj->refreshDerived();
         filletTool_.currentRadius = newR;
         view_.bevelWidth = newR;
@@ -1087,7 +1125,7 @@ void Application::updateFillet(bool snap) {
         Real lo = 0.05, hi = newR;
         for (int iter = 0; iter < 6; ++iter) {
             const Real mid = 0.5 * (lo + hi);
-            Mesh test = filletTool_.meshBefore;
+            Body test = filletTool_.meshBefore;
             FilletSpec testSpec;
             testSpec.segments = filletTool_.currentSegments;
             for (Index e : filletTool_.edges) testSpec.edges.push_back({e, mid});
@@ -1098,12 +1136,12 @@ void Application::updateFillet(bool snap) {
                 hi = mid;
             }
         }
-        Mesh best = filletTool_.meshBefore;
+        Body best = filletTool_.meshBefore;
         FilletSpec bestSpec;
         bestSpec.segments = filletTool_.currentSegments;
         for (Index e : filletTool_.edges) bestSpec.edges.push_back({e, validR});
         if (filletEdges(best, bestSpec)) {
-            obj->mesh = std::move(best);
+            obj->body = std::move(best);
             obj->refreshDerived();
             filletTool_.currentRadius = validR;
             view_.bevelWidth = validR;
@@ -1139,7 +1177,7 @@ void Application::commitFillet() {
                                                     obj->features, "Fillet"));
     } else {
         obj->features = std::move(chainBefore);
-        obj->mesh = std::move(filletTool_.meshBefore);
+        obj->body = std::move(filletTool_.meshBefore);
         obj->refreshDerived();
         // An empty reason means the feature built and editKeepsSolid turned it
         // down, which is the one case where the mesh itself is the problem.
@@ -1157,7 +1195,7 @@ void Application::abortFillet() {
     SceneObject* obj = scene_.find(id);
     if (obj) {
         obj->features = std::move(filletTool_.chainBefore);
-        obj->mesh = std::move(filletTool_.meshBefore);
+        obj->body = std::move(filletTool_.meshBefore);
         obj->refreshDerived();
     }
 }
@@ -1184,7 +1222,7 @@ bool Application::extendLastFillet(SceneObject& obj, const std::vector<Index>& e
     // The mesh as it stood before that fillet ran, which is what its edge
     // indices are numbered against.
     if (last == 0 || last > obj.featureCache.size()) return false;
-    const Mesh& before = obj.featureCache[last - 1];
+    const Body& before = obj.featureCache[last - 1];
     if (before.empty()) return false;
 
     // Only a list of edges can have one added to it. A rim selected as a
@@ -1200,16 +1238,17 @@ bool Application::extendLastFillet(SceneObject& obj, const std::vector<Index>& e
     for (size_t i = 0; i < merged.size(); ++i) radii.push_back(fillet.radiusFor(i));
 
     for (Index e : edges) {
-        if (e < 0 || e >= obj.mesh.halfedgeCount()) return false;
-        const Vec3 a = obj.mesh.verts[obj.mesh.fromVertex(e)].position;
-        const Vec3 b = obj.mesh.verts[obj.mesh.halfedges[e].vertex].position;
-        const Index mapped = edgeAlongSegment(before, a, b);
+        if (!obj.body.hasEdge(e)) return false;
+        Vec3 a, b;
+        obj.body.edgePositions(e, a, b);
+        const EdgeId mapped = edgeAlongSegment(before, a, b);
         if (mapped == kInvalid) return false;
 
-        const Index tw = before.halfedges[mapped].twin;
+        // Handles are canonical, so one comparison settles it -- there is no
+        // longer a twin that could name the same edge.
         bool already = false;
         for (size_t i = 0; i < merged.size(); ++i)
-            if (merged[i] == mapped || merged[i] == tw) {
+            if (merged[i] == mapped) {
                 radii[i] = radius;   // re-picking an edge restates its radius
                 already = true;
             }
@@ -1260,13 +1299,13 @@ void Application::applyBoolean(BooleanOp op) {
     // own transforms, and the boolean is defined on geometry, so they have to
     // be brought into one frame first.
     const Mat4 toLocal = inverse(target->modelMatrix()) * tool->modelMatrix();
-    Mesh baked = tool->mesh;
-    for (MeshVertex& v : baked.verts) v.position = transformPoint(toLocal, v.position);
+    Body baked = tool->body;
+    baked.transform(toLocal);
 
     Feature f;
     f.kind = FeatureKind::Boolean;
     f.booleanOp = op;
-    f.bakedMesh = std::move(baked);
+    f.bakedBody = std::move(baked);
 
     std::vector<Feature> chainBefore = target->features;
     if (!scene_.addFeature(targetId, std::move(f))) {
@@ -1297,19 +1336,20 @@ void Application::splitActiveObject() {
     const std::vector<Index> selFaces = scene_.selectedFaces(id);
     if (!selFaces.empty()) {
         const Index f = selFaces.front();
-        if (f < obj->mesh.faceCount()) {
-            const Vec3 norm = obj->mesh.faceNormal(f);
-            const Index h = obj->mesh.faces[f].halfedge;
-            const Vec3 pt = (h != kInvalid) ? obj->mesh.verts[obj->mesh.fromVertex(h)].position : Vec3{0,0,0};
+        if (f < obj->body.faceCount()) {
+            const Vec3 norm = obj->body.faceNormal(f);
+            std::vector<VertexId> fv;
+            obj->body.faceVertices(f, fv);
+            const Vec3 pt = fv.empty() ? Vec3{0, 0, 0} : obj->body.vertexPosition(fv.front());
 
-            Mesh piece1, piece2;
-            if (splitBodyByPlane(obj->mesh, pt, norm, piece1, piece2)) {
+            Body piece1, piece2;
+            if (splitByPlane(obj->body, pt, norm, piece1, piece2)) {
                 std::vector<Feature> chainBefore = obj->features;
 
                 std::vector<Feature> chain1;
                 Feature base1;
                 base1.kind = FeatureKind::BaseMesh;
-                base1.bakedMesh = std::move(piece1);
+                base1.bakedBody = std::move(piece1);
                 chain1.push_back(std::move(base1));
                 obj->features = std::move(chain1);
                 scene_.reevaluate(id);
@@ -1319,7 +1359,7 @@ void Application::splitActiveObject() {
                     SceneObject* pieceObj = scene_.find(copy);
                     if (pieceObj) {
                         pieceObj->name = obj->name + " (Body 2)";
-                        pieceObj->features.front().bakedMesh = std::move(piece2);
+                        pieceObj->features.front().bakedBody = std::move(piece2);
                         scene_.reevaluate(copy);
                     }
                 }
@@ -1345,17 +1385,17 @@ void Application::splitActiveObject() {
         SceneObject* toolObj = scene_.find(toolId);
         if (targetObj && toolObj && targetId != toolId) {
             const Mat4 toTargetLocal = inverse(targetObj->modelMatrix()) * toolObj->modelMatrix();
-            const Vec3 toolCenter = transformPoint(toTargetLocal, toolObj->mesh.bounds().center());
+            const Vec3 toolCenter = transformPoint(toTargetLocal, toolObj->body.bounds().center());
             const Vec3 toolNorm = normalize(transformVector(normalMatrix(toTargetLocal), Vec3{0, 0, 1}));
 
-            Mesh piece1, piece2;
-            if (splitBodyByPlane(targetObj->mesh, toolCenter, toolNorm, piece1, piece2)) {
+            Body piece1, piece2;
+            if (splitByPlane(targetObj->body, toolCenter, toolNorm, piece1, piece2)) {
                 std::vector<Feature> chainBefore = targetObj->features;
 
                 std::vector<Feature> chain1;
                 Feature base1;
                 base1.kind = FeatureKind::BaseMesh;
-                base1.bakedMesh = std::move(piece1);
+                base1.bakedBody = std::move(piece1);
                 chain1.push_back(std::move(base1));
                 targetObj->features = std::move(chain1);
                 scene_.reevaluate(targetId);
@@ -1365,7 +1405,7 @@ void Application::splitActiveObject() {
                     SceneObject* pieceObj = scene_.find(copy);
                     if (pieceObj) {
                         pieceObj->name = targetObj->name + " (Split 2)";
-                        pieceObj->features.front().bakedMesh = std::move(piece2);
+                        pieceObj->features.front().bakedBody = std::move(piece2);
                         scene_.reevaluate(copy);
                     }
                 }
@@ -1384,14 +1424,14 @@ void Application::splitActiveObject() {
     }
 
     // Check if body has disconnected shells
-    std::vector<Mesh> bodies;
-    if (splitShells(obj->mesh, bodies) >= 2) {
+    std::vector<Body> bodies;
+    if (splitBodies(obj->body, bodies) >= 2) {
         std::vector<Feature> chainBefore = obj->features;
 
         std::vector<Feature> chain;
         Feature base;
         base.kind = FeatureKind::BaseMesh;
-        base.bakedMesh = bodies.front();
+        base.bakedBody = bodies.front();
         chain.push_back(std::move(base));
         obj->features = std::move(chain);
         scene_.reevaluate(id);
@@ -1401,7 +1441,7 @@ void Application::splitActiveObject() {
             const ObjectId copy = scene_.duplicateObject(id);
             if (copy == kNoObject) continue;
             SceneObject* piece = scene_.find(copy);
-            piece->features.front().bakedMesh = bodies[i];
+            piece->features.front().bakedBody = bodies[i];
             scene_.reevaluate(copy);
             created.push_back(copy);
         }
@@ -1418,15 +1458,15 @@ void Application::splitActiveObject() {
     }
 
     // Single solid with no face selected: bisect through object center along XY plane
-    const Vec3 center = obj->mesh.bounds().center();
-    Mesh piece1, piece2;
-    if (splitBodyByPlane(obj->mesh, center, Vec3{0, 0, 1}, piece1, piece2)) {
+    const Vec3 center = obj->body.bounds().center();
+    Body piece1, piece2;
+    if (splitByPlane(obj->body, center, Vec3{0, 0, 1}, piece1, piece2)) {
         std::vector<Feature> chainBefore = obj->features;
 
         std::vector<Feature> chain1;
         Feature base1;
         base1.kind = FeatureKind::BaseMesh;
-        base1.bakedMesh = std::move(piece1);
+        base1.bakedBody = std::move(piece1);
         chain1.push_back(std::move(base1));
         obj->features = std::move(chain1);
         scene_.reevaluate(id);
@@ -1436,7 +1476,7 @@ void Application::splitActiveObject() {
             SceneObject* pieceObj = scene_.find(copy);
             if (pieceObj) {
                 pieceObj->name = obj->name + " (Body 2)";
-                pieceObj->features.front().bakedMesh = std::move(piece2);
+                pieceObj->features.front().bakedBody = std::move(piece2);
                 scene_.reevaluate(copy);
             }
         }
@@ -2002,7 +2042,7 @@ int Application::run() {
                                          ImGui::IsMouseDown(ImGuiMouseButton_Left);
                 healthIdle_ = interacting ? 0.0f : healthIdle_ + lastDt_;
                 if (healthIdle_ > 0.25f) {
-                    ctxObj->health = checkHealth(ctxObj->mesh);
+                    ctxObj->health = ctxObj->body.health();
                     ctxObj->healthVersion = ctxObj->meshVersion;
                     healthIdle_ = 0.0f;
                 }
@@ -2032,7 +2072,11 @@ int Application::run() {
             } else if (createTool_.stage() == CreateStage::AdjustProfile) {
                 ui_.toolStatus = "Adjust: Drag edge handles or corner fillet handles, press Enter/OK to extrude (Esc cancel)";
             } else if (createTool_.stage() == CreateStage::ExtrudeDepth) {
-                ui_.toolStatus = "Extrude: Move mouse to set depth (positive=solid/join, negative=cut), click to finish (Esc cancel)";
+                ui_.toolStatus =
+                    createTool_.hasTargetBody()
+                        ? std::string("Depth: move to set, ") + createOpName(createTool_.resolvedOp()) +
+                          "   A auto  J join  D cut  N new body   Ctrl free (snap on)   click finish   Esc cancel"
+                        : "Depth: move to set, click to finish   Ctrl free (snap on)   Esc cancel";
             }
         } else if (tool_.active()) {
             ui_.toolStatus = tool_.statusText();
@@ -2051,7 +2095,7 @@ int Application::run() {
         ui_.canRedo = undo_.canRedo();
         for (const auto& o : scene_.objects()) {
             ui_.stats.triangles += o->render.triangles.size() / 3;
-            ui_.stats.vertices  += static_cast<size_t>(o->mesh.vertexCount());
+            ui_.stats.vertices  += static_cast<size_t>(o->body.vertexCount());
         }
 
         buildUi();

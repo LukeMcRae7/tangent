@@ -3,7 +3,7 @@
 #include "app/camera.h"
 #include "app/undo.h"
 #include "core/math.h"
-#include "mesh/halfedge.h"
+#include "geom/body.h"
 #include "mesh/primitives.h"
 #include "render/renderer.h"
 #include "scene/scene.h"
@@ -23,6 +23,19 @@ enum class CreateStage {
 };
 
 enum class PlaneChoice { None, XY, XZ, YZ, Face };
+
+// What the new solid does to the body it was drawn on.
+//
+// Only meaningful when the profile was drawn on an object's face; on an origin
+// plane there is nothing to combine with and the result is always a new body.
+enum class CreateOp {
+    Auto = 0,   // join when pushed out of the face, cut when pushed into it
+    Join,       // union with the body, whichever way the depth goes
+    Cut,        // subtract from the body, whichever way the depth goes
+    NewBody,    // leave the body alone and add a separate one
+};
+
+const char* createOpName(CreateOp op);
 
 struct SavedCamera {
     Vec3 target{0.0f, 0.0f, 0.0f};
@@ -104,6 +117,16 @@ public:
     void setExtrudeDepth(Real depth) { extrudeDepth_ = depth; }
     void setStage(CreateStage s) { stage_ = s; }
 
+    // What the solid will do to the body it was drawn on. `Auto` resolves to
+    // Join or Cut from the sign of the depth; resolvedOp() reports which.
+    CreateOp op() const { return op_; }
+    void setOp(CreateOp op) { op_ = op; }
+    CreateOp resolvedOp() const;
+
+    // True when the profile was drawn on an object's face, so there is a body
+    // to combine with and the choice means anything.
+    bool hasTargetBody() const { return faceObject_ != kNoObject; }
+
     // Utilities for 2D profile and 3D prism generation (also exposed for testing and future sketching)
     static std::vector<Vec2> makeRectPolygon(Vec2 p1, Vec2 p2, const Real cornerRadii[4], int arcSegments = 6);
     static std::vector<Vec2> makeRectPolygon(Vec2 p1, Vec2 p2, Real cornerRadius, int arcSegments = 6);
@@ -167,6 +190,8 @@ private:
     Vec2 filletRefUV_{0, 0};
     std::vector<int> activeFilletCorners_;
 
+    CreateOp op_ = CreateOp::Auto;
+
     // Extrusion depth (in mm)
     Real extrudeDepth_ = 20.0;
     Vec2 extrudeStartMouse_{0, 0};
@@ -183,7 +208,7 @@ private:
     bool unprojectToPlane(const Camera& camera, Vec2 mousePx, Vec2& outUV) const;
     Real rayPlaneExtrudeDepth(const Camera& camera, Vec2 mousePx) const;
     std::vector<Vec2> getCurrentProfile() const;
-    Mesh buildCurrentSolid(Real depth) const;
+    Body buildCurrentSolid(Real depth) const;
 };
 
 } // namespace tg

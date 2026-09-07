@@ -416,8 +416,8 @@ void drawInspector(UiContext& ctx) {
     const AABB b = obj->localBounds;
     const Vec3 size = b.valid() ? b.size() : Vec3{};
     ImGui::TextColored(kDim, "Size    %.2f x %.2f x %.2f mm", size.x, size.y, size.z);
-    ImGui::TextColored(kDim, "Verts   %d", obj->mesh.vertexCount());
-    ImGui::TextColored(kDim, "Faces   %d", obj->mesh.faceCount());
+    ImGui::TextColored(kDim, "Verts   %d", obj->body.vertexCount());
+    ImGui::TextColored(kDim, "Faces   %d", obj->body.faceCount());
     ImGui::TextColored(kDim, "Tris    %zu", obj->render.triangles.size() / 3);
 
     ImGui::End();

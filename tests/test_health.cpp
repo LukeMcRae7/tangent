@@ -160,6 +160,98 @@ int main() {
         std::printf("[health] skipped check reports -1, not 0\n");
     }
 
+    // ---- What the check used to be blind to ------------------------------
+    //
+    // A fold that pivots on a shared vertex is the shape an over-large fillet
+    // makes, and checkHealth().solid() is the gate the fillet is accepted on.
+    // Excluding any pair of triangles that shared a corner exempted exactly
+    // that shape, so the gate could not see its own characteristic failure.
+    {
+        // B shares A's corner exactly and stabs through A's interior.
+        const std::vector<Vec3> pos = {
+            {0, 0, 0}, {10, 0, 0}, {0, 10, 0},
+            {0, 0, 0}, {6, 6, -4}, {6, 6, 4},
+        };
+        const std::vector<uint32_t> sizes = {3, 3};
+        const std::vector<uint32_t> idx = {0, 1, 2, 3, 4, 5};
+
+        Mesh m;
+        check(m.build(pos, sizes, idx, nullptr), "shared-corner pair builds");
+        check(checkHealth(m).selfIntersections > 0,
+              "a fold pivoting on a shared corner is seen");
+
+        // The same crossing with the corner moved off: the answer must not
+        // depend on whether the two happen to touch.
+        std::vector<Vec3> off = pos;
+        off[3] = {0.5, 0.5, 0.0};
+        Mesh m2;
+        m2.build(off, sizes, idx, nullptr);
+        check(checkHealth(m2).selfIntersections > 0, "and still seen when they do not touch");
+
+        // What the exclusion is actually for: two triangles sharing an edge.
+        const std::vector<Vec3> edgePair = {
+            {0, 0, 0}, {10, 0, 0}, {0, 10, 0},
+            {0, 0, 0}, {10, 0, 0}, {0, -10, 0},
+        };
+        Mesh m3;
+        m3.build(edgePair, sizes, idx, nullptr);
+        check(checkHealth(m3).selfIntersections == 0, "sharing an edge is not a crossing");
+        std::printf("[health] shared-corner fold seen; shared-edge pair still clean\n");
+    }
+
+    // Primitives and an operation's output must stay clean under that sharper
+    // test -- a check that cries wolf is worse than one that is blind, because
+    // every edit downstream is refused on it.
+    {
+        Mesh box;   makeBox(box, {20.0, 20.0, 20.0});
+        Mesh cyl;   makeCylinder(cyl, {8.0, 20.0, 48});
+        Mesh sph;   makeSphere(sph, {10.0, 32, 16});
+        Mesh tor;   makeTorus(tor, {12.0, 4.0, 40, 20});
+        check(checkHealth(box).selfIntersections == 0, "box is clean");
+        check(checkHealth(cyl).selfIntersections == 0, "cylinder is clean");
+        check(checkHealth(sph).selfIntersections == 0, "sphere is clean");
+        check(checkHealth(tor).selfIntersections == 0, "torus is clean");
+
+        // An n-gon cap on a plane whose coordinates are irrational is where an
+        // absolute parallel cutoff stopped agreeing with itself: the same solid
+        // read clean on the XY plane and self-intersecting when rotated.
+        const Vec3 n = normalize(Vec3{1, 1, 1});
+        const Vec3 u = normalize(cross(Vec3{0, 0, 1}, n));
+        const Vec3 v = cross(n, u);
+        std::vector<Vec3> pos;
+        std::vector<uint32_t> sizes, idx;
+        const int k = 20;
+        for (int s = 0; s < k; ++s) {
+            const Real a = kTwoPi * s / k;
+            const Vec2 p{10.0 * std::cos(a), 10.0 * std::sin(a)};
+            pos.push_back(Vec3{10, 20, 30} + u * p.x + v * p.y);
+        }
+        for (int s = 0; s < k; ++s) {
+            const Real a = kTwoPi * s / k;
+            const Vec2 p{10.0 * std::cos(a), 10.0 * std::sin(a)};
+            pos.push_back(Vec3{10, 20, 30} + u * p.x + v * p.y + n * 15.0);
+        }
+        sizes.push_back(k);
+        for (int s = k; s-- > 0;) idx.push_back(static_cast<uint32_t>(s));
+        sizes.push_back(k);
+        for (int s = 0; s < k; ++s) idx.push_back(static_cast<uint32_t>(k + s));
+        for (int s = 0; s < k; ++s) {
+            const int t = (s + 1) % k;
+            sizes.push_back(4);
+            idx.push_back(static_cast<uint32_t>(s));
+            idx.push_back(static_cast<uint32_t>(t));
+            idx.push_back(static_cast<uint32_t>(k + t));
+            idx.push_back(static_cast<uint32_t>(k + s));
+        }
+        Mesh angled;
+        check(angled.build(pos, sizes, idx, nullptr), "angled prism builds");
+        const MeshHealth ah = checkHealth(angled);
+        check(ah.selfIntersections == 0, "a prism on an angled plane is clean");
+        check(ah.solid(), "and printable");
+        std::printf("[health] angled-plane prism: %d intersecting pairs (expect 0)\n",
+                    ah.selfIntersections);
+    }
+
     std::printf("\n%s (%d failures)\n", failures ? "FAILED" : "ALL PASS", failures);
     return failures ? 1 : 0;
 }

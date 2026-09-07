@@ -61,36 +61,36 @@ ObjectId Scene::addPrimitive(PrimitiveKind kind, const PrimitiveSpec& spec, Vec3
     base.uid = nextFeatureUid_++;
     obj->features.push_back(base);
 
-    if (!evaluateFeatures(obj->features, obj->mesh)) return kNoObject;
+    if (!evaluateFeatures(obj->features, obj->body)) return kNoObject;
 
     obj->id = nextId_++;
     obj->name = uniqueName(primitiveName(kind));
     obj->transform.position = position;
-    obj->mesh.buildRenderMesh(obj->render);
-    obj->localBounds = obj->mesh.bounds();
+    obj->body.tessellate(obj->render);
+    obj->localBounds = obj->body.bounds();
 
     const ObjectId id = obj->id;
     objects_.push_back(std::move(obj));
     return id;
 }
 
-ObjectId Scene::addMesh(Mesh mesh, Vec3 position, const std::string& name) {
-    if (mesh.empty()) return kNoObject;
+ObjectId Scene::addBody(Body body, Vec3 position, const std::string& name) {
+    if (body.empty()) return kNoObject;
     auto obj = std::make_unique<SceneObject>();
     obj->spec.kind = PrimitiveKind::Custom;
-    obj->mesh = std::move(mesh);
+    obj->body = std::move(body);
 
     Feature base;
     base.kind = FeatureKind::BaseMesh;
-    base.bakedMesh = obj->mesh;
+    base.bakedBody = obj->body;
     base.uid = nextFeatureUid_++;
     obj->features.push_back(base);
 
     obj->id = nextId_++;
     obj->name = uniqueName(name.empty() ? "Object" : name);
     obj->transform.position = position;
-    obj->mesh.buildRenderMesh(obj->render);
-    obj->localBounds = obj->mesh.bounds();
+    obj->body.tessellate(obj->render);
+    obj->localBounds = obj->body.bounds();
 
     const ObjectId id = obj->id;
     objects_.push_back(std::move(obj));
@@ -118,7 +118,7 @@ ObjectId Scene::duplicateObject(ObjectId id) {
                                         // intermediate mesh would cost more
                                         // than re-running the chain once
     obj->transform   = src->transform;
-    obj->mesh        = src->mesh;
+    obj->body        = src->body;
     obj->render      = src->render;
     obj->localBounds = src->localBounds;
     obj->visible     = src->visible;
@@ -190,12 +190,12 @@ bool Scene::reevaluateFrom(ObjectId id, size_t fromFeature) {
     SceneObject* obj = find(id);
     if (!obj) return false;
 
-    // Evaluate into a scratch mesh: a chain that produces nothing must not
+    // Evaluate into a scratch body: a chain that produces nothing must not
     // destroy the geometry the user can still see.
-    Mesh next;
+    Body next;
     if (!evaluateFrom(obj->features, fromFeature, obj->featureCache, next)) return false;
 
-    obj->mesh = std::move(next);
+    obj->body = std::move(next);
     obj->refreshDerived();
     // Face numbering does not survive a re-evaluation.
     pruneElementSelection();
@@ -211,7 +211,7 @@ bool Scene::addFeature(ObjectId id, Feature feature, std::string* error) {
     obj->features.push_back(std::move(feature));
 
     // Only the new feature needs running; everything before it is cached.
-    Mesh next;
+    Body next;
     if (!evaluateFrom(obj->features, obj->features.size() - 1,
                       obj->featureCache, next)) {
         if (error) *error = obj->features.back().error;
@@ -227,7 +227,7 @@ bool Scene::addFeature(ObjectId id, Feature feature, std::string* error) {
         return false;
     }
 
-    obj->mesh = std::move(next);
+    obj->body = std::move(next);
     obj->refreshDerived();
     pruneElementSelection();
     return true;
@@ -321,36 +321,40 @@ ElementHit Scene::pickElement(const Ray& ray, const Mat4& viewProj,
             out.point = surface.point;
 
             const Mat4 model = obj->modelMatrix();
-            const Mesh& mesh = obj->mesh;
+            const Body& body = obj->body;
 
             float bestVert = vertexTolPx, bestEdge = edgeTolPx;
-            Index vertPick = kInvalid, edgePick = kInvalid;
+            VertexId vertPick = kInvalid;
+            EdgeId   edgePick = kInvalid;
 
-            const Index start = mesh.faces[surface.face].halfedge;
-            Index h = start;
-            do {
-                const Index v0 = mesh.fromVertex(h);
-                const Index v1 = mesh.halfedges[h].vertex;
+            auto atPixel = [&](Vec3 local, Vec2& px) {
+                return projectPx(viewProj, viewportW, viewportH,
+                                 transformPoint(model, local), px);
+            };
 
+            std::vector<VertexId> fv;
+            body.faceVertices(surface.face, fv);
+            for (VertexId v : fv) {
+                Vec2 p;
+                if (!atPixel(body.vertexPosition(v), p)) continue;
+                const float d = length(cursorPx - p);
+                if (d < bestVert) { bestVert = d; vertPick = v; }
+            }
+
+            std::vector<EdgeId> fe;
+            body.faceEdges(surface.face, fe);
+            for (EdgeId e : fe) {
+                // A cut that only exists because a face cannot hold a hole is
+                // not drawn, so it must not be pickable either -- clicking one
+                // would select a line the user cannot see.
+                if (body.isBridgeEdge(e)) continue;
+                Vec3 a, b;
+                body.edgePositions(e, a, b);
                 Vec2 p0, p1;
-                const bool ok0 = projectPx(viewProj, viewportW, viewportH,
-                                           transformPoint(model, mesh.verts[v0].position), p0);
-                const bool ok1 = projectPx(viewProj, viewportW, viewportH,
-                                           transformPoint(model, mesh.verts[v1].position), p1);
-
-                if (ok0) {
-                    const float d = length(cursorPx - p0);
-                    if (d < bestVert) { bestVert = d; vertPick = v0; }
-                }
-                if (ok0 && ok1) {
-                    const float d = distToSegment(cursorPx, p0, p1);
-                    if (d < bestEdge) {
-                        bestEdge = d;
-                        edgePick = std::min(h, mesh.halfedges[h].twin);
-                    }
-                }
-                h = mesh.halfedges[h].next;
-            } while (h != start);
+                if (!atPixel(a, p0) || !atPixel(b, p1)) continue;
+                const float d = distToSegment(cursorPx, p0, p1);
+                if (d < bestEdge) { bestEdge = d; edgePick = e; }
+            }
 
             if (vertPick != kInvalid)      out.ref = {surface.object, ElementKind::Vertex, vertPick};
             else if (edgePick != kInvalid) out.ref = {surface.object, ElementKind::Edge, edgePick};
@@ -360,52 +364,51 @@ ElementHit Scene::pickElement(const Ray& ray, const Mat4& viewProj,
 
     // If raycast missed or didn't hit a surface, check nearby vertices and edges
     // of visible objects on screen (off-silhouette generous picking).
+    // A vertex hit and an edge hit are tracked with their own owning object.
+    // Sharing one `bestObj` between them meant a vertex winning on one object
+    // and an edge later winning on another returned that second object with the
+    // first one's vertex handle.
     float bestVert = vertexTolPx, bestEdge = edgeTolPx;
-    ObjectId bestObj = kNoObject;
-    Index vertPick = kInvalid, edgePick = kInvalid;
+    ObjectId vertObj = kNoObject, edgeObj = kNoObject;
+    VertexId vertPick = kInvalid;
+    EdgeId   edgePick = kInvalid;
 
+    std::vector<VertexId> verts;
+    std::vector<EdgeId> edges;
     for (const auto& obj : objects_) {
-        if (!obj->visible || obj->mesh.empty()) continue;
+        if (!obj->visible || obj->body.empty()) continue;
         const Mat4 model = obj->modelMatrix();
-        const Mesh& mesh = obj->mesh;
+        const Body& body = obj->body;
 
-        for (Index v = 0; v < mesh.vertexCount(); ++v) {
+        auto atPixel = [&](Vec3 local, Vec2& px) {
+            return projectPx(viewProj, viewportW, viewportH,
+                             transformPoint(model, local), px);
+        };
+
+        body.allVertices(verts);
+        for (VertexId v : verts) {
             Vec2 p;
-            if (projectPx(viewProj, viewportW, viewportH,
-                          transformPoint(model, mesh.verts[v].position), p)) {
-                const float d = length(cursorPx - p);
-                if (d < bestVert) {
-                    bestVert = d;
-                    vertPick = v;
-                    bestObj = obj->id;
-                }
-            }
+            if (!atPixel(body.vertexPosition(v), p)) continue;
+            const float d = length(cursorPx - p);
+            if (d < bestVert) { bestVert = d; vertPick = v; vertObj = obj->id; }
         }
 
-        for (Index h = 0; h < mesh.halfedgeCount(); ++h) {
-            if (h > mesh.halfedges[h].twin) continue;
-            const Index v0 = mesh.fromVertex(h);
-            const Index v1 = mesh.halfedges[h].vertex;
+        body.allEdges(edges);
+        for (EdgeId e : edges) {
+            if (body.isBridgeEdge(e)) continue;
+            Vec3 a, b;
+            body.edgePositions(e, a, b);
             Vec2 p0, p1;
-            const bool ok0 = projectPx(viewProj, viewportW, viewportH,
-                                       transformPoint(model, mesh.verts[v0].position), p0);
-            const bool ok1 = projectPx(viewProj, viewportW, viewportH,
-                                       transformPoint(model, mesh.verts[v1].position), p1);
-            if (ok0 && ok1) {
-                const float d = distToSegment(cursorPx, p0, p1);
-                if (d < bestEdge) {
-                    bestEdge = d;
-                    edgePick = h;
-                    bestObj = obj->id;
-                }
-            }
+            if (!atPixel(a, p0) || !atPixel(b, p1)) continue;
+            const float d = distToSegment(cursorPx, p0, p1);
+            if (d < bestEdge) { bestEdge = d; edgePick = e; edgeObj = obj->id; }
         }
     }
 
-    if (vertPick != kInvalid && bestObj != kNoObject) {
-        out.ref = {bestObj, ElementKind::Vertex, vertPick};
-    } else if (edgePick != kInvalid && bestObj != kNoObject) {
-        out.ref = {bestObj, ElementKind::Edge, edgePick};
+    if (vertPick != kInvalid && vertObj != kNoObject) {
+        out.ref = {vertObj, ElementKind::Vertex, vertPick};
+    } else if (edgePick != kInvalid && edgeObj != kNoObject) {
+        out.ref = {edgeObj, ElementKind::Edge, edgePick};
     }
 
     return out;
@@ -416,17 +419,49 @@ bool Scene::isElementSelected(const ElementRef& e) const {
     return std::find(elements_.begin(), elements_.end(), e) != elements_.end();
 }
 
+// Picking one piece of a face that was split because a face cannot have a hole
+// selects the whole of it. The pieces are joined by cuts that are not drawn and
+// cannot be clicked, so anything else would have the user selecting two thirds
+// of a surface with no way to see why.
+//
+// Only those cuts are crossed. A face the user divided -- the section line an
+// extrude leaves down a wall -- stays two faces, picked and acted on
+// separately, which is what it is for.
+std::vector<ElementRef> Scene::faceGroup(const ElementRef& e) const {
+    if (e.kind != ElementKind::Face) return {e};
+    const SceneObject* o = find(e.object);
+    if (!o || e.index < 0 || e.index >= o->body.faceCount()) return {e};
+
+    std::vector<Index> group;
+    o->body.coplanarFaceGroup(e.index, group);
+    std::vector<ElementRef> out;
+    out.reserve(group.size());
+    for (Index f : group) out.push_back({e.object, ElementKind::Face, f});
+    return out;
+}
+
 void Scene::selectElement(const ElementRef& e, bool additive) {
     if (!additive) elements_.clear();
     if (!e.valid()) return;
-    if (!isElementSelected(e)) elements_.push_back(e);
+    for (const ElementRef& r : faceGroup(e))
+        if (!isElementSelected(r)) elements_.push_back(r);
 }
 
 void Scene::toggleElement(const ElementRef& e) {
     if (!e.valid()) return;
-    auto it = std::find(elements_.begin(), elements_.end(), e);
-    if (it != elements_.end()) elements_.erase(it);
-    else elements_.push_back(e);
+    // The group goes in and out together, or a shift-click would peel one
+    // invisible piece off a face and leave the rest selected.
+    const std::vector<ElementRef> group = faceGroup(e);
+    if (isElementSelected(e)) {
+        elements_.erase(std::remove_if(elements_.begin(), elements_.end(),
+                            [&](const ElementRef& x) {
+                                return std::find(group.begin(), group.end(), x) != group.end();
+                            }),
+                        elements_.end());
+        return;
+    }
+    for (const ElementRef& r : group)
+        if (!isElementSelected(r)) elements_.push_back(r);
 }
 
 std::vector<Index> Scene::selectedFaces(ObjectId id) const {
@@ -436,16 +471,17 @@ std::vector<Index> Scene::selectedFaces(ObjectId id) const {
     return out;
 }
 
-std::vector<Index> Scene::selectedEdges(ObjectId id) const {
-    std::vector<Index> out;
+std::vector<EdgeId> Scene::selectedEdges(ObjectId id) const {
+    std::vector<EdgeId> out;
     const SceneObject* o = find(id);
     if (!o) return out;
     for (const ElementRef& e : elements_) {
         if (e.object != id || e.kind != ElementKind::Edge) continue;
-        if (e.index < 0 || e.index >= o->mesh.halfedgeCount()) continue;
-        const Index canonical = std::min(e.index, o->mesh.halfedges[e.index].twin);
-        if (std::find(out.begin(), out.end(), canonical) == out.end())
-            out.push_back(canonical);
+        // Handles are already canonical wherever they came from, so this is a
+        // validity check and a de-duplication, not a normalisation.
+        if (!o->body.hasEdge(e.index)) continue;
+        if (std::find(out.begin(), out.end(), e.index) == out.end())
+            out.push_back(e.index);
     }
     return out;
 }
@@ -456,9 +492,9 @@ void Scene::pruneElementSelection() {
             const SceneObject* o = find(e.object);
             if (!o) return true;
             switch (e.kind) {
-                case ElementKind::Face:   return e.index >= o->mesh.faceCount();
-                case ElementKind::Edge:   return e.index >= o->mesh.halfedgeCount();
-                case ElementKind::Vertex: return e.index >= o->mesh.vertexCount();
+                case ElementKind::Face:   return !o->body.hasFace(e.index);
+                case ElementKind::Edge:   return !o->body.hasEdge(e.index);
+                case ElementKind::Vertex: return !o->body.hasVertex(e.index);
                 case ElementKind::None:   return true;
             }
             return true;
@@ -503,7 +539,7 @@ RayHit Scene::raycast(const Ray& ray) const {
             best.t      = worldT;
             best.point  = ray.origin + ray.dir * worldT;
             best.normal = normalize(transformVector(normalMatrix(model),
-                                                    o->mesh.faceNormal(best.face)));
+                                                    o->body.faceNormal(best.face)));
         }
     }
     return best;

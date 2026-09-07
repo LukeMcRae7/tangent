@@ -16,7 +16,8 @@
 
 namespace tg {
 
-inline constexpr uint32_t kProjectVersion = 3;   // 3: features name what they act on
+inline constexpr uint32_t kProjectVersion = 4;   // 3: features name what they act on
+                                                //  4: geometry is a tagged Body
 
 struct ProjectResult {
     bool ok = false;

@@ -13,7 +13,7 @@ static void check(bool ok, const std::string& what) {
 }
 static bool near(Real a, Real b, Real eps = 1e-9) { return std::fabs(a - b) < eps; }
 
-static Index faceFacing(const Mesh& m, Vec3 dir) {
+static FaceId faceFacing(const Body& m, Vec3 dir) {
     Index best = kInvalid; Real bestDot = -2.0;
     for (Index f = 0; f < m.faceCount(); ++f) {
         const Real d = dot(m.faceNormal(f), dir);
@@ -21,9 +21,11 @@ static Index faceFacing(const Mesh& m, Vec3 dir) {
     }
     return best;
 }
-static Index vertexAt(const Mesh& m, Vec3 p) {
-    for (Index v = 0; v < m.vertexCount(); ++v)
-        if (lengthSq(m.verts[v].position - p) < 1e-12) return v;
+static VertexId vertexAt(const Body& m, Vec3 p) {
+    std::vector<VertexId> verts;
+    m.allVertices(verts);
+    for (VertexId v : verts)
+        if (lengthSq(m.vertexPosition(v) - p) < 1e-12) return v;
     return kInvalid;
 }
 
@@ -46,7 +48,7 @@ int main() {
 
     Scene s;
     const ObjectId id = s.addPrimitive(PrimitiveKind::Box);   // 20mm, centred
-    const Mesh& m = s.find(id)->mesh;
+    const Body& m = s.find(id)->body;
 
     const Index top    = faceFacing(m, {0, 0, 1});
     const Index bottom = faceFacing(m, {0, 0, -1});
@@ -136,7 +138,7 @@ int main() {
     // ---- Two objects --------------------------------------------------------
     {
         const ObjectId b = s.addPrimitive(PrimitiveKind::Box, {}, Vec3{50, 0, 0});
-        const Mesh& mb = s.find(b)->mesh;
+        const Body& mb = s.find(b)->body;
         // Gap between the facing walls: 50 - 10 - 10 = 30mm.
         t.pick({id, ElementKind::Face, faceFacing(m, {1, 0, 0})});
         t.pick({b,  ElementKind::Face, faceFacing(mb, {-1, 0, 0})});

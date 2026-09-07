@@ -6,6 +6,7 @@
 #include "mesh/primitives.h"
 
 #include <cstdio>
+#include <random>
 #include <string>
 
 using namespace tg;
@@ -398,6 +399,210 @@ int main() {
         check(volumeOf(cut3) < volumeOf(cut2), "third cut removes volume");
         std::printf("[bool] 3 overlapping curved cuts: %.1f -> %.1f -> %.1f mm3\n",
                     volumeOf(cut1), volumeOf(cut2), volumeOf(cut3));
+    }
+
+    // ---- A face with more than one hole in it ----------------------------
+    //
+    // A boolean shreds every face it cuts and mergeCoplanarFaces puts the
+    // pieces back. It used to manage a face with one hole and give up entirely
+    // on a face with two, so the second hole left the whole fan of fragments on
+    // the model as visible lines across a flat surface. Since a face here holds
+    // one boundary loop, n holes must come out as n+1 pieces -- and that is
+    // what these check, because "fewer faces" alone would also be satisfied by
+    // merging something away that should have stayed.
+    {
+        auto plateWithBores = [](int n, Mesh& out) {
+            Mesh cur;
+            makeBox(cur, {60.0, 60.0, 10.0});
+            const int side = n <= 1 ? 1 : (n <= 4 ? 2 : 3);
+            int made = 0;
+            for (int i = 0; i < side; ++i)
+                for (int j = 0; j < side && made < n; ++j) {
+                    Mesh drill;
+                    makeCylinder(drill, {3.0, 30.0, 16});
+                    const Real step = 48.0 / side;
+                    const Vec3 at{-24.0 + step * (i + 0.5), -24.0 + step * (j + 0.5), 0.0};
+                    for (MeshVertex& v : drill.verts) v.position += at;
+                    Mesh next;
+                    if (!meshBoolean(cur, drill, BooleanOp::Difference, next, 300 + made))
+                        return false;
+                    cur = std::move(next);
+                    ++made;
+                }
+            out = std::move(cur);
+            return true;
+        };
+
+        auto piecesOnTop = [](const Mesh& m) {
+            int n = 0;
+            for (Index f = 0; f < m.faceCount(); ++f)
+                if (m.faceNormal(f).z > 0.99 && std::fabs(m.faceCentroid(f).z - 5.0) < 1e-3) ++n;
+            return n;
+        };
+
+        // A 16-sided bore of radius 3 removes this much from a 10mm plate.
+        const double bore = 0.5 * 16.0 * 9.0 * std::sin(kTwoPi / 16.0) * 10.0;
+
+        // Nine is here for a second reason. It only succeeds because classify
+        // stops splitting a piece once it is clear of the other solid's bounding
+        // box: without that, a bore through a plate cuts every face it touches
+        // edge to edge into hundreds of slabs, and by the fifth bore one of
+        // those arrangements is degenerate enough that the rebuild refuses it.
+        for (int n : {1, 2, 4, 9}) {
+            Mesh plate;
+            const std::string what = std::to_string(n) + " bore" + (n == 1 ? "" : "s");
+            check(plateWithBores(n, plate), what + ": every cut succeeds");
+            if (plate.empty()) continue;
+            expectSolid(plate, "bored plate");
+            check(near(volumeOf(plate), 60.0 * 60.0 * 10.0 - n * bore, 1e-3),
+                  what + ": volume is exact");
+            check(piecesOnTop(plate) == n + 1,
+                  what + ": the top comes back as " + std::to_string(n + 1) + " pieces");
+            std::printf("[bool] %-8s -> %3d faces, top plane in %d piece%s (ideal %d)\n",
+                        what.c_str(), plate.faceCount(), piecesOnTop(plate),
+                        piecesOnTop(plate) == 1 ? "" : "s", n + 1);
+        }
+    }
+
+    // A bridge cut that runs back along a boundary edge leaves a corner of zero
+    // angle. The area stays positive and the mesh still validates, so nothing
+    // notices until the next boolean has to classify against that sliver and
+    // refuses the whole operation. No merged face may contain one.
+    {
+        Mesh cur;
+        makeBox(cur, {20.0, 20.0, 20.0});
+        std::mt19937 rng(7);
+        std::uniform_real_distribution<double> U(-9.0, 9.0);
+
+        int cuts = 0, spikes = 0;
+        std::vector<Index> fv;
+        for (int i = 0; i < 40; ++i) {
+            Mesh cutter;
+            makeBox(cutter, {6.0, 6.0, 40.0});
+            const Vec3 at{U(rng), U(rng), 0.0};
+            for (MeshVertex& v : cutter.verts) v.position += at;
+            Mesh next;
+            if (!meshBoolean(cur, cutter, BooleanOp::Difference, next, 500 + i)) continue;
+            cur = std::move(next);
+            ++cuts;
+
+            for (Index f = 0; f < cur.faceCount(); ++f) {
+                cur.faceVertices(f, fv);
+                const size_t k = fv.size();
+                for (size_t c = 0; c < k; ++c) {
+                    const Vec3 a = cur.verts[fv[(c + k - 1) % k]].position;
+                    const Vec3 b = cur.verts[fv[c]].position;
+                    const Vec3 d = cur.verts[fv[(c + 1) % k]].position;
+                    const Vec3 u = a - b, v = d - b;
+                    const Real lu = length(u), lv = length(v);
+                    if (lu < 1e-12 || lv < 1e-12) { ++spikes; continue; }
+                    if (dot(u, v) / (lu * lv) > 1.0 - 1e-9) ++spikes;
+                }
+            }
+        }
+        check(cuts > 20, "most of a run of random cuts succeeds");
+        check(spikes == 0, "no merged face doubles back on itself");
+        std::printf("[bool] %d successive random cuts, %d zero-angle corners\n", cuts, spikes);
+    }
+
+    // ---- Nothing is drawn across a flat face ------------------------------
+    //
+    // A face here holds one boundary loop, so a region with a hole in it has to
+    // be cut into pieces and the cuts are real edges in the topology. They are
+    // not on the model, though: the surface does not turn at them, and a bore
+    // through a plate came back with two lines running from it to the rim. They
+    // are dropped from the wireframe and from picking instead of from the mesh.
+    //
+    // The invariant is the one the user sees: no drawn edge has coplanar faces
+    // on both sides that meet along more than one edge.
+    auto linesAcrossFlatFaces = [](const Mesh& m) {
+        RenderMesh rm;
+        m.buildRenderMesh(rm);
+        // Positions are per-corner copies, so match drawn segments back to
+        // edges by their endpoints.
+        int across = 0;
+        for (Index h = 0; h < m.halfedgeCount(); ++h) {
+            if (h > m.halfedges[h].twin) continue;
+            if (!m.isBridgeEdge(h)) continue;
+            const Vec3 a = m.verts[m.fromVertex(h)].position;
+            const Vec3 b = m.verts[m.halfedges[h].vertex].position;
+            for (size_t i = 0; i < rm.edgeLines.size(); i += 2) {
+                const Vec3 p = rm.positions[rm.edgeLines[i]];
+                const Vec3 q = rm.positions[rm.edgeLines[i + 1]];
+                if ((lengthSq(p - a) < 1e-12 && lengthSq(q - b) < 1e-12) ||
+                    (lengthSq(p - b) < 1e-12 && lengthSq(q - a) < 1e-12)) { ++across; break; }
+            }
+        }
+        return across;
+    };
+
+    {
+        // The reported case: a cylindrical pocket in the top of a box.
+        Mesh box;
+        makeBox(box, {36.0, 60.0, 27.0});
+        Mesh drill;
+        makeCylinder(drill, {10.0, 20.0, 24});
+        for (MeshVertex& v : drill.verts) v.position += Vec3{0, 0, 15.5};
+        Mesh pocketed;
+        check(meshBoolean(box, drill, BooleanOp::Difference, pocketed, 7), "pocket cut");
+
+        int bridges = 0;
+        for (Index h = 0; h < pocketed.halfedgeCount(); ++h)
+            if (h < pocketed.halfedges[h].twin && pocketed.isBridgeEdge(h)) ++bridges;
+        check(bridges == 2, "the bored face is bridged by two cuts");
+        check(linesAcrossFlatFaces(pocketed) == 0, "and neither is drawn");
+
+        RenderMesh rm;
+        pocketed.buildRenderMesh(rm);
+        check(static_cast<int>(rm.edgeLines.size() / 2) == pocketed.halfedgeCount() / 2 - 2,
+              "exactly the two cuts are left out of the wireframe");
+        std::printf("[bool] bored face: %d bridge cuts, %d drawn across a flat face\n",
+                    bridges, linesAcrossFlatFaces(pocketed));
+    }
+
+    {
+        // Four slots: four holes in one face, so four bridges.
+        Mesh cur;
+        makeBox(cur, {20.0, 20.0, 20.0});
+        for (int i = 0; i < 4; ++i) {
+            Mesh cutter;
+            makeBox(cutter, {5.0, 5.0, 30.0});
+            const Vec3 at{(i % 2) ? 6.0 : -6.0, (i / 2) ? 6.0 : -6.0, 0.0};
+            for (MeshVertex& v : cutter.verts) v.position += at;
+            Mesh next;
+            if (!meshBoolean(cur, cutter, BooleanOp::Difference, next, 100 + i)) break;
+            cur = std::move(next);
+        }
+        check(linesAcrossFlatFaces(cur) == 0, "four slots draw nothing across the faces");
+    }
+
+    {
+        // The other half of the rule: a section line an extrude left behind is
+        // one shared edge, not two, and stays drawn.
+        Mesh box;
+        makeBox(box, {20.0, 20.0, 20.0});
+        Index top = kInvalid;
+        for (Index f = 0; f < box.faceCount(); ++f)
+            if (dot(box.faceNormal(f), Vec3{0, 0, 1}) > 0.99) top = f;
+        check(extrudeFaces(box, {top}, 6.0), "raise the top");
+
+        int hidden = 0;
+        for (Index h = 0; h < box.halfedgeCount(); ++h)
+            if (h < box.halfedges[h].twin && box.isBridgeEdge(h)) ++hidden;
+        check(hidden == 0, "an extrude's section lines are not bridges");
+
+        RenderMesh rm;
+        box.buildRenderMesh(rm);
+        check(static_cast<int>(rm.edgeLines.size() / 2) == box.halfedgeCount() / 2,
+              "and every edge of an extruded body is still drawn");
+
+        Mesh plain;
+        makeBox(plain, {20.0, 20.0, 20.0});
+        RenderMesh pr;
+        plain.buildRenderMesh(pr);
+        check(pr.edgeLines.size() / 2 == 12, "a plain box still draws twelve edges");
+        std::printf("[bool] extruded body: %d bridges, all %zu edges drawn\n",
+                    hidden, rm.edgeLines.size() / 2);
     }
 
     std::printf("\n%s (%d failures)\n", failures ? "FAILED" : "ALL PASS", failures);

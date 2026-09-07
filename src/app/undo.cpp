@@ -113,7 +113,7 @@ void VertexCommand::apply(Scene& scene, const std::vector<Vec3>& positions) {
     SceneObject* o = scene.find(id_);
     if (!o) return;
     for (size_t i = 0; i < verts_.size() && i < positions.size(); ++i)
-        if (verts_[i] < o->mesh.vertexCount()) o->mesh.verts[verts_[i]].position = positions[i];
+        if (o->body.hasVertex(verts_[i])) o->body.setVertexPosition(verts_[i], positions[i]);
     o->refreshDerived();
 }
 
@@ -125,12 +125,12 @@ bool VertexCommand::mergeWith(const Command& other) {
 }
 
 // ---------------------------------------------------------------------------
-void MeshCommand::apply(Scene& scene, const Mesh& mesh, const PrimitiveSpec& spec) {
+void MeshCommand::apply(Scene& scene, const Body& body, const PrimitiveSpec& spec) {
     SceneObject* o = scene.find(id_);
     if (!o) return;
-    o->mesh = mesh;
-    o->mesh.buildRenderMesh(o->render);
-    o->localBounds = o->mesh.bounds();
+    o->body = body;
+    o->body.tessellate(o->render);
+    o->localBounds = o->body.bounds();
     o->spec = spec;
     o->markMeshChanged();
     // Face and vertex numbering does not survive a mesh edit, so anything the

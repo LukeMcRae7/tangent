@@ -38,7 +38,7 @@
 //    - Orthogonal multi-face cuts on all sides of a body
 //    - Precision volume and topological invariant verifications
 //  Section 9: Cuts and joins belong to the feature history
-//    - The tool's cut/join land in the chain, not over obj->mesh
+//    - The tool's cut/join land in the chain, not over obj->body
 //    - Re-evaluating for any reason preserves them
 //    - A fillet committed afterwards is neither refused nor loses the cut
 //    - A cut with nothing to cut into refuses instead of adding a body
@@ -90,8 +90,18 @@ double polygonArea2D(const std::vector<Vec2>& poly) {
     return 0.5 * area;
 }
 
+// The suite works at two levels: raw meshes from makePrismMesh, and Bodies
+// once they are in a scene. Both spellings forward to the same checks.
+void expectSolid(const Body& m, const std::string& what);
+double volumeOf(const Body& m);
+
 void expectSolid(const Mesh& m, const std::string& what) {
-    const MeshHealth h = checkHealth(m);
+    expectSolid(Body(m), what);
+}
+double volumeOf(const Mesh& m) { return volumeOf(Body(m)); }
+
+void expectSolid(const Body& m, const std::string& what) {
+    const MeshHealth h = m.health();
     check(h.watertight, what + ": watertight");
     check(h.volume > 0.0, what + ": positive volume");
     check(h.boundaryEdges == 0, what + ": no boundary edges");
@@ -102,8 +112,8 @@ void expectSolid(const Mesh& m, const std::string& what) {
     check(m.validate(&err), what + ": topological validation (" + err + ")");
 }
 
-double volumeOf(const Mesh& m) {
-    return checkHealth(m, false).volume;
+double volumeOf(const Body& m) {
+    return m.health(false).volume;
 }
 
 Mesh makeBoxMesh(Vec3 size, Vec3 center = {0, 0, 0}) {
@@ -845,20 +855,21 @@ void testSection8_SceneLifecycleAndTransforms() {
         bool finished = tool.finishCreation(scene, camera, undo);
         check(finished, "finishCreation on filleted box succeeds");
         check(scene.objectCount() == 1, "scene has 1 object after creating filleted box");
+        if (scene.objectCount() != 1) return;   // nothing below is meaningful
 
         ObjectId id = scene.objects().front()->id;
         SceneObject* obj = scene.find(id);
         check(obj != nullptr, "filleted object is present in scene (does not vanish)");
         if (obj) {
-            check(!obj->mesh.empty(), "filleted object mesh is non-empty");
-            expectSolid(obj->mesh, "scene filleted box solid");
+            check(!obj->body.empty(), "filleted object mesh is non-empty");
+            expectSolid(obj->body, "scene filleted box solid");
             const double expectedVol = (30.0 * 20.0 - (4.0 - kPi) * 16.0) * 15.0;
-            check(nearRel(volumeOf(obj->mesh), expectedVol, 0.01), "scene filleted box volume matches expected");
+            check(nearRel(volumeOf(obj->body), expectedVol, 0.01), "scene filleted box volume matches expected");
 
             // Re-evaluating scene feature timeline must preserve the geometry
             bool reb = scene.rebuild(id);
             check(reb, "scene.rebuild succeeds on filleted object");
-            check(!obj->mesh.empty() && nearRel(volumeOf(obj->mesh), expectedVol, 0.01),
+            check(!obj->body.empty() && nearRel(volumeOf(obj->body), expectedVol, 0.01),
                   "filleted object survives scene.rebuild without vanishing");
         }
 
@@ -868,8 +879,9 @@ void testSection8_SceneLifecycleAndTransforms() {
         undo.redo(scene);
         check(scene.objectCount() == 1, "redo restores filleted object");
         if (scene.objectCount() == 1) {
+            if (scene.objectCount() != 1) { check(false, "redo restored the object"); return; }
             SceneObject* restored = scene.objects().front().get();
-            expectSolid(restored->mesh, "restored filleted object is solid");
+            expectSolid(restored->body, "restored filleted object is solid");
         }
     }
 
@@ -909,7 +921,7 @@ void testSection8_SceneLifecycleAndTransforms() {
         check(near(wb.min.x, 80.0) && near(wb.max.x, 120.0), "boss world X bounds correct [80, 120]");
         check(near(wb.min.y, 30.0) && near(wb.max.y, 70.0), "boss world Y bounds correct [30, 70]");
         check(near(wb.min.z, -40.0) && near(wb.max.z, 15.0), "boss world Z bounds reach z=15 at top");
-        expectSolid(baseObj->mesh, "joined boss on transformed box");
+        expectSolid(baseObj->body, "joined boss on transformed box");
     }
 
     // 8.3 Negative Extrude / Cut into Transformed Object (Moved in World Space)
@@ -943,14 +955,14 @@ void testSection8_SceneLifecycleAndTransforms() {
 
         // Target volume should be exactly 64000 - 4000 = 60000 mm3
         const double expVol = 64000.0 - (20.0 * 20.0 * 10.0);
-        check(near(volumeOf(baseObj->mesh), expVol), "pocket cut into transformed box has exact volume 60000 mm3");
-        expectSolid(baseObj->mesh, "transformed box with pocket");
+        check(near(volumeOf(baseObj->body), expVol), "pocket cut into transformed box has exact volume 60000 mm3");
+        expectSolid(baseObj->body, "transformed box with pocket");
 
         // Test Undo & Redo of cut
         undo.undo(scene);
-        check(near(volumeOf(baseObj->mesh), 64000.0), "undo restores uncut transformed box volume");
+        check(near(volumeOf(baseObj->body), 64000.0), "undo restores uncut transformed box volume");
         undo.redo(scene);
-        check(near(volumeOf(baseObj->mesh), expVol), "redo restores pocket cut volume");
+        check(near(volumeOf(baseObj->body), expVol), "redo restores pocket cut volume");
     }
 
     // 8.4 Standalone Solid with Single Corner Fillet in Scene
@@ -972,14 +984,15 @@ void testSection8_SceneLifecycleAndTransforms() {
         bool finished = tool.finishCreation(scene, camera, undo);
         check(finished, "finishCreation on single-corner filleted box succeeds");
         check(scene.objectCount() == 1, "scene contains single-corner filleted box");
+        if (scene.objectCount() != 1) return;
 
         ObjectId id = scene.objects().front()->id;
         SceneObject* obj = scene.find(id);
         check(obj != nullptr, "single-corner filleted object found");
         if (obj) {
-            expectSolid(obj->mesh, "single-corner filleted object solid");
+            expectSolid(obj->body, "single-corner filleted object solid");
             const double expVol = (40.0 * 30.0 - (1.0 - kPi * 0.25) * 36.0) * 20.0;
-            check(nearRel(volumeOf(obj->mesh), expVol, 0.01), "single-corner filleted object volume exact");
+            check(nearRel(volumeOf(obj->body), expVol, 0.01), "single-corner filleted object volume exact");
         }
     }
 
@@ -1020,7 +1033,7 @@ void testSection8_SceneLifecycleAndTransforms() {
 // ===========================================================================
 // SECTION 9: Cuts and Joins Belong to the Feature History
 //
-// The tool used to assign target->mesh and leave features/featureCache
+// The tool used to assign target->body and leave features/featureCache
 // describing the body as it was before the operation. Everything downstream
 // trusted the stale chain: re-evaluating deleted the cut, and committing a
 // fillet either failed to resolve edges it had just previewed or applied them
@@ -1061,8 +1074,8 @@ void testSection9_EditsLandInTheHistory() {
         check(obj != nullptr, "cut object present");
         if (!obj) return;
 
-        check(near(volumeOf(obj->mesh), kPocket), "pocket volume is 13600 mm3");
-        expectSolid(obj->mesh, "pocketed box");
+        check(near(volumeOf(obj->body), kPocket), "pocket volume is 13600 mm3");
+        expectSolid(obj->body, "pocketed box");
         check(obj->features.size() == 2, "the chain has two features");
         check(obj->features.size() == 2 &&
               obj->features[1].kind == FeatureKind::Boolean &&
@@ -1081,21 +1094,21 @@ void testSection9_EditsLandInTheHistory() {
         SceneObject* obj = scene.find(id);
         if (!obj) { check(false, "cut object present for re-evaluation"); return; }
 
-        check(scene.reevaluate(id) && near(volumeOf(obj->mesh), kPocket),
+        check(scene.reevaluate(id) && near(volumeOf(obj->body), kPocket),
               "reevaluate keeps the pocket");
-        check(scene.rebuild(id) && near(volumeOf(obj->mesh), kPocket),
+        check(scene.rebuild(id) && near(volumeOf(obj->body), kPocket),
               "rebuild keeps the pocket");
 
         // The base is still a parametric box, so changing its width re-cuts.
         obj->spec.box.width = 50.0;
         check(scene.rebuild(id) &&
-              near(volumeOf(obj->mesh), 50.0 * 20.0 * 20.0 - 10.0 * 10.0 * 8.0),
+              near(volumeOf(obj->body), 50.0 * 20.0 * 20.0 - 10.0 * 10.0 * 8.0),
               "widening the box re-cuts the pocket");
 
         undo.undo(scene);
-        check(near(volumeOf(obj->mesh), kBox), "undo restores the uncut box");
+        check(near(volumeOf(obj->body), kBox), "undo restores the uncut box");
         undo.redo(scene);
-        check(near(volumeOf(obj->mesh), kPocket), "redo restores the pocket");
+        check(near(volumeOf(obj->body), kPocket), "redo restores the pocket");
     }
 
     // 9.3 A fillet committed on the cut body is neither refused nor destructive
@@ -1105,29 +1118,30 @@ void testSection9_EditsLandInTheHistory() {
         SceneObject* obj = scene.find(id);
         if (!obj) { check(false, "cut object present for filleting"); return; }
 
-        const Mesh before = obj->mesh;
+        const Body before = obj->body;
         int previewed = 0, refused = 0, lostTheCut = 0;
 
-        for (Index he = 0; he < before.halfedgeCount(); ++he) {
-            if (he > before.halfedges[he].twin) continue;
-            const Index fa = before.halfedges[he].face;
-            const Index fb = before.halfedges[before.halfedges[he].twin].face;
-            if (fa == kInvalid || fb == kInvalid) continue;
+        std::vector<EdgeId> allEdges;
+        before.allEdges(allEdges);
+        for (EdgeId he : allEdges) {
+            FaceId fa = kNoFace, fb = kNoFace;
+            before.edgeFaces(he, fa, fb);
+            if (fa == kNoFace || fb == kNoFace) continue;
             if (dot(before.faceNormal(fa), before.faceNormal(fb)) > 0.999) continue;
 
-            const std::vector<Index> edges = extendTangentChain(before, {he});
+            const std::vector<EdgeId> edges = extendTangentChain(before, {he});
 
             // What the interactive preview computes.
-            Mesh scratch = before;
+            Body scratch = before;
             FilletSpec spec;
             spec.segments = 4;
-            for (Index e : edges) spec.edges.push_back({e, 1.0});
+            for (EdgeId e : edges) spec.edges.push_back({e, 1.0});
             if (!filletEdges(scratch, spec)) continue;
             ++previewed;
 
             // What committing it computes: named edges, replayed chain.
             const std::vector<Feature> chainBefore = obj->features;
-            const std::vector<Mesh> cacheBefore = obj->featureCache;
+            const std::vector<Body> cacheBefore = obj->featureCache;
 
             Feature f;
             f.kind = FeatureKind::Bevel;
@@ -1140,12 +1154,12 @@ void testSection9_EditsLandInTheHistory() {
             if (!scene.addFeature(id, std::move(f), &why)) {
                 ++refused;
                 std::printf("      chain at he %d refused on commit: %s\n", he, why.c_str());
-            } else if (volumeOf(obj->mesh) > kPocket + 400.0) {
+            } else if (volumeOf(obj->body) > kPocket + 400.0) {
                 // A fillet moves the volume by a few mm3 either way; the pocket
                 // vanishing is an 800 mm3 jump, so halfway is a safe line.
                 ++lostTheCut;
                 std::printf("      chain at he %d committed onto the uncut body (vol %.1f)\n",
-                            he, volumeOf(obj->mesh));
+                            he, volumeOf(obj->body));
             }
 
             obj->features = chainBefore;
@@ -1196,13 +1210,104 @@ void testSection9_EditsLandInTheHistory() {
         SceneObject* obj = scene.find(id);
         if (!obj) { check(false, "joined object present"); return; }
         const double expected = 20.0 * 20.0 * 20.0 + 10.0 * 10.0 * 10.0;
-        check(near(volumeOf(obj->mesh), expected), "boss volume is 9000 mm3");
+        check(near(volumeOf(obj->body), expected), "boss volume is 9000 mm3");
         check(obj->features.size() == 2 &&
               obj->features[1].kind == FeatureKind::Boolean &&
               obj->features[1].booleanOp == BooleanOp::Union,
               "the join is recorded as a Boolean union");
-        check(scene.reevaluate(id) && near(volumeOf(obj->mesh), expected),
+        check(scene.reevaluate(id) && near(volumeOf(obj->body), expected),
               "reevaluate keeps the boss");
+    }
+}
+
+// ===========================================================================
+// SECTION 10: Choosing What the New Solid Does to the Body Under It
+//
+// Drawing on an object's face, the user says whether the result joins, cuts, or
+// stands apart. Auto keeps what the tool did before: push out of a face and it
+// joins, push into anything and it cuts.
+// ===========================================================================
+void testSection10_CreateOperation() {
+    std::printf("\n--- Section 10: Join / Cut / New Body ---\n");
+
+    const double kBox = 40.0 * 40.0 * 40.0;
+    const double kStub = 10.0 * 10.0 * 10.0;
+
+    // Builds a 40mm box and puts the tool on its top face with a 10x10 profile.
+    auto onTopFace = [](Scene& scene, Camera& camera, CreateTool& tool, ObjectId& id) {
+        PrimitiveSpec ps;
+        ps.kind = PrimitiveKind::Box;
+        ps.box.width = ps.box.depth = ps.box.height = 40.0;
+        id = scene.addPrimitive(PrimitiveKind::Box, ps, {0, 0, 20});
+        tool.start(PrimitiveKind::Box);
+        tool.setHoveredPlane(PlaneChoice::Face, {0, 0, 40}, {0, 0, 1}, id, 1);
+        tool.commitPlaneSelection(camera);
+        tool.setProfileRect({-5, -5}, {5, 5}, 0.0);
+        tool.setStage(CreateStage::ExtrudeDepth);
+    };
+
+    // 10.1 Auto is what it always was
+    {
+        Scene scene; Camera camera; UndoStack undo; CreateTool tool; ObjectId id;
+        onTopFace(scene, camera, tool, id);
+        tool.setExtrudeDepth(10.0);
+        check(tool.op() == CreateOp::Auto, "the tool starts on Auto");
+        check(tool.resolvedOp() == CreateOp::Join, "auto + outward = join");
+        tool.setExtrudeDepth(-10.0);
+        check(tool.resolvedOp() == CreateOp::Cut, "auto + inward = cut");
+    }
+
+    // 10.2 Join, forced, on an inward depth
+    {
+        Scene scene; Camera camera; UndoStack undo; CreateTool tool; ObjectId id;
+        onTopFace(scene, camera, tool, id);
+        tool.setExtrudeDepth(10.0);
+        tool.setOp(CreateOp::Join);
+        check(tool.finishCreation(scene, camera, undo), "forced join succeeds");
+        check(scene.objectCount() == 1, "join does not add a body");
+        check(near(volumeOf(scene.find(id)->body), kBox + kStub), "join adds the stub's volume");
+    }
+
+    // 10.3 Cut, forced, on an outward depth -- trimming a boss back
+    {
+        Scene scene; Camera camera; UndoStack undo; CreateTool tool; ObjectId id;
+        onTopFace(scene, camera, tool, id);
+        tool.setExtrudeDepth(-10.0);
+        tool.setOp(CreateOp::Cut);
+        check(tool.finishCreation(scene, camera, undo), "forced cut succeeds");
+        check(scene.objectCount() == 1, "cut does not add a body");
+        check(near(volumeOf(scene.find(id)->body), kBox - kStub), "cut removes the stub's volume");
+    }
+
+    // 10.4 New Body leaves the target alone, on either sign
+    for (double depth : {10.0, -10.0}) {
+        Scene scene; Camera camera; UndoStack undo; CreateTool tool; ObjectId id;
+        onTopFace(scene, camera, tool, id);
+        tool.setExtrudeDepth(depth);
+        tool.setOp(CreateOp::NewBody);
+        const std::string what = depth > 0 ? "outward" : "inward";
+        check(tool.finishCreation(scene, camera, undo), "new body (" + what + ") succeeds");
+        check(scene.objectCount() == 2, "new body adds a second object (" + what + ")");
+        check(near(volumeOf(scene.find(id)->body), kBox),
+              "and leaves the original untouched (" + what + ")");
+    }
+
+    // 10.5 The choice only arises where there is a body to act on
+    {
+        Scene scene; Camera camera; UndoStack undo; CreateTool tool;
+        tool.start(PrimitiveKind::Box);
+        tool.setHoveredPlane(PlaneChoice::XY, {0, 0, 0}, {0, 0, 1});
+        tool.commitPlaneSelection(camera);
+        check(!tool.hasTargetBody(), "an origin plane has no body to act on");
+        tool.setProfileRect({-5, -5}, {5, 5}, 0.0);
+        tool.setExtrudeDepth(10.0);
+        tool.setStage(CreateStage::ExtrudeDepth);
+        check(tool.resolvedOp() == CreateOp::NewBody, "outward from an origin plane is a new body");
+
+        // ...but pushing into an origin plane still cuts whatever is under it,
+        // which is how a hole gets drilled from a construction plane.
+        tool.setExtrudeDepth(-10.0);
+        check(tool.resolvedOp() == CreateOp::Cut, "inward from an origin plane still cuts");
     }
 }
 
@@ -1223,6 +1328,7 @@ int main() {
     testSection7_MultiOperationSequences();
     testSection8_SceneLifecycleAndTransforms();
     testSection9_EditsLandInTheHistory();
+    testSection10_CreateOperation();
 
     std::printf("\n=========================================================\n");
     std::printf("  Test Suite Summary: %s\n", gFailures == 0 ? "ALL PASS" : "FAILED");

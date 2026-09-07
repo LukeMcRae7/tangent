@@ -1,26 +1,38 @@
 // Tangent - constructive solid geometry.
 //
-// Approach: BSP-based CSG. Each solid becomes a set of polygons; one solid's
-// polygons are clipped against a BSP tree built from the other's, classified
-// as inside or outside, and the halves kept or dropped according to the
-// operation.
+// Approach: each solid becomes a set of polygons; a face the other solid
+// reaches is split against the planes of the triangles near it, and each piece
+// is kept or dropped according to which side of the other solid it is on. That
+// side is decided by summing the solid angle the other solid subtends at a
+// point just off the piece -- a full sphere from inside, nothing from outside.
+// There is no BSP; the tree that used to drive this made the answer depend on
+// how it had been built, and could not be asked twice about the same body.
 //
 // Not the only option -- computing the exact intersection curve and
 // retriangulating along it produces tidier output with fewer slivers -- but
-// that needs exact predicates to be robust, and a BSP is far easier to get
+// that needs exact predicates to be robust, and this is far easier to get
 // *correct*, which matters more here than tidy. Double precision buys the
 // headroom the classification needs.
 //
 // The result is welded and rebuilt through Mesh::build, so it is manifold or
 // the operation fails. A boolean never returns broken geometry.
 //
-// Known limitation: a cut whose plane lands on one an earlier operation already
-// created is near-degenerate for a BSP, and classification goes wrong there --
-// the result comes back with two faces on the same directed edge and is
-// refused. Measured, the threshold is around 1e-3 of the model size. Fixing it
-// needs exact predicates or an intersection-curve formulation. Until then the
-// failure is at least honest: the operation returns false rather than handing
-// back geometry that looks right and is not.
+// Splitting against infinite planes cuts a face far beyond where the two solids
+// actually meet, so the output arrives in far more pieces than the shape needs
+// -- thousands, for a finely faceted cutter. mergeCoplanarFaces puts each flat
+// region back together afterwards and reaches the minimum this mesh can
+// represent, so that is a cost in time rather than in the result. Two things
+// keep it bounded: a piece already clear of the other solid's bounding box is
+// not split again, since no further cut could change what it classifies as, and
+// a probe outside that box is answered without a sum at all.
+//
+// Known limitation: a cut landing very close to geometry an earlier operation
+// created is near-degenerate, and the rebuild refuses it -- the result comes
+// back with two faces on one directed edge, or a vertex two sheets meet at.
+// It is rare (one refusal in a thousand successive random cuts) and it is
+// honest: the operation returns false rather than handing back geometry that
+// looks right and is not. Fixing the last of it needs exact predicates or an
+// intersection-curve formulation.
 #pragma once
 
 #include "mesh/halfedge.h"

@@ -2,7 +2,11 @@
 // rebuild. No GL context is involved, so this runs headless.
 #include "scene/scene.h"
 #include "app/camera.h"
+#include "mesh/boolean.h"
+#include "mesh/operations.h"
+#include "mesh/primitives.h"
 
+#include <cmath>
 #include <cstdio>
 #include <string>
 
@@ -273,6 +277,78 @@ int main() {
             check(px > 20.0f && px < 90.0f, "one snap step stays a sane screen size");
         }
         std::printf("[snap] ladder and zoom scaling ok\n");
+    }
+
+    // ---- Picking a face that had to be split ------------------------------
+    //
+    // A face here holds one boundary loop, so a bored face has to be cut into
+    // pieces. Those cuts are not drawn and cannot be clicked, so picking any one
+    // piece has to reach the whole surface -- otherwise the user selects two
+    // thirds of a face with nothing on screen to explain why.
+    //
+    // The other half of the rule matters just as much: a split the *user* made
+    // is a face they meant to have. Both are checked here, because widening the
+    // selection would be easy to get right for one and wrong for the other.
+    {
+        Scene s;
+        Mesh plate;
+        makeBox(plate, {40.0, 40.0, 10.0});
+        Mesh drill;
+        makeCylinder(drill, {6.0, 30.0, 24});
+        Mesh bored;
+        check(meshBoolean(plate, drill, BooleanOp::Difference, bored, 7), "bore the plate");
+
+        const ObjectId id = s.addBody(Body(bored));
+        const SceneObject* o = s.find(id);
+        check(o != nullptr, "bored plate is in the scene");
+
+        std::vector<Index> top;
+        for (Index f = 0; f < o->body.faceCount(); ++f)
+            if (o->body.faceNormal(f).z > 0.99 &&
+                std::fabs(o->body.faceCentroid(f).z - 5.0) < 1e-3) top.push_back(f);
+        check(top.size() == 2, "the bored face came back as two pieces");
+
+        s.selectElement({id, ElementKind::Face, top[0]});
+        check(s.selectedFaces(id).size() == 2, "clicking one piece selects the whole face");
+
+        // The area has to add up to the real face, not to one piece.
+        double area = 0.0;
+        for (Index f : s.selectedFaces(id)) area += o->body.faceArea(f);
+        const double whole = 40.0 * 40.0 - 0.5 * 24.0 * 36.0 * std::sin(kTwoPi / 24.0);
+        check(std::fabs(area - whole) < 1e-6, "and the whole of its area");
+
+        // Shift-clicking takes the whole thing back out again.
+        s.toggleElement({id, ElementKind::Face, top[1]});
+        check(s.selectedFaces(id).empty(), "toggling removes the group together");
+        std::printf("[select] bored face: one click selects %zu pieces, %.1f mm2\n",
+                    (size_t)2, area);
+    }
+
+    {
+        // A section line an extrude left behind divides a wall into two faces on
+        // purpose. Picking one must select one.
+        Scene s;
+        const ObjectId id = s.addPrimitive(PrimitiveKind::Box);
+        SceneObject* o = s.find(id);
+        Index top = kInvalid;
+        for (Index f = 0; f < o->body.faceCount(); ++f)
+            if (dot(o->body.faceNormal(f), Vec3{0, 0, 1}) > 0.99) top = f;
+        check(extrudeFaces(o->body, {top}, 6.0), "raise the top of the box");
+        o->refreshDerived();
+
+        // The two halves of a side wall: coplanar, one shared edge.
+        Index lower = kInvalid, upper = kInvalid;
+        for (Index f = 0; f < o->body.faceCount(); ++f) {
+            if (dot(o->body.faceNormal(f), Vec3{1, 0, 0}) < 0.99) continue;
+            // after raising the top by 6, the wall is split at z = 10
+            if (o->body.faceCentroid(f).z < 8.0) lower = f; else upper = f;
+        }
+        check(lower != kInvalid && upper != kInvalid, "found both halves of the wall");
+
+        s.selectElement({id, ElementKind::Face, lower});
+        check(s.selectedFaces(id).size() == 1, "a user's section line still divides the face");
+        check(s.selectedFaces(id).front() == lower, "and the piece picked is the one selected");
+        std::printf("[select] extruded wall: one click selects 1 piece\n");
     }
 
     std::printf("\n%s (%d failures)\n", failures ? "FAILED" : "ALL PASS", failures);
