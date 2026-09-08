@@ -37,7 +37,60 @@ static void expectSolid(const Mesh& m, const char* what) {
     check(m.validate(&err), std::string(what) + ": " + err);
 }
 
+// A bolt circle: the pattern that showed the coplanar rebuild giving up.
+//
+// Bridging a hole to the region around it used to aim each cut at the nearest
+// outer vertex and no other. Once an earlier bridge had run through the face,
+// the nearest vertex was regularly one the hole could not see, every candidate
+// was thrown out for crossing the outline, and the whole region fell back to
+// the fragments the boolean had left. From the third hole on, a plate came
+// back with a thousand faces and lines all over a surface that is flat.
+static void testBoltCircle() {
+    for (int segments : {16, 32, 48}) {
+        Mesh plate;
+        BoxParams bp; bp.width = 100; bp.depth = 100; bp.height = 10;
+        makeBox(plate, bp);
+        for (MeshVertex& v : plate.verts) v.position += Vec3{0, 0, 5};
+
+        int cut = 0;
+        for (int i = 0; i < 8; ++i) {
+            const double a = 2.0 * kPi * i / 8.0;
+            CylinderParams cp;
+            cp.radius = 3.3; cp.height = 12; cp.segments = segments;
+            Mesh tool; makeCylinder(tool, cp);
+            for (MeshVertex& v : tool.verts)
+                v.position += Vec3{35.0 * std::cos(a), 35.0 * std::sin(a), 5.0};
+
+            Mesh out;
+            if (!meshBoolean(plate, tool, BooleanOp::Difference, out)) break;
+            plate = std::move(out);
+            ++cut;
+        }
+        check(cut == 8, "all eight holes of a bolt circle are cut at " +
+                        std::to_string(segments) + " segments");
+
+        // The face count is the real assertion. A plate with eight holes is
+        // six sides plus a wall per facet per hole, plus the two faces each
+        // bridge leaves behind. Anything near a thousand means the rebuild gave
+        // up and the fragments stayed on the model.
+        const int walls = 8 * segments;
+        check(plate.faceCount() < walls + 60,
+              "and the flat faces stay whole at " + std::to_string(segments) +
+              " segments (" + std::to_string(plate.faceCount()) + " faces)");
+        expectSolid(plate, "bolt circle plate");
+
+        const double expected = 100.0 * 100.0 * 10.0 -
+                                8.0 * (0.5 * segments * std::sin(2.0 * kPi / segments) * 3.3 * 3.3) * 10.0;
+        check(std::fabs(volumeOf(plate) - expected) < 1.0,
+              "and the volume is the plate less eight faceted holes");
+        std::printf("[boolean] bolt circle at %2d segments: %d faces, %.1f mm3\n",
+                    segments, plate.faceCount(), volumeOf(plate));
+    }
+}
+
 int main() {
+    testBoltCircle();
+
     // Two 20mm cubes overlapping over a 10mm slab: the three results have
     // volumes that can be computed exactly.
     //   A: x in [-10, 10]      B: x in [0, 20]      overlap 10 x 20 x 20 = 4000

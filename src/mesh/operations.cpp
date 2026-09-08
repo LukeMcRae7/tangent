@@ -3182,64 +3182,103 @@ int mergeCoplanarFaces(Mesh& mesh, Real toleranceDegrees) {
                     const std::vector<Index>& H = loops[cur.holes[hk]];
                     const size_t hCount = H.size();
 
-                    auto nearestOuter = [&](Index h) {
-                        size_t at = 0;
-                        Real bd = 1e300;
-                        for (size_t i = 0; i < O.size(); ++i) {
-                            const Real d = lengthSq(mesh.verts[O[i]].position -
-                                                    mesh.verts[h].position);
-                            if (d < bd) { bd = d; at = i; }
+                    // Where a cut may land. The nearest outer vertex on its
+                    // own is not enough: once an earlier bridge has run through
+                    // the region, the nearest vertex is often one the hole
+                    // cannot see, and every candidate is then thrown out for
+                    // crossing the outline. On a bolt circle that happened from
+                    // the third hole onwards, the whole region fell back to the
+                    // fragments the boolean left, and the plate came back with
+                    // a thousand faces and lines all over it.
+                    //
+                    // So: several candidates per hole vertex, screened by
+                    // whether the cut actually reaches without crossing
+                    // anything. That test is linear, where building the merged
+                    // loop and checking it for self-intersection is quadratic,
+                    // which is what makes trying many candidates affordable.
+                    // Does the segment from an outer vertex to a hole vertex
+                    // get there without crossing the outline, its own hole, or
+                    // a hole still waiting to be bridged? Touching at the
+                    // shared endpoints does not count: segmentsCross is strict.
+                    auto cutIsClear = [&](size_t oi, size_t hi) {
+                        const Vec2 a = flat(O[oi]), b = flat(H[hi]);
+                        for (size_t i = 0; i < O.size(); ++i)
+                            if (segmentsCross(a, b, flat(O[i]), flat(O[(i + 1) % O.size()])))
+                                return false;
+                        for (size_t ok2 = 0; ok2 < cur.holes.size(); ++ok2) {
+                            const std::vector<Index>& other = loops[cur.holes[ok2]];
+                            for (size_t i = 0; i < other.size(); ++i)
+                                if (segmentsCross(a, b, flat(other[i]),
+                                                  flat(other[(i + 1) % other.size()])))
+                                    return false;
                         }
-                        return at;
+                        return true;
                     };
 
-                    // Two cuts, from opposite sides of the hole to whichever
-                    // outer vertex is nearest. Opposite sides so the two halves
-                    // are both substantial rather than one being a sliver.
-                    for (size_t offset = 0; offset < hCount; ++offset) {
-                        const size_t hi0 = offset;
-                        const size_t hi1 = (offset + hCount / 2) % hCount;
-                        if (hi0 == hi1) continue;
-
-                        const size_t oi0 = nearestOuter(H[hi0]);
-                        const size_t oi1 = nearestOuter(H[hi1]);
-                        if (oi0 == oi1) continue;
-
-                        const Real d =
-                            lengthSq(mesh.verts[O[oi0]].position - mesh.verts[H[hi0]].position) +
-                            lengthSq(mesh.verts[O[oi1]].position - mesh.verts[H[hi1]].position);
-                        if (d >= bestDist) continue;
-
-                        // Neither cut may pass through a hole that is still to
-                        // be bridged, or that hole would straddle the two
-                        // halves and belong to neither.
-                        bool blocked = false;
-                        for (size_t ok2 = 0; ok2 < cur.holes.size() && !blocked; ++ok2) {
-                            if (ok2 == hk) continue;
-                            const std::vector<Index>& other = loops[cur.holes[ok2]];
-                            for (size_t i = 0; i < other.size() && !blocked; ++i) {
-                                const Vec2 c = flat(other[i]);
-                                const Vec2 e = flat(other[(i + 1) % other.size()]);
-                                if (segmentsCross(flat(O[oi0]), flat(H[hi0]), c, e) ||
-                                    segmentsCross(flat(O[oi1]), flat(H[hi1]), c, e))
-                                    blocked = true;
+                    // For every vertex of the hole, the nearest outer vertices
+                    // it can actually see, nearest first, and then every pair
+                    // of those. `k` is how many alternatives each end may try.
+                    auto search = [&](size_t k) {
+                        std::vector<std::vector<size_t>> visible(hCount);
+                        std::vector<std::pair<Real, size_t>> byDist;
+                        for (size_t hi = 0; hi < hCount; ++hi) {
+                            byDist.clear();
+                            byDist.reserve(O.size());
+                            for (size_t i = 0; i < O.size(); ++i)
+                                byDist.push_back({lengthSq(mesh.verts[O[i]].position -
+                                                           mesh.verts[H[hi]].position), i});
+                            std::sort(byDist.begin(), byDist.end());
+                            for (const auto& [d2, oi] : byDist) {
+                                if (visible[hi].size() >= k) break;
+                                if (cutIsClear(oi, hi)) visible[hi].push_back(oi);
                             }
                         }
-                        if (blocked) continue;
 
-                        std::vector<Index> p1 = walk(O, oi0, oi1);
-                        for (Index x : walk(H, hi1, hi0)) p1.push_back(x);
-                        std::vector<Index> p2 = walk(O, oi1, oi0);
-                        for (Index x : walk(H, hi0, hi1)) p2.push_back(x);
-                        if (!simple(p1) || !simple(p2)) continue;
-                        if (!noSpike(p1) || !noSpike(p2)) continue;
+                        // Two cuts, from opposite sides of the hole. Opposite
+                        // so that both halves are substantial rather than one
+                        // being a sliver.
+                        for (size_t offset = 0; offset < hCount; ++offset) {
+                            const size_t hi0 = offset;
+                            const size_t hi1 = (offset + hCount / 2) % hCount;
+                            if (hi0 == hi1) continue;
 
-                        bestDist = d;
-                        bestP1 = std::move(p1);
-                        bestP2 = std::move(p2);
-                        bestHole = hk;
-                        foundCut = true;
-                    }
+                            for (size_t oi0 : visible[hi0]) {
+                                for (size_t oi1 : visible[hi1]) {
+                                    if (oi0 == oi1) continue;
+
+                                    const Real d =
+                                        lengthSq(mesh.verts[O[oi0]].position - mesh.verts[H[hi0]].position) +
+                                        lengthSq(mesh.verts[O[oi1]].position - mesh.verts[H[hi1]].position);
+                                    if (d >= bestDist) continue;
+                                    if (segmentsCross(flat(O[oi0]), flat(H[hi0]),
+                                                      flat(O[oi1]), flat(H[hi1]))) continue;
+
+                                    std::vector<Index> p1 = walk(O, oi0, oi1);
+                                    for (Index x : walk(H, hi1, hi0)) p1.push_back(x);
+                                    std::vector<Index> p2 = walk(O, oi1, oi0);
+                                    for (Index x : walk(H, hi0, hi1)) p2.push_back(x);
+                                    if (!simple(p1) || !simple(p2)) continue;
+                                    if (!noSpike(p1) || !noSpike(p2)) continue;
+
+                                    bestDist = d;
+                                    bestP1 = std::move(p1);
+                                    bestP2 = std::move(p2);
+                                    bestHole = hk;
+                                    foundCut = true;
+                                }
+                            }
+                        }
+                    };
+
+                    // A region with one hole in it -- a lone bore, which is
+                    // most of them -- is bridged by the nearest visible vertex
+                    // and nothing is gained by looking further. Where several
+                    // holes share a face the choice matters: a cut that is
+                    // merely legal can leave the next hole with nowhere to go,
+                    // and on a bolt circle that is what took the whole region
+                    // back to the fragments the boolean left it in.
+                    search(cur.holes.size() > 1 ? 6 : 1);
+                    if (!foundCut) search(6);
                 }
 
                 if (!foundCut) { bridgedAll = false; break; }
