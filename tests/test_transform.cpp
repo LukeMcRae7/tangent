@@ -29,7 +29,40 @@ static Camera makeCamera() {
     return c;
 }
 
+// Quat::fromFrame: the rotation that takes the world axes onto a given frame.
+// Used when an object is built on a plane that is not the ground, which is the
+// difference between a primitive that stays parametric and one that gets baked.
+static void testFromFrame() {
+    struct Case { const char* what; Vec3 u, v, n; };
+    const Case cases[] = {
+        {"identity",        {1, 0, 0}, {0, 1, 0}, {0, 0, 1}},
+        {"front plane XZ",  {1, 0, 0}, {0, 0, 1}, {0, -1, 0}},
+        {"right plane YZ",  {0, 1, 0}, {0, 0, 1}, {1, 0, 0}},
+        {"upside down",     {1, 0, 0}, {0, -1, 0}, {0, 0, -1}},
+        {"half turn about z", {-1, 0, 0}, {0, -1, 0}, {0, 0, 1}},
+        {"quarter turn",    {0, 1, 0}, {-1, 0, 0}, {0, 0, 1}},
+    };
+    for (const Case& c : cases) {
+        const Quat q = Quat::fromFrame(c.u, c.v, c.n);
+        check(nearV(rotate(q, {1, 0, 0}), c.u), std::string("x lands on u: ") + c.what);
+        check(nearV(rotate(q, {0, 1, 0}), c.v), std::string("y lands on v: ") + c.what);
+        check(nearV(rotate(q, {0, 0, 1}), c.n), std::string("z lands on n: ") + c.what);
+    }
+
+    // An arbitrary frame, built the way the create tool builds one.
+    const Vec3 n = normalize(Vec3{0.3f, -0.7f, 0.65f});
+    const Vec3 u = normalize(cross(std::fabs(n.z) < 0.9f ? Vec3{0, 0, 1} : Vec3{1, 0, 0}, n));
+    const Vec3 v = cross(n, u);
+    const Quat q = Quat::fromFrame(u, v, n);
+    check(nearV(rotate(q, {0, 0, 1}), n), "an arbitrary plane normal is matched");
+    check(nearV(cross(rotate(q, {1, 0, 0}), rotate(q, {0, 1, 0})), n),
+          "and the frame stays right-handed");
+    std::printf("[math] fromFrame maps the world axes onto 7 frames\n");
+}
+
 int main() {
+    testFromFrame();
+
     // ---- Undo stack basics -------------------------------------------------
     {
         Scene s;

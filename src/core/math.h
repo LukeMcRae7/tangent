@@ -316,6 +316,37 @@ struct Quat {
                 cx*cy*sz - sx*sy*cz, cx*cy*cz + sx*sy*sz};
     }
 
+    // The rotation that takes the world axes onto the given frame, which must
+    // be orthonormal and right-handed. Used where an object is built on a plane
+    // rather than on the ground: the plane's own axes are the frame, and the
+    // primitive stays a primitive instead of being baked into a mesh because
+    // nobody could say which way it was pointing.
+    static Quat fromFrame(Vec3 x, Vec3 y, Vec3 z) {
+        // Shepperd: pick the branch whose divisor is largest, so the square
+        // root never runs into a near-zero.
+        Quat q;
+        const Real t = x.x + y.y + z.z;
+        if (t > 0) {
+            const Real s = std::sqrt(t + 1.0f) * 2.0f;
+            q = {(y.z - z.y) / s, (z.x - x.z) / s, (x.y - y.x) / s, 0.25f * s};
+        } else if (x.x > y.y && x.x > z.z) {
+            const Real s = std::sqrt(1.0f + x.x - y.y - z.z) * 2.0f;
+            q = {0.25f * s, (y.x + x.y) / s, (z.x + x.z) / s, (y.z - z.y) / s};
+        } else if (y.y > z.z) {
+            const Real s = std::sqrt(1.0f + y.y - x.x - z.z) * 2.0f;
+            q = {(y.x + x.y) / s, 0.25f * s, (z.y + y.z) / s, (z.x - x.z) / s};
+        } else {
+            const Real s = std::sqrt(1.0f + z.z - x.x - y.y) * 2.0f;
+            q = {(z.x + x.z) / s, (z.y + y.z) / s, 0.25f * s, (x.y - y.x) / s};
+        }
+        // Normalised here rather than through the free function, which is
+        // declared further down this header and so is not visible from inside
+        // the class body.
+        const Real l = std::sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
+        if (l < kEps) return Quat();
+        return {q.x / l, q.y / l, q.z / l, q.w / l};
+    }
+
     static Quat fromTo(Vec3 from, Vec3 to) {
         Vec3 u = normalize(from);
         Vec3 v = normalize(to);

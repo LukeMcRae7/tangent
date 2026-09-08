@@ -54,6 +54,7 @@
 #include <cmath>
 #include <cstdio>
 #include <string>
+#include <algorithm>
 #include <vector>
 
 using namespace tg;
@@ -1435,6 +1436,87 @@ static void testSection11_NumericEntry() {
     }
 }
 
+
+// ===========================================================================
+// SECTION 12: A Primitive Stays A Primitive, Whatever Plane It Was Drawn On
+//
+// A box drawn on the front plane used to be baked into a mesh and lose its
+// dimensions from the Inspector, purely because nothing recorded which way it
+// faced. The plane's own axes are a rotation; that is all it needed.
+// ===========================================================================
+static void testSection12_ParametricOnAnyPlane() {
+    std::printf("\n--- Section 12: Parametric On Any Plane ---\n");
+
+    // World size along each axis, sorted, so an assertion does not depend on
+    // which way round the plane's basis came out.
+    auto sortedSize = [](const AABB& b) {
+        std::vector<double> d{b.max.x - b.min.x, b.max.y - b.min.y, b.max.z - b.min.z};
+        std::sort(d.begin(), d.end());
+        return d;
+    };
+    auto sameSize = [&](const std::vector<double>& got, std::vector<double> want,
+                        const std::string& what) {
+        std::sort(want.begin(), want.end());
+        for (size_t i = 0; i < 3; ++i) check(near(got[i], want[i]), what);
+    };
+
+    struct Case { const char* what; int key; };
+    const Case planes[] = {{"top (XY)", '7'}, {"front (XZ)", '1'}, {"right (YZ)", '3'}};
+
+    for (const Case& c : planes) {
+        Scene scene; Camera camera; UndoStack undo; CreateTool tool;
+        tool.start(PrimitiveKind::Box);
+        tool.handleKey(c.key, false, false, camera, scene, undo);
+        tool.setProfileRect({-15, -10}, {15, 10}, 0.0);   // 30 x 20
+        tool.setStage(CreateStage::ExtrudeDepth);
+        tool.setExtrudeDepth(12.0);
+        check(tool.finishCreation(scene, camera, undo), std::string("created on ") + c.what);
+
+        SceneObject* o = scene.objects().back().get();
+        check(o->features.size() == 1 && o->features[0].kind == FeatureKind::Primitive,
+              std::string("stays parametric on ") + c.what);
+        sameSize(sortedSize(o->worldBounds()), {30.0, 20.0, 12.0},
+                 std::string("world size is right on ") + c.what);
+
+        // The point of staying parametric: the dimension is still editable.
+        o->spec.box.width = 45.0;
+        check(scene.rebuild(o->id), std::string("rebuilt after a width change on ") + c.what);
+        sameSize(sortedSize(o->worldBounds()), {45.0, 20.0, 12.0},
+                 std::string("and the edit lands on the right axis on ") + c.what);
+        std::printf("  %-12s parametric, %.0f x %.0f x %.0f -> width 45\n",
+                    c.what, 30.0, 20.0, 12.0);
+    }
+
+    // The same on an object's face, which is the case the create tool was built
+    // for: a boss drawn on the side of a cube and kept as its own body.
+    {
+        Scene scene; Camera camera; UndoStack undo; CreateTool tool;
+        PrimitiveSpec cube;
+        cube.kind = PrimitiveKind::Box;
+        cube.box = {20.0f, 20.0f, 20.0f};
+        scene.addPrimitive(PrimitiveKind::Box, cube);
+
+        tool.start(PrimitiveKind::Cylinder);
+        tool.setHoveredPlane(PlaneChoice::Face, {10, 0, 0}, {1, 0, 0},
+                             scene.objects().front()->id, 0);
+        tool.commitPlaneSelection(camera);
+        tool.setProfileCircle({0, 0}, 4.0);
+        tool.setStage(CreateStage::ExtrudeDepth);
+        tool.setExtrudeDepth(6.0);
+        tool.setOp(CreateOp::NewBody);
+        check(tool.finishCreation(scene, camera, undo), "boss created as its own body");
+
+        SceneObject* o = scene.objects().back().get();
+        check(o->features.size() == 1 && o->features[0].kind == FeatureKind::Primitive,
+              "a cylinder on a face stays parametric too");
+        check(near(o->spec.cylinder.radius, 4.0), "with the radius it was drawn at");
+        const AABB b = o->worldBounds();
+        check(near(b.min.x, 10.0) && near(b.max.x, 16.0),
+              "and sits on the face it was drawn on");
+        std::printf("  on a +X face: parametric cylinder r=4, x 10.0..16.0\n");
+    }
+}
+
 // ===========================================================================
 // MAIN ENTRY POINT
 // ===========================================================================
@@ -1454,6 +1536,7 @@ int main() {
     testSection9_EditsLandInTheHistory();
     testSection10_CreateOperation();
     testSection11_NumericEntry();
+    testSection12_ParametricOnAnyPlane();
 
     std::printf("\n=========================================================\n");
     std::printf("  Test Suite Summary: %s\n", gFailures == 0 ? "ALL PASS" : "FAILED");

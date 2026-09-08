@@ -1087,7 +1087,12 @@ bool CreateTool::finishCreation(Scene& scene, Camera& camera, UndoStack& undo) {
                              cornerRadii_[0] < 1e-4 && cornerRadii_[1] < 1e-4 &&
                              cornerRadii_[2] < 1e-4 && cornerRadii_[3] < 1e-4);
 
-    if (isSharpBox && selectedPlane_ == PlaneChoice::XY && faceObject_ == kNoObject) {
+    // The plane's own axes, as a rotation. A box drawn on the front plane is
+    // still a box: it used to be baked into a mesh, and lose its dimensions
+    // from the Inspector, purely because nothing recorded which way it faced.
+    const Quat orientation = Quat::fromFrame(planeU_, planeV_, planeNormal_);
+
+    if (isSharpBox) {
         PrimitiveSpec spec;
         spec.kind = PrimitiveKind::Box;
         spec.box.width = currentWidth_;
@@ -1097,8 +1102,8 @@ bool CreateTool::finishCreation(Scene& scene, Camera& camera, UndoStack& undo) {
         const Vec3 pos = planeOrigin_ + planeU_ * centerUV.x + planeV_ * centerUV.y +
                          planeNormal_ * (depth * 0.5f);
         id = scene.addPrimitive(PrimitiveKind::Box, spec, pos);
-    } else if (kind_ == PrimitiveKind::Cylinder &&
-               selectedPlane_ == PlaneChoice::XY && faceObject_ == kNoObject) {
+        if (SceneObject* o = scene.find(id)) o->transform.rotation = orientation;
+    } else if (kind_ == PrimitiveKind::Cylinder) {
         PrimitiveSpec spec;
         spec.kind = PrimitiveKind::Cylinder;
         spec.cylinder.radius = currentRadius_;
@@ -1106,6 +1111,7 @@ bool CreateTool::finishCreation(Scene& scene, Camera& camera, UndoStack& undo) {
         const Vec3 pos = planeOrigin_ + planeU_ * pt1_.x + planeV_ * pt1_.y +
                          planeNormal_ * (depth * 0.5f);
         id = scene.addPrimitive(PrimitiveKind::Cylinder, spec, pos);
+        if (SceneObject* o = scene.find(id)) o->transform.rotation = orientation;
     } else {
         // Any rounded rectangle with fillet, or arbitrary plane, or custom profile
         id = scene.addBody(solid, {0, 0, 0}, kind_ == PrimitiveKind::Box ? "Box" : "Cylinder");
