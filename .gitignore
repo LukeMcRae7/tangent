@@ -1,4 +1,5 @@
 build/
+build-*/
 tangent.ini
 *.ppm
 *.o

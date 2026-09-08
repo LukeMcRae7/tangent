@@ -6,7 +6,14 @@ namespace tg {
 // pointless: they are the list of what a second backend must provide, and they
 // are the only place in the codebase that will need a branch when it arrives.
 
-bool makePrimitive(const PrimitiveSpec& spec, Body& out) {
+bool makePrimitive(const PrimitiveSpec& spec, Body& out, Backend backend) {
+    if (backend == Backend::Brep) {
+        BrepRef s = brep::primitive(spec);
+        if (!s) return false;
+        out = Body(std::move(s));
+        return true;
+    }
+
     Mesh m;
     bool ok = false;
     switch (spec.kind) {

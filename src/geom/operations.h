@@ -21,8 +21,18 @@
 
 namespace tg {
 
+// Which kernel a body is made of. Chosen per body rather than per project: a
+// mesh imported from an STL and a parametric bracket can sit in the same scene,
+// and the operations below say plainly when one of them cannot do something.
+enum class Backend { Mesh, Brep };
+
 // ---- Construction ---------------------------------------------------------
-bool makePrimitive(const PrimitiveSpec& spec, Body& out);
+// Returns false, leaving `out` untouched, for degenerate parameters -- and for
+// a Brep body when the project was built without OpenCASCADE, or when the kind
+// has no exact form (a Plane is a surface, not a solid). Refusing is deliberate:
+// quietly handing back a mesh body would put a body in the scene that cannot do
+// what the caller asked for.
+bool makePrimitive(const PrimitiveSpec& spec, Body& out, Backend backend = Backend::Mesh);
 
 // ---- Modelling ------------------------------------------------------------
 // Pushes faces along the region's area-weighted normal. `newFaces` reports

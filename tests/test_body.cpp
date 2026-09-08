@@ -23,16 +23,24 @@ static void check(bool ok, const std::string& what) {
 }
 static bool near(Real a, Real b, Real eps = 1e-9) { return std::fabs(a - b) < eps; }
 
+// Which backend the contract below is being run against. The contract itself
+// never mentions it: that is the point of the seam, and a section that had to
+// know would be a section that does not belong here.
+static Backend gBackend = Backend::Mesh;
+
 static Body box(Real w = 20, Real d = 20, Real h = 20) {
     PrimitiveSpec spec;
     spec.kind = PrimitiveKind::Box;
     spec.box.width = w; spec.box.depth = d; spec.box.height = h;
     Body b;
-    makePrimitive(spec, b);
+    makePrimitive(spec, b, gBackend);
     return b;
 }
 
-int main() {
+// Everything a Body promises, for any backend. Run once per backend that the
+// build has, and identical either way -- if a line here ever needs an "unless
+// it is a mesh", the seam has sprung a leak.
+static void seamContract() {
     std::printf("--- Body: enumeration and handles ---\n");
     {
         const Body b = box();
@@ -172,7 +180,81 @@ int main() {
         check(h.solid(), "and is a solid");
     }
 
-    std::printf("--- Body: operations go through the seam ---\n");
+}
+
+int main() {
+    std::printf("== mesh backend ==\n");
+    gBackend = Backend::Mesh;
+    seamContract();
+
+    if (brep::available()) {
+        std::printf("\n== B-rep backend ==\n");
+        gBackend = Backend::Brep;
+        seamContract();
+        gBackend = Backend::Mesh;
+    } else {
+        std::printf("\n== B-rep backend: not built (TANGENT_BREP=OFF) ==\n");
+    }
+
+    // The claim the primitive naming makes: the same part of the same primitive
+    // gets the same name whichever backend built it. That is what would let a
+    // body change backends without every stored reference going stale.
+    if (brep::available()) {
+        std::printf("\n--- Body: names agree across backends ---\n");
+        PrimitiveSpec spec;
+        spec.kind = PrimitiveKind::Box;
+        spec.box.width = 20; spec.box.depth = 20; spec.box.height = 20;
+        Body meshBox, brepBox;
+        check(makePrimitive(spec, meshBox, Backend::Mesh), "mesh box built");
+        check(makePrimitive(spec, brepBox, Backend::Brep), "B-rep box built");
+
+        std::vector<FaceId> mf, bf;
+        meshBox.allFaces(mf);
+        brepBox.allFaces(bf);
+        std::set<ElementId> mNames, bNames;
+        for (FaceId f : mf) mNames.insert(meshBox.faceName(f));
+        for (FaceId f : bf) bNames.insert(brepBox.faceName(f));
+        check(mNames == bNames, "a box has the same six face names on either backend");
+
+        // And they name the same faces: the one called X faces the same way.
+        for (FaceId f : mf) {
+            const FaceId g = brepBox.findFace(meshBox.faceName(f));
+            check(g != kInvalid, "each mesh face name resolves on the B-rep box");
+            if (g == kInvalid) continue;
+            check(length(brepBox.faceNormal(g) - meshBox.faceNormal(f)) < 1e-9,
+                  "and points the same way");
+        }
+
+        // A cylinder can only agree about the parts both backends have. Its
+        // caps are one face either way; its wall is one face here and a ring of
+        // facets there, so no name could be shared and none is claimed.
+        PrimitiveSpec cyl;
+        cyl.kind = PrimitiveKind::Cylinder;
+        cyl.cylinder.radius = 8; cyl.cylinder.height = 20; cyl.cylinder.segments = 32;
+        Body meshCyl, brepCyl;
+        check(makePrimitive(cyl, meshCyl, Backend::Mesh), "mesh cylinder built");
+        check(makePrimitive(cyl, brepCyl, Backend::Brep), "B-rep cylinder built");
+        check(brepCyl.faceCount() == 3, "a B-rep cylinder is a wall and two caps");
+
+        int capsFound = 0;
+        std::vector<FaceId> cf;
+        meshCyl.allFaces(cf);
+        for (FaceId f : cf) {
+            if (std::fabs(meshCyl.faceNormal(f).z) < 0.99) continue;   // the facets
+            if (brepCyl.findFace(meshCyl.faceName(f)) != kInvalid) ++capsFound;
+        }
+        check(capsFound == 2, "both cylinder caps keep their names across backends");
+
+        RenderMesh rm;
+        brepCyl.tessellate(rm);
+        check(rm.triangles.size() > 60, "and it tessellates to a smooth wall");
+        std::printf("  B-rep cylinder: %d faces, %zu triangles\n",
+                    brepCyl.faceCount(), rm.triangles.size() / 3);
+    }
+
+    // Operations are still mesh-only; Stage 2 moves them across one at a time,
+    // and this section joins the contract above as it does.
+    std::printf("\n--- Body: operations go through the seam ---\n");
     {
         Body b = box();
         // Find the top face without reaching past the seam for it.
