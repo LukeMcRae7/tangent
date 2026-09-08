@@ -1311,6 +1311,130 @@ void testSection10_CreateOperation() {
     }
 }
 
+
+// ===========================================================================
+// SECTION 11: Numeric Entry
+//
+// The README has promised this since the beginning -- "type a number -> exact
+// value" -- and the buffer existed, was cleared, and was never read. A printed
+// part is designed in round numbers; getting 24.97 because the mouse was a
+// pixel out is the whole reason this matters.
+// ===========================================================================
+static void testSection11_NumericEntry() {
+    std::printf("\n--- Section 11: Numeric Entry ---\n");
+
+    auto typeInto = [](CreateTool& t, const char* digits, Camera& c, Scene& s, UndoStack& u) {
+        for (const char* p = digits; *p; ++p) t.handleKey(*p, false, false, c, s, u);
+    };
+
+    // 11.1 A typed width and depth, committed with Tab and Enter
+    {
+        Scene scene; Camera camera; UndoStack undo; CreateTool tool;
+        tool.start(PrimitiveKind::Box);
+        tool.handleKey('7', false, false, camera, scene, undo);   // top plane
+        tool.handleKey('E', false, false, camera, scene, undo);   // -> Pt2
+        tool.setProfileRect({0, 0}, {3, 3}, 0.0);                 // a rough drag
+
+        typeInto(tool, "25", camera, scene, undo);
+        check(tool.typing(), "digits are being collected");
+        tool.handleKey(9, false, false, camera, scene, undo);     // Tab: commit, next field
+        check(!tool.typing(), "Tab commits what was typed");
+        check(tool.typedField() == 1, "and moves to the second dimension");
+
+        typeInto(tool, "12.5", camera, scene, undo);
+        tool.handleKey(13, false, false, camera, scene, undo);    // Enter: commit and advance
+        check(tool.stage() == CreateStage::AdjustProfile, "Enter advances the stage");
+
+        tool.setStage(CreateStage::ExtrudeDepth);
+        tool.setExtrudeDepth(10.0);
+        check(tool.finishCreation(scene, camera, undo), "created");
+        const SceneObject* obj = scene.objects().front().get();
+        const AABB b = obj->body.bounds();
+        check(near(b.max.x - b.min.x, 25.0), "the typed width is exact");
+        check(near(b.max.y - b.min.y, 12.5), "the typed depth is exact");
+        std::printf("  typed 25 x 12.5: got %.4f x %.4f mm\n",
+                    b.max.x - b.min.x, b.max.y - b.min.y);
+    }
+
+    // 11.2 A negative depth is a cut, and only a depth may be negative
+    {
+        Scene scene; Camera camera; UndoStack undo; CreateTool tool;
+        tool.start(PrimitiveKind::Box);
+        tool.setHoveredPlane(PlaneChoice::XY, {0, 0, 0}, {0, 0, 1});
+        tool.commitPlaneSelection(camera);
+        tool.setProfileRect({-5, -5}, {5, 5}, 0.0);
+        tool.setStage(CreateStage::ExtrudeDepth);
+
+        typeInto(tool, "-7.5", camera, scene, undo);
+        check(tool.typing(), "a minus starts a depth");
+        tool.handleKey(13, false, false, camera, scene, undo);
+
+        // Back in a profile stage a minus is not part of a size.
+        CreateTool t2;
+        t2.start(PrimitiveKind::Box);
+        t2.handleKey('7', false, false, camera, scene, undo);
+        t2.handleKey('E', false, false, camera, scene, undo);
+        check(!t2.handleKey('-', false, false, camera, scene, undo),
+              "a width cannot start with a minus");
+    }
+
+    // 11.3 Backspace, Escape, and a half-typed number that means nothing
+    {
+        Scene scene; Camera camera; UndoStack undo; CreateTool tool;
+        tool.start(PrimitiveKind::Cylinder);
+        tool.handleKey('7', false, false, camera, scene, undo);
+        tool.handleKey('E', false, false, camera, scene, undo);
+        tool.setProfileCircle({0, 0}, 4.0);
+
+        typeInto(tool, "18", camera, scene, undo);
+        tool.handleKey(8, false, false, camera, scene, undo);     // backspace
+        check(tool.typedValue() == "1", "backspace removes a digit");
+
+        tool.handleKey(27, false, false, camera, scene, undo);    // Esc
+        check(!tool.typing(), "Escape drops what was typed");
+        check(tool.stage() == CreateStage::DrawProfile_Pt2, "and does not cancel the tool");
+
+        tool.handleKey(27, false, false, camera, scene, undo);    // Esc again
+        check(tool.stage() == CreateStage::None, "a second Escape cancels the tool");
+
+        // "." alone is not a number: it must not become zero.
+        CreateTool t2;
+        t2.start(PrimitiveKind::Box);
+        t2.handleKey('7', false, false, camera, scene, undo);
+        t2.handleKey('E', false, false, camera, scene, undo);
+        t2.setProfileRect({0, 0}, {30, 20}, 0.0);
+        t2.handleKey('.', false, false, camera, scene, undo);
+        t2.handleKey(13, false, false, camera, scene, undo);
+        t2.setStage(CreateStage::ExtrudeDepth);
+        t2.setExtrudeDepth(5.0);
+        check(t2.finishCreation(scene, camera, undo), "created after a discarded entry");
+        const AABB b = scene.objects().back()->body.bounds();
+        check(near(b.max.x - b.min.x, 30.0), "the dimension was left alone");
+    }
+
+    // 11.4 Typing locks the mouse out of the dimension being typed
+    {
+        Scene scene; Camera camera; UndoStack undo; CreateTool tool;
+        tool.start(PrimitiveKind::Box);
+        tool.handleKey('7', false, false, camera, scene, undo);
+        tool.handleKey('E', false, false, camera, scene, undo);
+        tool.setProfileRect({0, 0}, {30, 20}, 0.0);
+        typeInto(tool, "45", camera, scene, undo);
+
+        // A mouse move mid-entry would otherwise overwrite the number before it
+        // could be committed, which is the one way this feature gets worse than
+        // not having it.
+        tool.update(scene, camera, {400.0f, 300.0f}, false);
+        check(tool.typedValue() == "45", "the mouse did not touch what was typed");
+        tool.handleKey(13, false, false, camera, scene, undo);
+        tool.setStage(CreateStage::ExtrudeDepth);
+        tool.setExtrudeDepth(5.0);
+        check(tool.finishCreation(scene, camera, undo), "created");
+        const AABB b = scene.objects().back()->body.bounds();
+        check(near(b.max.x - b.min.x, 45.0), "and the typed width survived");
+    }
+}
+
 // ===========================================================================
 // MAIN ENTRY POINT
 // ===========================================================================
@@ -1329,6 +1453,7 @@ int main() {
     testSection8_SceneLifecycleAndTransforms();
     testSection9_EditsLandInTheHistory();
     testSection10_CreateOperation();
+    testSection11_NumericEntry();
 
     std::printf("\n=========================================================\n");
     std::printf("  Test Suite Summary: %s\n", gFailures == 0 ? "ALL PASS" : "FAILED");

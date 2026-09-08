@@ -570,7 +570,12 @@ void Application::handleShortcuts() {
     }
 
     if (createTool_.active()) {
-        if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) { createTool_.cancel(camera_); return; }
+        // Escape goes through handleKey rather than straight to cancel: with a
+        // number half typed it takes back the mouse, and only then the tool.
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+            createTool_.handleKey(27, io.KeyShift, io.KeyCtrl, camera_, scene_, undo_);
+            return;
+        }
         if (ImGui::IsKeyPressed(ImGuiKey_Enter, false) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false) ||
             ImGui::IsKeyPressed(ImGuiKey_Space, false) || ImGui::IsKeyPressed(ImGuiKey_E, false)) {
             createTool_.handleKey('E', io.KeyShift, io.KeyCtrl, camera_, scene_, undo_);
@@ -588,17 +593,24 @@ void Application::handleShortcuts() {
                 createTool_.handleKey(ch, io.KeyShift, io.KeyCtrl, camera_, scene_, undo_))
                 return;
         }
-        if (ImGui::IsKeyPressed(ImGuiKey_1, false) || ImGui::IsKeyPressed(ImGuiKey_Keypad1, false)) {
-            createTool_.handleKey('1', io.KeyShift, io.KeyCtrl, camera_, scene_, undo_);
-            return;
+        // Digits, and the rest of what a number is made of. The tool decides
+        // what each one means: in SelectPlane 1, 3 and 7 pick a plane, and
+        // everywhere else a digit is the start of a dimension.
+        for (int d = 0; d <= 9; ++d) {
+            if ((ImGui::IsKeyPressed(static_cast<ImGuiKey>(ImGuiKey_0 + d), false) ||
+                 ImGui::IsKeyPressed(static_cast<ImGuiKey>(ImGuiKey_Keypad0 + d), false)) &&
+                createTool_.handleKey('0' + d, io.KeyShift, io.KeyCtrl, camera_, scene_, undo_))
+                return;
         }
-        if (ImGui::IsKeyPressed(ImGuiKey_3, false) || ImGui::IsKeyPressed(ImGuiKey_Keypad3, false)) {
-            createTool_.handleKey('3', io.KeyShift, io.KeyCtrl, camera_, scene_, undo_);
-            return;
-        }
-        if (ImGui::IsKeyPressed(ImGuiKey_7, false) || ImGui::IsKeyPressed(ImGuiKey_Keypad7, false)) {
-            createTool_.handleKey('7', io.KeyShift, io.KeyCtrl, camera_, scene_, undo_);
-            return;
+        for (const auto& [imKey, ch] : {std::pair{ImGuiKey_Period, '.'},
+                                        std::pair{ImGuiKey_KeypadDecimal, '.'},
+                                        std::pair{ImGuiKey_Minus, '-'},
+                                        std::pair{ImGuiKey_KeypadSubtract, '-'},
+                                        std::pair{ImGuiKey_Backspace, static_cast<char>(8)},
+                                        std::pair{ImGuiKey_Tab, static_cast<char>(9)}}) {
+            if (ImGui::IsKeyPressed(imKey, false) &&
+                createTool_.handleKey(ch, io.KeyShift, io.KeyCtrl, camera_, scene_, undo_))
+                return;
         }
         return;
     }

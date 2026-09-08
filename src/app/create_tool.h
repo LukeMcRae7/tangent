@@ -117,6 +117,12 @@ public:
     void setExtrudeDepth(Real depth) { extrudeDepth_ = depth; }
     void setStage(CreateStage s) { stage_ = s; }
 
+    // What is being typed, for the HUD and for tests. Empty when the mouse is
+    // in charge, which is the normal state.
+    const std::string& typedValue() const { return typedValue_; }
+    int typedField() const { return typedField_; }
+    bool typing() const { return !typedValue_.empty(); }
+
     // What the solid will do to the body it was drawn on. `Auto` resolves to
     // Join or Cut from the sign of the depth; resolvedOp() reports which.
     CreateOp op() const { return op_; }
@@ -197,13 +203,30 @@ private:
     Vec2 extrudeStartMouse_{0, 0};
     Real extrudeBaseDepth_ = 20.0;
 
-    // Numeric input buffer
+    // Numeric entry. The README has always promised it ("type a number ->
+    // exact value") and the buffer has been here, cleared and never read,
+    // since the tool was written.
+    //
+    // While anything is typed the mouse stops driving the dimension being
+    // typed. Otherwise the next mouse-move would overwrite the number before
+    // it could be committed, which is the one behaviour that would make the
+    // feature worse than not having it.
     std::string typedValue_;
+    int typedField_ = 0;   // 0 = width, radius or depth; 1 = the rectangle's depth
 
     // Set by finishCreation when it refuses; drained by the application.
     std::string lastError_;
 
     // Helpers
+    // Accumulates one keystroke into typedValue_. Returns false for a key that
+    // is not part of a number, so the caller can go on to its own shortcuts.
+    bool handleTypedKey(int key);
+
+    // Parses what was typed into the dimension the current stage is about, and
+    // clears the buffer. Returns false if it does not parse, leaving the
+    // dimension alone -- a half-typed "12." must not become 12.
+    bool applyTypedValue();
+
     void computePlaneBasis(Vec3 normal);
     bool unprojectToPlane(const Camera& camera, Vec2 mousePx, Vec2& outUV) const;
     Real rayPlaneExtrudeDepth(const Camera& camera, Vec2 mousePx) const;

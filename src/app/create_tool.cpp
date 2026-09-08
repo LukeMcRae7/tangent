@@ -344,6 +344,7 @@ void CreateTool::start(PrimitiveKind kind) {
     isFilleting_ = false;
     activeFilletCorners_.clear();
     typedValue_.clear();
+    typedField_ = 0;
 }
 
 void CreateTool::cancel(Camera& camera) {
@@ -364,6 +365,7 @@ void CreateTool::cancel(Camera& camera) {
     isDragging_ = false;
     isFilleting_ = false;
     typedValue_.clear();
+    typedField_ = 0;
 }
 
 void CreateTool::setHoveredPlane(PlaneChoice choice, Vec3 point, Vec3 normal,
@@ -501,6 +503,7 @@ void CreateTool::update(const Scene& scene, const Camera& camera, Vec2 mousePx, 
     }
 
     if (stage_ == CreateStage::DrawProfile_Pt2) {
+        if (typing()) return;               // the keyboard has the dimension
         Vec2 uv{0, 0};
         if (unprojectToPlane(camera, mousePx, uv)) {
             uv = {quantise(uv.x), quantise(uv.y)};
@@ -521,6 +524,7 @@ void CreateTool::update(const Scene& scene, const Camera& camera, Vec2 mousePx, 
 
         if (isDragging_ && activeHandle_ != HandleId::None) {
             if (isFilleting_) {
+                if (typing()) return;
                 // Fillet measured from mouse distance away from reference point!
                 // Mouse on corner/reference point creates 0 fillet (sharp), further away creates more fillet!
                 Real dist = quantise(length(currentUV - filletRefUV_));
@@ -595,6 +599,7 @@ void CreateTool::update(const Scene& scene, const Camera& camera, Vec2 mousePx, 
     }
 
     if (stage_ == CreateStage::ExtrudeDepth) {
+        if (typing()) return;
         const Real d = quantise(rayPlaneExtrudeDepth(camera, mousePx));
         if (std::fabs(d) > 1e-4) extrudeDepth_ = d;
         return;
@@ -724,19 +729,108 @@ void CreateTool::handleRightClick(Camera& camera) {
     cancel(camera);
 }
 
+bool CreateTool::handleTypedKey(int key) {
+    // Only where there is a dimension for a number to mean something. In
+    // SelectPlane the digits are already spoken for: 1, 3 and 7 pick a plane.
+    if (stage_ != CreateStage::DrawProfile_Pt2 && stage_ != CreateStage::AdjustProfile &&
+        stage_ != CreateStage::ExtrudeDepth)
+        return false;
+
+    if (key == 8 || key == 127) {                       // backspace
+        if (typedValue_.empty()) return false;
+        typedValue_.pop_back();
+        return true;
+    }
+    if (key >= '0' && key <= '9') { typedValue_.push_back(static_cast<char>(key)); return true; }
+    if (key == '.' && typedValue_.find('.') == std::string::npos) {
+        typedValue_.push_back('.');
+        return true;
+    }
+    // A leading minus only, and only where a negative reads as something: a
+    // depth of -5 is a cut, a width of -5 is nothing.
+    if (key == '-' && typedValue_.empty() && stage_ == CreateStage::ExtrudeDepth) {
+        typedValue_.push_back('-');
+        return true;
+    }
+    return false;
+}
+
+bool CreateTool::applyTypedValue() {
+    if (typedValue_.empty()) return false;
+
+    Real v = 0.0;
+    try {
+        size_t used = 0;
+        v = std::stod(typedValue_, &used);
+        if (used != typedValue_.size()) { typedValue_.clear(); return false; }
+    } catch (...) {
+        typedValue_.clear();                            // "-" or "." on their own
+        return false;
+    }
+    typedValue_.clear();
+
+    if (stage_ == CreateStage::ExtrudeDepth) {
+        extrudeDepth_ = v;
+        return true;
+    }
+
+    // A fillet being dragged takes the number as its radius, since that is the
+    // dimension the user is looking at.
+    if (stage_ == CreateStage::AdjustProfile && isFilleting_ && !activeFilletCorners_.empty()) {
+        const Real maxR = std::min(currentWidth_, currentDepth_) * 0.499f;
+        const Real r = clampf(v, 0.0f, maxR);
+        for (int c : activeFilletCorners_) cornerRadii_[c] = r;
+        return true;
+    }
+
+    if (v <= 0.0) return false;                         // a size has to be positive
+
+    if (kind_ == PrimitiveKind::Cylinder) {
+        currentRadius_ = v;
+        pt2_ = pt1_ + Vec2{currentRadius_, 0};
+        return true;
+    }
+
+    // Keep the corner the user started from where it is and move the opposite
+    // one, in whichever direction the rectangle is already being drawn.
+    if (typedField_ == 0) {
+        currentWidth_ = v;
+        pt2_.x = pt1_.x + (pt2_.x < pt1_.x ? -v : v);
+    } else {
+        currentDepth_ = v;
+        pt2_.y = pt1_.y + (pt2_.y < pt1_.y ? -v : v);
+    }
+    return true;
+}
+
 bool CreateTool::handleKey(int key, bool shift, bool ctrl, Camera& camera, Scene& scene, UndoStack& undo) {
     (void)shift;
     (void)ctrl;
     if (stage_ == CreateStage::None) return false;
 
-    // Esc = Cancel
+    // Esc gives back the mouse before it gives up the tool.
     if (key == 27) {
+        if (typing()) { typedValue_.clear(); return true; }
         cancel(camera);
         return true;
     }
 
-    // E = Extrude, Enter, Space
+    // Tab moves between the two dimensions of a rectangle, committing whatever
+    // was typed for the one being left.
+    if (key == 9 && kind_ != PrimitiveKind::Cylinder &&
+        (stage_ == CreateStage::DrawProfile_Pt2 || stage_ == CreateStage::AdjustProfile)) {
+        applyTypedValue();
+        typedField_ = 1 - typedField_;
+        return true;
+    }
+
+    // Digits, a point, a leading minus, backspace.
+    if (handleTypedKey(key)) return true;
+
+    // E = Extrude, Enter, Space. Anything typed is committed before the stage
+    // moves on, so "25 Enter" sets the width and advances in one gesture.
     if (key == 'E' || key == 'e' || key == 13 || key == 32) {
+        applyTypedValue();
         if (stage_ == CreateStage::SelectPlane) {
             commitPlaneSelection(camera);
             return true;
@@ -1244,13 +1338,30 @@ bool CreateTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& ou
                 ImGui::TextColored(kAccentIm, "Width: %.2f mm  |  Depth: %.2f mm", currentWidth_, currentDepth_);
             }
             ImGui::SameLine();
-            ImGui::TextDisabled("(Click to set / E to adjust)");
+            if (typing()) {
+                ImGui::TextColored(kAccentIm, " %s = %s_",
+                                   kind_ == PrimitiveKind::Cylinder ? "Radius"
+                                          : (typedField_ == 0 ? "Width" : "Depth"),
+                                   typedValue_.c_str());
+                ImGui::SameLine();
+                ImGui::TextDisabled(kind_ == PrimitiveKind::Cylinder ? "(Enter)" : "(Tab / Enter)");
+            } else {
+                ImGui::TextDisabled("(Click to set / type a number / E to adjust)");
+            }
             ImGui::SameLine();
             if (ImGui::Button("Cancel (Esc)")) cancel(camera);
         } else if (stage_ == CreateStage::AdjustProfile) {
             ImGui::TextColored(kAccentIm, "Adjust Profile");
             ImGui::SameLine();
-            ImGui::TextDisabled("| Drag edge to resize, drag corner for fillet (F)");
+            if (typing()) {
+                ImGui::TextColored(kAccentIm, "| %s = %s_",
+                                   isFilleting_ ? "Fillet"
+                                   : kind_ == PrimitiveKind::Cylinder ? "Radius"
+                                   : (typedField_ == 0 ? "Width" : "Depth"),
+                                   typedValue_.c_str());
+            } else {
+                ImGui::TextDisabled("| Drag edge to resize, drag corner for fillet (F), or type a number");
+            }
             ImGui::Separator();
 
             if (kind_ == PrimitiveKind::Cylinder) {
@@ -1295,6 +1406,10 @@ bool CreateTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& ou
             const ImVec4 cutCol(0.95f, 0.35f, 0.25f, 1.0f);
             ImGui::TextColored(shown == CreateOp::Cut ? cutCol : kAccentIm,
                                "%s  %+.2f mm", createOpName(shown), extrudeDepth_);
+            if (typing()) {
+                ImGui::SameLine();
+                ImGui::TextColored(kAccentIm, " Depth = %s_", typedValue_.c_str());
+            }
             if (target) {
                 ImGui::SameLine();
                 ImGui::TextDisabled(shown == CreateOp::Cut   ? "from %s"
