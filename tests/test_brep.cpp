@@ -9,6 +9,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <map>
 #include <set>
 #include <string>
 #include <vector>
@@ -271,6 +272,107 @@ int main() {
               "with the volume of a rounded rectangle, not a chamfered one");
         std::printf("  rounded rectangle: %d faces, %.3f mm3 (exact %.3f)\n",
                     solid.faceCount(), solid.health(false).volume, area * 10.0);
+    }
+
+    std::printf("--- what gets drawn is what the part looks like ---\n");
+    {
+        // A rounded cube with a bore: every kind of surface at once, and the
+        // shape the first exact bodies were rendered as.
+        PrimitiveSpec bs;
+        bs.kind = PrimitiveKind::Box;
+        bs.box = {20, 20, 20};
+        Body body;
+        check(makePrimitive(bs, body, Backend::Brep), "cube built");
+
+        std::vector<EdgeId> edges;
+        body.allEdges(edges);
+        FilletSpec fs;
+        fs.salt = 51;
+        for (EdgeId e : edges) fs.edges.push_back({e, 4.0});
+        std::string why;
+        check(filletEdges(body, fs, &why), "every edge rounded: " + why);
+
+        PrimitiveSpec cs;
+        cs.kind = PrimitiveKind::Cylinder;
+        cs.cylinder.radius = 3;
+        cs.cylinder.height = 60;
+        Body tool;
+        check(makePrimitive(cs, tool, Backend::Brep), "bore tool built");
+        tool.transform(toMat4(Quat::fromAxisAngle({0, 1, 0}, static_cast<Real>(kHalfPi))));
+        Body out;
+        check(booleanOp(body, tool, BooleanOp::Difference, out, 52, false, &why),
+              "bored through: " + why);
+        body = std::move(out);
+
+        RenderMesh rm;
+        body.tessellate(rm);
+
+        // Every face has to reach the screen. A face with no triangles is a
+        // hole in the model as far as the user is concerned.
+        std::vector<FaceId> faces;
+        body.allFaces(faces);
+        std::set<Index> drawn(rm.triangleFace.begin(), rm.triangleFace.end());
+        check(static_cast<int>(drawn.size()) == body.faceCount(),
+              "every face contributes triangles");
+
+        // No triangles of zero area: they draw as a speck at best, and a ray
+        // that hit one would resolve to a face nobody can see.
+        int degenerate = 0;
+        for (size_t i = 0; i + 2 < rm.triangles.size(); i += 3) {
+            const Vec3 a2 = rm.positions[rm.triangles[i]];
+            const Vec3 b2 = rm.positions[rm.triangles[i + 1]];
+            const Vec3 c2 = rm.positions[rm.triangles[i + 2]];
+            if (length(cross(b2 - a2, c2 - a2)) < 1e-12) ++degenerate;
+        }
+        check(degenerate == 0, "no triangles of zero area");
+
+        // And no cracks: welded by position, every triangle edge is shared by
+        // exactly two triangles, or the silhouette shows a notch.
+        std::map<std::string, int> ids;
+        std::vector<int> welded(rm.positions.size(), 0);
+        for (size_t i = 0; i < rm.positions.size(); ++i) {
+            const Vec3 p = rm.positions[i];
+            char buf[96];
+            std::snprintf(buf, sizeof buf, "%lld,%lld,%lld",
+                          static_cast<long long>(std::llround(p.x * 1e4)),
+                          static_cast<long long>(std::llround(p.y * 1e4)),
+                          static_cast<long long>(std::llround(p.z * 1e4)));
+            const auto [it, fresh] = ids.emplace(buf, static_cast<int>(ids.size()));
+            welded[i] = it->second;
+        }
+        std::map<std::pair<int, int>, int> used;
+        for (size_t i = 0; i + 2 < rm.triangles.size(); i += 3) {
+            const int t[3] = {welded[rm.triangles[i]], welded[rm.triangles[i + 1]],
+                              welded[rm.triangles[i + 2]]};
+            for (int k = 0; k < 3; ++k) {
+                const int x = t[k], y = t[(k + 1) % 3];
+                if (x != y) ++used[{std::min(x, y), std::max(x, y)}];
+            }
+        }
+        int cracks = 0, overshared = 0;
+        for (const auto& [e, n] : used) {
+            if (n == 1) ++cracks;
+            else if (n > 2) ++overshared;
+        }
+        check(cracks == 0, "the tessellated surface is closed: no cracks between faces");
+        check(overshared == 0, "and no edge is shared by more than two triangles");
+
+        // The wireframe draws the part's edges and not the parameterisation's.
+        // A hole has a seam running across it where its surface is cut open to
+        // be parameterised, and drawing that puts a line across the opening.
+        int acrossTheBore = 0;
+        for (size_t i = 0; i + 1 < rm.edgeLines.size(); i += 2) {
+            const Vec3 a2 = rm.positions[rm.edgeLines[i]];
+            const Vec3 b2 = rm.positions[rm.edgeLines[i + 1]];
+            // A seam of this bore runs along X, inside the hole's radius.
+            if (std::fabs(a2.y) < 3.01 && std::fabs(a2.z) < 3.01 &&
+                std::fabs(b2.y) < 3.01 && std::fabs(b2.z) < 3.01 &&
+                std::fabs(b2.x - a2.x) > 1.0)
+                ++acrossTheBore;
+        }
+        check(acrossTheBore == 0, "no seam line is drawn across the bore");
+        std::printf("  rounded cube with a bore: %d faces, %zu triangles, %zu lines\n",
+                    body.faceCount(), rm.triangles.size() / 3, rm.edgeLines.size() / 2);
     }
 
     std::printf("--- refusals say why ---\n");

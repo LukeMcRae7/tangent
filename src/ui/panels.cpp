@@ -384,6 +384,24 @@ void drawInspector(UiContext& ctx) {
         ctx.actions.transformBefore = transformBefore;
     }
 
+    sectionLabel("GEOMETRY");
+    {
+        // Which kernel this body is made of. Not a detail: the two refuse
+        // different things and round different edges, so "why did that fillet
+        // work here and not there" has a different answer for each, and the
+        // answer should be visible rather than inferred.
+        const bool exact = !obj->body.isMesh();
+        ImGui::TextColored(exact ? im(palette::kValid) : kDim,
+                           exact ? "Exact  (B-rep)" : "Mesh");
+        ImGui::SameLine();
+        ImGui::TextColored(kDim, "%d face%s", obj->body.faceCount(),
+                           obj->body.faceCount() == 1 ? "" : "s");
+        if (exact)
+            ImGui::TextColored(kDim, "Curves are held as curves; a hole is round, not a polygon");
+        else
+            ImGui::TextColored(kDim, "Facets: a curve is as smooth as the segment count that made it");
+    }
+
     sectionLabel("PRINTABILITY");
     {
         const MeshHealth& h = obj->health;
@@ -405,6 +423,12 @@ void drawInspector(UiContext& ctx) {
             if (h.selfIntersections > 0)
                 ImGui::TextColored(kDim, "  %d self-intersection%s", h.selfIntersections,
                                    h.selfIntersections == 1 ? "" : "s");
+            else if (h.selfIntersections < 0 && !obj->body.isMesh())
+                // -1 means the check did not run. On an exact body the kernel's
+                // own validity check has already passed, which is a stronger
+                // statement -- but it is not the same statement, and saying
+                // nothing here would let the user read it as the same one.
+                ImGui::TextColored(kDim, "  checked by the kernel, not by triangle sampling");
             if (h.volume < 0.0) ImGui::TextColored(kDim, "  inside out");
 
             ImGui::TextColored(kDim, "Volume  %.2f cm3", h.volume / 1000.0);

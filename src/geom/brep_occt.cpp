@@ -763,6 +763,17 @@ void tessellate(const BrepShape& s, RenderMesh& out, Real deviation) {
             int a = 0, b = 0, c = 0;
             tri->Triangle(i).Get(a, b, c);
             if (flipped) std::swap(b, c);
+
+            // A triangulation carries a few triangles of no area, where a
+            // surface closes on itself or comes to a point. They draw as
+            // nothing at best and as a stray speck at worst, and a ray that
+            // hits one would resolve to a face the user cannot see, so they do
+            // not go into the render mesh at all.
+            const Vec3 pa = out.positions[base + static_cast<size_t>(a - 1)];
+            const Vec3 pb = out.positions[base + static_cast<size_t>(b - 1)];
+            const Vec3 pc = out.positions[base + static_cast<size_t>(c - 1)];
+            if (length(cross(pb - pa, pc - pa)) < 1e-12) continue;
+
             out.triangles.push_back(base + static_cast<uint32_t>(a - 1));
             out.triangles.push_back(base + static_cast<uint32_t>(b - 1));
             out.triangles.push_back(base + static_cast<uint32_t>(c - 1));
@@ -777,6 +788,20 @@ void tessellate(const BrepShape& s, RenderMesh& out, Real deviation) {
     for (int ei = 0; ei < s.edges.Extent(); ++ei) {
         const TopoDS_Edge& edge = edgeAt(s, ei);
         if (BRep_Tool::Degenerated(edge)) continue;
+
+        // A seam is where a closed surface is cut open so it can be given a
+        // rectangular parameter space -- a cylinder has one running down its
+        // side, a hole has one across it. It is a fact about the parameterisation
+        // and not about the part, and drawing it puts a line across a face that
+        // does not turn there. The same objection the mesh backend's bridge
+        // edges answered, arriving from the other direction.
+        bool seam = false;
+        if (s.edgeFaces.Contains(s.edges(ei + 1))) {
+            for (TopTools_ListOfShape::Iterator it(s.edgeFaces.FindFromKey(s.edges(ei + 1)));
+                 it.More() && !seam; it.Next())
+                seam = BRep_Tool::IsClosed(edge, TopoDS::Face(it.Value()));
+        }
+        if (seam) continue;
         BRepAdaptor_Curve curve(edge);
         GCPnts_QuasiUniformDeflection sampler(curve, dev);
         if (!sampler.IsDone() || sampler.NbPoints() < 2) continue;

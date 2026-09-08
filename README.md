@@ -1,8 +1,7 @@
 <p align="center">
   <img src="assets/logo.png" alt="Project Logo" width="300" height="auto">
 </p>
-Meet tangent, a Linux-based 3D modeling software built for the ergonomics of Blender with the precision of Fusion360. Built for 3D printing purposes, this mesh-based modeling tool natively exports to .stl and rejects invalid operations immediately. It's fast, accurate, and just works. Tangent is C++ on OpenGL 3.3, targeting Linux/Wayland, and has no runtime
-dependencies beyond the system GL stack.<br><br>
+Meet tangent, a Linux-based 3D modeling software built for the ergonomics of Blender with the precision of Fusion360. Built for 3D printing purposes, it models on an exact kernel and exports to .stl natively, rejecting invalid operations immediately rather than handing back geometry that looks right and is not. It's fast, accurate, and just works. Tangent is C++ on OpenGL 3.3, targeting Linux/Wayland; the exact kernel is an optional dependency on OpenCASCADE, and without it the build has none beyond the system GL stack.<br><br>
 
 **Status:** early development, not ready for use
 
@@ -22,11 +21,52 @@ Run the tests:
 ctest --test-dir build --output-on-failure
 ```
 
+### The exact kernel
+
+Tangent can build bodies two ways: as a half-edge mesh, which is what it has
+always done, or as an exact boundary representation, where a hole is a cylinder
+rather than a thirty-two-sided prism. The exact kernel needs OpenCASCADE and is
+off by default, so a plain build has no dependency it did not have before.
+
+```sh
+sudo pacman -S opencascade          # or your distribution's equivalent
+
+cmake -S . -B build -G Ninja -DTANGENT_BREP=ON
+cmake --build build
+./build/tangent
+```
+
+Configure prints `-- OpenCASCADE <version> from <prefix>` when it has found it.
+There is nothing to switch on at run time: with the kernel compiled in, new
+bodies are exact, and the Inspector says which kind each body is. Only the
+modelling libraries are linked -- no visualization -- so it costs fifteen
+shared objects and about 32 MB, with nothing beneath them but libc, libstdc++
+and libm.
+
+Building without it leaves every behaviour exactly as it was; the test suite
+gains one more suite with it (16 rather than 15).
+
 ## Features
 
-### Mesh-based
-Similar to Blender, tangent is **mesh-based**. Meshes are the native object of `.stl` files, and therefore tangent supports importing and exporting for 3D printing natively without conversion. This is a large pain point with Fusion360, which is B-rep based and requires conversion when handling meshes.<br>
-Unlike Blender, tangent rejects non-manifold edges, open surfaces, and other invalid operations that would also be rejected by 3D printing slicers. The status bar will indicate `solid` or `not solid` if an existing mesh doesn't comply with these rules.
+### Exact where it matters, mesh where it helps
+Tangent holds a body either as an exact boundary representation or as a mesh,
+and both are first-class.
+
+**Exact** is the default where the build has it. A hole is a cylinder, so its
+diameter is 8mm rather than 7.994mm; a fillet is a real blend, so rounding
+every rim of a bolt circle in one operation works rather than being refused;
+and a face is one face, so selecting a bored surface selects the surface.
+
+**Meshes** are the native object of `.stl` files, so importing and exporting
+for 3D printing needs no conversion. This is a large pain point with Fusion360,
+which converts on the way in and on the way out. Mesh bodies can be moved,
+measured, checked and exported as they are, and a mesh-only operation -- moving
+individual vertices, for instance -- says so rather than pretending on an exact
+body.
+
+Either way, tangent rejects non-manifold edges, open surfaces, and other
+invalid results that a slicer would also reject. The status bar indicates
+`solid` or `not solid`, and the Inspector says which kernel a body is made of.
 
 ### Conventions
 
