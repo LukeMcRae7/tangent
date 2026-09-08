@@ -19,6 +19,17 @@ BrepRef clone(const BrepShape&) { return {}; }
 
 BrepRef primitive(const PrimitiveSpec&) { return {}; }
 
+BrepRef booleanOp(const BrepShape&, const BrepShape&, BooleanOp, ElementId, std::string* reason) {
+    if (reason) *reason = "built without OpenCASCADE";
+    return {};
+}
+BrepRef filletEdges(const BrepShape&, const std::vector<EdgeId>&, const std::vector<Real>&,
+                    ElementId, std::string* reason) {
+    if (reason) *reason = "built without OpenCASCADE";
+    return {};
+}
+void findFaces(const BrepShape&, ElementId, std::vector<FaceId>& out) { out.clear(); }
+
 bool empty(const BrepShape&) { return true; }
 int  faceCount(const BrepShape&) { return 0; }
 int  edgeCount(const BrepShape&) { return 0; }

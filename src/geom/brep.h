@@ -18,6 +18,7 @@
 
 #include "core/math.h"
 #include "mesh/element_id.h"
+#include "mesh/boolean.h"
 #include "mesh/halfedge.h"
 #include "mesh/primitives.h"
 #include "mesh/health.h"
@@ -102,6 +103,28 @@ VertexId findVertex(const BrepShape& s, ElementId id);
 // the same six face names whichever backend built it. That is what would let a
 // chain move between backends without its references going stale.
 BrepRef primitive(const PrimitiveSpec& spec);
+
+// ---- Modelling -------------------------------------------------------------
+// Both carry names across the operation by asking it what became of what --
+// Modified, Generated, IsDeleted -- rather than by matching geometry
+// afterwards. `salt` identifies the feature, so re-running the same chain names
+// the same things; see element_id.h.
+//
+// Both return null on refusal and put a short phrase in `reason`. Neither
+// touches its input: a refused edit cannot half-apply.
+BrepRef booleanOp(const BrepShape& a, const BrepShape& b, BooleanOp op,
+                  ElementId salt, std::string* reason);
+
+// One radius per edge, parallel to `edges`. Rounding two edges to different
+// radii in one operation is a different solid from rounding them in sequence,
+// which is why they go together.
+BrepRef filletEdges(const BrepShape& s, const std::vector<EdgeId>& edges,
+                    const std::vector<Real>& radii, ElementId salt, std::string* reason);
+
+// Every face answering to this name. A name stands for a set: a boolean
+// routinely splits one face into several, and a feature that referred to the
+// face has to go on referring to all of it.
+void findFaces(const BrepShape& s, ElementId id, std::vector<FaceId>& out);
 
 // ---- Display and validity --------------------------------------------------
 // `deviation` is the chord tolerance in millimetres; zero asks the backend to

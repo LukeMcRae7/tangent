@@ -18,7 +18,13 @@
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepBndLib.hxx>
+#include <BRepAlgoAPI_BooleanOperation.hxx>
+#include <BRepAlgoAPI_Common.hxx>
+#include <BRepAlgoAPI_Cut.hxx>
+#include <BRepAlgoAPI_Fuse.hxx>
+#include <BRepBuilderAPI_MakeShape.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
+#include <BRepFilletAPI_MakeFillet.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepGProp.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
@@ -51,6 +57,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <memory>
+#include <sstream>
 #include <unordered_map>
 
 namespace tg {
@@ -533,6 +541,130 @@ VertexId findVertex(const BrepShape& s, ElementId id) {
     return it == s.byVert.end() ? kInvalid : it->second;
 }
 
+// ---- Carrying names across an operation ------------------------------------
+//
+// The mechanism the Stage 0 spike established, and the reason the migration has
+// a history to stand on. Three questions per element:
+//
+//   IsDeleted(X)   X is gone
+//   Modified(X)    these are what X became
+//   Generated(X)   these appeared because of X
+//
+// Faces are carried. Edges and vertices are not: they are named from the faces
+// that meet at them, which makeBrep derives, so an edge a boolean invented gets
+// the right name without anyone having to invent one for it.
+namespace {
+
+struct NameSource {
+    const BrepShape* shape;
+};
+
+std::vector<ElementId> propagateNames(BRepBuilderAPI_MakeShape& op,
+                                      const std::vector<NameSource>& inputs,
+                                      const TopoDS_Shape& after,
+                                      ElementId salt) {
+    TopTools_IndexedMapOfShape newFaces;
+    TopExp::MapShapes(after, TopAbs_FACE, newFaces);
+    std::vector<ElementId> names(static_cast<size_t>(newFaces.Extent()), kNoId);
+
+    auto slotOf = [&](const TopoDS_Shape& f) -> int {
+        const int i = newFaces.FindIndex(f);
+        return i > 0 ? i - 1 : -1;
+    };
+
+    // What survived, and what it became. A face split into several keeps its
+    // name on every piece: a feature that referred to the face has to go on
+    // referring to all of it, which is the decision already taken on the mesh
+    // side for a bored face.
+    for (const NameSource& in : inputs) {
+        if (!in.shape) continue;
+        for (int i = 0; i < in.shape->faces.Extent(); ++i) {
+            const TopoDS_Shape& f = in.shape->faces(i + 1);
+            const ElementId name = in.shape->faceNames[static_cast<size_t>(i)];
+            if (name == kNoId || op.IsDeleted(f)) continue;
+
+            bool any = false;
+            for (TopTools_ListOfShape::Iterator it(op.Modified(f)); it.More(); it.Next()) {
+                const int at = slotOf(it.Value());
+                if (at >= 0) { names[static_cast<size_t>(at)] = name; any = true; }
+            }
+            if (any) continue;
+            const int at = slotOf(f);          // untouched, and still there
+            if (at >= 0) names[static_cast<size_t>(at)] = name;
+        }
+    }
+
+    // What the operation made. A wall opened by a cut is generated from the
+    // tool's face; a fillet surface is generated from the edge it rounds, which
+    // is why edges are asked as well even though they are not carried.
+    for (const NameSource& in : inputs) {
+        if (!in.shape) continue;
+        auto adopt = [&](const TopoDS_Shape& from, ElementId parent, IdRole role) {
+            if (parent == kNoId) return;
+            for (TopTools_ListOfShape::Iterator it(op.Generated(from)); it.More(); it.Next()) {
+                const int at = slotOf(it.Value());
+                if (at >= 0 && names[static_cast<size_t>(at)] == kNoId)
+                    names[static_cast<size_t>(at)] = nameId(salt, role, parent);
+            }
+        };
+        for (int i = 0; i < in.shape->faces.Extent(); ++i)
+            adopt(in.shape->faces(i + 1), in.shape->faceNames[static_cast<size_t>(i)],
+                  IdRole::Wall);
+        for (int i = 0; i < in.shape->edges.Extent(); ++i)
+            adopt(in.shape->edges(i + 1), in.shape->edgeNames[static_cast<size_t>(i)],
+                  IdRole::Patch);
+    }
+
+    // Anything left has no provenance to name it from -- rare, and worth being
+    // able to count. Named from the operation and a deterministic ordinal, by
+    // position, so at least a re-run of the same chain agrees with itself.
+    std::vector<std::pair<int, gp_Pnt>> leftovers;
+    for (int i = 0; i < newFaces.Extent(); ++i) {
+        if (names[static_cast<size_t>(i)] != kNoId) continue;
+        GProp_GProps props;
+        BRepGProp::SurfaceProperties(newFaces(i + 1), props);
+        leftovers.push_back({i, props.CentreOfMass()});
+    }
+    std::sort(leftovers.begin(), leftovers.end(), [](const auto& a, const auto& b) {
+        if (std::fabs(a.second.X() - b.second.X()) > 1e-9) return a.second.X() < b.second.X();
+        if (std::fabs(a.second.Y() - b.second.Y()) > 1e-9) return a.second.Y() < b.second.Y();
+        return a.second.Z() < b.second.Z();
+    });
+    for (size_t k = 0; k < leftovers.size(); ++k)
+        names[static_cast<size_t>(leftovers[k].first)] =
+            nameId(salt, IdRole::Split, static_cast<ElementId>(k) + 1);
+
+    return names;
+}
+
+// A result worth handing back: not null, has faces, and passes OCCT's own
+// check. The alternative is geometry that looks right and is not, which this
+// project has already decided it will not ship.
+bool acceptable(const TopoDS_Shape& shape, std::string* reason) {
+    if (shape.IsNull()) {
+        if (reason) *reason = "no shape came out of it";
+        return false;
+    }
+    TopTools_IndexedMapOfShape faces;
+    TopExp::MapShapes(shape, TopAbs_FACE, faces);
+    if (faces.Extent() == 0) {
+        if (reason) *reason = "the result has no faces";
+        return false;
+    }
+    try {
+        if (!BRepCheck_Analyzer(shape).IsValid()) {
+            if (reason) *reason = "the result is not a valid solid";
+            return false;
+        }
+    } catch (const Standard_Failure& e) {
+        if (reason) *reason = e.GetMessageString() ? e.GetMessageString() : "the check threw";
+        return false;
+    }
+    return true;
+}
+
+} // namespace
+
 void tessellate(const BrepShape& s, RenderMesh& out, Real deviation) {
     out.clear();
     if (s.shape.IsNull()) return;
@@ -686,6 +818,95 @@ MeshHealth health(const BrepShape& s, bool) {
         h.watertight = false;
     }
     return h;
+}
+
+BrepRef booleanOp(const BrepShape& a, const BrepShape& b, BooleanOp op,
+                  ElementId salt, std::string* reason) {
+    if (reason) reason->clear();
+    if (a.shape.IsNull() || b.shape.IsNull()) {
+        if (reason) *reason = "one of the bodies is empty";
+        return {};
+    }
+    try {
+        std::unique_ptr<BRepAlgoAPI_BooleanOperation> algo;
+        switch (op) {
+            case BooleanOp::Union:        algo = std::make_unique<BRepAlgoAPI_Fuse>(a.shape, b.shape); break;
+            case BooleanOp::Difference:   algo = std::make_unique<BRepAlgoAPI_Cut>(a.shape, b.shape); break;
+            case BooleanOp::Intersection: algo = std::make_unique<BRepAlgoAPI_Common>(a.shape, b.shape); break;
+        }
+        if (!algo) return {};
+        if (!algo->IsDone() || algo->HasErrors()) {
+            if (reason) {
+                std::ostringstream os;
+                algo->DumpErrors(os);
+                *reason = os.str().empty() ? "the boolean did not complete" : os.str();
+            }
+            return {};
+        }
+        const TopoDS_Shape result = algo->Shape();
+        if (!acceptable(result, reason)) return {};
+        return makeBrep(result, propagateNames(*algo, {{&a}, {&b}}, result, salt));
+    } catch (const Standard_Failure& e) {
+        if (reason) *reason = e.GetMessageString() ? e.GetMessageString() : "the boolean threw";
+        return {};
+    }
+}
+
+BrepRef filletEdges(const BrepShape& s, const std::vector<EdgeId>& edges,
+                    const std::vector<Real>& radii, ElementId salt, std::string* reason) {
+    if (reason) reason->clear();
+    if (edges.empty()) {
+        if (reason) *reason = "no edges to round";
+        return {};
+    }
+    try {
+        BRepFilletAPI_MakeFillet fil(s.shape);
+        int added = 0;
+        for (size_t i = 0; i < edges.size(); ++i) {
+            if (!validEdge(s, edges[i])) continue;
+            const Real r = i < radii.size() ? radii[i] : (radii.empty() ? Real(1.0) : radii.back());
+            if (r <= 0.0) continue;
+            const TopoDS_Edge& e = edgeAt(s, edges[i]);
+            if (BRep_Tool::Degenerated(e)) continue;
+            fil.Add(r, e);
+            ++added;
+        }
+        if (added == 0) {
+            if (reason) *reason = "none of those edges can be rounded";
+            return {};
+        }
+
+        fil.Build();
+        if (!fil.IsDone()) {
+            // Say which part of it failed, rather than "it did not work". A
+            // refusal the interface cannot explain is the thing this project
+            // decided it will not ship.
+            if (reason) {
+                std::ostringstream os;
+                os << "the fillet could not be built";
+                if (fil.NbFaultyContours() > 0)
+                    os << " (" << fil.NbFaultyContours() << " of "
+                       << fil.NbContours() << " edge chains failed)";
+                else if (fil.NbFaultyVertices() > 0)
+                    os << " (" << fil.NbFaultyVertices() << " corners failed)";
+                *reason = os.str();
+            }
+            return {};
+        }
+        const TopoDS_Shape result = fil.Shape();
+        if (!acceptable(result, reason)) return {};
+        return makeBrep(result, propagateNames(fil, {{&s}}, result, salt));
+    } catch (const Standard_Failure& e) {
+        if (reason) *reason = e.GetMessageString() ? e.GetMessageString() : "the fillet threw";
+        return {};
+    }
+}
+
+void findFaces(const BrepShape& s, ElementId id, std::vector<FaceId>& out) {
+    out.clear();
+    if (id == kNoId) return;
+    for (int i = 0; i < s.faces.Extent(); ++i)
+        if (s.faceNames[static_cast<size_t>(i)] == id) out.push_back(i);
 }
 
 BrepRef transformed(const BrepShape& s, const Mat4& m) {

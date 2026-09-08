@@ -141,6 +141,15 @@ void Body::coplanarFaceGroup(FaceId f, std::vector<FaceId>& out) const {
     mesh_.coplanarFaceGroup(f, out);
 }
 
+void Body::findFaces(ElementId id, std::vector<FaceId>& out) const {
+    if (brep_) { brep::findFaces(*brep_, id, out); return; }
+    out.clear();
+    // The mesh backend gives every face its own name, so this is the one-or-
+    // none case -- but callers are written against the set either way.
+    const FaceId f = mesh_.findFace(id);
+    if (f != kInvalid) out.push_back(f);
+}
+
 EdgeId Body::findEdge(ElementId id) const {
     if (brep_) return brep::findEdge(*brep_, id);
     const Index he = mesh_.findEdge(id);

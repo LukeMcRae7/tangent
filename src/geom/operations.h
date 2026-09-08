@@ -47,8 +47,13 @@ bool insetFaces(Body& body, const std::vector<FaceId>& faces, Real amount,
 // Rounds edges. `reason` gets a short phrase on refusal; see the note above.
 bool filletEdges(Body& body, const FilletSpec& spec, std::string* reason = nullptr);
 
+// Both bodies must be the same kind. Combining a mesh body with an exact one
+// is refused with a reason rather than approximated: the result would be a mesh
+// and the user should be told that before it happens, not after. Stage 6 of the
+// migration is where that becomes an offer instead of a refusal.
 bool booleanOp(const Body& a, const Body& b, BooleanOp op, Body& out,
-               ElementId salt = 0, bool trustBNames = false);
+               ElementId salt = 0, bool trustBNames = false,
+               std::string* reason = nullptr);
 
 // Largest radius the whole body can take before a face collapses. For clamping
 // a slider to a range that always produces valid geometry.

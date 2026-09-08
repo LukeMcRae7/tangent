@@ -43,13 +43,44 @@ bool insetFaces(Body& body, const std::vector<FaceId>& faces, Real amount,
 }
 
 bool filletEdges(Body& body, const FilletSpec& spec, std::string* reason) {
+    if (!body.isMesh()) {
+        std::vector<EdgeId> edges;
+        std::vector<Real> radii;
+        edges.reserve(spec.edges.size());
+        radii.reserve(spec.edges.size());
+        for (const FilletEdge& e : spec.edges) {
+            edges.push_back(e.edge);
+            radii.push_back(e.radius);
+        }
+        BrepRef result = brep::filletEdges(body.brep(), edges, radii, spec.salt, reason);
+        if (!result) return false;
+        body = Body(std::move(result));
+        return true;
+    }
     return filletEdges(body.mesh(), spec, reason);
 }
 
 bool booleanOp(const Body& a, const Body& b, BooleanOp op, Body& out,
-               ElementId salt, bool trustBNames) {
+               ElementId salt, bool trustBNames, std::string* reason) {
+    if (reason) reason->clear();
+    if (a.isMesh() != b.isMesh()) {
+        if (reason) *reason = "one body is a mesh and the other is exact";
+        return false;
+    }
+    if (!a.isMesh()) {
+        BrepRef result = brep::booleanOp(a.brep(), b.brep(), op, salt, reason);
+        if (!result) return false;
+        out = Body(std::move(result));
+        return true;
+    }
+
     Mesh combined;
-    if (!meshBoolean(a.mesh(), b.mesh(), op, combined, salt, trustBNames)) return false;
+    if (!meshBoolean(a.mesh(), b.mesh(), op, combined, salt, trustBNames)) {
+        // The mesh boolean reports only that it refused. What it does guarantee
+        // is that it refused rather than handing back something broken.
+        if (reason) *reason = "no valid solid came out of it";
+        return false;
+    }
     out = Body(std::move(combined));
     return true;
 }

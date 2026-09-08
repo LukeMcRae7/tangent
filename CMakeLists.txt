@@ -221,6 +221,18 @@ target_link_libraries(test_create_tool PRIVATE imgui PkgConfig::EPOXY)
 target_compile_options(test_create_tool PRIVATE -Wall -Wextra -Wno-unused-parameter)
 add_test(NAME create_tool COMMAND test_create_tool)
 
+# The exact backend's own suite. Only built when there is a backend to test:
+# the seam contract in test_body covers what both backends share, and this
+# covers what only this one can do.
+if(TANGENT_BREP)
+  add_executable(test_brep tests/test_brep.cpp
+    src/mesh/health.cpp src/mesh/boolean.cpp ${TANGENT_GEOM}
+    src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp)
+  target_include_directories(test_brep PRIVATE src)
+  target_compile_options(test_brep PRIVATE -Wall -Wextra)
+  add_test(NAME brep COMMAND test_brep)
+endif()
+
 # Not a test: a stopwatch for the heavy paths. Run it by hand.
 add_executable(bench EXCLUDE_FROM_ALL tests/bench.cpp
   src/scene/scene.cpp src/scene/feature.cpp src/mesh/health.cpp

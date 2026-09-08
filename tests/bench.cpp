@@ -3,10 +3,14 @@
 #include "mesh/boolean.h"
 #include "mesh/operations.h"
 #include "mesh/primitives.h"
+#include "geom/body.h"
+#include "geom/operations.h"
 #include "scene/scene.h"
 
 #include <chrono>
+#include <cmath>
 #include <cstdio>
+#include <string>
 #include <functional>
 
 using namespace tg;
@@ -19,7 +23,86 @@ static double ms(std::function<void()> fn, int reps = 1) {
     return std::chrono::duration<double, std::milli>(t1 - t0).count() / reps;
 }
 
+// The same part on both kernels, through the seam, so the numbers are
+// comparable: a plate with a bolt circle, then every rim rounded at once.
+static void benchBackends() {
+    if (!brep::available()) {
+        std::printf("\n=== B-rep backend not built; skipping the comparison ===\n");
+        return;
+    }
+
+    for (Backend backend : {Backend::Mesh, Backend::Brep}) {
+        const char* what = backend == Backend::Mesh ? "mesh (32 segments)" : "exact";
+
+        PrimitiveSpec plateSpec;
+        plateSpec.kind = PrimitiveKind::Box;
+        plateSpec.box = {100.0, 100.0, 10.0};
+
+        PrimitiveSpec boreSpec;
+        boreSpec.kind = PrimitiveKind::Cylinder;
+        boreSpec.cylinder.radius = 3.3;
+        boreSpec.cylinder.height = 40.0;
+        boreSpec.cylinder.segments = 32;
+
+        Body body;
+        int cut = 0;
+        const double buildMs = ms([&] {
+            makePrimitive(plateSpec, body, backend);
+            cut = 0;
+            for (int i = 0; i < 8; ++i) {
+                const double a = 2.0 * 3.14159265358979 * i / 8.0;
+                Body tool;
+                if (!makePrimitive(boreSpec, tool, backend)) break;
+                tool.transform(translate({35.0 * std::cos(a), 35.0 * std::sin(a), 0}));
+                Body out;
+                if (!booleanOp(body, tool, BooleanOp::Difference, out,
+                               static_cast<ElementId>(200 + i), false, nullptr)) break;
+                body = std::move(out);
+                ++cut;
+            }
+        });
+
+        // Every rim, in one operation.
+        std::vector<EdgeId> rims;
+        std::vector<EdgeId> edges;
+        body.allEdges(edges);
+        for (EdgeId e : edges) {
+            Vec3 p, q;
+            body.edgePositions(e, p, q);
+            if (std::fabs(p.z - 5.0) < 1e-6 && std::fabs(q.z - 5.0) < 1e-6 &&
+                std::hypot(p.x, p.y) < 49.0)
+                rims.push_back(e);
+        }
+        FilletSpec spec;
+        spec.salt = 4242;
+        spec.segments = 4;
+        for (EdgeId e : rims) spec.edges.push_back({e, 1.0});
+
+        Body rounded = body;
+        std::string why;
+        bool filletOk = false;
+        const double filletMs = ms([&] {
+            rounded = body;
+            filletOk = filletEdges(rounded, spec, &why);
+        });
+
+        RenderMesh rm;
+        const double tessMs = ms([&] { rm.clear(); rounded.tessellate(rm); });
+
+        std::printf("\n=== bolt circle, %s ===\n", what);
+        std::printf("  8 cuts                   %8.2f ms   (%d of 8)\n", buildMs, cut);
+        std::printf("  fillet %2zu rims at once   %8.2f ms   %s\n", rims.size(), filletMs,
+                    filletOk ? "ok" : ("refused: " + why).c_str());
+        std::printf("  tessellate               %8.2f ms   %zu triangles\n",
+                    tessMs, rm.triangles.size() / 3);
+        std::printf("  faces                    %8d\n", body.faceCount());
+        std::printf("  volume                   %8.1f mm3\n", body.health(false).volume);
+    }
+}
+
 int main() {
+    benchBackends();
+
     for (int seg : {128, 320}) {
         SphereParams sp;
         sp.segments = seg;

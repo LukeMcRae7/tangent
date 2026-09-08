@@ -119,6 +119,12 @@ public:
         return brep_ ? brep::findFace(*brep_, id) : mesh_.findFace(id);
     }
     EdgeId   findEdge(ElementId id)   const;
+
+    // Every face answering to a name. A name can stand for more than one: an
+    // operation splits a face and each piece keeps the name, so a feature that
+    // referred to the face goes on referring to all of it. findFace returns the
+    // first, for the callers that only need one.
+    void findFaces(ElementId id, std::vector<FaceId>& out) const;
     VertexId findVertex(ElementId id) const {
         return brep_ ? brep::findVertex(*brep_, id) : mesh_.findVertex(id);
     }
