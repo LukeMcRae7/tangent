@@ -3,7 +3,9 @@
 #include "mesh/boolean.h"
 #include "mesh/operations.h"
 #include "mesh/primitives.h"
+#include "app/camera.h"
 #include "geom/body.h"
+#include "render/lod.h"
 #include "geom/operations.h"
 #include "scene/scene.h"
 
@@ -100,8 +102,54 @@ static void benchBackends() {
     }
 }
 
+// What the level-of-detail pass costs when it has nothing to do, which is most
+// frames, and what a re-tessellation costs when it does.
+static void benchLod() {
+    if (!brep::available()) return;
+
+    Scene s;
+    for (int i = 0; i < 50; ++i) {
+        PrimitiveSpec spec;
+        spec.kind = PrimitiveKind::Cylinder;
+        spec.cylinder.radius = 5;
+        spec.cylinder.height = 10;
+        s.addPrimitive(PrimitiveKind::Cylinder, spec,
+                       {static_cast<Real>(i % 10) * 20, static_cast<Real>(i / 10) * 20, 0});
+    }
+
+    Camera cam;
+    cam.viewportW = 1600;
+    cam.viewportH = 900;
+    cam.distance = 300.0f;
+    cam.target = {0, 0, 0};
+    cam.snapToGoal();
+
+    LodPolicy p;
+    p.budgetPerFrame = 64;
+    while (refreshTessellation(s, cam, p) > 0) {}      // settle
+
+    std::printf("\n=== level of detail, 50 exact bodies ===\n");
+    std::printf("  steady frame (nothing to do)  %8.3f ms\n",
+                ms([&] { refreshTessellation(s, cam, p); }, 20));
+
+    // A body that has to be re-tessellated because the view moved.
+    SceneObject* one = s.objects().front().get();
+    const Real settled = one->renderDeviation;
+    std::printf("  one body re-tessellated        %8.3f ms\n", ms([&] {
+        TessellationQuality q;
+        q.deviationMm = settled * 0.25;
+        one->body.tessellate(one->render, q);
+    }));
+    std::printf("  the same tolerance again       %8.3f ms   <- the cache\n", ms([&] {
+        TessellationQuality q;
+        q.deviationMm = settled * 0.25;
+        one->body.tessellate(one->render, q);
+    }, 20));
+}
+
 int main() {
     benchBackends();
+    benchLod();
 
     for (int seg : {128, 320}) {
         SphereParams sp;

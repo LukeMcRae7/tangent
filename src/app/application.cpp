@@ -1,4 +1,5 @@
 #include "app/application.h"
+#include "render/lod.h"
 #include "ui/theme.h"
 
 #include "core/palette.h"
@@ -2154,6 +2155,12 @@ int Application::run() {
         tool_.drawOverlay(renderer_, camera_);
 
         camera_.update(dt);
+
+        // Bring a body or two up to the tolerance this view wants. Bounded per
+        // frame on purpose: re-tessellating is tens of milliseconds on a heavy
+        // part, so doing every body that wants it at once would turn a smooth
+        // zoom into a series of stalls. See render/lod.h.
+        refreshTessellation(scene_, camera_);
 
         ImGui::Render();
         drawFrame();

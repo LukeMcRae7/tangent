@@ -705,11 +705,12 @@ void tessellate(const BrepShape& s, RenderMesh& out, TessellationQuality q) {
 
     IMeshTools_Parameters p;
     p.Deflection = dev;
-    // Without this a request for a coarser mesh than the one already on the
-    // shape is silently ignored, and an export at 0.2mm quietly writes the
-    // screen's 0.017mm instead: safe, but not what was asked for, and ten times
-    // the file.
-    p.AllowQualityDecrease = q.independent ? Standard_True : Standard_False;
+    // Without this, a request for a *coarser* mesh than the one already on the
+    // shape is silently ignored -- an export at 0.2mm quietly writes the
+    // screen's 0.017mm, and pulling the camera back never gives the triangles
+    // up. Asking for the same tolerance twice still costs nothing, which is
+    // what keeps a redraw cheap.
+    p.AllowQualityDecrease = Standard_True;
     // The screen's default is coarse because it is paid every zoom step; an
     // export names its own and means it, so the chord tolerance is what binds
     // rather than the angle.

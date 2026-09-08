@@ -102,6 +102,7 @@ add_executable(tangent
   src/render/shader.cpp
   src/render/gpu_mesh.cpp
   src/render/renderer.cpp
+  src/render/lod.cpp
   src/ui/theme.cpp
   src/ui/panels.cpp
 )
@@ -232,6 +233,15 @@ target_link_libraries(test_create_tool PRIVATE imgui PkgConfig::EPOXY)
 target_compile_options(test_create_tool PRIVATE -Wall -Wextra -Wno-unused-parameter)
 add_test(NAME create_tool COMMAND test_create_tool)
 
+add_executable(test_lod tests/test_lod.cpp
+  src/render/lod.cpp src/app/camera.cpp
+  src/scene/scene.cpp src/scene/feature.cpp src/mesh/boolean.cpp src/mesh/health.cpp
+  ${TANGENT_GEOM} src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp)
+target_include_directories(test_lod PRIVATE src)
+target_link_libraries(test_lod PRIVATE PkgConfig::EPOXY)
+target_compile_options(test_lod PRIVATE -Wall -Wextra)
+add_test(NAME lod COMMAND test_lod)
+
 # The exact backend's own suite. Only built when there is a backend to test:
 # the seam contract in test_body covers what both backends share, and this
 # covers what only this one can do.
@@ -247,5 +257,7 @@ endif()
 # Not a test: a stopwatch for the heavy paths. Run it by hand.
 add_executable(bench EXCLUDE_FROM_ALL tests/bench.cpp
   src/scene/scene.cpp src/scene/feature.cpp src/mesh/health.cpp
-  src/mesh/boolean.cpp ${TANGENT_GEOM} src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp)
+  src/mesh/boolean.cpp ${TANGENT_GEOM} src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp
+  src/render/lod.cpp src/app/camera.cpp)
 target_include_directories(bench PRIVATE src)
+target_link_libraries(bench PRIVATE PkgConfig::EPOXY)

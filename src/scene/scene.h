@@ -51,6 +51,11 @@ struct SceneObject {
     // from the version it last saw.
     uint32_t meshVersion = 1;
 
+    // The chord tolerance `render` was built at, or 0 for "whatever the backend
+    // chose". An exact body is re-tessellated as the view changes -- see
+    // render/lod.h -- and this is what that decision is made against.
+    Real renderDeviation = 0.0;
+
     // Cached printability report. Self-intersection testing is too costly to
     // repeat every frame, so it is refreshed only when the geometry changes.
     MeshHealth health;
@@ -62,6 +67,8 @@ struct SceneObject {
     // Any code that edits vertex positions must call this.
     void refreshDerived() {
         body.tessellate(render);
+        // The backend chose the tolerance, so the view has not had its say yet.
+        renderDeviation = 0.0;
         localBounds = body.bounds();
         ++meshVersion;
     }
