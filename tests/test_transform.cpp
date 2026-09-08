@@ -382,6 +382,9 @@ int main() {
     // ---- Element transforms: move a face, not the object -------------------
     {
         Scene s;
+        // Dragging vertices is a mesh operation: on an exact body a vertex is
+        // where surfaces meet, not a free point, and the feature refuses.
+        s.setDefaultBackend(Backend::Mesh);
         Camera cam = makeCamera();
         TransformTool tool;
         const ObjectId id = s.addPrimitive(PrimitiveKind::Box);   // 20mm cube
@@ -423,6 +426,9 @@ int main() {
     // Cancelling an element move must restore the vertices exactly.
     {
         Scene s;
+        // Dragging vertices is a mesh operation: on an exact body a vertex is
+        // where surfaces meet, not a free point, and the feature refuses.
+        s.setDefaultBackend(Backend::Mesh);
         Camera cam = makeCamera();
         TransformTool tool;
         const ObjectId id = s.addPrimitive(PrimitiveKind::Box);
@@ -442,6 +448,9 @@ int main() {
     // object carries a rotation and a non-uniform scale.
     {
         Scene s;
+        // Dragging vertices is a mesh operation: on an exact body a vertex is
+        // where surfaces meet, not a free point, and the feature refuses.
+        s.setDefaultBackend(Backend::Mesh);
         Camera cam = makeCamera();
         TransformTool tool;
         const ObjectId id = s.addPrimitive(PrimitiveKind::Box);
@@ -470,6 +479,9 @@ int main() {
     // An edge drag moves only its two vertices.
     {
         Scene s;
+        // Dragging vertices is a mesh operation: on an exact body a vertex is
+        // where surfaces meet, not a free point, and the feature refuses.
+        s.setDefaultBackend(Backend::Mesh);
         Camera cam = makeCamera();
         TransformTool tool;
         const ObjectId id = s.addPrimitive(PrimitiveKind::Box);

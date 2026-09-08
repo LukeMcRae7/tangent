@@ -58,8 +58,15 @@ ObjectId Scene::addPrimitive(PrimitiveKind kind, const PrimitiveSpec& spec, Vec3
     Feature base;
     base.kind = FeatureKind::Primitive;
     base.primitive = obj->spec;
+    base.backend = defaultBackend_;
     base.uid = nextFeatureUid_++;
     obj->features.push_back(base);
+
+    // A plane is a surface, not a solid, and the exact kernel builds solids.
+    // Falling back keeps the construction plane working rather than refusing
+    // to make one at all.
+    if (base.backend == Backend::Brep && kind == PrimitiveKind::Plane)
+        obj->features.back().backend = Backend::Mesh;
 
     if (!evaluateFeatures(obj->features, obj->body)) return kNoObject;
 

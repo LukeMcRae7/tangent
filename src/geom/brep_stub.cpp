@@ -28,6 +28,18 @@ BrepRef filletEdges(const BrepShape&, const std::vector<EdgeId>&, const std::vec
     if (reason) *reason = "built without OpenCASCADE";
     return {};
 }
+BrepRef extrudeFaces(const BrepRef&, const std::vector<FaceId>&, Real, ElementId,
+                     std::vector<ElementId>*, std::string* reason) {
+    if (reason) *reason = "built without OpenCASCADE";
+    return {};
+}
+BrepRef prism(const std::vector<Vec3>&, const std::vector<Real>&, Vec3, Real, Real,
+              ElementId, std::string* reason) {
+    if (reason) *reason = "built without OpenCASCADE";
+    return {};
+}
+bool encode(const BrepShape&, std::string&, std::vector<ElementId>&) { return false; }
+BrepRef decode(const std::string&, const std::vector<ElementId>&) { return {}; }
 void findFaces(const BrepShape&, ElementId, std::vector<FaceId>& out) { out.clear(); }
 
 bool empty(const BrepShape&) { return true; }

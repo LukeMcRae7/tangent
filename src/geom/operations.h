@@ -39,7 +39,19 @@ bool makePrimitive(const PrimitiveSpec& spec, Body& out, Backend backend = Backe
 // where the moved faces ended up, in the order they were given.
 bool extrudeFaces(Body& body, const std::vector<FaceId>& faces, Real distance,
                   std::vector<FaceId>* newFaces = nullptr, ElementId salt = 0,
-                  ExtrudeOp op = ExtrudeOp::Auto);
+                  ExtrudeOp op = ExtrudeOp::Auto, std::string* reason = nullptr);
+
+// A solid from a closed profile on a plane, swept between two heights along the
+// plane's normal -- what the create tool draws.
+//
+// `arcs` is parallel to `points`: a non-zero entry means that span is a
+// circular arc of that sagitta rather than a straight line, which is how a
+// rounded corner stays an arc instead of becoming the polyline a mesh has to
+// settle for. The mesh backend ignores it and the create tool's own polygon
+// path covers that case.
+bool makeProfileSolid(const std::vector<Vec3>& points, const std::vector<Real>& arcs,
+                      Vec3 planeNormal, Real z0, Real z1, Body& out,
+                      ElementId salt = 0, std::string* reason = nullptr);
 
 bool insetFaces(Body& body, const std::vector<FaceId>& faces, Real amount,
                 std::vector<FaceId>* newFaces = nullptr, ElementId salt = 0);

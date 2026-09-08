@@ -298,16 +298,98 @@ std::vector<Vec2> CreateTool::getCurrentProfile() const {
     }
 }
 
-Body CreateTool::buildCurrentSolid(Real depth) const {
-    Mesh out;
-    const std::vector<Vec2> prof = getCurrentProfile();
-    if (prof.empty() || std::fabs(depth) < 1e-4) return Body{};
+void CreateTool::getCurrentProfileArcs(std::vector<Vec3>& points, std::vector<Real>& arcs) const {
+    points.clear();
+    arcs.clear();
 
-    if (depth > 0.0) {
-        makePrismMesh(prof, planeOrigin_, planeU_, planeV_, planeNormal_, 0.0, depth, out);
+    // The sagitta of a quarter circle: how far the arc stands off the middle of
+    // its chord. Every corner here is a quarter, whether it is a rounded corner
+    // or one of the four spans that make a circle.
+    auto quarter = [](Real r) { return r * (1.0 - std::sqrt(2.0) * 0.5); };
+
+    std::vector<Vec2> uv;
+    std::vector<Real> bulge;
+
+    if (kind_ == PrimitiveKind::Cylinder) {
+        const Real r = currentRadius_;
+        if (r <= 1e-9) return;
+        for (int i = 0; i < 4; ++i) {
+            const Real a = kHalfPi * i;
+            uv.push_back({pt1_.x + r * std::cos(a), pt1_.y + r * std::sin(a)});
+            bulge.push_back(quarter(r));
+        }
     } else {
-        makePrismMesh(prof, planeOrigin_, planeU_, planeV_, planeNormal_, depth, 0.0, out);
+        const Real uMin = std::min(pt1_.x, pt2_.x), uMax = std::max(pt1_.x, pt2_.x);
+        const Real vMin = std::min(pt1_.y, pt2_.y), vMax = std::max(pt1_.y, pt2_.y);
+        if (uMax - uMin < 1e-9 || vMax - vMin < 1e-9) return;
+
+        // Clamped the same way the polygon path clamps: a corner cannot eat
+        // more than half the side it sits on.
+        const Real lim = std::min(uMax - uMin, vMax - vMin) * 0.5;
+        Real r[4];
+        for (int i = 0; i < 4; ++i) r[i] = clampf(cornerRadii_[i], 0.0f, static_cast<float>(lim));
+
+        // Counter-clockwise from the bottom-right corner, matching the corner
+        // order the tool stores: 0 BR, 1 TR, 2 TL, 3 BL.
+        struct Corner { Vec2 in, out, centre; Real radius; };
+        const Corner corners[4] = {
+            {{uMax - r[0], vMin}, {uMax, vMin + r[0]}, {uMax - r[0], vMin + r[0]}, r[0]},
+            {{uMax, vMax - r[1]}, {uMax - r[1], vMax}, {uMax - r[1], vMax - r[1]}, r[1]},
+            {{uMin + r[2], vMax}, {uMin, vMax - r[2]}, {uMin + r[2], vMax - r[2]}, r[2]},
+            {{uMin, vMin + r[3]}, {uMin + r[3], vMin}, {uMin + r[3], vMin + r[3]}, r[3]},
+        };
+        for (const Corner& c : corners) {
+            uv.push_back(c.in);
+            if (c.radius > 1e-9) {
+                bulge.push_back(quarter(c.radius));   // the corner arc
+                uv.push_back(c.out);
+                bulge.push_back(0.0);                 // the straight side after it
+            } else {
+                bulge.push_back(0.0);                 // a sharp corner: no arc at all
+            }
+        }
     }
+    if (uv.size() < 3) return;
+
+    // Which way the profile winds decides which side of a chord its arcs bulge
+    // towards. Measuring it is cheaper than reasoning about whether the plane's
+    // basis came out right-handed.
+    Real area = 0.0;
+    for (size_t i = 0; i < uv.size(); ++i) {
+        const Vec2 a = uv[i], b = uv[(i + 1) % uv.size()];
+        area += a.x * b.y - b.x * a.y;
+    }
+    const Real sign = area > 0 ? -1.0 : 1.0;
+
+    points.reserve(uv.size());
+    for (size_t i = 0; i < uv.size(); ++i) {
+        points.push_back(planeOrigin_ + planeU_ * uv[i].x + planeV_ * uv[i].y);
+        arcs.push_back(bulge[i] * sign);
+    }
+}
+
+Body CreateTool::buildCurrentSolid(Real depth, Backend backend) const {
+    if (std::fabs(depth) < 1e-4) return Body{};
+    const Real z0 = depth > 0.0 ? 0.0 : depth;
+    const Real z1 = depth > 0.0 ? depth : 0.0;
+
+    if (backend == Backend::Brep) {
+        std::vector<Vec3> points;
+        std::vector<Real> arcs;
+        getCurrentProfileArcs(points, arcs);
+        Body out;
+        std::string why;
+        if (makeProfileSolid(points, arcs, planeNormal_, z0, z1, out, 0, &why)) return out;
+        // Falling through to a mesh would put a body in the scene that cannot
+        // be combined with the exact one it was drawn on. Better to hand back
+        // nothing and let the caller say so.
+        return Body{};
+    }
+
+    const std::vector<Vec2> prof = getCurrentProfile();
+    if (prof.empty()) return Body{};
+    Mesh out;
+    makePrismMesh(prof, planeOrigin_, planeU_, planeV_, planeNormal_, z0, z1, out);
     return Body(std::move(out));
 }
 
@@ -950,9 +1032,10 @@ bool CreateTool::finishCreation(Scene& scene, Camera& camera, UndoStack& undo) {
         return false;
     }
 
-    const Body solid = buildCurrentSolid(depth);
+    const Body solid = buildCurrentSolid(depth, scene.defaultBackend());
     if (solid.empty()) {
-        cancel(camera);
+        lastError_ = "That profile could not be turned into a solid";
+        stage_ = CreateStage::None;
         return false;
     }
 
@@ -981,18 +1064,29 @@ bool CreateTool::finishCreation(Scene& scene, Camera& camera, UndoStack& undo) {
             // depends on the direction the profile was pushed, which Cut no
             // longer assumes: cutting outward from a face is a legitimate way to
             // trim a boss back.
-            Mesh cutter;
-            const std::vector<Vec2> prof = getCurrentProfile();
             const Real overshoot = std::max(std::fabs(depth) * 0.05, Real(1.0));
-            if (depth < 0.0)
-                makePrismMesh(prof, planeOrigin_, planeU_, planeV_, planeNormal_,
-                              depth, overshoot, cutter);
-            else
-                makePrismMesh(prof, planeOrigin_, planeU_, planeV_, planeNormal_,
-                              -overshoot, depth, cutter);
+            const Real cz0 = depth < 0.0 ? depth : -overshoot;
+            const Real cz1 = depth < 0.0 ? overshoot : depth;
 
-            // Transform cutter into target object's local coordinate space
-            Body cutterBody(std::move(cutter));
+            Body cutterBody;
+            if (scene.defaultBackend() == Backend::Brep) {
+                std::vector<Vec3> points;
+                std::vector<Real> arcs;
+                getCurrentProfileArcs(points, arcs);
+                std::string why;
+                if (!makeProfileSolid(points, arcs, planeNormal_, cz0, cz1, cutterBody, 0, &why)) {
+                    lastError_ = why.empty() ? "The cutter could not be built" : "Cut failed: " + why;
+                    stage_ = CreateStage::None;
+                    return false;
+                }
+            } else {
+                Mesh cutter;
+                makePrismMesh(getCurrentProfile(), planeOrigin_, planeU_, planeV_, planeNormal_,
+                              cz0, cz1, cutter);
+                cutterBody = Body(std::move(cutter));
+            }
+
+            // Into the target object's local space, where its own chain lives.
             cutterBody.transform(inverse(target->modelMatrix()));
 
             // The cut goes into the history, not over the mesh.
@@ -1273,7 +1367,12 @@ void CreateTool::drawOverlay(const Scene& scene, const Camera& camera, Renderer&
 
     // 3D Extrusion Solid Preview
     if (stage_ == CreateStage::ExtrudeDepth && std::fabs(extrudeDepth_) > 0.05) {
-        const Body solid = buildCurrentSolid(extrudeDepth_);
+        // The preview is drawn every frame, so it is built the cheap way even
+        // when the scene is exact: what it shows is the same shape, and the
+        // solid that gets committed is built exactly. If the exact path ever
+        // becomes cheap enough to run per frame, this is the only line that
+        // has to change.
+        const Body solid = buildCurrentSolid(extrudeDepth_, Backend::Mesh);
         if (!solid.empty()) {
             const Vec4 wireCol = (extrudeDepth_ < 0.0) ? Vec4{1.0f, 0.4f, 0.3f, 0.9f} : toVec4(palette::kBrand, 0.9f);
             const Vec4 faceTint = (extrudeDepth_ < 0.0) ? kCutCol : kCreateCol;

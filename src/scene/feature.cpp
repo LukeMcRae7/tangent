@@ -228,7 +228,10 @@ bool evaluateFrom(std::vector<Feature>& features, size_t from,
 
         switch (f.kind) {
         case FeatureKind::Primitive:
-            if (!makePrimitive(f.primitive, body)) fail("degenerate parameters");
+            if (!makePrimitive(f.primitive, body, f.backend))
+                fail(f.backend == Backend::Brep && !brep::available()
+                         ? "this file needs the exact kernel, which this build does not have"
+                         : "degenerate parameters");
             else any = true;
             break;
 
@@ -237,8 +240,11 @@ bool evaluateFrom(std::vector<Feature>& features, size_t from,
             else if (!f.faces.resolveFaces(body, scratchFaces)) fail("faces no longer exist");
             // The operation is transactional, so a rejection leaves the body as
             // it was and the chain carries on from there.
-            else if (!extrudeFaces(body, scratchFaces, f.distance, nullptr, f.uid, f.extrudeOp))
-                fail("extrude failed");
+            else {
+                std::string why;
+                if (!extrudeFaces(body, scratchFaces, f.distance, nullptr, f.uid, f.extrudeOp, &why))
+                    fail(why.empty() ? "extrude failed" : why.c_str());
+            }
             break;
 
         case FeatureKind::Inset:
@@ -277,8 +283,9 @@ bool evaluateFrom(std::vector<Feature>& features, size_t from,
             if (body.empty()) { fail("nothing to combine with"); break; }
             if (f.bakedBody.empty()) { fail("tool body is missing"); break; }
             Body combined;
-            if (!booleanOp(body, f.bakedBody, f.booleanOp, combined, f.uid))
-                fail("boolean produced no valid solid");
+            std::string why;
+            if (!booleanOp(body, f.bakedBody, f.booleanOp, combined, f.uid, false, &why))
+                fail(why.empty() ? "boolean produced no valid solid" : why.c_str());
             else
                 body = std::move(combined);
             break;
@@ -286,6 +293,13 @@ bool evaluateFrom(std::vector<Feature>& features, size_t from,
 
         case FeatureKind::VertexEdit: {
             if (body.empty()) { fail("nothing to edit"); break; }
+            if (!body.canMoveVertices()) {
+                // A vertex on an exact body is where surfaces meet, not a free
+                // point. Refusing is the honest answer; approximating would
+                // quietly turn the body into something it is not.
+                fail("an exact body has no free vertices to move");
+                break;
+            }
 
             std::vector<VertexId> all;
             body.allVertices(all);

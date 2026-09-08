@@ -108,6 +108,16 @@ public:
     // ---- Contents --------------------------------------------------------
     ObjectId addPrimitive(PrimitiveKind kind, const PrimitiveSpec& spec = {},
                           Vec3 position = {});
+
+    // Which kernel new bodies are built with. Exact where the build has it,
+    // and a mesh otherwise, so the same code path serves both -- and so a build
+    // without OpenCASCADE behaves exactly as it did before the backend existed.
+    //
+    // Per scene rather than per call: it is a mode, not a parameter, and the
+    // mesh side comes back as a mode too when imported geometry gets its own
+    // place in the interface.
+    Backend defaultBackend() const { return defaultBackend_; }
+    void setDefaultBackend(Backend b) { defaultBackend_ = b; }
     ObjectId addBody(Body body, Vec3 position = {}, const std::string& name = "Object");
     bool     removeObject(ObjectId id);
     ObjectId duplicateObject(ObjectId id);
@@ -237,6 +247,7 @@ private:
     // steps that were already failing when it started.
     void noteNewFailures(const SceneObject& obj, const std::vector<ElementId>& wasBroken);
 
+    Backend defaultBackend_ = brep::available() ? Backend::Brep : Backend::Mesh;
     uint64_t nextFeatureUid_ = 1;
     std::string chainNotice_;
 };

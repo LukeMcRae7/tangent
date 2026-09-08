@@ -100,8 +100,13 @@ struct Feature {
     // same kind do not collide. Assigned when the feature is created.
     ElementId uid = 0;
 
-    // Primitive: the base shape the chain starts from.
+    // Primitive: the base shape the chain starts from, and which kernel builds
+    // it. The backend belongs to the feature that creates the body rather than
+    // to the object, because it is a property of the geometry: a chain that
+    // starts exact stays exact, and one that starts from an imported mesh
+    // cannot become exact by wishing.
     PrimitiveSpec primitive;
+    Backend       backend = Backend::Mesh;
 
     // Extrude / Inset: which faces, by name as of this point in the chain.
     ElementRefs faces;

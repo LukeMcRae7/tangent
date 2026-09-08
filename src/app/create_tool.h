@@ -231,7 +231,14 @@ private:
     bool unprojectToPlane(const Camera& camera, Vec2 mousePx, Vec2& outUV) const;
     Real rayPlaneExtrudeDepth(const Camera& camera, Vec2 mousePx) const;
     std::vector<Vec2> getCurrentProfile() const;
-    Body buildCurrentSolid(Real depth) const;
+
+    // The profile as spans rather than as points: a rounded corner is one arc
+    // and a circle is four, so the exact kernel gets the shape that was drawn
+    // instead of a polygon that resembles it. `arcs` is parallel to `points`
+    // and holds each span's sagitta, zero for a straight one.
+    void getCurrentProfileArcs(std::vector<Vec3>& points, std::vector<Real>& arcs) const;
+
+    Body buildCurrentSolid(Real depth, Backend backend) const;
 };
 
 } // namespace tg

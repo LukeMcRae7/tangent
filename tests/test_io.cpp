@@ -164,15 +164,42 @@ int main() {
         s.find(id)->transform.position = {5, 6, 7};
 
         // A chain with something of every interesting kind in it.
+        //
+        // The face is chosen by which way it points, not by handle: handles are
+        // whatever the backend numbered them, and "face 0" is the top face on
+        // one kernel and a side face on the other. Asking for the top face is
+        // what the test means, and it is what a user does.
+        const Body& start = s.find(id)->body;
+        FaceId top = kNoFace;
+        {
+            std::vector<FaceId> faces;
+            start.allFaces(faces);
+            for (FaceId f : faces)
+                if (dot(start.faceNormal(f), Vec3{0, 0, 1}) > 0.99) top = f;
+        }
+        check(top != kNoFace, "found the top face to extrude");
+
         Feature ext;
         ext.kind = FeatureKind::Extrude;
-        ext.faces = nameFaces(s.find(id)->body, {0});
+        ext.faces = nameFaces(start, {top});
         ext.distance = 6.0;
         check(s.addFeature(id, ext), "extrude added");
 
+        // Two edges of the face that is now on top, for the same reason.
+        std::vector<EdgeId> topEdges;
+        {
+            const Body& b = s.find(id)->body;
+            std::vector<FaceId> faces;
+            b.allFaces(faces);
+            for (FaceId f : faces)
+                if (dot(b.faceNormal(f), Vec3{0, 0, 1}) > 0.99) { b.faceEdges(f, topEdges); break; }
+        }
+        check(topEdges.size() >= 2, "the top face has edges to round");
+
         Feature fil;
         fil.kind = FeatureKind::Bevel;
-        fil.edges.ids = {s.find(id)->body.edgeName(0), s.find(id)->body.edgeName(2)};
+        fil.edges.ids = {s.find(id)->body.edgeName(topEdges[0]),
+                         s.find(id)->body.edgeName(topEdges[1])};
         fil.radii = {2.0, 3.5};   // a radius per edge, as Fusion's fillet has
         fil.width = 2.0;
         fil.segments = 4;
@@ -219,6 +246,9 @@ int main() {
     // A boolean's baked tool body has to survive too.
     {
         Scene s;
+        // A mesh tool body, so a mesh scene: mixing kernels is refused, and
+        // this block is about the baked body surviving a save, not about that.
+        s.setDefaultBackend(Backend::Mesh);
         const ObjectId a = s.addPrimitive(PrimitiveKind::Box);
         Mesh tool;
         BoxParams p;

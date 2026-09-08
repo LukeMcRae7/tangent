@@ -31,10 +31,48 @@ bool makePrimitive(const PrimitiveSpec& spec, Body& out, Backend backend) {
 }
 
 bool extrudeFaces(Body& body, const std::vector<FaceId>& faces, Real distance,
-                  std::vector<FaceId>* newFaces, ElementId salt, ExtrudeOp op) {
+                  std::vector<FaceId>* newFaces, ElementId salt, ExtrudeOp op,
+                  std::string* reason) {
+    if (!body.isMesh()) {
+        // The exact backend sweeps the face and combines the result, so which
+        // way the push goes decides whether that is a join or a cut. ExtrudeOp
+        // says it outright when the caller knows better than the sign does.
+        Real signed_ = distance;
+        if (op == ExtrudeOp::Cut && signed_ > 0) signed_ = -signed_;
+        if (op == ExtrudeOp::Join && signed_ < 0) signed_ = -signed_;
+
+        std::vector<ElementId> names;
+        BrepRef result = brep::extrudeFaces(body.brepRef(), faces, signed_, salt,
+                                            newFaces ? &names : nullptr, reason);
+        if (!result) return false;
+        body = Body(std::move(result));
+        if (newFaces) {
+            newFaces->clear();
+            std::vector<FaceId> at;
+            for (ElementId id : names) {
+                body.findFaces(id, at);
+                for (FaceId f : at) newFaces->push_back(f);
+            }
+        }
+        return true;
+    }
+
     // Transactional, as every operation here is: the mesh function leaves its
     // input untouched on failure, so a refused edit cannot half-apply.
-    return extrudeFaces(body.mesh(), faces, distance, newFaces, salt, op);
+    if (!extrudeFaces(body.mesh(), faces, distance, newFaces, salt, op)) {
+        if (reason) *reason = "the extrude could not be built";
+        return false;
+    }
+    return true;
+}
+
+bool makeProfileSolid(const std::vector<Vec3>& points, const std::vector<Real>& arcs,
+                      Vec3 planeNormal, Real z0, Real z1, Body& out,
+                      ElementId salt, std::string* reason) {
+    BrepRef s = brep::prism(points, arcs, planeNormal, z0, z1, salt, reason);
+    if (!s) return false;
+    out = Body(std::move(s));
+    return true;
 }
 
 bool insetFaces(Body& body, const std::vector<FaceId>& faces, Real amount,

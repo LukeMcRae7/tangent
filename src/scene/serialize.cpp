@@ -130,7 +130,7 @@ void writeMesh(Writer& w, const Mesh& m) {
 // written before a second backend exists still reads afterwards, and one
 // written with a B-rep body fails loudly on a build that has no backend for it
 // rather than being misread as a mesh.
-enum : uint32_t { kBodyMesh = 1 };
+enum : uint32_t { kBodyMesh = 1, kBodyBrep = 2 };
 
 bool readMesh(Reader& r, Mesh& out) {
     const uint32_t vertCount = r.u32();
@@ -203,8 +203,26 @@ void writeFeature(Writer& w, const Feature& f) {
     w.ids(f.verts);
     w.u32(static_cast<uint32_t>(f.offsets.size()));
     for (const Vec3& o : f.offsets) w.vec3(o);
-    w.u32(kBodyMesh);
-    writeMesh(w, f.bakedBody.mesh());
+    if (f.bakedBody.isMesh()) {
+        w.u32(kBodyMesh);
+        writeMesh(w, f.bakedBody.mesh());
+    } else {
+        // The shape in OCCT's own text, and the names beside it. Writing an
+        // empty mesh here instead -- which is what a tag-blind writer would do
+        // -- would save a file that loads as a model with a hole where the cut
+        // used to be, and say nothing about it.
+        std::string shape;
+        std::vector<ElementId> names;
+        if (brep::encode(f.bakedBody.brep(), shape, names)) {
+            w.u32(kBodyBrep);
+            w.text(shape);
+            w.ids(names);
+        } else {
+            w.u32(kBodyMesh);
+            writeMesh(w, Mesh{});
+        }
+    }
+    w.u32(static_cast<uint32_t>(f.backend));
 }
 
 bool readFeature(Reader& r, Feature& f) {
@@ -235,12 +253,24 @@ bool readFeature(Reader& r, Feature& f) {
     f.offsets.clear();
     f.offsets.reserve(offsetCount);
     for (uint32_t i = 0; i < offsetCount; ++i) f.offsets.push_back(r.vec3());
-    if (r.u32() != kBodyMesh) return false;
-    {
+    const uint32_t bodyTag = r.u32();
+    if (bodyTag == kBodyMesh) {
         Mesh m;
         if (!readMesh(r, m)) return false;
         f.bakedBody = Body(std::move(m));
+    } else if (bodyTag == kBodyBrep) {
+        const std::string shape = r.text();
+        const std::vector<ElementId> names = r.ids();
+        if (r.bad) return false;
+        BrepRef s = brep::decode(shape, names);
+        if (!s) return false;      // a build without the backend says so loudly
+        f.bakedBody = Body(std::move(s));
+    } else {
+        return false;
     }
+    const uint32_t backend = r.u32();
+    if (backend > static_cast<uint32_t>(Backend::Brep)) return false;
+    f.backend = static_cast<Backend>(backend);
     return !r.bad;
 }
 

@@ -143,6 +143,9 @@ int main() {
     // ---- A chain that produces nothing must not destroy the model ----------
     {
         Scene s;
+        // Mesh-kernel behaviour: this block builds its tool bodies as meshes,
+        // or edits vertices, neither of which an exact body does.
+        s.setDefaultBackend(Backend::Mesh);
         const ObjectId id = s.addPrimitive(PrimitiveKind::Box);
         SceneObject* o = s.find(id);
         const double before = volumeOf(o->body);
@@ -157,6 +160,9 @@ int main() {
     // ---- Free-form vertex edits ride along in the chain --------------------
     {
         Scene s;
+        // Mesh-kernel behaviour: this block builds its tool bodies as meshes,
+        // or edits vertices, neither of which an exact body does.
+        s.setDefaultBackend(Backend::Mesh);
         const ObjectId id = s.addPrimitive(PrimitiveKind::Box);
         SceneObject* o = s.find(id);
 
@@ -197,7 +203,7 @@ int main() {
         PrimitiveSpec spec;
         spec.kind = PrimitiveKind::Box;
         spec.box = {10.0f, 10.0f, 40.0f};
-        check(makePrimitive(spec, tool), "tool body built");
+        check(makePrimitive(spec, tool, s.defaultBackend()), "tool body built");
 
         Feature cut;
         cut.kind = FeatureKind::Boolean;
@@ -310,6 +316,9 @@ int main() {
     // The tool's own transform has to be taken into account, not just its mesh.
     {
         Scene s;
+        // Mesh-kernel behaviour: this block builds its tool bodies as meshes,
+        // or edits vertices, neither of which an exact body does.
+        s.setDefaultBackend(Backend::Mesh);
         const ObjectId a = s.addPrimitive(PrimitiveKind::Box);
         const ObjectId b = s.addPrimitive(PrimitiveKind::Box);
         s.find(b)->transform.position = {10, 0, 0};   // moved by transform only
@@ -333,6 +342,9 @@ int main() {
     // A boolean that cannot produce a solid is refused, chain untouched.
     {
         Scene s;
+        // Mesh-kernel behaviour: this block builds its tool bodies as meshes,
+        // or edits vertices, neither of which an exact body does.
+        s.setDefaultBackend(Backend::Mesh);
         const ObjectId a = s.addPrimitive(PrimitiveKind::Box);
         Mesh far;
         BoxParams p;
@@ -385,6 +397,9 @@ int main() {
     // A BaseMesh chain root carries geometry that has no parameters.
     {
         Scene s;
+        // Mesh-kernel behaviour: this block builds its tool bodies as meshes,
+        // or edits vertices, neither of which an exact body does.
+        s.setDefaultBackend(Backend::Mesh);
         const ObjectId id = s.addPrimitive(PrimitiveKind::Box);
         Mesh sphereMesh;
         makeSphere(sphereMesh);
@@ -408,6 +423,9 @@ int main() {
     // the rim sharp and a fillet somewhere else entirely. Nothing reported it.
     {
         Scene s;
+        // Mesh-kernel behaviour: this block builds its tool bodies as meshes,
+        // or edits vertices, neither of which an exact body does.
+        s.setDefaultBackend(Backend::Mesh);
         PrimitiveSpec spec;
         spec.cylinder.segments = 16;
         const ObjectId id = s.addPrimitive(PrimitiveKind::Cylinder, spec);
@@ -480,6 +498,9 @@ int main() {
     // boolean, which is what made it so visible.
     {
         Scene s;
+        // Mesh-kernel behaviour: this block builds its tool bodies as meshes,
+        // or edits vertices, neither of which an exact body does.
+        s.setDefaultBackend(Backend::Mesh);
         const ObjectId id = s.addPrimitive(PrimitiveKind::Box);
 
         CylinderParams bore;
@@ -556,6 +577,9 @@ int main() {
     {
         // A chain with something of everything on it.
         Scene s;
+        // Mesh-kernel behaviour: this block builds its tool bodies as meshes,
+        // or edits vertices, neither of which an exact body does.
+        s.setDefaultBackend(Backend::Mesh);
         PrimitiveSpec ps;
         ps.kind = PrimitiveKind::Box;
         ps.box.width = 40.0; ps.box.depth = 30.0; ps.box.height = 20.0;

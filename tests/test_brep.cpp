@@ -211,6 +211,68 @@ int main() {
         std::printf("  %zu names, stable across a re-run and two parameter changes\n", a.size());
     }
 
+    std::printf("--- extrude, the operation the workflow is built on ---\n");
+    {
+        Body body = plate(40, 40, 10);
+        const ElementId topName = body.faceName(topFace(body));
+
+        // A boss pushed out of the top face.
+        std::vector<FaceId> newFaces;
+        std::string why;
+        check(extrudeFaces(body, {topFace(body)}, 12.0, &newFaces, 21,
+                           ExtrudeOp::Auto, &why), "extrude out: " + why);
+        check(near(body.health(false).volume, 40.0 * 40.0 * 22.0, 1e-6),
+              "the body grew by exactly the swept volume");
+        check(!newFaces.empty(), "and it reports where the face went");
+        check(body.findFace(topName) != kInvalid,
+              "the extruded face keeps the name it was selected by");
+
+        // A pocket pushed into it, from the face the last step left on top.
+        const FaceId nowTop = topFace(body);
+        check(nowTop != kNoFace, "there is a top face to push into");
+        Body pocketed = body;
+        check(extrudeFaces(pocketed, {nowTop}, -4.0, nullptr, 22, ExtrudeOp::Auto, &why),
+              "extrude in: " + why);
+        check(pocketed.health(false).volume < body.health(false).volume,
+              "pushing into the body takes material away");
+        std::printf("  boss then pocket: %d faces, %.1f mm3\n",
+                    pocketed.faceCount(), pocketed.health(false).volume);
+    }
+
+    std::printf("--- a profile with real arcs in it ---\n");
+    {
+        // A 40 x 20 rectangle with 5mm rounded corners, as the create tool
+        // draws it -- but with the corners as actual arcs rather than the
+        // polyline the mesh backend has to settle for.
+        const Real w = 40, d = 20, r = 5;
+        std::vector<Vec3> pts;
+        std::vector<Real> arcs;
+        auto add = [&](Real x, Real y, Real bulge) {
+            pts.push_back({x, y, 0});
+            arcs.push_back(bulge);
+        };
+        // Corner arcs bulge inward by the sagitta of a quarter circle.
+        const Real sag = r * (1.0 - std::sqrt(2.0) / 2.0);
+        add(-w / 2 + r, -d / 2, 0);           add(w / 2 - r, -d / 2, -sag);
+        add(w / 2, -d / 2 + r, 0);            add(w / 2, d / 2 - r, -sag);
+        add(w / 2 - r, d / 2, 0);             add(-w / 2 + r, d / 2, -sag);
+        add(-w / 2, d / 2 - r, 0);            add(-w / 2, -d / 2 + r, -sag);
+
+        Body solid;
+        std::string why;
+        check(makeProfileSolid(pts, arcs, {0, 0, 1}, 0, 10, solid, 31, &why),
+              "the rounded profile sweeps into a solid: " + why);
+        check(!solid.empty() && solid.validate(), "and it is valid");
+
+        // Area of a rounded rectangle: the rectangle less the corners the
+        // rounding cut off. If the corners were polylines this would be short.
+        const Real area = w * d - (4.0 - kPi) * r * r;
+        check(near(solid.health(false).volume, area * 10.0, 1e-6),
+              "with the volume of a rounded rectangle, not a chamfered one");
+        std::printf("  rounded rectangle: %d faces, %.3f mm3 (exact %.3f)\n",
+                    solid.faceCount(), solid.health(false).volume, area * 10.0);
+    }
+
     std::printf("--- refusals say why ---\n");
     {
         Body body = plate(20, 20, 20);

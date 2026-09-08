@@ -24,7 +24,12 @@
 #include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepBuilderAPI_MakeShape.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
+#include <BRepBuilderAPI_MakeEdge.hxx>
+#include <BRepBuilderAPI_MakeFace.hxx>
+#include <BRepBuilderAPI_MakeWire.hxx>
 #include <BRepFilletAPI_MakeFillet.hxx>
+#include <BRepPrimAPI_MakePrism.hxx>
+#include <GC_MakeArcOfCircle.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepGProp.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
@@ -34,6 +39,8 @@
 #include <BRepPrimAPI_MakeSphere.hxx>
 #include <BRepPrimAPI_MakeTorus.hxx>
 #include <BRepTools.hxx>
+#include <BRepTools_WireExplorer.hxx>
+#include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
 #include <Bnd_Box.hxx>
 #include <GCPnts_QuasiUniformDeflection.hxx>
@@ -371,11 +378,23 @@ void faceEdges(const BrepShape& s, FaceId f, std::vector<EdgeId>& out) {
 void faceVertices(const BrepShape& s, FaceId f, std::vector<VertexId>& out) {
     out.clear();
     if (!validFace(s, f)) return;
-    // Around the outer wire, in order: a caller drawing an outline needs the
-    // sequence, not the set.
+    // Around the outer wire, in connection order. A plain explorer would give
+    // the vertices in the order the edges were stored, which is not the order
+    // they are joined in -- a perimeter measured from that comes out along the
+    // diagonals, 96.6mm around a 20mm square instead of 80.
     const TopoDS_Wire outer = BRepTools::OuterWire(faceAt(s, f));
-    for (TopExp_Explorer v(outer.IsNull() ? TopoDS_Shape(faceAt(s, f)) : TopoDS_Shape(outer),
-                           TopAbs_VERTEX); v.More(); v.Next()) {
+    if (!outer.IsNull()) {
+        for (BRepTools_WireExplorer w(outer, faceAt(s, f)); w.More(); w.Next()) {
+            const int i = s.verts.FindIndex(w.CurrentVertex());
+            if (i <= 0) continue;
+            const VertexId id = i - 1;
+            if (std::find(out.begin(), out.end(), id) == out.end()) out.push_back(id);
+        }
+        if (!out.empty()) return;
+    }
+    // A face with no usable outer wire -- a full sphere, whose boundary is a
+    // seam rather than a loop -- still has to answer with something.
+    for (TopExp_Explorer v(faceAt(s, f), TopAbs_VERTEX); v.More(); v.Next()) {
         const int i = s.verts.FindIndex(v.Current());
         if (i <= 0) continue;
         const VertexId id = i - 1;
@@ -898,6 +917,238 @@ BrepRef filletEdges(const BrepShape& s, const std::vector<EdgeId>& edges,
         return makeBrep(result, propagateNames(fil, {{&s}}, result, salt));
     } catch (const Standard_Failure& e) {
         if (reason) *reason = e.GetMessageString() ? e.GetMessageString() : "the fillet threw";
+        return {};
+    }
+}
+
+BrepRef extrudeFaces(const BrepRef& s, const std::vector<FaceId>& faces, Real distance,
+                     ElementId salt, std::vector<ElementId>* newFaces, std::string* reason) {
+    if (newFaces) newFaces->clear();
+    if (reason) reason->clear();
+    if (!s || faces.empty()) {
+        if (reason) *reason = "nothing to extrude";
+        return {};
+    }
+    if (std::fabs(distance) < 1e-9) {
+        if (reason) *reason = "the distance is zero";
+        return {};
+    }
+
+    // Hold the faces by name, not by handle: each step rebuilds the shape and
+    // renumbers everything, which is the whole reason names exist.
+    std::vector<ElementId> targets;
+    for (FaceId f : faces) {
+        const ElementId id = faceName(*s, f);
+        if (id != kNoId) targets.push_back(id);
+    }
+    if (targets.empty()) {
+        if (reason) *reason = "those faces have no names to follow";
+        return {};
+    }
+
+    BrepRef current = s;
+    for (size_t i = 0; i < targets.size(); ++i) {
+        std::vector<FaceId> at;
+        findFaces(*current, targets[i], at);
+        if (at.empty()) {
+            if (reason) *reason = "a face to extrude no longer exists";
+            return {};
+        }
+
+        // One prism per piece: a face split by an earlier step is still one
+        // face as far as the feature is concerned.
+        BrepRef step = current;
+        for (FaceId f : at) {
+            std::vector<FaceId> live;
+            findFaces(*step, targets[i], live);
+            if (live.empty()) break;
+            const FaceId use = f < static_cast<FaceId>(step->faces.Extent()) ? live.front() : live.front();
+
+            const Vec3 n = faceNormal(*step, use);
+            if (length(n) < 0.5) {
+                if (reason) *reason = "a face has no direction to be pushed along";
+                return {};
+            }
+            const gp_Vec sweep(n.x * distance, n.y * distance, n.z * distance);
+
+            TopoDS_Shape solid;
+            try {
+                BRepPrimAPI_MakePrism prism(faceAt(*step, use), sweep);
+                prism.Build();
+                if (!prism.IsDone()) {
+                    if (reason) *reason = "the face could not be swept";
+                    return {};
+                }
+                solid = prism.Shape();
+            } catch (const Standard_Failure& e) {
+                if (reason) *reason = e.GetMessageString() ? e.GetMessageString() : "the sweep threw";
+                return {};
+            }
+
+            // Name the swept solid from the face it came from, so the boolean
+            // that follows has something to carry.
+            TopTools_IndexedMapOfShape pf;
+            TopExp::MapShapes(solid, TopAbs_FACE, pf);
+            std::vector<ElementId> prismNames(static_cast<size_t>(pf.Extent()), kNoId);
+            const Vec3 startCentre = faceCentroid(*step, use);
+            for (int k = 0; k < pf.Extent(); ++k) {
+                const TopoDS_Face& face = TopoDS::Face(pf(k + 1));
+                GProp_GProps props;
+                BRepGProp::SurfaceProperties(face, props);
+                const Vec3 c = toVec3(props.CentreOfMass());
+                const Real along = dot(c - startCentre, n);
+                // The cap at the far end carries the *original* face's name,
+                // because that is what it is: the face the user selected, moved.
+                // A feature that referred to it before the extrude has to go on
+                // referring to it after, which is the whole job of the history.
+                // The near cap vanishes into the body and gets a derived name.
+                if (along > std::fabs(distance) * 0.9)
+                    prismNames[static_cast<size_t>(k)] = targets[i];
+                else if (std::fabs(along) < std::fabs(distance) * 0.1)
+                    prismNames[static_cast<size_t>(k)] = nameId(salt, IdRole::Cap, targets[i]);
+                else
+                    prismNames[static_cast<size_t>(k)] =
+                        nameId(salt, IdRole::Wall, targets[i], static_cast<ElementId>(k));
+            }
+            BrepRef tool = makeBrep(solid, prismNames);
+
+            BrepRef combined = booleanOp(*step, *tool,
+                                         distance > 0 ? BooleanOp::Union : BooleanOp::Difference,
+                                         nameId(salt, IdRole::Split, targets[i]), reason);
+            if (!combined) return {};
+            step = combined;
+            break;   // the prism spans every piece of that face already
+        }
+        current = step;
+        if (newFaces) newFaces->push_back(targets[i]);
+    }
+    return current;
+}
+
+BrepRef prism(const std::vector<Vec3>& points, const std::vector<Real>& arcs,
+              Vec3 planeNormal, Real z0, Real z1, ElementId salt, std::string* reason) {
+    if (reason) reason->clear();
+    if (points.size() < 3) {
+        if (reason) *reason = "the profile has too few points";
+        return {};
+    }
+    if (std::fabs(z1 - z0) < 1e-9) {
+        if (reason) *reason = "the profile has no depth";
+        return {};
+    }
+
+    const Vec3 n = normalize(planeNormal);
+    try {
+        BRepBuilderAPI_MakeWire wire;
+        const size_t count = points.size();
+        for (size_t i = 0; i < count; ++i) {
+            const Vec3 a = points[i] + n * z0;
+            const Vec3 b = points[(i + 1) % count] + n * z0;
+            if (length(b - a) < 1e-9) continue;
+
+            const Real bulge = i < arcs.size() ? arcs[i] : Real(0);
+            if (std::fabs(bulge) > 1e-9) {
+                // Three-point arc: the sagitta is measured from the chord's
+                // midpoint, towards the inside of the corner.
+                const Vec3 mid = (a + b) * 0.5;
+                const Vec3 chord = b - a;
+                Vec3 side = cross(n, chord);
+                if (length(side) < 1e-12) continue;
+                side = normalize(side);
+                const Vec3 through = mid + side * bulge;
+                wire.Add(BRepBuilderAPI_MakeEdge(
+                    GC_MakeArcOfCircle(gp_Pnt(a.x, a.y, a.z), gp_Pnt(through.x, through.y, through.z),
+                                       gp_Pnt(b.x, b.y, b.z)).Value()).Edge());
+            } else {
+                wire.Add(BRepBuilderAPI_MakeEdge(gp_Pnt(a.x, a.y, a.z),
+                                                 gp_Pnt(b.x, b.y, b.z)).Edge());
+            }
+        }
+        wire.Build();
+        if (!wire.IsDone()) {
+            if (reason) *reason = "the profile does not close";
+            return {};
+        }
+
+        BRepBuilderAPI_MakeFace face(wire.Wire(), Standard_True);
+        face.Build();
+        if (!face.IsDone()) {
+            if (reason) *reason = "the profile does not bound a face";
+            return {};
+        }
+
+        const Real depth = z1 - z0;
+        const gp_Vec sweep(n.x * depth, n.y * depth, n.z * depth);
+        BRepPrimAPI_MakePrism solid(face.Face(), sweep);
+        solid.Build();
+        if (!solid.IsDone() || !acceptable(solid.Shape(), reason)) {
+            if (reason && reason->empty()) *reason = "the profile could not be swept into a solid";
+            return {};
+        }
+
+        // Named by role, the way a primitive is: the two caps and the wall the
+        // profile swept out. The wall is several faces -- one per span of the
+        // profile -- so each takes the ordinal of the span it came from.
+        const TopoDS_Shape shape = solid.Shape();
+        TopTools_IndexedMapOfShape fs;
+        TopExp::MapShapes(shape, TopAbs_FACE, fs);
+        std::vector<ElementId> names(static_cast<size_t>(fs.Extent()), kNoId);
+        std::vector<std::pair<Real, int>> byAngle;
+        for (int i = 0; i < fs.Extent(); ++i) {
+            const TopoDS_Face& f = TopoDS::Face(fs(i + 1));
+            const Vec3 fn = outwardNormal(f);
+            const Real along = dot(fn, n);
+            if (along > 0.9)       names[static_cast<size_t>(i)] = nameId(salt, IdRole::Cap, 1);
+            else if (along < -0.9) names[static_cast<size_t>(i)] = nameId(salt, IdRole::Cap, 0);
+            else {
+                GProp_GProps props;
+                BRepGProp::SurfaceProperties(f, props);
+                const Vec3 c = toVec3(props.CentreOfMass());
+                byAngle.push_back({std::atan2(c.y, c.x), i});
+            }
+        }
+        // The walls in a fixed order around the profile, so that the same
+        // profile always names them the same way.
+        std::sort(byAngle.begin(), byAngle.end());
+        for (size_t k = 0; k < byAngle.size(); ++k)
+            names[static_cast<size_t>(byAngle[k].second)] =
+                nameId(salt, IdRole::Side, static_cast<ElementId>(k));
+
+        return makeBrep(shape, names);
+    } catch (const Standard_Failure& e) {
+        if (reason) *reason = e.GetMessageString() ? e.GetMessageString() : "the profile threw";
+        return {};
+    }
+}
+
+bool encode(const BrepShape& s, std::string& shapeOut, std::vector<ElementId>& namesOut) {
+    if (s.shape.IsNull()) return false;
+    try {
+        std::ostringstream os;
+        BRepTools::Write(s.shape, os);
+        shapeOut = os.str();
+    } catch (const Standard_Failure&) {
+        return false;
+    }
+    namesOut = s.faceNames;
+    return !shapeOut.empty();
+}
+
+BrepRef decode(const std::string& shapeText, const std::vector<ElementId>& names) {
+    if (shapeText.empty()) return {};
+    try {
+        TopoDS_Shape shape;
+        BRep_Builder builder;
+        std::istringstream is(shapeText);
+        BRepTools::Read(shape, is, builder);
+        if (shape.IsNull()) return {};
+        // The names are matched to faces by index, which is safe because OCCT
+        // reads its own text back in the order it wrote it. If a file ever
+        // arrives with the wrong count, makeBrep pads with kNoId rather than
+        // reading past the end, and the faces without names simply cannot be
+        // referred to -- which is a visible failure, not a silent one.
+        return makeBrep(shape, names);
+    } catch (const Standard_Failure&) {
         return {};
     }
 }

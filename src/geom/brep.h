@@ -121,6 +121,33 @@ BrepRef booleanOp(const BrepShape& a, const BrepShape& b, BooleanOp op,
 BrepRef filletEdges(const BrepShape& s, const std::vector<EdgeId>& edges,
                     const std::vector<Real>& radii, ElementId salt, std::string* reason);
 
+// Pushes faces along their own normals and joins the result to the body, or
+// cuts it out when the distance is negative. Built as a prism and combined
+// through the same boolean path, so the names come out of the same mechanism
+// rather than a second one written for the occasion.
+//
+// `newFaces` reports the name of each moved face's new position, in the order
+// the faces were given.
+BrepRef extrudeFaces(const BrepRef& s, const std::vector<FaceId>& faces, Real distance,
+                     ElementId salt, std::vector<ElementId>* newFaces, std::string* reason);
+
+// A solid from a closed outline on a plane, swept between two heights along the
+// plane's normal. The create tool's profiles arrive this way.
+//
+// `arcs` is optional and parallel to `points`: a non-zero entry k means the
+// span from point k to point k+1 is a circular arc bulging by that sagitta,
+// rather than a straight line. That is what keeps a rounded corner an actual
+// arc instead of the polyline the mesh backend had to settle for.
+BrepRef prism(const std::vector<Vec3>& points, const std::vector<Real>& arcs,
+              Vec3 planeNormal, Real z0, Real z1, ElementId salt, std::string* reason);
+
+// ---- Persistence -----------------------------------------------------------
+// The shape in OpenCASCADE's own text form, and the face names beside it --
+// which are ours, not OCCT's business, and are what makes the file a parametric
+// model rather than a lump of geometry.
+bool encode(const BrepShape& s, std::string& shapeOut, std::vector<ElementId>& namesOut);
+BrepRef decode(const std::string& shapeText, const std::vector<ElementId>& names);
+
 // Every face answering to this name. A name stands for a set: a boolean
 // routinely splits one face into several, and a feature that referred to the
 // face has to go on referring to all of it.
