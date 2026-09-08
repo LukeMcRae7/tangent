@@ -245,7 +245,7 @@ MeasureResult MeasureTool::compute(const Scene& scene) const {
                 r.hasDiameter = true;
                 r.diameter = A.radius * 2.0;
                 r.centre = A.centre;
-                std::snprintf(buf, sizeof(buf), "\u2300 %.3f mm  (%.3f mm around)",
+                std::snprintf(buf, sizeof(buf), "\u00D8 %.3f mm  (%.3f mm around)",
                               r.diameter, r.length);
             } else {
                 std::snprintf(buf, sizeof(buf), "%.3f mm", r.length);
@@ -271,7 +271,7 @@ MeasureResult MeasureTool::compute(const Scene& scene) const {
                 r.diameter = A.radius * 2.0;
                 r.centre = A.centre;
                 r.from = r.to = A.centre;
-                std::snprintf(buf, sizeof(buf), "\u2300 %.3f mm", r.diameter);
+                std::snprintf(buf, sizeof(buf), "\u00D8 %.3f mm", r.diameter);
             } else {
                 std::snprintf(buf, sizeof(buf), "%.3f mm2", area);
             }

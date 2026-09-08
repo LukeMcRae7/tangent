@@ -1501,7 +1501,7 @@ bool CreateTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& ou
                 ImGui::TextColored(kAccentIm, " snapped to %s", snapKindName(activeSnap_.kind));
                 if (activeSnap_.radius > 0.0) {
                     ImGui::SameLine();
-                    ImGui::TextDisabled("(\u2300 %.3f mm)", activeSnap_.radius * 2.0);
+                    ImGui::TextDisabled("(\u00D8 %.3f mm)", activeSnap_.radius * 2.0);
                 }
             } else {
                 ImGui::TextDisabled("(Click to set / type a number / E to adjust)");

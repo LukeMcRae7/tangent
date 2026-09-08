@@ -2114,7 +2114,7 @@ int Application::run() {
             if (const SnapHit& hit = createTool_.activeSnap(); hit.valid()) {
                 char buf[96];
                 if (hit.radius > 0.0)
-                    std::snprintf(buf, sizeof buf, "Snapped to %s  (\u2300 %.3f mm)",
+                    std::snprintf(buf, sizeof buf, "Snapped to %s  (\u00D8 %.3f mm)",
                                   snapKindName(hit.kind), hit.radius * 2.0);
                 else
                     std::snprintf(buf, sizeof buf, "Snapped to %s", snapKindName(hit.kind));
