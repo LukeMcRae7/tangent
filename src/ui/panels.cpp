@@ -494,6 +494,28 @@ void drawHistory(UiContext& ctx) {
                 ImGui::TextColored(kDim, "%s", f.edges.describe("edge").c_str());
                 break;
             }
+            case FeatureKind::Boolean: {
+                // The tool body is baked into the feature, so its shape is not
+                // editable here -- but which way it combines is, and redoing a
+                // cut from scratch because it should have been a join is the
+                // sort of thing a history exists to avoid.
+                const char* const opNames[] = {"Union", "Difference", "Intersection"};
+                int currentOp = static_cast<int>(f.booleanOp);
+                if (currentOp < 0 || currentOp > 2) currentOp = 0;
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextUnformatted("Operation");
+                ImGui::SameLine();
+                if (ImGui::Combo("##BooleanOp", &currentOp, opNames, 3)) {
+                    f.booleanOp = static_cast<BooleanOp>(currentOp);
+                    changed = true;
+                }
+                ImGui::TextColored(kDim, "Tool body: %d faces", f.bakedBody.faceCount());
+                break;
+            }
+            case FeatureKind::BaseMesh:
+                ImGui::TextColored(kDim, "Imported geometry, %d faces", f.bakedBody.faceCount());
+                ImGui::TextColored(kDim, "Not parametric: edit it with the mesh tools");
+                break;
             case FeatureKind::VertexEdit:
                 ImGui::TextColored(kDim, "Free-form edit of %zu vertices",
                                    f.verts.size());

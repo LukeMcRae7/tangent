@@ -183,6 +183,81 @@ int main() {
         std::printf("[features] vertex edit survives re-evaluation\n");
     }
 
+    // ---- A boolean's operation is editable after the fact ------------------
+    //
+    // The tool body is baked into the feature, so its shape cannot be changed
+    // here -- but which way it combines can, and the History panel now offers
+    // it. This is the behaviour behind that control.
+    {
+        Scene s;
+        const ObjectId id = s.addPrimitive(PrimitiveKind::Box);   // 20mm cube
+        SceneObject* o = s.find(id);
+
+        Body tool;
+        PrimitiveSpec spec;
+        spec.kind = PrimitiveKind::Box;
+        spec.box = {10.0f, 10.0f, 40.0f};
+        check(makePrimitive(spec, tool), "tool body built");
+
+        Feature cut;
+        cut.kind = FeatureKind::Boolean;
+        cut.booleanOp = BooleanOp::Difference;
+        cut.bakedBody = tool;
+        check(s.addFeature(id, cut), "difference added");
+        const double cutVolume = volumeOf(o->body);
+        check(near(static_cast<float>(cutVolume), 8000.0f - 10.0f * 10.0f * 20.0f, 1.0f),
+              "a 10x10 hole went through the cube");
+
+        o->features[1].booleanOp = BooleanOp::Union;
+        check(s.reevaluate(id), "re-evaluated as a union");
+        const double joinVolume = volumeOf(o->body);
+        check(joinVolume > cutVolume, "switching to union puts material back");
+        check(near(static_cast<float>(joinVolume), 8000.0f + 10.0f * 10.0f * 20.0f, 1.0f),
+              "and the tool is now part of the body");
+        check(s.takeChainNotice().empty(), "a working switch reports nothing");
+        std::printf("[features] boolean op switched in place: %.0f -> %.0f mm3\n",
+                    cutVolume, joinVolume);
+    }
+
+    // ---- A step that drops out of the chain says so ------------------------
+    //
+    // The History panel has always marked a failed feature, but the chain is
+    // re-run by edits that have nothing to do with the step that breaks. Losing
+    // a fillet because a base dimension moved should not be silent.
+    {
+        Scene s;
+        const ObjectId id = s.addPrimitive(PrimitiveKind::Box);
+        SceneObject* o = s.find(id);
+
+        Feature bev;
+        bev.kind = FeatureKind::Bevel;
+        bev.edges.kind = ElementRefs::Kind::All;
+        bev.width = 4.0f;
+        check(s.addFeature(id, bev), "fillet added to a 20mm cube");
+        check(s.takeChainNotice().empty(), "a chain that worked says nothing");
+
+        // Thin the cube until the fillet cannot fit in it.
+        o->spec.box.height = 2.0f;
+        s.rebuild(id);
+        const std::string notice = s.takeChainNotice();
+        check(!notice.empty(), "the lost fillet is reported");
+        check(notice.find(o->features[1].displayKind()) != std::string::npos,
+              "the notice names the step the way the timeline does");
+        check(o->features[1].errored, "and the step itself is marked");
+
+        // Still broken, but no longer news: a slider drag re-evaluates every
+        // frame and must not shout on each of them.
+        s.rebuild(id);
+        check(s.takeChainNotice().empty(), "the same failure is not reported twice");
+
+        // Fixed: the fillet comes back and stays quiet.
+        o->spec.box.height = 20.0f;
+        s.rebuild(id);
+        check(!o->features[1].errored, "the fillet returns when it fits again");
+        check(s.takeChainNotice().empty(), "recovery is not reported as a failure");
+        std::printf("[features] a failed step reports once: %s\n", notice.c_str());
+    }
+
     // ---- Duplicating an object copies its history --------------------------
     {
         Scene s;

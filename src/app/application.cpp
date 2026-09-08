@@ -2110,6 +2110,13 @@ int Application::run() {
 
         applyActions();
 
+        // A feature that dropped out of the chain during any of the above.
+        // Drained here, after the actions have run, because a re-evaluation is
+        // triggered from a dozen places -- an inspector nudge, a history
+        // toggle, an undo -- and none of them should have to remember to say so.
+        if (std::string chainErr = scene_.takeChainNotice(); !chainErr.empty())
+            setNotice(chainErr);
+
         // Queued before the frame is drawn; the renderer flushes overlay lines
         // at the end of its pass.
         drawSelectionHighlights();

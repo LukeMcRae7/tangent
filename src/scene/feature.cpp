@@ -23,6 +23,11 @@ const char* featureKindName(FeatureKind k) {
     return "Feature";
 }
 
+const char* Feature::displayKind() const {
+    if (kind == FeatureKind::Bevel) return segments == 1 ? "Chamfer" : "Fillet";
+    return featureKindName(kind);
+}
+
 std::string Feature::summary() const {
     char buf[96];
     switch (kind) {
@@ -51,7 +56,7 @@ std::string Feature::summary() const {
             break;
         case FeatureKind::Bevel: {
             // A single segment is a flat cut, which is a chamfer, not a fillet.
-            const char* what = segments == 1 ? "Chamfer" : "Fillet";
+            const char* what = displayKind();
 
             // Say so when the edges do not all share a radius, rather than
             // showing one of them as though it applied to the whole feature.

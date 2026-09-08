@@ -152,6 +152,18 @@ public:
     // before it. Pass 0 to rebuild everything.
     bool reevaluateFrom(ObjectId id, size_t fromFeature);
 
+    // A feature that failed during the last re-evaluation, phrased for the
+    // status bar, or empty. Reading it clears it.
+    //
+    // The History panel has always marked a failed step, but a chain is re-run
+    // by edits that have nothing to do with the step that breaks: nudging a
+    // base dimension, undoing, toggling something earlier. The fillet then
+    // quietly disappears from the viewport and the only sign of it is a panel
+    // the user may not have open. Only a step that has *newly* failed is
+    // reported, so a chain carrying a known-bad step does not repeat itself on
+    // every frame of a slider drag.
+    std::string takeChainNotice() { std::string s; s.swap(chainNotice_); return s; }
+
     // ---- Selection -------------------------------------------------------
     const std::vector<ObjectId>& selection() const { return selection_; }
     bool isSelected(ObjectId id) const;
@@ -221,7 +233,12 @@ private:
     // Handed to each new feature so it has an identity independent of where it
     // sits in the chain. Saved with the project: reloading and then adding a
     // feature must not reissue a number an existing feature already holds.
+    // Fills chainNotice_ from whatever the last evaluation marked, ignoring
+    // steps that were already failing when it started.
+    void noteNewFailures(const SceneObject& obj, const std::vector<ElementId>& wasBroken);
+
     uint64_t nextFeatureUid_ = 1;
+    std::string chainNotice_;
 };
 
 } // namespace tg

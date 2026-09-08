@@ -155,6 +155,12 @@ struct Feature {
 
     // Short description for the timeline, e.g. "Extrude  12.0 mm".
     std::string summary() const;
+
+    // What to call this step in a sentence. Not always featureKindName: a
+    // bevel is a chamfer when it cuts flat and a fillet when it rounds, and a
+    // message that calls it neither leaves the user hunting the timeline for a
+    // word that is not there.
+    const char* displayKind() const;
 };
 
 // Runs the chain, leaving the result in `out`. Marks failing features and keeps

@@ -186,14 +186,43 @@ bool Scene::rebuild(ObjectId id) {
     return reevaluate(id);
 }
 
+void Scene::noteNewFailures(const SceneObject& obj,
+                            const std::vector<ElementId>& wasBroken) {
+    const Feature* first = nullptr;
+    int count = 0;
+    for (const Feature& f : obj.features) {
+        if (!f.errored) continue;
+        if (std::find(wasBroken.begin(), wasBroken.end(), f.uid) != wasBroken.end()) continue;
+        if (!first) first = &f;
+        ++count;
+    }
+    if (!first) return;
+
+    chainNotice_ = std::string(first->displayKind()) + " failed";
+    if (!first->error.empty()) chainNotice_ += ": " + first->error;
+    if (count > 1) chainNotice_ += " (and " + std::to_string(count - 1) + " more)";
+}
+
 bool Scene::reevaluateFrom(ObjectId id, size_t fromFeature) {
     SceneObject* obj = find(id);
     if (!obj) return false;
 
+    // What was already broken before this run, so that only a step that has
+    // newly failed is reported. Held by uid rather than by position: a chain
+    // can be reordered between runs.
+    std::vector<ElementId> wasBroken;
+    for (const Feature& f : obj->features)
+        if (f.errored) wasBroken.push_back(f.uid);
+
     // Evaluate into a scratch body: a chain that produces nothing must not
     // destroy the geometry the user can still see.
     Body next;
-    if (!evaluateFrom(obj->features, fromFeature, obj->featureCache, next)) return false;
+    const bool ok = evaluateFrom(obj->features, fromFeature, obj->featureCache, next);
+
+    // Either way: evaluateFrom has marked each step it ran, and a chain that
+    // produced nothing at all is exactly the case worth saying something about.
+    noteNewFailures(*obj, wasBroken);
+    if (!ok) return false;
 
     obj->body = std::move(next);
     obj->refreshDerived();
