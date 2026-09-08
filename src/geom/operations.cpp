@@ -76,8 +76,28 @@ bool makeProfileSolid(const std::vector<Vec3>& points, const std::vector<Real>& 
 }
 
 bool insetFaces(Body& body, const std::vector<FaceId>& faces, Real amount,
-                std::vector<FaceId>* newFaces, ElementId salt) {
-    return insetFaces(body.mesh(), faces, amount, newFaces, salt);
+                std::vector<FaceId>* newFaces, ElementId salt, std::string* reason) {
+    if (!body.isMesh()) {
+        std::vector<ElementId> names;
+        BrepRef result = brep::insetFaces(body.brepRef(), faces, amount, salt,
+                                          newFaces ? &names : nullptr, reason);
+        if (!result) return false;
+        body = Body(std::move(result));
+        if (newFaces) {
+            newFaces->clear();
+            std::vector<FaceId> at;
+            for (ElementId id : names) {
+                body.findFaces(id, at);
+                for (FaceId f : at) newFaces->push_back(f);
+            }
+        }
+        return true;
+    }
+    if (!insetFaces(body.mesh(), faces, amount, newFaces, salt)) {
+        if (reason) *reason = "inset too large";
+        return false;
+    }
+    return true;
 }
 
 bool filletEdges(Body& body, const FilletSpec& spec, std::string* reason) {

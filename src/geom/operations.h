@@ -54,7 +54,8 @@ bool makeProfileSolid(const std::vector<Vec3>& points, const std::vector<Real>& 
                       ElementId salt = 0, std::string* reason = nullptr);
 
 bool insetFaces(Body& body, const std::vector<FaceId>& faces, Real amount,
-                std::vector<FaceId>* newFaces = nullptr, ElementId salt = 0);
+                std::vector<FaceId>* newFaces = nullptr, ElementId salt = 0,
+                std::string* reason = nullptr);
 
 // Rounds edges. `reason` gets a short phrase on refusal; see the note above.
 bool filletEdges(Body& body, const FilletSpec& spec, std::string* reason = nullptr);

@@ -28,7 +28,9 @@
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
+#include <BRepFeat_SplitShape.hxx>
 #include <BRepFilletAPI_MakeFillet.hxx>
+#include <BRepOffsetAPI_MakeOffset.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
 #include <GC_MakeArcOfCircle.hxx>
 #include <BRepCheck_Analyzer.hxx>
@@ -1065,6 +1067,125 @@ BrepRef extrudeFaces(const BrepRef& s, const std::vector<FaceId>& faces, Real di
         }
         current = step;
         if (newFaces) newFaces->push_back(targets[i]);
+    }
+    return current;
+}
+
+BrepRef insetFaces(const BrepRef& s, const std::vector<FaceId>& faces, Real amount,
+                   ElementId salt, std::vector<ElementId>* newFaces, std::string* reason) {
+    if (newFaces) newFaces->clear();
+    if (reason) reason->clear();
+    if (!s || faces.empty()) {
+        if (reason) *reason = "nothing to inset";
+        return {};
+    }
+    if (amount <= 0.0) {
+        if (reason) *reason = "the amount has to be positive";
+        return {};
+    }
+
+    std::vector<ElementId> targets;
+    for (FaceId f : faces) {
+        const ElementId id = faceName(*s, f);
+        if (id != kNoId) targets.push_back(id);
+    }
+    if (targets.empty()) {
+        if (reason) *reason = "those faces have no names to follow";
+        return {};
+    }
+
+    BrepRef current = s;
+    for (ElementId target : targets) {
+        std::vector<FaceId> at;
+        findFaces(*current, target, at);
+        if (at.empty()) {
+            if (reason) *reason = "a face to inset no longer exists";
+            return {};
+        }
+        const TopoDS_Face& face = faceAt(*current, at.front());
+
+        if (BRepAdaptor_Surface(face).GetType() != GeomAbs_Plane) {
+            if (reason) *reason = "only a flat face can be inset";
+            return {};
+        }
+
+        try {
+            // The outline, moved inward within the face's own plane. Offsetting
+            // the wire rather than the face keeps the result a wire that still
+            // lies in that plane, which is what the splitter needs.
+            const TopoDS_Wire outer = BRepTools::OuterWire(face);
+            if (outer.IsNull()) {
+                if (reason) *reason = "that face has no outline to offset";
+                return {};
+            }
+
+            BRepOffsetAPI_MakeOffset offset(face, GeomAbs_Arc);
+            offset.Perform(-amount);
+            if (!offset.IsDone()) {
+                if (reason) *reason = "the outline cannot be moved in that far";
+                return {};
+            }
+            TopoDS_Shape inner = offset.Shape();
+            if (inner.IsNull()) {
+                if (reason) *reason = "the inset leaves nothing of the face";
+                return {};
+            }
+
+            // Split the face along it: the solid comes back whole, with that
+            // one face now two.
+            BRepFeat_SplitShape splitter(current->shape);
+            bool added = false;
+            for (TopExp_Explorer w(inner, TopAbs_WIRE); w.More(); w.Next()) {
+                splitter.Add(TopoDS::Wire(w.Current()), face);
+                added = true;
+            }
+            if (!added) {
+                if (reason) *reason = "the inset outline is not a closed loop";
+                return {};
+            }
+            splitter.Build();
+            if (!splitter.IsDone() || !acceptable(splitter.Shape(), reason)) {
+                if (reason && reason->empty()) *reason = "the face could not be split";
+                return {};
+            }
+
+            const TopoDS_Shape result = splitter.Shape();
+            std::vector<ElementId> names = propagateNames(splitter, {{current.get()}}, result, salt);
+
+            // The face was one and is now two, both carrying its name. The
+            // inner one is what the user will act on next, so it keeps the
+            // name alone and the ring around it takes a derived one -- the
+            // opposite of the boolean's rule, and for the same reason: a name
+            // should land on the thing a person would point at.
+            TopTools_IndexedMapOfShape newFaceMap;
+            TopExp::MapShapes(result, TopAbs_FACE, newFaceMap);
+            std::vector<int> pieces;
+            for (int i = 0; i < newFaceMap.Extent(); ++i)
+                if (names[static_cast<size_t>(i)] == target) pieces.push_back(i);
+            if (pieces.size() == 2) {
+                // The ring is the piece with a hole in it -- two wires, an
+                // outline and the inset outline inside it. Not the larger of
+                // the two: a 5mm inset on a 40mm face leaves 900mm2 inside and
+                // 700 around, and the answer would come out backwards.
+                auto wireCount = [](const TopoDS_Shape& f) {
+                    int n = 0;
+                    for (TopExp_Explorer w(f, TopAbs_WIRE); w.More(); w.Next()) ++n;
+                    return n;
+                };
+                const int w0 = wireCount(newFaceMap(pieces[0] + 1));
+                const int w1 = wireCount(newFaceMap(pieces[1] + 1));
+                if (w0 != w1) {
+                    const int ring = w0 > w1 ? pieces[0] : pieces[1];
+                    names[static_cast<size_t>(ring)] = nameId(salt, IdRole::Ring, target);
+                }
+            }
+
+            current = makeBrep(result, names);
+            if (newFaces) newFaces->push_back(target);
+        } catch (const Standard_Failure& e) {
+            if (reason) *reason = e.GetMessageString() ? e.GetMessageString() : "the inset threw";
+            return {};
+        }
     }
     return current;
 }

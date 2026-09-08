@@ -240,6 +240,59 @@ int main() {
                     pocketed.faceCount(), pocketed.health(false).volume);
     }
 
+    std::printf("--- inset, and what a pocket is drawn from ---\n");
+    {
+        Body body = plate(40, 40, 10);
+        const FaceId top = topFace(body);
+        const ElementId topName = body.faceName(top);
+        const int facesBefore = body.faceCount();
+        const Real volumeBefore = body.health(false).volume;
+
+        std::vector<FaceId> inner;
+        std::string why;
+        check(insetFaces(body, {top}, 5.0, &inner, 41, &why), "the top face insets: " + why);
+        check(body.faceCount() == facesBefore + 1, "the face is now two: an inner and a ring");
+        check(near(body.health(false).volume, volumeBefore, 1e-6),
+              "and no material moved -- an inset is a split, not a cut");
+        check(!inner.empty(), "it reports the inner face");
+
+        // The inner face keeps the name: it is the one a person would point at
+        // next, and the ring around it takes a derived name.
+        check(body.findFace(topName) != kInvalid, "the inner face answers to the original name");
+        const FaceId keptName = body.findFace(topName);
+        check(near(body.faceArea(keptName), 30.0 * 30.0, 1e-6),
+              "and it is the inner one: 30 x 30 inside a 40 x 40 face");
+
+        // A pocket: inset, then push the inner face in.
+        check(extrudeFaces(body, {keptName}, -3.0, nullptr, 42, ExtrudeOp::Auto, &why),
+              "the inner face pushes in: " + why);
+        check(near(body.health(false).volume, volumeBefore - 30.0 * 30.0 * 3.0, 1e-6),
+              "which takes exactly the pocket out");
+        std::printf("  40mm plate, 5mm inset, 3mm pocket: %d faces, %.1f mm3\n",
+                    body.faceCount(), body.health(false).volume);
+    }
+
+    std::printf("--- a curved face is refused rather than approximated ---\n");
+    {
+        PrimitiveSpec cs;
+        cs.kind = PrimitiveKind::Cylinder;
+        cs.cylinder.radius = 10;
+        cs.cylinder.height = 20;
+        Body cyl;
+        check(makePrimitive(cs, cyl, Backend::Brep), "cylinder built");
+
+        FaceId wall = kNoFace;
+        std::vector<FaceId> faces;
+        cyl.allFaces(faces);
+        for (FaceId f : faces)
+            if (std::fabs(cyl.faceNormal(f).z) < 0.5) wall = f;
+        check(wall != kNoFace, "found the wall");
+
+        std::string why;
+        check(!insetFaces(cyl, {wall}, 2.0, nullptr, 43, &why), "insetting a curved face is refused");
+        check(why.find("flat") != std::string::npos, "and says why: " + why);
+    }
+
     std::printf("--- a profile with real arcs in it ---\n");
     {
         // A 40 x 20 rectangle with 5mm rounded corners, as the create tool

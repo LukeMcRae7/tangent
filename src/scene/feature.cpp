@@ -250,8 +250,11 @@ bool evaluateFrom(std::vector<Feature>& features, size_t from,
         case FeatureKind::Inset:
             if (body.empty()) fail("nothing to inset");
             else if (!f.faces.resolveFaces(body, scratchFaces)) fail("faces no longer exist");
-            else if (!insetFaces(body, scratchFaces, f.amount, nullptr, f.uid))
-                fail("inset too large");
+            else {
+                std::string why;
+                if (!insetFaces(body, scratchFaces, f.amount, nullptr, f.uid, &why))
+                    fail(why.empty() ? "inset too large" : why.c_str());
+            }
             break;
 
         case FeatureKind::Bevel: {

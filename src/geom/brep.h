@@ -156,6 +156,15 @@ BrepRef filletEdges(const BrepShape& s, const std::vector<EdgeId>& edges,
 BrepRef extrudeFaces(const BrepRef& s, const std::vector<FaceId>& faces, Real distance,
                      ElementId salt, std::vector<ElementId>* newFaces, std::string* reason);
 
+// Splits each face into an inner face and the ring around it, the inner one
+// offset inward by `amount`. What a pocket or a boss is drawn from.
+//
+// Only a flat face can be inset: on a curved one the offset is not a wire in
+// the same surface and the answer would be an approximation. Refused with a
+// reason rather than approximated.
+BrepRef insetFaces(const BrepRef& s, const std::vector<FaceId>& faces, Real amount,
+                   ElementId salt, std::vector<ElementId>* newFaces, std::string* reason);
+
 // A solid from a closed outline on a plane, swept between two heights along the
 // plane's normal. The create tool's profiles arrive this way.
 //
