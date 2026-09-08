@@ -2,6 +2,7 @@
 #include "mesh/export_stl.h"
 #include "scene/serialize.h"
 
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -59,7 +60,109 @@ static double stlVolume(const std::vector<StlTri>& tris) {
     return s6 / 6.0;
 }
 
+// STL export at a stated tolerance: the number a printer cares about, and the
+// thing a mesh body cannot offer because its resolution was decided when it was
+// made.
+static void testExportTolerance() {
+    if (!brep::available()) {
+        std::printf("[stl] exact kernel not built; tolerance test skipped\n");
+        return;
+    }
+
+    // A 20mm cylinder: the shape where the tolerance is visible as a number.
+    Scene s;
+    PrimitiveSpec spec;
+    spec.kind = PrimitiveKind::Cylinder;
+    spec.cylinder.radius = 10;
+    spec.cylinder.height = 20;
+    const ObjectId id = s.addPrimitive(PrimitiveKind::Cylinder, spec);
+    check(id != kNoObject, "exact cylinder created");
+    check(!s.find(id)->body.isMesh(), "and it is exact");
+
+    struct Case { Real dev; size_t coarser; };
+    size_t previous = 0;
+    for (Real dev : {0.2, 0.05, 0.01}) {
+        StlOptions opt;
+        opt.deviationMm = dev;
+        const std::string path = "/tmp/tangent_tol_test.stl";
+        const StlResult r = exportStl(s, path, opt);
+        check(r.ok, "export at " + std::to_string(dev) + "mm");
+        check(r.triangles > 0, "wrote triangles");
+        if (previous) check(r.triangles >= previous, "a finer tolerance never writes fewer triangles");
+        previous = r.triangles;
+
+        // The real assertion: how far the written surface actually sits from
+        // the cylinder it stands for. Every vertex of the wall must be inside
+        // the tolerance of the true radius -- that is what the number promises.
+        Real worst = 0.0;
+        RenderMesh rm;
+        TessellationQuality q;
+        q.deviationMm = dev;
+        q.angleRad = 0.5;
+        q.independent = true;
+        s.find(id)->body.tessellate(rm, q);
+        // The deviation lives at the middle of a chord: a tessellation puts its
+        // vertices *on* the surface, so measuring those measures nothing. Only
+        // the curved wall is asked about -- a flat cap is exact whatever the
+        // tolerance, and its triangles run straight across the disc.
+        const Body& b = s.find(id)->body;
+        for (size_t t = 0; t < rm.triangleFace.size(); ++t) {
+            const FaceId f = rm.triangleFace[t];
+            if (std::fabs(b.faceNormal(f).z) > 0.5) continue;     // a cap
+            for (int k = 0; k < 3; ++k) {
+                const Vec3 a2 = rm.positions[rm.triangles[t * 3 + k]];
+                const Vec3 b2 = rm.positions[rm.triangles[t * 3 + (k + 1) % 3]];
+                if (std::fabs(a2.z - b2.z) > 1e-9) continue;      // a vertical chord is exact
+                const Vec3 mid{(a2.x + b2.x) * 0.5, (a2.y + b2.y) * 0.5, a2.z};
+                worst = std::max(worst, 10.0 - std::hypot(mid.x, mid.y));
+            }
+        }
+        check(worst <= dev + 1e-9,
+              "the surface stays within " + std::to_string(dev) + "mm (worst " +
+              std::to_string(worst) + ")");
+        std::printf("[stl] %.3f mm tolerance: %zu triangles, worst deviation %.5f mm\n",
+                    dev, r.triangles, worst);
+        std::remove(path.c_str());
+    }
+
+    // Exporting coarsely must not leave the screen showing the coarse result.
+    // Meshing writes into the shape, which every Body that copied it shares, so
+    // an export that did not work on a copy would degrade the viewport.
+    {
+        RenderMesh screen;
+        s.find(id)->body.tessellate(screen);
+        const size_t before = screen.triangles.size();
+
+        StlOptions coarse;
+        coarse.deviationMm = 0.5;
+        const StlResult cr = exportStl(s, "/tmp/tangent_tol_coarse.stl", coarse);
+        check(cr.ok, "coarse export");
+
+        RenderMesh after;
+        s.find(id)->body.tessellate(after);
+        check(after.triangles.size() == before,
+              "the screen keeps its own tessellation after a coarse export");
+        std::remove("/tmp/tangent_tol_coarse.stl");
+        std::printf("[stl] screen kept %zu triangles across a 0.5mm export of %zu\n",
+                    before / 3, cr.triangles);
+    }
+
+    // A mesh body is written as it stands, and the result says so rather than
+    // implying the tolerance was honoured.
+    Scene m;
+    m.setDefaultBackend(Backend::Mesh);
+    m.addPrimitive(PrimitiveKind::Cylinder, spec);
+    StlOptions opt;
+    opt.deviationMm = 0.001;
+    const StlResult r = exportStl(m, "/tmp/tangent_tol_mesh.stl", opt);
+    check(r.ok && r.meshBodies == 1, "a mesh body is reported as written at its own resolution");
+    std::remove("/tmp/tangent_tol_mesh.stl");
+    std::printf("[stl] mesh body: %zu triangles, tolerance not applicable\n", r.triangles);
+}
+
 int main() {
+    testExportTolerance();
+
     // ---- STL ---------------------------------------------------------------
     {
         Scene s;

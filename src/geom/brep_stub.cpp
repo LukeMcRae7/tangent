@@ -80,7 +80,7 @@ FaceId   findFace(const BrepShape&, ElementId) { return kInvalid; }
 EdgeId   findEdge(const BrepShape&, ElementId) { return kInvalid; }
 VertexId findVertex(const BrepShape&, ElementId) { return kInvalid; }
 
-void tessellate(const BrepShape&, RenderMesh& out, Real) { out.clear(); }
+void tessellate(const BrepShape&, RenderMesh& out, TessellationQuality) { out.clear(); }
 bool validate(const BrepShape&, std::string* err) {
     if (err) *err = "built without OpenCASCADE";
     return false;

@@ -128,6 +128,11 @@ private:
     char        pathField_[512] = {};
     bool        exportBinaryStl_ = true;
     bool        exportSelectionOnly_ = false;
+
+    // The chord tolerance the exported triangles must stay within. Finer than
+    // any filament printer resolves, and the number a user should be able to
+    // argue with -- so it is offered rather than assumed.
+    float       exportDeviationMm_ = 0.01f;
     void extrudeSelection();
     void bevelActiveObject();
 

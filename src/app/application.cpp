@@ -1621,11 +1621,21 @@ void Application::runFileOperation(FileMode mode, const std::string& path) {
         StlOptions opt;
         opt.binary = exportBinaryStl_;
         opt.selectionOnly = exportSelectionOnly_;
+        opt.deviationMm = exportDeviationMm_;
         const StlResult r = exportStl(scene_, path, opt);
-        if (r.ok)
-            setNotice("Exported " + std::to_string(r.triangles) + " triangles to " + path);
-        else
+        if (r.ok) {
+            std::string note = "Exported " + std::to_string(r.triangles) + " triangles to " + path;
+            // A mesh body cannot honour a tolerance -- its resolution was fixed
+            // when it was made -- and saying so is better than letting the
+            // number on the dialog imply otherwise.
+            if (r.meshBodies > 0)
+                note += "  (" + std::to_string(r.meshBodies) +
+                        (r.meshBodies == 1 ? " mesh body written at its own resolution)"
+                                           : " mesh bodies written at their own resolution)");
+            setNotice(note);
+        } else {
             setNotice("Export failed: " + r.error);
+        }
         break;
     }
     case FileMode::None:
@@ -1660,6 +1670,12 @@ void Application::drawFilePrompt() {
             ImGui::Checkbox("Binary", &exportBinaryStl_);
             ImGui::SameLine();
             ImGui::Checkbox("Selection only", &exportSelectionOnly_);
+
+            ImGui::SetNextItemWidth(140.0f);
+            ImGui::DragFloat("Tolerance", &exportDeviationMm_, 0.001f, 0.001f, 0.5f,
+                             "%.3f mm");
+            ImGui::SameLine();
+            ImGui::TextDisabled("how far a triangle may sit from the surface");
         }
 
         ImGui::Spacing();

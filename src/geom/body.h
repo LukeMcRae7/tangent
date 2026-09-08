@@ -130,15 +130,13 @@ public:
     }
 
     // ---- Display and validity ---------------------------------------------
-    // `deviationMm` is the chord tolerance a curved backend should meet; zero
-    // lets it choose one from the size of the body. The mesh backend ignores it
-    // -- its curves were decided when the primitive was made -- and the crease
-    // angle is the mirror of that: a B-rep knows where its edges are and does
-    // not have to guess from the angle between two facets.
-    void tessellate(RenderMesh& out, Real creaseAngleDeg = 35.0,
-                    Real deviationMm = 0.0) const {
-        if (brep_) brep::tessellate(*brep_, out, deviationMm);
-        else       mesh_.buildRenderMesh(out, creaseAngleDeg);
+    // How closely the triangles have to follow the surface. The defaults are
+    // the screen's answer; an export sets its own, because the number a printer
+    // cares about and the number a frame budget can afford are not the same
+    // number. See TessellationQuality in brep.h.
+    void tessellate(RenderMesh& out, TessellationQuality q = {}) const {
+        if (brep_) brep::tessellate(*brep_, out, q);
+        else       mesh_.buildRenderMesh(out, q.creaseAngleDeg);
     }
     bool validate(std::string* err = nullptr) const {
         return brep_ ? brep::validate(*brep_, err) : mesh_.validate(err);

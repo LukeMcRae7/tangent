@@ -27,7 +27,7 @@ struct Tri {
 
 // Collects world-space triangles from everything that should be written.
 bool gather(const Scene& scene, const StlOptions& opt,
-            std::vector<Tri>& tris, size_t& objects) {
+            std::vector<Tri>& tris, size_t& objects, size_t& meshBodies) {
     for (const auto& obj : scene.objects()) {
         if (opt.selectionOnly) {
             if (!scene.isSelected(obj->id)) continue;
@@ -35,7 +35,27 @@ bool gather(const Scene& scene, const StlOptions& opt,
             continue;
         }
 
-        const RenderMesh& rm = obj->render;
+        // An exact body is tessellated again, to the export's tolerance rather
+        // than the screen's. A mesh body has no choice in the matter and goes
+        // out as it stands.
+        RenderMesh exported;
+        if (!obj->body.isMesh() && opt.deviationMm > 0.0)
+            {
+                TessellationQuality q;
+                q.deviationMm = opt.deviationMm;
+                // Loose enough that the tolerance the user asked for is what
+                // decides the result on any feature of a normal size, and tight
+                // enough that a 1mm hole does not come out a hexagon just
+                // because a coarse tolerance allows it.
+                q.angleRad = 0.5;
+        q.independent = true;
+                q.independent = true;
+                obj->body.tessellate(exported, q);
+            }
+        else if (obj->body.isMesh())
+            ++meshBodies;
+
+        const RenderMesh& rm = exported.triangles.empty() ? obj->render : exported;
         if (rm.triangles.empty()) continue;
 
         const Mat4 model = obj->modelMatrix();
@@ -67,7 +87,7 @@ StlResult exportStl(const Scene& scene, const std::string& path,
     StlResult r;
 
     std::vector<Tri> tris;
-    if (!gather(scene, options, tris, r.objects)) {
+    if (!gather(scene, options, tris, r.objects, r.meshBodies)) {
         r.error = options.selectionOnly ? "nothing selected to export"
                                         : "nothing visible to export";
         return r;

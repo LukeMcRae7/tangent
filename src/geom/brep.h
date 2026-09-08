@@ -39,6 +39,31 @@ struct BrepShape;
 
 using BrepRef = std::shared_ptr<const BrepShape>;
 
+// How closely triangles have to follow the surface they stand for.
+//
+// The two limits do different jobs and both bind. `deviationMm` is how far a
+// chord may sit from the surface, which is what a printer cares about.
+// `angleRad` is how far the surface may turn between one triangle and the next,
+// which is what stops a big shallow cylinder being drawn as a hexagon even
+// though every chord is within tolerance. Stage 0 measured the cost: opening
+// the angle from OCCT's default to 1 radian took a 206-face part from 179ms to
+// 60, which is why the screen's default is coarse and an export's is not.
+struct TessellationQuality {
+    Real deviationMm = 0.0;      // 0: chosen from the size of the body
+    Real angleRad = 0.0;         // 0: the screen's coarse default
+    Real creaseAngleDeg = 35.0;  // the mesh backend's shading threshold only
+
+    // Meshing writes its result into the shape, where it is shared with every
+    // Body that copied it and reused on the next call -- which is what makes a
+    // redraw cheap, and why asking for a *coarser* mesh than the one already
+    // there does nothing at all.
+    //
+    // An export wants an answer of its own: at 0.2mm it should get 0.2mm, and
+    // it must not leave the screen showing the coarse result afterwards. Set
+    // this and the work happens on a copy.
+    bool independent = false;
+};
+
 namespace brep {
 
 // Was the project built with OpenCASCADE? Everything below returns an empty or
@@ -154,11 +179,10 @@ BrepRef decode(const std::string& shapeText, const std::vector<ElementId>& names
 void findFaces(const BrepShape& s, ElementId id, std::vector<FaceId>& out);
 
 // ---- Display and validity --------------------------------------------------
-// `deviation` is the chord tolerance in millimetres; zero asks the backend to
-// pick one from the size of the body. Unlike the mesh backend, this is not free
-// -- see the Stage 0 measurements -- so callers should cache the result and
-// re-tessellate on a geometry change or a large zoom change, not per frame.
-void tessellate(const BrepShape& s, RenderMesh& out, Real deviation);
+// Not free, unlike the mesh backend -- see the Stage 0 measurements -- so
+// callers should cache the result and re-tessellate on a geometry change or a
+// large zoom change, not per frame.
+void tessellate(const BrepShape& s, RenderMesh& out, TessellationQuality q);
 bool validate(const BrepShape& s, std::string* err);
 MeshHealth health(const BrepShape& s, bool checkIntersections);
 

@@ -24,6 +24,7 @@
 #include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepBuilderAPI_MakeShape.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
+#include <BRepBuilderAPI_Copy.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
@@ -684,7 +685,7 @@ bool acceptable(const TopoDS_Shape& shape, std::string* reason) {
 
 } // namespace
 
-void tessellate(const BrepShape& s, RenderMesh& out, Real deviation) {
+void tessellate(const BrepShape& s, RenderMesh& out, TessellationQuality q) {
     out.clear();
     if (s.shape.IsNull()) return;
 
@@ -693,7 +694,7 @@ void tessellate(const BrepShape& s, RenderMesh& out, Real deviation) {
     // chord tolerance, is what drives the triangle count on cylinders and
     // fillets, and opening it from the default to 1 radian took a 206-face part
     // from 179 ms to 60.
-    Real dev = deviation;
+    Real dev = q.deviationMm;
     if (dev <= 0.0) {
         const AABB b = bounds(s);
         const Real diag = length(b.size());
@@ -702,26 +703,44 @@ void tessellate(const BrepShape& s, RenderMesh& out, Real deviation) {
 
     IMeshTools_Parameters p;
     p.Deflection = dev;
-    p.Angle = 1.0;
+    // Without this a request for a coarser mesh than the one already on the
+    // shape is silently ignored, and an export at 0.2mm quietly writes the
+    // screen's 0.017mm instead: safe, but not what was asked for, and ten times
+    // the file.
+    p.AllowQualityDecrease = q.independent ? Standard_True : Standard_False;
+    // The screen's default is coarse because it is paid every zoom step; an
+    // export names its own and means it, so the chord tolerance is what binds
+    // rather than the angle.
+    p.Angle = q.angleRad > 0.0 ? q.angleRad : 1.0;
     p.MinSize = dev * 0.1;
     p.InParallel = Standard_True;
     p.ControlSurfaceDeflection = Standard_False;
     p.Relative = Standard_False;
 
+    // Meshing writes the triangulation into the shape, which is shared with
+    // every Body that copied this one -- deliberately, since it is a cache of
+    // exactly the thing they would all recompute. It is not thread-safe, and
+    // tessellation is called from the frame loop, which is single threaded.
+    //
+    // A caller that wants an answer of its own gets a copy to write into, so
+    // the screen keeps the mesh it had.
+    TopoDS_Shape target = s.shape;
+    TopTools_IndexedMapOfShape targetFaces;
     try {
-        // Meshing writes the triangulation into the shape, which is shared with
-        // every Body that copied this one -- deliberately, since it is a cache
-        // of exactly the thing they would all recompute. It is not thread-safe,
-        // and tessellation is called from the frame loop, which is single
-        // threaded.
-        BRepMesh_IncrementalMesh mesher(const_cast<TopoDS_Shape&>(s.shape), p);
+        if (q.independent) {
+            BRepBuilderAPI_Copy copier(s.shape, Standard_False);
+            if (copier.IsDone()) target = copier.Shape();
+        }
+        BRepMesh_IncrementalMesh mesher(target, p);
         (void)mesher;
     } catch (const Standard_Failure&) {
         return;
     }
+    TopExp::MapShapes(target, TopAbs_FACE, targetFaces);
+    if (targetFaces.Extent() != s.faces.Extent()) return;
 
     for (int fi = 0; fi < s.faces.Extent(); ++fi) {
-        const TopoDS_Face& face = faceAt(s, fi);
+        const TopoDS_Face& face = TopoDS::Face(targetFaces(fi + 1));
         TopLoc_Location loc;
         const Handle(Poly_Triangulation) tri = BRep_Tool::Triangulation(face, loc);
         if (tri.IsNull()) continue;
