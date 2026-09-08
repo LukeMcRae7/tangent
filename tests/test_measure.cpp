@@ -177,6 +177,51 @@ int main() {
         std::printf("[measure] pick bookkeeping ok\n");
     }
 
+    // Round things measure as round things. On a mesh a hole is a polygon and
+    // the honest answer is the polygon's; on an exact body the answer is the
+    // diameter the part was drilled at.
+    if (brep::available()) {
+        Scene s;
+        PrimitiveSpec spec;
+        spec.kind = PrimitiveKind::Cylinder;
+        spec.cylinder.radius = 6;
+        spec.cylinder.height = 20;
+        spec.cylinder.segments = 32;
+        const ObjectId id = s.addPrimitive(PrimitiveKind::Cylinder, spec);
+        const Body& b = s.find(id)->body;
+
+        MeasureTool t;
+        t.begin();
+
+        EdgeId rim = kInvalid;
+        std::vector<EdgeId> edges;
+        b.allEdges(edges);
+        for (EdgeId e : edges) if (b.edgeKind(e) == CurveKind::Circle) rim = e;
+        check(rim != kInvalid, "the cylinder has a circular rim");
+
+        t.pick({id, ElementKind::Edge, rim});
+        const MeasureResult re = t.compute(s);
+        check(re.valid && re.hasDiameter, "a circular edge reports a diameter");
+        check(near(re.diameter, 12.0, 1e-6), "12mm, not the chord across a facet");
+        check(near(re.length, 2.0 * static_cast<Real>(kPi) * 6.0, 1e-6),
+              "and 37.70mm around, not the zero a full circle's chord gives");
+        check(length(re.to - re.from) > 1.0, "with a line to draw across it");
+        std::printf("[measure] rim: %s\n", re.summary.c_str());
+        t.clearPicks();
+
+        FaceId wall = kNoFace;
+        std::vector<FaceId> faces;
+        b.allFaces(faces);
+        for (FaceId f : faces) if (b.faceKind(f) == SurfaceKind::Cylinder) wall = f;
+        check(wall != kNoFace, "and a cylindrical wall");
+        t.pick({id, ElementKind::Face, wall});
+        const MeasureResult rf = t.compute(s);
+        check(rf.valid && rf.hasDiameter, "a cylindrical face reports a diameter too");
+        check(near(rf.diameter, 12.0, 1e-6), "the same 12mm");
+        std::printf("[measure] wall: %s\n", rf.summary.c_str());
+        t.end();
+    }
+
     std::printf("\n%s (%d failures)\n", failures ? "FAILED" : "ALL PASS", failures);
     return failures ? 1 : 0;
 }

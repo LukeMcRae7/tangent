@@ -1517,6 +1517,79 @@ static void testSection12_ParametricOnAnyPlane() {
     }
 }
 
+
+// ===========================================================================
+// SECTION 13: Snapping To The Geometry
+//
+// The point of exact curves, from where a user stands: a boss goes on the
+// centre of a hole because the centre is a thing that exists, not because the
+// cursor landed within a millimetre of where a facet happened to start.
+// ===========================================================================
+static void testSection13_SnapToGeometry() {
+    std::printf("\n--- Section 13: Snapping To Geometry ---\n");
+    if (!brep::available()) {
+        std::printf("  exact kernel not built; nothing to snap to\n");
+        return;
+    }
+
+    Scene scene; Camera camera; UndoStack undo;
+
+    // A plate with a hole 20mm off centre.
+    PrimitiveSpec plate;
+    plate.kind = PrimitiveKind::Box;
+    plate.box = {80, 80, 10};
+    const ObjectId id = scene.addPrimitive(PrimitiveKind::Box, plate);
+
+    PrimitiveSpec bore;
+    bore.kind = PrimitiveKind::Cylinder;
+    bore.cylinder.radius = 7;
+    bore.cylinder.height = 40;
+    Body tool;
+    check(makePrimitive(bore, tool, Backend::Brep), "bore tool built");
+    tool.transform(translate({20, 0, 0}));
+    Feature cut;
+    cut.kind = FeatureKind::Boolean;
+    cut.booleanOp = BooleanOp::Difference;
+    cut.bakedBody = std::move(tool);
+    check(scene.addFeature(id, cut), "hole cut in the plate");
+
+    camera.viewportW = 1600;
+    camera.viewportH = 900;
+    camera.distance = 200.0f;
+    camera.target = {0, 0, 0};
+    camera.yaw = 0.0f;
+    camera.pitch = 1.5707f;          // looking straight down at the plate
+    camera.snapToGoal();
+
+    // Draw on the top face, then aim near the hole's centre but not on it.
+    CreateTool tool2;
+    tool2.start(PrimitiveKind::Cylinder);
+    tool2.setHoveredPlane(PlaneChoice::Face, {0, 0, 5}, {0, 0, 1}, id, 0);
+    tool2.commitPlaneSelection(camera);
+
+    // Project *after* committing the plane: choosing a plane moves the camera
+    // to look at it head-on, so a pixel worked out before that points somewhere
+    // else afterwards.
+    camera.snapToGoal();
+    Vec2 centrePx{};
+    check(camera.projectToPixel(Vec3{20, 0, 5}, centrePx), "the hole's centre is on screen");
+    tool2.update(scene, camera, centrePx + Vec2{5.0f, 4.0f}, true);
+
+    const SnapHit& hit = tool2.activeSnap();
+    check(hit.valid(), "the cursor snapped to something");
+    check(hit.kind == SnapKind::CircleCentre,
+          std::string("and it is the hole's centre, not ") + snapKindName(hit.kind));
+    check(near(hit.point.x, 20.0) && near(hit.point.y, 0.0),
+          "at exactly the centre, from five pixels away");
+    check(near(hit.radius, 7.0), "and it carries the radius it came from");
+    std::printf("  aimed 6px off, landed on the centre at %.4f, %.4f (r %.3f)\n",
+                hit.point.x, hit.point.y, hit.radius);
+
+    // Holding Ctrl -- snapping off -- leaves the cursor where it actually is.
+    tool2.update(scene, camera, centrePx + Vec2{5.0f, 4.0f}, false);
+    check(!tool2.activeSnap().valid(), "with snapping off, nothing is snapped to");
+}
+
 // ===========================================================================
 // MAIN ENTRY POINT
 // ===========================================================================
@@ -1537,6 +1610,7 @@ int main() {
     testSection10_CreateOperation();
     testSection11_NumericEntry();
     testSection12_ParametricOnAnyPlane();
+    testSection13_SnapToGeometry();
 
     std::printf("\n=========================================================\n");
     std::printf("  Test Suite Summary: %s\n", gFailures == 0 ? "ALL PASS" : "FAILED");

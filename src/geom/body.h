@@ -104,6 +104,29 @@ public:
     void edgePositions(EdgeId e, Vec3& a, Vec3& b) const;
     Vec3 edgeDirection(EdgeId e) const;   // normalised, from the first end
 
+    // ---- What a thing actually is -----------------------------------------
+    // A mesh answers "a polygon" and "a straight line" to all of these, which
+    // is honest: that is all it has. An exact body answers with the surface and
+    // the curve it was built from, and that is what makes a hole's diameter a
+    // diameter rather than the width of a facet.
+    SurfaceKind faceKind(FaceId f) const {
+        return brep_ ? brep::faceKind(*brep_, f) : SurfaceKind::Plane;
+    }
+    CurveKind edgeKind(EdgeId e) const {
+        return brep_ ? brep::edgeKind(*brep_, e) : CurveKind::Line;
+    }
+    bool edgeCircle(EdgeId e, Vec3& centre, Vec3& axis, Real& radius) const {
+        return brep_ ? brep::edgeCircle(*brep_, e, centre, axis, radius) : false;
+    }
+    bool faceCylinder(FaceId f, Vec3& point, Vec3& axis, Real& radius) const {
+        return brep_ ? brep::faceCylinder(*brep_, f, point, axis, radius) : false;
+    }
+
+    // Along the curve, not across the chord: a semicircular edge of radius 10
+    // is 31.4mm long, and a full circle's chord is zero.
+    Real edgeLength(EdgeId e) const;
+    Vec3 edgeMidpoint(EdgeId e) const;
+
     // ---- Names -------------------------------------------------------------
     ElementId faceName(FaceId f)     const {
         return brep_ ? brep::faceName(*brep_, f) : mesh_.faceId(f);

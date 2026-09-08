@@ -1,6 +1,7 @@
 #pragma once
 
 #include "app/camera.h"
+#include "app/snap.h"
 #include "app/undo.h"
 #include "core/math.h"
 #include "geom/body.h"
@@ -117,6 +118,11 @@ public:
     void setExtrudeDepth(Real depth) { extrudeDepth_ = depth; }
     void setStage(CreateStage s) { stage_ = s; }
 
+    // What the cursor is currently snapped to, if anything. The overlay marks
+    // it and the HUD names it: a snap that happens invisibly is indistinguish-
+    // able from the tool being imprecise.
+    const SnapHit& activeSnap() const { return activeSnap_; }
+
     // What is being typed, for the HUD and for tests. Empty when the mouse is
     // in charge, which is the normal state.
     const std::string& typedValue() const { return typedValue_; }
@@ -192,6 +198,8 @@ private:
     Vec2 dragStartPt1_{0, 0};
     Vec2 dragStartPt2_{0, 0};
     Real dragStartFillets_[4] = {0.0, 0.0, 0.0, 0.0};
+
+    SnapHit activeSnap_;
 
     Vec2 filletRefUV_{0, 0};
     std::vector<int> activeFilletCorners_;

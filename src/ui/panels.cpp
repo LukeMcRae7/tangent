@@ -595,8 +595,22 @@ void drawMeasurePanel(UiContext& ctx) {
             ImGui::TextColored(kDim, "Click a vertex, edge or face.");
             ImGui::TextColored(kDim, "Click a second to measure between.");
         } else {
+            // A round thing leads with what it is. On an exact body the
+            // diameter is a fact about the geometry rather than a measurement
+            // taken across it, and it is the number someone is after.
+            if (m.hasDiameter) {
+                ImGui::TextColored(kDim, "Diameter");
+                ImGui::SameLine(96.0f);
+                ImGui::TextColored(kAccent, "%.4f mm", m.diameter);
+                ImGui::TextColored(kDim, "Radius");
+                ImGui::SameLine(96.0f);
+                ImGui::Text("%.4f mm", m.diameter * 0.5);
+                ImGui::TextColored(kDim, "Centre");
+                ImGui::SameLine(96.0f);
+                ImGui::Text("%.3f, %.3f, %.3f", m.centre.x, m.centre.y, m.centre.z);
+            }
             if (m.hasLength) {
-                ImGui::TextColored(kDim, "Length");
+                ImGui::TextColored(kDim, m.hasDiameter ? "Around" : "Length");
                 ImGui::SameLine(96.0f);
                 ImGui::TextColored(kAccent, "%.4f mm", m.length);
             }

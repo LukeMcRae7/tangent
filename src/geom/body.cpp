@@ -130,6 +130,20 @@ void Body::transform(const Mat4& m) {
     for (MeshVertex& v : mesh_.verts) v.position = transformPoint(m, v.position);
 }
 
+Real Body::edgeLength(EdgeId e) const {
+    if (brep_) return brep::edgeLength(*brep_, e);
+    Vec3 a{}, b{};
+    edgePositions(e, a, b);
+    return length(b - a);       // a mesh edge is a straight line, and this is it
+}
+
+Vec3 Body::edgeMidpoint(EdgeId e) const {
+    if (brep_) return brep::edgeMidpoint(*brep_, e);
+    Vec3 a{}, b{};
+    edgePositions(e, a, b);
+    return (a + b) * 0.5;
+}
+
 void Body::coplanarFaceGroup(FaceId f, std::vector<FaceId>& out) const {
     if (brep_) {
         // A B-rep face is already the whole flat region: there is nothing to

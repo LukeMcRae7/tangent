@@ -2107,6 +2107,19 @@ int Application::run() {
                           "   A auto  J join  D cut  N new body   Ctrl free (snap on)   click finish   Esc cancel"
                         : "Depth: move to set, click to finish   Ctrl free (snap on)   Esc cancel";
             }
+            // What the cursor has caught replaces the step's own prompt: it is
+            // the more specific thing to say, and a snap nobody is told about
+            // is indistinguishable from the tool being imprecise -- or from a
+            // snap to the wrong thing.
+            if (const SnapHit& hit = createTool_.activeSnap(); hit.valid()) {
+                char buf[96];
+                if (hit.radius > 0.0)
+                    std::snprintf(buf, sizeof buf, "Snapped to %s  (\u2300 %.3f mm)",
+                                  snapKindName(hit.kind), hit.radius * 2.0);
+                else
+                    std::snprintf(buf, sizeof buf, "Snapped to %s", snapKindName(hit.kind));
+                ui_.toolStatus = std::string(buf) + "   Ctrl for free placement";
+            }
         } else if (tool_.active()) {
             ui_.toolStatus = tool_.statusText();
         } else {

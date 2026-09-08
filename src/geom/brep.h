@@ -64,6 +64,11 @@ struct TessellationQuality {
     bool independent = false;
 };
 
+// What a face and an edge are made of. A mesh can only ever answer Plane and
+// Line, which is honest: that is all it has.
+enum class SurfaceKind { Plane, Cylinder, Cone, Sphere, Torus, Freeform };
+enum class CurveKind   { Line, Circle, Ellipse, Freeform };
+
 namespace brep {
 
 // Was the project built with OpenCASCADE? Everything below returns an empty or
@@ -109,6 +114,28 @@ Vec3 vertexPosition(const BrepShape& s, VertexId v);
 AABB bounds(const BrepShape& s);
 void edgePositions(const BrepShape& s, EdgeId e, Vec3& a, Vec3& b);
 Vec3 edgeDirection(const BrepShape& s, EdgeId e);
+
+// ---- What a thing actually is ----------------------------------------------
+//
+// A mesh can only answer "a polygon" and "a straight line", so nothing above
+// the seam has ever been able to ask. These are what a hole's diameter, a
+// snap to an arc's centre, and an angle between two faces are made of, and
+// they are the reason those become exact rather than sampled.
+SurfaceKind faceKind(const BrepShape& s, FaceId f);
+CurveKind   edgeKind(const BrepShape& s, EdgeId e);
+
+// True when the edge is a circle or an arc of one, filling in where it is.
+// `radius` is the circle's, not the arc's chord.
+bool edgeCircle(const BrepShape& s, EdgeId e, Vec3& centre, Vec3& axis, Real& radius);
+
+// True when the face is a cylinder, filling in its axis and radius -- which is
+// how a bore reports its diameter rather than the width of a facet.
+bool faceCylinder(const BrepShape& s, FaceId f, Vec3& point, Vec3& axis, Real& radius);
+
+// Along the curve, not across the chord: a semicircular edge of radius 10 is
+// 31.4mm long and its midpoint is out on the arc, not inside the body.
+Real edgeLength(const BrepShape& s, EdgeId e);
+Vec3 edgeMidpoint(const BrepShape& s, EdgeId e);
 
 // ---- Names -----------------------------------------------------------------
 ElementId faceName(const BrepShape& s, FaceId f);

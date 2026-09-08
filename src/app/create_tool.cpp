@@ -521,6 +521,26 @@ void CreateTool::update(const Scene& scene, const Camera& camera, Vec2 mousePx, 
     const Real step = snap ? camera.snapStep(planeOrigin_) : 0.0;
     auto quantise = [step](Real v) { return step > 0.0 ? std::round(v / step) * step : v; };
 
+    // What the cursor is over, in the geometry's own terms: the centre of a
+    // hole, the middle of an edge, a corner. Only points on or very near the
+    // sketch plane are offered -- snapping a sketch point to something floating
+    // above the plane would move it somewhere the user did not point at.
+    activeSnap_ = SnapHit{};
+    Vec2 snappedUV{0, 0};
+    bool haveSnap = false;
+    if (snap && stage_ != CreateStage::SelectPlane) {
+        const SnapHit hit = findSnap(scene, camera, mousePx);
+        if (hit.valid()) {
+            const Vec3 rel = hit.point - planeOrigin_;
+            const Real offPlane = std::fabs(dot(rel, planeNormal_));
+            if (offPlane < static_cast<Real>(camera.pixelWorldSize(hit.point)) * 4.0) {
+                activeSnap_ = hit;
+                snappedUV = {dot(rel, planeU_), dot(rel, planeV_)};
+                haveSnap = true;
+            }
+        }
+    }
+
     if (stage_ == CreateStage::SelectPlane) {
         // Raycast against scene objects first
         const Ray ray = camera.rayThroughPixel(mousePx.x, mousePx.y);
@@ -577,7 +597,7 @@ void CreateTool::update(const Scene& scene, const Camera& camera, Vec2 mousePx, 
     if (stage_ == CreateStage::DrawProfile_Pt1) {
         Vec2 uv{0, 0};
         if (unprojectToPlane(camera, mousePx, uv)) {
-            uv = {quantise(uv.x), quantise(uv.y)};
+            uv = haveSnap ? snappedUV : Vec2{quantise(uv.x), quantise(uv.y)};
             pt1_ = uv;
             pt2_ = uv;
         }
@@ -588,7 +608,10 @@ void CreateTool::update(const Scene& scene, const Camera& camera, Vec2 mousePx, 
         if (typing()) return;               // the keyboard has the dimension
         Vec2 uv{0, 0};
         if (unprojectToPlane(camera, mousePx, uv)) {
-            uv = {quantise(uv.x), quantise(uv.y)};
+            // A geometry snap wins over the grid: it is a point the user can
+            // see and name, where the grid is a compromise for when there is
+            // nothing better.
+            uv = haveSnap ? snappedUV : Vec2{quantise(uv.x), quantise(uv.y)};
             pt2_ = uv;
             if (kind_ == PrimitiveKind::Cylinder) {
                 currentRadius_ = std::max(length(pt2_ - pt1_), Real(1.0));
@@ -1227,6 +1250,30 @@ bool CreateTool::finishCreation(Scene& scene, Camera& camera, UndoStack& undo) {
 void CreateTool::drawOverlay(const Scene& scene, const Camera& camera, Renderer& renderer) const {
     if (stage_ == CreateStage::None) return;
 
+    // Mark what the cursor is snapped to. A snap nobody can see is
+    // indistinguishable from the tool being imprecise, and the shape says which
+    // kind it is without needing to be read: a ring for something round, a
+    // cross for a point.
+    if (activeSnap_.valid()) {
+        const Vec3 p = activeSnap_.point;
+        const Real r = static_cast<Real>(camera.pixelWorldSize(p)) * 7.0;
+        const Vec4 col = toVec4(palette::kBrand, 1.0f);
+        const bool round = activeSnap_.kind == SnapKind::CircleCentre ||
+                           activeSnap_.kind == SnapKind::ArcQuadrant;
+        if (round) {
+            Vec3 prev{};
+            for (int i = 0; i <= 16; ++i) {
+                const Real a = kTwoPi * i / 16.0;
+                const Vec3 at = p + planeU_ * (r * std::cos(a)) + planeV_ * (r * std::sin(a));
+                if (i > 0) renderer.addLine(prev, at, col);
+                prev = at;
+            }
+        } else {
+            renderer.addLine(p - planeU_ * r, p + planeU_ * r, col);
+            renderer.addLine(p - planeV_ * r, p + planeV_ * r, col);
+        }
+    }
+
     if (stage_ == CreateStage::SelectPlane) {
         const float sz = std::max(camera.distance * 0.35f, 25.0f);
         const Vec4 activeBorder = toVec4(palette::kBrand, 0.95f);
@@ -1450,6 +1497,12 @@ bool CreateTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& ou
                                    typedValue_.c_str());
                 ImGui::SameLine();
                 ImGui::TextDisabled(kind_ == PrimitiveKind::Cylinder ? "(Enter)" : "(Tab / Enter)");
+            } else if (activeSnap_.valid()) {
+                ImGui::TextColored(kAccentIm, " snapped to %s", snapKindName(activeSnap_.kind));
+                if (activeSnap_.radius > 0.0) {
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(\u2300 %.3f mm)", activeSnap_.radius * 2.0);
+                }
             } else {
                 ImGui::TextDisabled("(Click to set / type a number / E to adjust)");
             }

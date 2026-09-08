@@ -540,6 +540,67 @@ Vec3 edgeDirection(const BrepShape& s, EdgeId e) {
     return {static_cast<Real>(d.X()), static_cast<Real>(d.Y()), static_cast<Real>(d.Z())};
 }
 
+SurfaceKind faceKind(const BrepShape& s, FaceId f) {
+    if (!validFace(s, f)) return SurfaceKind::Freeform;
+    switch (BRepAdaptor_Surface(faceAt(s, f)).GetType()) {
+        case GeomAbs_Plane:    return SurfaceKind::Plane;
+        case GeomAbs_Cylinder: return SurfaceKind::Cylinder;
+        case GeomAbs_Cone:     return SurfaceKind::Cone;
+        case GeomAbs_Sphere:   return SurfaceKind::Sphere;
+        case GeomAbs_Torus:    return SurfaceKind::Torus;
+        default:               return SurfaceKind::Freeform;
+    }
+}
+
+CurveKind edgeKind(const BrepShape& s, EdgeId e) {
+    if (!validEdge(s, e)) return CurveKind::Freeform;
+    switch (BRepAdaptor_Curve(edgeAt(s, e)).GetType()) {
+        case GeomAbs_Line:    return CurveKind::Line;
+        case GeomAbs_Circle:  return CurveKind::Circle;
+        case GeomAbs_Ellipse: return CurveKind::Ellipse;
+        default:              return CurveKind::Freeform;
+    }
+}
+
+bool edgeCircle(const BrepShape& s, EdgeId e, Vec3& centre, Vec3& axis, Real& radius) {
+    if (!validEdge(s, e)) return false;
+    BRepAdaptor_Curve c(edgeAt(s, e));
+    if (c.GetType() != GeomAbs_Circle) return false;
+    const gp_Circ circ = c.Circle();
+    centre = toVec3(circ.Location());
+    const gp_Dir d = circ.Axis().Direction();
+    axis = {static_cast<Real>(d.X()), static_cast<Real>(d.Y()), static_cast<Real>(d.Z())};
+    radius = static_cast<Real>(circ.Radius());
+    return true;
+}
+
+bool faceCylinder(const BrepShape& s, FaceId f, Vec3& point, Vec3& axis, Real& radius) {
+    if (!validFace(s, f)) return false;
+    BRepAdaptor_Surface surf(faceAt(s, f));
+    if (surf.GetType() != GeomAbs_Cylinder) return false;
+    const gp_Cylinder cyl = surf.Cylinder();
+    point = toVec3(cyl.Location());
+    const gp_Dir d = cyl.Axis().Direction();
+    axis = {static_cast<Real>(d.X()), static_cast<Real>(d.Y()), static_cast<Real>(d.Z())};
+    radius = static_cast<Real>(cyl.Radius());
+    return true;
+}
+
+Real edgeLength(const BrepShape& s, EdgeId e) {
+    if (!validEdge(s, e)) return 0.0;
+    // Along the curve. The chord between the ends is not the same number, and
+    // for a full circle it is zero.
+    GProp_GProps props;
+    BRepGProp::LinearProperties(edgeAt(s, e), props);
+    return static_cast<Real>(props.Mass());
+}
+
+Vec3 edgeMidpoint(const BrepShape& s, EdgeId e) {
+    if (!validEdge(s, e)) return {0, 0, 0};
+    BRepAdaptor_Curve c(edgeAt(s, e));
+    return toVec3(c.Value((c.FirstParameter() + c.LastParameter()) * 0.5));
+}
+
 ElementId faceName(const BrepShape& s, FaceId f) {
     return validFace(s, f) ? s.faceNames[static_cast<size_t>(f)] : kNoId;
 }

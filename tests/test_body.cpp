@@ -252,6 +252,60 @@ int main() {
                     brepCyl.faceCount(), rm.triangles.size() / 3);
     }
 
+    if (brep::available()) {
+        std::printf("\n--- Body: what a thing actually is ---\n");
+        PrimitiveSpec spec;
+        spec.kind = PrimitiveKind::Cylinder;
+        spec.cylinder.radius = 8;
+        spec.cylinder.height = 20;
+        spec.cylinder.segments = 32;
+        Body cyl, meshCyl;
+        check(makePrimitive(spec, cyl, Backend::Brep), "exact cylinder");
+        check(makePrimitive(spec, meshCyl, Backend::Mesh), "mesh cylinder");
+
+        std::vector<FaceId> faces;
+        cyl.allFaces(faces);
+        int walls = 0, caps = 0;
+        for (FaceId f : faces) {
+            if (cyl.faceKind(f) == SurfaceKind::Cylinder) ++walls;
+            if (cyl.faceKind(f) == SurfaceKind::Plane) ++caps;
+        }
+        check(walls == 1 && caps == 2, "a cylinder is a wall and two flat caps");
+
+        Vec3 point, axis;
+        Real radius = 0;
+        FaceId wall = kNoFace;
+        for (FaceId f : faces) if (cyl.faceKind(f) == SurfaceKind::Cylinder) wall = f;
+        check(cyl.faceCylinder(wall, point, axis, radius), "the wall knows it is a cylinder");
+        check(near(radius, 8.0, 1e-9), "and its radius is 8, not the width of a facet");
+        check(near(std::fabs(axis.z), 1.0, 1e-9), "with the axis it was built on");
+
+        // The rim: a circle, with a centre to snap to and a length along it.
+        std::vector<EdgeId> edges;
+        cyl.allEdges(edges);
+        EdgeId rim = kInvalid;
+        for (EdgeId e : edges) if (cyl.edgeKind(e) == CurveKind::Circle) rim = e;
+        check(rim != kInvalid, "the rim is a circle");
+        Vec3 centre;
+        check(cyl.edgeCircle(rim, centre, axis, radius), "and reports where it is");
+        check(near(radius, 8.0, 1e-9), "at radius 8");
+        check(near(std::hypot(centre.x, centre.y), 0.0, 1e-9), "centred on the axis");
+        check(near(cyl.edgeLength(rim), 2.0 * kPi * 8.0, 1e-6),
+              "50.27mm around, not the zero its chord would give");
+        check(near(length(cyl.edgeMidpoint(rim) - centre), 8.0, 1e-6),
+              "and its midpoint is out on the arc, not in the middle of the body");
+
+        // The mesh answers honestly: a polygon and a straight line, which is
+        // all it has.
+        std::vector<EdgeId> me;
+        meshCyl.allEdges(me);
+        check(meshCyl.edgeKind(me.front()) == CurveKind::Line, "every mesh edge is a line");
+        check(!meshCyl.edgeCircle(me.front(), centre, axis, radius),
+              "and none of them is a circle, because none of them is");
+        std::printf("  exact: %d faces, rim %.4f mm around; mesh: %d faces\n",
+                    cyl.faceCount(), cyl.edgeLength(rim), meshCyl.faceCount());
+    }
+
     // Operations are still mesh-only; Stage 2 moves them across one at a time,
     // and this section joins the contract above as it does.
     std::printf("\n--- Body: operations go through the seam ---\n");

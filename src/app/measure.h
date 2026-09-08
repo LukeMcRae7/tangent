@@ -38,6 +38,13 @@ struct MeasureResult {
     Real area = 0.0;
     Real perimeter = 0.0;
 
+    // Set when what was picked is round: a hole reports the diameter it was
+    // drilled at rather than the width of a facet, which on an exact body is a
+    // fact about the geometry and not a measurement of it.
+    bool hasDiameter = false;
+    Real diameter = 0.0;
+    Vec3 centre;
+
     std::string summary;   // one line for the viewport label
 };
 

@@ -89,6 +89,7 @@ add_executable(tangent
   src/app/transform_tool.cpp
   src/app/create_tool.cpp
   src/app/measure.cpp
+  src/app/snap.cpp
   src/app/undo.cpp
   src/mesh/halfedge.cpp
   src/mesh/primitives.cpp
@@ -224,7 +225,7 @@ target_compile_options(test_io PRIVATE -Wall -Wextra)
 add_test(NAME io COMMAND test_io)
 
 add_executable(test_create_tool tests/test_create_tool.cpp
-  src/app/create_tool.cpp src/app/camera.cpp src/app/undo.cpp
+  src/app/create_tool.cpp src/app/camera.cpp src/app/undo.cpp src/app/snap.cpp
   src/scene/scene.cpp src/scene/feature.cpp src/mesh/boolean.cpp
   src/mesh/health.cpp ${TANGENT_GEOM} src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp
   src/render/renderer.cpp src/render/shader.cpp src/render/gpu_mesh.cpp)
@@ -232,6 +233,15 @@ target_include_directories(test_create_tool PRIVATE src ${imgui_SOURCE_DIR} ${im
 target_link_libraries(test_create_tool PRIVATE imgui PkgConfig::EPOXY)
 target_compile_options(test_create_tool PRIVATE -Wall -Wextra -Wno-unused-parameter)
 add_test(NAME create_tool COMMAND test_create_tool)
+
+add_executable(test_snap tests/test_snap.cpp
+  src/app/snap.cpp src/app/camera.cpp
+  src/scene/scene.cpp src/scene/feature.cpp src/mesh/boolean.cpp src/mesh/health.cpp
+  ${TANGENT_GEOM} src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp)
+target_include_directories(test_snap PRIVATE src)
+target_link_libraries(test_snap PRIVATE PkgConfig::EPOXY)
+target_compile_options(test_snap PRIVATE -Wall -Wextra)
+add_test(NAME snap COMMAND test_snap)
 
 add_executable(test_lod tests/test_lod.cpp
   src/render/lod.cpp src/app/camera.cpp

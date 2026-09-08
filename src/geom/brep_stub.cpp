@@ -77,6 +77,13 @@ AABB bounds(const BrepShape&) { return {}; }
 void edgePositions(const BrepShape&, EdgeId, Vec3& a, Vec3& b) { a = {0, 0, 0}; b = {0, 0, 0}; }
 Vec3 edgeDirection(const BrepShape&, EdgeId) { return {0, 0, 0}; }
 
+SurfaceKind faceKind(const BrepShape&, FaceId) { return SurfaceKind::Plane; }
+CurveKind   edgeKind(const BrepShape&, EdgeId) { return CurveKind::Line; }
+bool edgeCircle(const BrepShape&, EdgeId, Vec3&, Vec3&, Real&) { return false; }
+bool faceCylinder(const BrepShape&, FaceId, Vec3&, Vec3&, Real&) { return false; }
+Real edgeLength(const BrepShape&, EdgeId) { return 0.0; }
+Vec3 edgeMidpoint(const BrepShape&, EdgeId) { return {0, 0, 0}; }
+
 ElementId faceName(const BrepShape&, FaceId) { return kNoId; }
 ElementId edgeName(const BrepShape&, EdgeId) { return kNoId; }
 ElementId vertexName(const BrepShape&, VertexId) { return kNoId; }

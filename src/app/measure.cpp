@@ -14,6 +14,14 @@ struct Entity {
     std::vector<Vec3> pts;
     Vec3 normal;
     bool ok = false;
+
+    // What the thing is, where the body can say. A mesh always answers "a
+    // straight line" and "a polygon", so these stay false and every reading
+    // below falls back to what it always was.
+    bool round = false;        // a circular edge, or a cylindrical face
+    Real radius = 0.0;
+    Vec3 centre;
+    Real curveLength = 0.0;    // along the curve, not across the chord
 };
 
 Entity resolve(const Scene& scene, const ElementRef& ref) {
@@ -35,10 +43,38 @@ Entity resolve(const Scene& scene, const ElementRef& ref) {
         body.edgePositions(ref.index, a, b);
         e.pts.push_back(transformPoint(model, a));
         e.pts.push_back(transformPoint(model, b));
+
+        Vec3 centre, axis;
+        Real radius = 0.0;
+        if (body.edgeCircle(ref.index, centre, axis, radius)) {
+            e.round = true;
+            e.radius = radius;
+            e.centre = transformPoint(model, centre);
+            // A full circle's two ends are the same point, so the line the
+            // viewport draws has to be the diameter instead of a zero-length
+            // nothing at the seam.
+            if (length(e.pts[1] - e.pts[0]) < 1e-9) {
+                const Vec3 out = normalize(transformVector(model, body.edgeMidpoint(ref.index) - centre));
+                e.pts[0] = e.centre - out * radius;
+                e.pts[1] = e.centre + out * radius;
+            }
+        }
+        e.curveLength = body.edgeLength(ref.index);
         break;
     }
     case ElementKind::Face: {
         if (!body.hasFace(ref.index)) return e;
+
+        Vec3 point, axis;
+        Real radius = 0.0;
+        if (body.faceCylinder(ref.index, point, axis, radius)) {
+            // A bore's wall. Its diameter is what the part was drilled at --
+            // not something to be recovered from the vertices around it.
+            e.round = true;
+            e.radius = radius;
+            e.centre = transformPoint(model, point);
+        }
+
         std::vector<VertexId> verts;
         body.faceVertices(ref.index, verts);
         for (VertexId v : verts)
@@ -200,10 +236,20 @@ MeasureResult MeasureTool::compute(const Scene& scene) const {
             r.from = A.pts[0];
             r.to = A.pts[1];
             r.hasLength = true;
-            r.length = length(A.pts[1] - A.pts[0]);
+            // Along the curve. For a straight edge this is the same number it
+            // always was; for an arc it is the one a person means.
+            r.length = A.curveLength > 0.0 ? A.curveLength : length(A.pts[1] - A.pts[0]);
             r.delta = A.pts[1] - A.pts[0];
             r.distance = r.length;
-            std::snprintf(buf, sizeof(buf), "%.3f mm", r.length);
+            if (A.round) {
+                r.hasDiameter = true;
+                r.diameter = A.radius * 2.0;
+                r.centre = A.centre;
+                std::snprintf(buf, sizeof(buf), "\u2300 %.3f mm  (%.3f mm around)",
+                              r.diameter, r.length);
+            } else {
+                std::snprintf(buf, sizeof(buf), "%.3f mm", r.length);
+            }
             break;
         case ElementKind::Face: {
             Vec3 c{};
@@ -220,7 +266,15 @@ MeasureResult MeasureTool::compute(const Scene& scene) const {
             r.hasArea = true;
             r.area = area;
             r.perimeter = perim;
-            std::snprintf(buf, sizeof(buf), "%.3f mm2", area);
+            if (A.round) {
+                r.hasDiameter = true;
+                r.diameter = A.radius * 2.0;
+                r.centre = A.centre;
+                r.from = r.to = A.centre;
+                std::snprintf(buf, sizeof(buf), "\u2300 %.3f mm", r.diameter);
+            } else {
+                std::snprintf(buf, sizeof(buf), "%.3f mm2", area);
+            }
             break;
         }
         case ElementKind::None:
