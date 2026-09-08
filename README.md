@@ -7,9 +7,11 @@ Meet tangent, a Linux-based 3D modeling software built for the ergonomics of Ble
 
 ## Build
 
-Requires a C++20 compiler, CMake ≥ 3.24, SDL3 and libepoxy
+Requires a C++20 compiler, CMake ≥ 3.24, SDL3, libepoxy and OpenCASCADE.
 
 ```sh
+sudo pacman -S opencascade          # or your distribution's equivalent
+
 cmake -S . -B build -G Ninja
 cmake --build build
 ./build/tangent
@@ -21,30 +23,24 @@ Run the tests:
 ctest --test-dir build --output-on-failure
 ```
 
-### The exact kernel
+### Without the exact kernel
 
-Tangent can build bodies two ways: as a half-edge mesh, which is what it has
-always done, or as an exact boundary representation, where a hole is a cylinder
-rather than a thirty-two-sided prism. The exact kernel needs OpenCASCADE and is
-off by default, so a plain build has no dependency it did not have before.
+Tangent builds bodies two ways: as an exact boundary representation, where a
+hole is a cylinder rather than a thirty-two-sided prism, or as a half-edge mesh.
+Exact is the default and needs OpenCASCADE; only the modelling libraries are
+linked -- no visualization -- so it costs fifteen shared objects and about
+32 MB, with nothing beneath them but libc, libstdc++ and libm.
+
+The mesh kernel alone still builds, and behaves exactly as it did before any of
+this existed:
 
 ```sh
-sudo pacman -S opencascade          # or your distribution's equivalent
-
-cmake -S . -B build -G Ninja -DTANGENT_BREP=ON
-cmake --build build
-./build/tangent
+cmake -S . -B build -G Ninja -DTANGENT_BREP=OFF
 ```
 
-Configure prints `-- OpenCASCADE <version> from <prefix>` when it has found it.
-There is nothing to switch on at run time: with the kernel compiled in, new
-bodies are exact, and the Inspector says which kind each body is. Only the
-modelling libraries are linked -- no visualization -- so it costs fifteen
-shared objects and about 32 MB, with nothing beneath them but libc, libstdc++
-and libm.
-
-Building without it leaves every behaviour exactly as it was; the test suite
-gains one more suite with it (16 rather than 15).
+There is nothing to switch at run time either way: the Inspector says which
+kernel each body is made of. The test suite gains one suite with the exact
+kernel (16 rather than 15).
 
 ## Features
 

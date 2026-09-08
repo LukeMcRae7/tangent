@@ -3,6 +3,7 @@
 #include "scene/serialize.h"
 
 #include <cmath>
+#include <iterator>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -160,8 +161,65 @@ static void testExportTolerance() {
     std::printf("[stl] mesh body: %zu triangles, tolerance not applicable\n", r.triangles);
 }
 
+// A project written by an older build still opens. The version bump that let
+// bodies be exact added a field to every feature; refusing to read a file
+// without it would be losing someone's work over a field with one possible
+// value.
+static void testOlderFileOpens() {
+    Scene s;
+    s.setDefaultBackend(Backend::Mesh);
+    const ObjectId id = s.addPrimitive(PrimitiveKind::Box);
+    s.find(id)->name = "Legacy";
+    const std::string path = "/tmp/tangent_v4_test.tng";
+    check(saveProject(s, path).ok, "saved a project");
+
+    // Rewrite the version word in place, and strip what version 5 added: one
+    // u32 backend field at the end of each feature. With a single-feature box
+    // that is the last four bytes of the file.
+    std::vector<char> bytes;
+    {
+        std::ifstream in(path, std::ios::binary);
+        bytes.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    }
+    check(bytes.size() > 12, "the file has content");
+    const size_t versionAt = 8;   // after the magic
+    uint32_t four = 4;
+    std::memcpy(bytes.data() + versionAt, &four, sizeof four);
+    bytes.resize(bytes.size() - 4);
+    {
+        std::ofstream out(path, std::ios::binary);
+        out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    }
+
+    Scene loaded;
+    const ProjectResult r = loadProject(loaded, path);
+    check(r.ok, "a version 4 project still opens: " + r.error);
+    check(loaded.objectCount() == 1, "with its object");
+    if (loaded.objectCount() == 1) {
+        const SceneObject* o = loaded.objects().front().get();
+        check(o->name == "Legacy", "and its name");
+        check(o->features.size() == 1 && o->features[0].backend == Backend::Mesh,
+              "and everything in it is a mesh, which is all a v4 file could hold");
+        check(o->body.faceCount() == 6, "and it re-evaluates");
+    }
+
+    // A file from the future is refused, because there is no way to know what a
+    // field this build has never heard of means.
+    uint32_t future = kProjectVersion + 1;
+    std::memcpy(bytes.data() + versionAt, &future, sizeof future);
+    {
+        std::ofstream out(path, std::ios::binary);
+        out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    }
+    Scene tooNew;
+    check(!loadProject(tooNew, path).ok, "a newer project is refused");
+    std::remove(path.c_str());
+    std::printf("[project] version 4 opens, version %u refused\n", kProjectVersion + 1);
+}
+
 int main() {
     testExportTolerance();
+    testOlderFileOpens();
 
     // ---- STL ---------------------------------------------------------------
     {

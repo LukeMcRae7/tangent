@@ -225,7 +225,11 @@ void writeFeature(Writer& w, const Feature& f) {
     w.u32(static_cast<uint32_t>(f.backend));
 }
 
-bool readFeature(Reader& r, Feature& f) {
+// `version` is the file's, not this build's: a project written before bodies
+// could be exact has no representation tag to read and no backend field after
+// it, and refusing to open it would be losing someone's work over a field that
+// has one possible value.
+bool readFeature(Reader& r, Feature& f, uint32_t version) {
     const uint32_t kind = r.u32();
     if (kind > static_cast<uint32_t>(FeatureKind::Boolean)) return false;
     f.kind = static_cast<FeatureKind>(kind);
@@ -254,6 +258,7 @@ bool readFeature(Reader& r, Feature& f) {
     f.offsets.reserve(offsetCount);
     for (uint32_t i = 0; i < offsetCount; ++i) f.offsets.push_back(r.vec3());
     const uint32_t bodyTag = r.u32();
+    if (version < 5 && bodyTag != kBodyMesh) return false;   // v4 had only meshes
     if (bodyTag == kBodyMesh) {
         Mesh m;
         if (!readMesh(r, m)) return false;
@@ -268,9 +273,13 @@ bool readFeature(Reader& r, Feature& f) {
     } else {
         return false;
     }
-    const uint32_t backend = r.u32();
-    if (backend > static_cast<uint32_t>(Backend::Brep)) return false;
-    f.backend = static_cast<Backend>(backend);
+    if (version >= 5) {
+        const uint32_t backend = r.u32();
+        if (backend > static_cast<uint32_t>(Backend::Brep)) return false;
+        f.backend = static_cast<Backend>(backend);
+    } else {
+        f.backend = Backend::Mesh;   // everything in a v4 file was a mesh
+    }
     return !r.bad;
 }
 
@@ -334,9 +343,12 @@ ProjectResult loadProject(Scene& scene, const std::string& path) {
     r.p += sizeof(kMagic);
 
     const uint32_t version = r.u32();
-    if (version != kProjectVersion) {
+    // Older files are read; newer ones are not, because there is no way to know
+    // what a field this build has never heard of means.
+    if (version > kProjectVersion || version < kMinReadableVersion) {
         res.error = "project version " + std::to_string(version) +
-                    " (this build reads " + std::to_string(kProjectVersion) + ")";
+                    " (this build reads " + std::to_string(kMinReadableVersion) +
+                    " to " + std::to_string(kProjectVersion) + ")";
         return res;
     }
 
@@ -371,7 +383,7 @@ ProjectResult loadProject(Scene& scene, const std::string& path) {
         chain.reserve(featureCount);
         for (uint32_t k = 0; k < featureCount; ++k) {
             Feature f;
-            if (!readFeature(r, f)) { res.error = "bad feature"; return res; }
+            if (!readFeature(r, f, version)) { res.error = "bad feature"; return res; }
             chain.push_back(std::move(f));
         }
         if (r.bad) { res.error = "truncated file"; return res; }

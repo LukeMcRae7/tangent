@@ -52,11 +52,22 @@ target_compile_definitions(imgui PUBLIC IMGUI_DEFINE_MATH_OPERATORS)
 # translation unit in the program has to agree about it -- one target compiled
 # without it would be a one-definition-rule violation that shows up as a crash
 # rather than as an error.
-option(TANGENT_BREP "Build the exact B-rep backend (requires OpenCASCADE)" OFF)
+option(TANGENT_BREP "Build the exact B-rep backend (requires OpenCASCADE)" ON)
 
 set(TANGENT_BREP_SRC src/geom/brep_stub.cpp)
 if(TANGENT_BREP)
-  find_package(OpenCASCADE REQUIRED CONFIG)
+  # Required, and said plainly. Falling back to the mesh kernel when the
+  # dependency is missing would hand someone a build that quietly is not the
+  # one they think they have -- and "why is my hole a polygon" is a bad way to
+  # find out.
+  find_package(OpenCASCADE CONFIG)
+  if(NOT OpenCASCADE_FOUND)
+    message(FATAL_ERROR
+      "OpenCASCADE was not found, and it is what makes a hole round.\n"
+      "  Install it (Arch: pacman -S opencascade, Debian: libocct-*-dev),\n"
+      "  or point CMake at a prefix with -DCMAKE_PREFIX_PATH=<prefix>,\n"
+      "  or build the mesh kernel alone with -DTANGENT_BREP=OFF.")
+  endif()
   message(STATUS "OpenCASCADE ${OpenCASCADE_VERSION} from ${OpenCASCADE_INSTALL_PREFIX}")
   set(TANGENT_BREP_SRC src/geom/brep_occt.cpp)
   add_compile_definitions(TG_HAVE_OCCT)
