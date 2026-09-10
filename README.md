@@ -23,6 +23,26 @@ Run the tests:
 ctest --test-dir build --output-on-failure
 ```
 
+### Either platform, either kernel
+
+Presets cover the four combinations, and the same three commands drive all of
+them:
+
+|             | Exact (default) | Mesh only      |
+|-------------|-----------------|----------------|
+| **Linux**   | `linux`         | `linux-mesh`   |
+| **Windows** | `windows`       | `windows-mesh` |
+
+```sh
+cmake --preset windows
+cmake --build --preset windows
+ctest --preset windows
+```
+
+Linux takes the dependencies from the system. Windows takes them from vcpkg
+through `vcpkg.json`, so it wants `VCPKG_ROOT` set and an x64 Native Tools
+Command Prompt, which is where Ninja finds MSVC.
+
 ### Without the exact kernel
 
 Tangent builds bodies two ways: as an exact boundary representation, where a
@@ -40,7 +60,7 @@ cmake -S . -B build -G Ninja -DTANGENT_BREP=OFF
 
 There is nothing to switch at run time either way: the Inspector says which
 kernel each body is made of. The test suite gains one suite with the exact
-kernel (16 rather than 15).
+kernel (18 rather than 17).
 
 ## Features
 
