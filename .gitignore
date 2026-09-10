@@ -1,5 +1,6 @@
 build/
 build-*/
+CMakeUserPresets.json
 tangent.ini
 *.ppm
 *.o

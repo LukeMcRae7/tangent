@@ -1,4 +1,14 @@
 cmake_minimum_required(VERSION 3.24)
+
+# Declared before project() because on Windows the vcpkg toolchain resolves the
+# manifest while project() runs, and has to know by then whether OpenCASCADE is
+# wanted. The option and vcpkg.json's "brep" feature are the same switch, so
+# -DTANGENT_BREP=OFF means the same thing on both platforms.
+option(TANGENT_BREP "Build the exact B-rep backend (requires OpenCASCADE)" ON)
+if(TANGENT_BREP)
+  list(APPEND VCPKG_MANIFEST_FEATURES brep)
+endif()
+
 project(Tangent VERSION 0.1.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
@@ -10,11 +20,42 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "" FORCE)
 endif()
 
-# ---- System dependencies (native Linux / Wayland) -------------------------
+# ---- System dependencies --------------------------------------------------
+# Linux takes these from the system (pacman, apt); Windows takes them from
+# vcpkg via the manifest next to this file. SDL3 ships a CMake config either
+# way, so it needs no help.
 find_package(SDL3 REQUIRED CONFIG)
 
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(EPOXY REQUIRED IMPORTED_TARGET epoxy)
+# libepoxy is a meson project. Linux exposes it through pkg-config; the vcpkg
+# build ships neither a CMake config nor a usable .pc, so there it is found by
+# hand. Both arrive as one target and nothing below this needs to know which
+# platform it is on.
+add_library(tangent_epoxy INTERFACE)
+if(WIN32)
+  find_path(EPOXY_INCLUDE_DIR NAMES epoxy/gl.h REQUIRED)
+  find_library(EPOXY_LIBRARY NAMES epoxy REQUIRED)
+  message(STATUS "epoxy ${EPOXY_LIBRARY}")
+  target_include_directories(tangent_epoxy INTERFACE ${EPOXY_INCLUDE_DIR})
+  target_link_libraries(tangent_epoxy INTERFACE ${EPOXY_LIBRARY})
+else()
+  find_package(PkgConfig REQUIRED)
+  pkg_check_modules(EPOXY REQUIRED IMPORTED_TARGET epoxy)
+  target_link_libraries(tangent_epoxy INTERFACE PkgConfig::EPOXY)
+endif()
+
+# Warning flags, spelled per compiler: MSVC understands neither -Wextra nor
+# -Wno-unused-parameter (4100 is its number for the latter).
+if(MSVC)
+  set(TANGENT_WARNINGS /W4)
+  set(TANGENT_WARNINGS_LOOSE /W4 /wd4100)
+  # Defensive against <windows.h>, which epoxy's WGL path can pull in: NOMINMAX
+  # stops it taking min/max, and WIN32_LEAN_AND_MEAN trims what else it brings.
+  add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN _USE_MATH_DEFINES
+                          _CRT_SECURE_NO_WARNINGS)
+else()
+  set(TANGENT_WARNINGS -Wall -Wextra)
+  set(TANGENT_WARNINGS_LOOSE -Wall -Wextra -Wno-unused-parameter)
+endif()
 
 # ---- Dear ImGui (docking branch) ------------------------------------------
 include(FetchContent)
@@ -52,7 +93,8 @@ target_compile_definitions(imgui PUBLIC IMGUI_DEFINE_MATH_OPERATORS)
 # translation unit in the program has to agree about it -- one target compiled
 # without it would be a one-definition-rule violation that shows up as a crash
 # rather than as an error.
-option(TANGENT_BREP "Build the exact B-rep backend (requires OpenCASCADE)" ON)
+# The option itself is declared at the top of this file, before project(),
+# because vcpkg needs to know about it while the manifest is being resolved.
 
 set(TANGENT_BREP_SRC src/geom/brep_stub.cpp)
 if(TANGENT_BREP)
@@ -65,6 +107,8 @@ if(TANGENT_BREP)
     message(FATAL_ERROR
       "OpenCASCADE was not found, and it is what makes a hole round.\n"
       "  Install it (Arch: pacman -S opencascade, Debian: libocct-*-dev),\n"
+      "  or on Windows configure with the vcpkg toolchain, which takes it\n"
+      "  from the manifest (see CMakePresets.json),\n"
       "  or point CMake at a prefix with -DCMAKE_PREFIX_PATH=<prefix>,\n"
       "  or build the mesh kernel alone with -DTANGENT_BREP=OFF.")
   endif()
@@ -108,8 +152,8 @@ add_executable(tangent
   src/ui/panels.cpp
 )
 target_include_directories(tangent PRIVATE src)
-target_link_libraries(tangent PRIVATE imgui SDL3::SDL3 PkgConfig::EPOXY)
-target_compile_options(tangent PRIVATE -Wall -Wextra -Wno-unused-parameter)
+target_link_libraries(tangent PRIVATE imgui SDL3::SDL3 tangent_epoxy)
+target_compile_options(tangent PRIVATE ${TANGENT_WARNINGS_LOOSE})
 
 # Shaders are compiled into the binary via #include of generated headers is
 # overkill for now; ship them next to the executable and locate at runtime.
@@ -127,19 +171,19 @@ add_executable(test_body tests/test_body.cpp
   src/mesh/boolean.cpp src/mesh/health.cpp src/mesh/operations.cpp
   src/mesh/halfedge.cpp src/mesh/primitives.cpp)
 target_include_directories(test_body PRIVATE src)
-target_compile_options(test_body PRIVATE -Wall -Wextra)
+target_compile_options(test_body PRIVATE ${TANGENT_WARNINGS})
 add_test(NAME body COMMAND test_body)
 
 add_executable(test_mesh tests/test_mesh.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp)
 target_include_directories(test_mesh PRIVATE src)
-target_compile_options(test_mesh PRIVATE -Wall -Wextra)
+target_compile_options(test_mesh PRIVATE ${TANGENT_WARNINGS})
 add_test(NAME mesh COMMAND test_mesh)
 
 add_executable(test_scene tests/test_scene.cpp
   src/scene/scene.cpp src/scene/feature.cpp src/mesh/boolean.cpp src/mesh/health.cpp ${TANGENT_GEOM} src/mesh/operations.cpp
   src/mesh/halfedge.cpp src/mesh/primitives.cpp src/app/camera.cpp)
 target_include_directories(test_scene PRIVATE src)
-target_compile_options(test_scene PRIVATE -Wall -Wextra)
+target_compile_options(test_scene PRIVATE ${TANGENT_WARNINGS})
 add_test(NAME scene COMMAND test_scene)
 
 # Links the renderer only because TransformTool::drawOverlay references it; the
@@ -150,59 +194,59 @@ add_executable(test_transform tests/test_transform.cpp
   src/mesh/halfedge.cpp src/mesh/primitives.cpp
   src/render/renderer.cpp src/render/shader.cpp src/render/gpu_mesh.cpp)
 target_include_directories(test_transform PRIVATE src)
-target_link_libraries(test_transform PRIVATE PkgConfig::EPOXY)
-target_compile_options(test_transform PRIVATE -Wall -Wextra -Wno-unused-parameter)
+target_link_libraries(test_transform PRIVATE tangent_epoxy)
+target_compile_options(test_transform PRIVATE ${TANGENT_WARNINGS_LOOSE})
 add_test(NAME transform COMMAND test_transform)
 
 add_executable(test_operations tests/test_operations.cpp
   src/mesh/boolean.cpp src/mesh/health.cpp ${TANGENT_GEOM} src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp)
 target_include_directories(test_operations PRIVATE src)
-target_compile_options(test_operations PRIVATE -Wall -Wextra)
+target_compile_options(test_operations PRIVATE ${TANGENT_WARNINGS})
 add_test(NAME operations COMMAND test_operations)
 
 add_executable(test_fillet tests/test_fillet.cpp
   src/mesh/health.cpp src/mesh/boolean.cpp ${TANGENT_GEOM} src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp)
 target_include_directories(test_fillet PRIVATE src)
-target_compile_options(test_fillet PRIVATE -Wall -Wextra)
+target_compile_options(test_fillet PRIVATE ${TANGENT_WARNINGS})
 add_test(NAME fillet COMMAND test_fillet)
 
 add_executable(test_names tests/test_names.cpp
   src/mesh/health.cpp src/mesh/boolean.cpp ${TANGENT_GEOM} src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp)
 target_include_directories(test_names PRIVATE src)
-target_compile_options(test_names PRIVATE -Wall -Wextra)
+target_compile_options(test_names PRIVATE ${TANGENT_WARNINGS})
 add_test(NAME names COMMAND test_names)
 
 add_executable(test_fillet_mechanics tests/test_fillet_mechanics.cpp
   src/mesh/health.cpp src/mesh/boolean.cpp ${TANGENT_GEOM} src/mesh/operations.cpp
   src/mesh/halfedge.cpp src/mesh/primitives.cpp)
 target_include_directories(test_fillet_mechanics PRIVATE src)
-target_compile_options(test_fillet_mechanics PRIVATE -Wall -Wextra)
+target_compile_options(test_fillet_mechanics PRIVATE ${TANGENT_WARNINGS})
 add_test(NAME fillet_mechanics COMMAND test_fillet_mechanics)
 
 add_executable(test_fillet_sweep tests/test_fillet_sweep.cpp
   src/mesh/health.cpp src/mesh/boolean.cpp ${TANGENT_GEOM} src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp)
 target_include_directories(test_fillet_sweep PRIVATE src)
-target_compile_options(test_fillet_sweep PRIVATE -Wall -Wextra)
+target_compile_options(test_fillet_sweep PRIVATE ${TANGENT_WARNINGS})
 add_test(NAME fillet_sweep COMMAND test_fillet_sweep)
 
 add_executable(test_features tests/test_features.cpp
   src/scene/scene.cpp src/scene/feature.cpp src/mesh/boolean.cpp src/mesh/health.cpp
   ${TANGENT_GEOM} src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp)
 target_include_directories(test_features PRIVATE src)
-target_compile_options(test_features PRIVATE -Wall -Wextra)
+target_compile_options(test_features PRIVATE ${TANGENT_WARNINGS})
 add_test(NAME features COMMAND test_features)
 
 add_executable(test_health tests/test_health.cpp
   src/mesh/health.cpp src/mesh/boolean.cpp ${TANGENT_GEOM} src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp)
 target_include_directories(test_health PRIVATE src)
-target_compile_options(test_health PRIVATE -Wall -Wextra)
+target_compile_options(test_health PRIVATE ${TANGENT_WARNINGS})
 add_test(NAME health COMMAND test_health)
 
 add_executable(test_boolean tests/test_boolean.cpp
   src/mesh/boolean.cpp src/mesh/health.cpp ${TANGENT_GEOM} src/mesh/operations.cpp
   src/mesh/halfedge.cpp src/mesh/primitives.cpp)
 target_include_directories(test_boolean PRIVATE src)
-target_compile_options(test_boolean PRIVATE -Wall -Wextra)
+target_compile_options(test_boolean PRIVATE ${TANGENT_WARNINGS})
 add_test(NAME boolean COMMAND test_boolean)
 
 # Links the renderer only because MeasureTool::drawOverlay references it; no GL
@@ -212,8 +256,8 @@ add_executable(test_measure tests/test_measure.cpp
   src/mesh/health.cpp ${TANGENT_GEOM} src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp
   src/render/renderer.cpp src/render/shader.cpp src/render/gpu_mesh.cpp)
 target_include_directories(test_measure PRIVATE src)
-target_link_libraries(test_measure PRIVATE PkgConfig::EPOXY)
-target_compile_options(test_measure PRIVATE -Wall -Wextra -Wno-unused-parameter)
+target_link_libraries(test_measure PRIVATE tangent_epoxy)
+target_compile_options(test_measure PRIVATE ${TANGENT_WARNINGS_LOOSE})
 add_test(NAME measure COMMAND test_measure)
 
 add_executable(test_io tests/test_io.cpp
@@ -221,7 +265,7 @@ add_executable(test_io tests/test_io.cpp
   src/scene/scene.cpp src/scene/feature.cpp src/mesh/boolean.cpp
   src/mesh/health.cpp ${TANGENT_GEOM} src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp)
 target_include_directories(test_io PRIVATE src)
-target_compile_options(test_io PRIVATE -Wall -Wextra)
+target_compile_options(test_io PRIVATE ${TANGENT_WARNINGS})
 add_test(NAME io COMMAND test_io)
 
 add_executable(test_create_tool tests/test_create_tool.cpp
@@ -230,8 +274,8 @@ add_executable(test_create_tool tests/test_create_tool.cpp
   src/mesh/health.cpp ${TANGENT_GEOM} src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp
   src/render/renderer.cpp src/render/shader.cpp src/render/gpu_mesh.cpp)
 target_include_directories(test_create_tool PRIVATE src ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/backends)
-target_link_libraries(test_create_tool PRIVATE imgui PkgConfig::EPOXY)
-target_compile_options(test_create_tool PRIVATE -Wall -Wextra -Wno-unused-parameter)
+target_link_libraries(test_create_tool PRIVATE imgui tangent_epoxy)
+target_compile_options(test_create_tool PRIVATE ${TANGENT_WARNINGS_LOOSE})
 add_test(NAME create_tool COMMAND test_create_tool)
 
 add_executable(test_snap tests/test_snap.cpp
@@ -239,8 +283,8 @@ add_executable(test_snap tests/test_snap.cpp
   src/scene/scene.cpp src/scene/feature.cpp src/mesh/boolean.cpp src/mesh/health.cpp
   ${TANGENT_GEOM} src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp)
 target_include_directories(test_snap PRIVATE src)
-target_link_libraries(test_snap PRIVATE PkgConfig::EPOXY)
-target_compile_options(test_snap PRIVATE -Wall -Wextra)
+target_link_libraries(test_snap PRIVATE tangent_epoxy)
+target_compile_options(test_snap PRIVATE ${TANGENT_WARNINGS})
 add_test(NAME snap COMMAND test_snap)
 
 add_executable(test_lod tests/test_lod.cpp
@@ -248,8 +292,8 @@ add_executable(test_lod tests/test_lod.cpp
   src/scene/scene.cpp src/scene/feature.cpp src/mesh/boolean.cpp src/mesh/health.cpp
   ${TANGENT_GEOM} src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp)
 target_include_directories(test_lod PRIVATE src)
-target_link_libraries(test_lod PRIVATE PkgConfig::EPOXY)
-target_compile_options(test_lod PRIVATE -Wall -Wextra)
+target_link_libraries(test_lod PRIVATE tangent_epoxy)
+target_compile_options(test_lod PRIVATE ${TANGENT_WARNINGS})
 add_test(NAME lod COMMAND test_lod)
 
 # The exact backend's own suite. Only built when there is a backend to test:
@@ -260,7 +304,7 @@ if(TANGENT_BREP)
     src/mesh/health.cpp src/mesh/boolean.cpp ${TANGENT_GEOM}
     src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp)
   target_include_directories(test_brep PRIVATE src)
-  target_compile_options(test_brep PRIVATE -Wall -Wextra)
+  target_compile_options(test_brep PRIVATE ${TANGENT_WARNINGS})
   add_test(NAME brep COMMAND test_brep)
 endif()
 
@@ -270,4 +314,4 @@ add_executable(bench EXCLUDE_FROM_ALL tests/bench.cpp
   src/mesh/boolean.cpp ${TANGENT_GEOM} src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp
   src/render/lod.cpp src/app/camera.cpp)
 target_include_directories(bench PRIVATE src)
-target_link_libraries(bench PRIVATE PkgConfig::EPOXY)
+target_link_libraries(bench PRIVATE tangent_epoxy)

@@ -3,6 +3,7 @@
 #include "scene/serialize.h"
 
 #include <cmath>
+#include <filesystem>
 #include <iterator>
 #include <cstdio>
 #include <cstring>
@@ -18,9 +19,13 @@ static void check(bool ok, const std::string& what) {
 }
 static bool near(double a, double b, double eps = 1e-6) { return std::fabs(a - b) < eps; }
 
+// Honours TMPDIR on Linux and TEMP on Windows. A hardcoded /tmp resolves to
+// C:\tmp there, which does not exist, and the write that then failed surfaced
+// as a crash further down rather than as a failed check.
 static std::string tmp(const char* name) {
-    const char* dir = std::getenv("TMPDIR");
-    return std::string(dir ? dir : "/tmp") + "/tangent_test_" + name;
+    return (std::filesystem::temp_directory_path() /
+            ("tangent_test_" + std::string(name)))
+        .string();
 }
 
 // Minimal binary STL reader, so the test checks the bytes rather than trusting
@@ -85,7 +90,7 @@ static void testExportTolerance() {
     for (Real dev : {0.2, 0.05, 0.01}) {
         StlOptions opt;
         opt.deviationMm = dev;
-        const std::string path = "/tmp/tangent_tol_test.stl";
+        const std::string path = tmp("tol.stl");
         const StlResult r = exportStl(s, path, opt);
         check(r.ok, "export at " + std::to_string(dev) + "mm");
         check(r.triangles > 0, "wrote triangles");
@@ -136,14 +141,15 @@ static void testExportTolerance() {
 
         StlOptions coarse;
         coarse.deviationMm = 0.5;
-        const StlResult cr = exportStl(s, "/tmp/tangent_tol_coarse.stl", coarse);
+        const std::string coarsePath = tmp("tol_coarse.stl");
+        const StlResult cr = exportStl(s, coarsePath, coarse);
         check(cr.ok, "coarse export");
 
         RenderMesh after;
         s.find(id)->body.tessellate(after);
         check(after.triangles.size() == before,
               "the screen keeps its own tessellation after a coarse export");
-        std::remove("/tmp/tangent_tol_coarse.stl");
+        std::remove(coarsePath.c_str());
         std::printf("[stl] screen kept %zu triangles across a 0.5mm export of %zu\n",
                     before / 3, cr.triangles);
     }
@@ -155,9 +161,10 @@ static void testExportTolerance() {
     m.addPrimitive(PrimitiveKind::Cylinder, spec);
     StlOptions opt;
     opt.deviationMm = 0.001;
-    const StlResult r = exportStl(m, "/tmp/tangent_tol_mesh.stl", opt);
+    const std::string meshPath = tmp("tol_mesh.stl");
+    const StlResult r = exportStl(m, meshPath, opt);
     check(r.ok && r.meshBodies == 1, "a mesh body is reported as written at its own resolution");
-    std::remove("/tmp/tangent_tol_mesh.stl");
+    std::remove(meshPath.c_str());
     std::printf("[stl] mesh body: %zu triangles, tolerance not applicable\n", r.triangles);
 }
 
@@ -170,7 +177,7 @@ static void testOlderFileOpens() {
     s.setDefaultBackend(Backend::Mesh);
     const ObjectId id = s.addPrimitive(PrimitiveKind::Box);
     s.find(id)->name = "Legacy";
-    const std::string path = "/tmp/tangent_v4_test.tng";
+    const std::string path = tmp("v4.tng");
     check(saveProject(s, path).ok, "saved a project");
 
     // Rewrite the version word in place, and strip what version 5 added: one

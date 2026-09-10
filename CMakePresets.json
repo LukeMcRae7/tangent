@@ -1,0 +1,82 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": { "major": 3, "minor": 24, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "linux",
+      "displayName": "Linux (system dependencies)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo"
+      }
+    },
+    {
+      "name": "linux-mesh",
+      "inherits": "linux",
+      "displayName": "Linux, mesh kernel only",
+      "binaryDir": "${sourceDir}/build-mesh",
+      "cacheVariables": {
+        "TANGENT_BREP": "OFF"
+      }
+    },
+    {
+      "name": "windows",
+      "displayName": "Windows (MSVC + vcpkg)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-msvc",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      },
+      "toolchainFile": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "VCPKG_TARGET_TRIPLET": "x64-windows"
+      }
+    },
+    {
+      "name": "windows-mesh",
+      "inherits": "windows",
+      "displayName": "Windows, mesh kernel only",
+      "binaryDir": "${sourceDir}/build-msvc-mesh",
+      "cacheVariables": {
+        "TANGENT_BREP": "OFF"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "linux", "configurePreset": "linux" },
+    { "name": "linux-mesh", "configurePreset": "linux-mesh" },
+    { "name": "windows", "configurePreset": "windows" },
+    { "name": "windows-mesh", "configurePreset": "windows-mesh" }
+  ],
+  "testPresets": [
+    {
+      "name": "linux",
+      "configurePreset": "linux",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "linux-mesh",
+      "configurePreset": "linux-mesh",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "windows",
+      "configurePreset": "windows",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "windows-mesh",
+      "configurePreset": "windows-mesh",
+      "output": { "outputOnFailure": true }
+    }
+  ]
+}
