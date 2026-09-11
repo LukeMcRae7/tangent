@@ -31,7 +31,9 @@
 #include <BRepFeat_SplitShape.hxx>
 #include <BRepFilletAPI_MakeFillet.hxx>
 #include <BRepOffsetAPI_MakeOffset.hxx>
+#include <BRepOffsetAPI_MakeThickSolid.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
+#include <ShapeUpgrade_UnifySameDomain.hxx>
 #include <GC_MakeArcOfCircle.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepGProp.hxx>
@@ -599,6 +601,47 @@ Vec3 edgeMidpoint(const BrepShape& s, EdgeId e) {
     if (!validEdge(s, e)) return {0, 0, 0};
     BRepAdaptor_Curve c(edgeAt(s, e));
     return toVec3(c.Value((c.FirstParameter() + c.LastParameter()) * 0.5));
+}
+
+void edgePolyline(const BrepShape& s, EdgeId e, Real deviationMm,
+                  std::vector<Vec3>& out) {
+    out.clear();
+    if (!validEdge(s, e)) return;
+    const TopoDS_Edge& ed = edgeAt(s, e);
+    if (BRep_Tool::Degenerated(ed)) return;
+
+    // A line is already the whole of itself, and every selected edge asks this
+    // once a frame -- no reason to run a deflection solve to rediscover two ends.
+    if (edgeKind(s, e) == CurveKind::Line) {
+        Vec3 a, b;
+        edgePositions(s, e, a, b);
+        out.push_back(a);
+        out.push_back(b);
+        return;
+    }
+
+    Real dev = deviationMm;
+    if (!(dev > 0.0)) {
+        // A hundredth of the curve's own length, so the choice scales with the
+        // edge rather than with whatever units the part happens to be in.
+        const Real len = edgeLength(s, e);
+        dev = len > 0.0 ? len * 0.01 : 0.01;
+    }
+
+    BRepAdaptor_Curve c(ed);
+    GCPnts_QuasiUniformDeflection sampler(c, dev);
+    if (!sampler.IsDone() || sampler.NbPoints() < 2) {
+        // Refusing would leave the caller with nothing to draw; the chord is
+        // wrong but visible, and a curve this sampler cannot walk is a bug
+        // worth seeing rather than a silently missing highlight.
+        Vec3 a, b;
+        edgePositions(s, e, a, b);
+        out.push_back(a);
+        out.push_back(b);
+        return;
+    }
+    out.reserve(static_cast<size_t>(sampler.NbPoints()));
+    for (int i = 1; i <= sampler.NbPoints(); ++i) out.push_back(toVec3(sampler.Value(i)));
 }
 
 ElementId faceName(const BrepShape& s, FaceId f) {
@@ -1252,6 +1295,71 @@ BrepRef insetFaces(const BrepRef& s, const std::vector<FaceId>& faces, Real amou
     return current;
 }
 
+BrepRef shell(const BrepRef& s, const std::vector<FaceId>& openFaces, Real thickness,
+              ElementId salt, std::string* reason) {
+    if (reason) reason->clear();
+    if (!s || s->shape.IsNull()) {
+        if (reason) *reason = "there is no body to shell";
+        return {};
+    }
+    if (!(thickness > 0.0)) {
+        if (reason) *reason = "the wall has to have a thickness";
+        return {};
+    }
+    for (FaceId f : openFaces) {
+        if (!validFace(*s, f)) {
+            if (reason) *reason = "a face to open no longer exists";
+            return {};
+        }
+    }
+
+    try {
+        TopTools_ListOfShape open;
+        for (FaceId f : openFaces) open.Append(faceAt(*s, f));
+
+        BRepOffsetAPI_MakeThickSolid op;
+        // Negative, because the wall is measured inward: shelling a 20mm box by
+        // 2mm leaves a 20mm box with a 16mm cavity, not a 24mm one. An outward
+        // offset is a different operation and not what hollowing means.
+        op.MakeThickSolidByJoin(s->shape, open, -thickness, 1e-3);
+        op.Build();
+        if (!op.IsDone()) {
+            if (reason)
+                *reason = "the wall does not fit: try a thinner one";
+            return {};
+        }
+
+        const TopoDS_Shape out = op.Shape();
+        if (!acceptable(out, reason)) {
+            if (reason && reason->empty()) *reason = "shelling produced no valid solid";
+            return {};
+        }
+
+        // A wall too thick to leave a cavity is not refused by OCCT: it hands
+        // back the solid unhollowed and reports success. That is the quiet
+        // no-op this codebase will not ship -- the user asked for a hollow
+        // part and would get a solid one with a feature in the timeline
+        // claiming otherwise. So compare the volumes and say what happened.
+        GProp_GProps was, now;
+        BRepGProp::VolumeProperties(s->shape, was);
+        BRepGProp::VolumeProperties(out, now);
+        if (now.Mass() > was.Mass() * 0.999) {
+            if (reason) *reason = "the wall is too thick to leave a cavity";
+            return {};
+        }
+
+        // The same provenance mechanism as everything else: the outer faces are
+        // Modified from the originals and keep their names, and the wall the
+        // offset created is Generated from the face it came from. A feature that
+        // referred to the top of a box still refers to it after the box is
+        // hollowed out.
+        return makeBrep(out, propagateNames(op, {{s.get()}}, out, salt));
+    } catch (const Standard_Failure& e) {
+        if (reason) *reason = e.GetMessageString() ? e.GetMessageString() : "shelling threw";
+        return {};
+    }
+}
+
 BrepRef prism(const std::vector<Vec3>& points, const std::vector<Real>& arcs,
               Vec3 planeNormal, Real z0, Real z1, ElementId salt, std::string* reason) {
     if (reason) reason->clear();
@@ -1313,10 +1421,32 @@ BrepRef prism(const std::vector<Vec3>& points, const std::vector<Real>& arcs,
             return {};
         }
 
+        // Four quarter-arcs of one circle are one cylinder, and two collinear
+        // spans are one plane. The sweep gives a face per span regardless,
+        // which draws seams down a drawn bore that a cut one does not have,
+        // and makes clicking the bore select a quarter of it. Merging the
+        // spans that share a surface is what makes a hole the same shape
+        // whichever way it was made.
+        //
+        // Before the names are assigned, so there is no name to reconcile:
+        // afterwards the merge would have to decide which of four names the
+        // surviving face keeps, and any feature that referred to the other
+        // three would have nothing to resolve to.
+        TopoDS_Shape shape = solid.Shape();
+        try {
+            ShapeUpgrade_UnifySameDomain unify(shape, Standard_True, Standard_True,
+                                               Standard_False);
+            unify.Build();
+            const TopoDS_Shape merged = unify.Shape();
+            if (!merged.IsNull() && acceptable(merged, nullptr)) shape = merged;
+        } catch (const Standard_Failure&) {
+            // Keep the sweep as it came. More faces than it needs is a
+            // blemish; refusing a solid that is otherwise correct is worse.
+        }
+
         // Named by role, the way a primitive is: the two caps and the wall the
-        // profile swept out. The wall is several faces -- one per span of the
-        // profile -- so each takes the ordinal of the span it came from.
-        const TopoDS_Shape shape = solid.Shape();
+        // profile swept out. The wall may still be several faces -- one per
+        // span that did not merge -- so each takes the ordinal of its span.
         TopTools_IndexedMapOfShape fs;
         TopExp::MapShapes(shape, TopAbs_FACE, fs);
         std::vector<ElementId> names(static_cast<size_t>(fs.Extent()), kNoId);

@@ -223,6 +223,7 @@ void writeFeature(Writer& w, const Feature& f) {
         }
     }
     w.u32(static_cast<uint32_t>(f.backend));
+    w.f64(f.thickness);
 }
 
 // `version` is the file's, not this build's: a project written before bodies
@@ -231,7 +232,7 @@ void writeFeature(Writer& w, const Feature& f) {
 // has one possible value.
 bool readFeature(Reader& r, Feature& f, uint32_t version) {
     const uint32_t kind = r.u32();
-    if (kind > static_cast<uint32_t>(FeatureKind::Boolean)) return false;
+    if (kind > static_cast<uint32_t>(FeatureKind::Shell)) return false;
     f.kind = static_cast<FeatureKind>(kind);
     f.enabled = r.u8() != 0;
     if (!readSpec(r, f.primitive)) return false;
@@ -280,6 +281,9 @@ bool readFeature(Reader& r, Feature& f, uint32_t version) {
     } else {
         f.backend = Backend::Mesh;   // everything in a v4 file was a mesh
     }
+    // Version 6 added the shell. A file older than that has no shell features
+    // in it, so the default wall stands and nothing reads it.
+    if (version >= 6) f.thickness = r.f64();
     return !r.bad;
 }
 

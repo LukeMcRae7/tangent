@@ -75,6 +75,18 @@ bool makeProfileSolid(const std::vector<Vec3>& points, const std::vector<Real>& 
     return true;
 }
 
+bool shellBody(Body& body, const std::vector<FaceId>& openFaces, Real thickness,
+               ElementId salt, std::string* reason) {
+    if (body.isMesh()) {
+        if (reason) *reason = "shelling needs the exact kernel, and this body is a mesh";
+        return false;
+    }
+    BrepRef result = brep::shell(body.brepRef(), openFaces, thickness, salt, reason);
+    if (!result) return false;
+    body = Body(std::move(result));
+    return true;
+}
+
 bool insetFaces(Body& body, const std::vector<FaceId>& faces, Real amount,
                 std::vector<FaceId>* newFaces, ElementId salt, std::string* reason) {
     if (!body.isMesh()) {

@@ -57,6 +57,17 @@ bool insetFaces(Body& body, const std::vector<FaceId>& faces, Real amount,
                 std::vector<FaceId>* newFaces = nullptr, ElementId salt = 0,
                 std::string* reason = nullptr);
 
+// Hollows the body out to a wall `thickness` thick, opening the faces given: a
+// box shelled with its top face open is a tray. The single most asked-for
+// operation for printing, because it is what turns a solid model into one that
+// does not cost a spool of filament.
+//
+// Exact bodies only. On a mesh, offsetting every face and mitring every corner
+// is a different algorithm and a large one; refusing says so at the interface
+// rather than producing something that is nearly a shell.
+bool shellBody(Body& body, const std::vector<FaceId>& openFaces, Real thickness,
+               ElementId salt = 0, std::string* reason = nullptr);
+
 // Rounds edges. `reason` gets a short phrase on refusal; see the note above.
 bool filletEdges(Body& body, const FilletSpec& spec, std::string* reason = nullptr);
 

@@ -80,6 +80,7 @@ public:
         filletDemoSegments_ = segments; filletDemoEdges_ = edges;
     }
     void setAutoExtrude(float mm) { autoExtrude_ = true; autoExtrudeMm_ = mm; }
+    void setShellDemo(float wallMm) { shellDemo_ = wallMm; }
     void setHoldTransform() { holdTransform_ = true; }
 
     // Writes the viewport to a PPM after `afterFrames` frames. Reads back this
@@ -135,6 +136,7 @@ private:
     float       exportDeviationMm_ = 0.01f;
     void extrudeSelection();
     void bevelActiveObject();
+    void shellActiveObject();
 
     // Rounds the selected edges only, the way F does in Fusion.
     void filletSelectedEdges();
@@ -259,6 +261,7 @@ private:
     int         filletDemoEdges_ = 1;
     bool        autoExtrude_ = false;
     float       autoExtrudeMm_ = 10.0f;
+    float       shellDemo_ = 0.0f;      // wall in mm; 0 means do not
     bool        holdTransform_ = false;
 
     double meanViewportLuminance() const;

@@ -295,6 +295,17 @@ int main() {
         check(near(length(cyl.edgeMidpoint(rim) - centre), 8.0, 1e-6),
               "and its midpoint is out on the arc, not in the middle of the body");
 
+        // What a rim is made of when something has to *draw* it. Asking for the
+        // two ends gave a chord across the hole -- and for a closed circle the
+        // two ends are the same point, so it drew nothing at all.
+        std::vector<Vec3> poly;
+        cyl.edgePolyline(rim, 0.01, poly);
+        check(poly.size() > 2, "the rim draws as a chain of points, not one chord");
+        Real offCircle = 0.0;
+        for (const Vec3& p : poly)
+            offCircle = std::max(offCircle, std::fabs(std::hypot(p.x, p.y) - 8.0));
+        check(offCircle < 1e-6, "every one of them on the circle");
+
         // The mesh answers honestly: a polygon and a straight line, which is
         // all it has.
         std::vector<EdgeId> me;
@@ -302,8 +313,61 @@ int main() {
         check(meshCyl.edgeKind(me.front()) == CurveKind::Line, "every mesh edge is a line");
         check(!meshCyl.edgeCircle(me.front(), centre, axis, radius),
               "and none of them is a circle, because none of them is");
+        meshCyl.edgePolyline(me.front(), 0.01, poly);
+        check(poly.size() == 2, "a mesh edge draws as its two ends, which is all a line is");
         std::printf("  exact: %d faces, rim %.4f mm around; mesh: %d faces\n",
                     cyl.faceCount(), cyl.edgeLength(rim), meshCyl.faceCount());
+    }
+
+    // A hole is where the two representations differ most, and where drawing
+    // one as if it were the other shows up as lines across the opening.
+    std::printf("\n--- Body: a bored face, and what may be drawn of it ---\n");
+    {
+        PrimitiveSpec plate;
+        plate.kind = PrimitiveKind::Box;
+        plate.box.width = plate.box.depth = 60; plate.box.height = 10;
+        PrimitiveSpec drill;
+        drill.kind = PrimitiveKind::Cylinder;
+        drill.cylinder.radius = 15;
+        drill.cylinder.height = 40;
+        drill.cylinder.segments = 24;
+
+        for (Backend backend : {Backend::Mesh, Backend::Brep}) {
+            if (backend == Backend::Brep && !brep::available()) continue;
+            Body body, tool, bored;
+            check(makePrimitive(plate, body, backend), "plate built");
+            check(makePrimitive(drill, tool, backend), "drill built");
+            tool.transform(translate({0, 0, -10}));
+            std::string why;
+            check(booleanOp(body, tool, BooleanOp::Difference, bored, 7, false, &why),
+                  std::string("bored it: ") + why);
+
+            std::vector<FaceId> faces;
+            bored.allFaces(faces);
+            FaceId top = kNoFace;
+            for (FaceId f : faces)
+                if (dot(bored.faceNormal(f), Vec3{0, 0, 1}) > 0.99 &&
+                    (top == kNoFace || bored.faceArea(f) > bored.faceArea(top))) top = f;
+            check(top != kNoFace, "found a face on top of it");
+
+            std::vector<EdgeId> fe;
+            bored.faceEdges(top, fe);
+            int bridges = 0;
+            for (EdgeId e : fe) if (bored.isBridgeEdge(e)) ++bridges;
+
+            if (backend == Backend::Brep) {
+                // One face holds the hole, so nothing had to be invented to
+                // reach it -- which is why the outline can be drawn whole.
+                check(bridges == 0, "an exact bored face has no bridge edges");
+            } else {
+                // The mesh needs them, and they are the lines that used to be
+                // drawn across the opening. What matters is that they can be
+                // told apart from the part's own edges.
+                check(bridges > 0, "a mesh bored face needs bridge edges");
+            }
+            std::printf("  %s: top face has %zu edges, %d of them bridges\n",
+                        backend == Backend::Brep ? "exact" : "mesh ", fe.size(), bridges);
+        }
     }
 
     // Operations are still mesh-only; Stage 2 moves them across one at a time,

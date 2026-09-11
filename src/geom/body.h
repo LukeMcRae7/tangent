@@ -127,6 +127,14 @@ public:
     Real edgeLength(EdgeId e) const;
     Vec3 edgeMidpoint(EdgeId e) const;
 
+    // The edge as a chain of points along the curve, no chord further than
+    // `deviationMm` from it; 0 lets the backend choose. Anything that draws an
+    // edge wants this and not the two ends -- the straight line between a
+    // circular rim's ends runs across the hole rather than around it.
+    //
+    // A mesh edge comes back as its two ends, which is the whole of a line.
+    void edgePolyline(EdgeId e, Real deviationMm, std::vector<Vec3>& out) const;
+
     // ---- Names -------------------------------------------------------------
     ElementId faceName(FaceId f)     const {
         return brep_ ? brep::faceName(*brep_, f) : mesh_.faceId(f);

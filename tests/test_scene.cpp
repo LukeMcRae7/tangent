@@ -218,6 +218,77 @@ int main() {
         std::printf("[pick] vertex/edge/face priority and generous picking ok\n");
     }
 
+    // ---- A round rim is clickable all the way round ------------------------
+    // Picking measured the cursor against the chord between an edge's two ends.
+    // A closed rim's ends are the same point, so the chord collapsed and only
+    // the handful of pixels around its seam could ever be clicked.
+    if (brep::available()) {
+        Scene s;
+        PrimitiveSpec plateSpec;
+        plateSpec.kind = PrimitiveKind::Box;
+        plateSpec.box.width = plateSpec.box.depth = 60;
+        plateSpec.box.height = 10;
+        PrimitiveSpec drillSpec;
+        drillSpec.kind = PrimitiveKind::Cylinder;
+        drillSpec.cylinder.radius = 10;
+        drillSpec.cylinder.height = 40;
+
+        Body plate, drill, bored;
+        check(makePrimitive(plateSpec, plate, Backend::Brep), "exact plate built");
+        check(makePrimitive(drillSpec, drill, Backend::Brep), "exact drill built");
+        drill.transform(translate({0, 0, -15}));
+        std::string why;
+        check(booleanOp(plate, drill, BooleanOp::Difference, bored, 5, false, &why),
+              std::string("bored the plate: ") + why);
+
+        // The upper rim, and where it sits.
+        std::vector<EdgeId> all;
+        bored.allEdges(all);
+        EdgeId rim = kInvalid;
+        Vec3 centre{};
+        Real radius = 0;
+        for (EdgeId e : all) {
+            Vec3 c, ax;
+            Real r = 0;
+            if (!bored.edgeCircle(e, c, ax, r)) continue;
+            if (rim == kInvalid || c.z > centre.z) { rim = e; centre = c; radius = r; }
+        }
+        check(rim != kInvalid, "found a circular rim");
+
+        const ObjectId id = s.addBody(bored, {}, "Plate");
+        const Body& body = s.find(id)->body;
+
+        const int W = 800, H = 800;
+        const Mat4 view = lookAt({0, 0, 200}, {0, 0, 0}, {0, 1, 0});
+        const Mat4 proj = perspective(radians(45.0f), 1.0f, 0.1f, 1000.0f);
+        const Mat4 vp = proj * view;
+        auto pixelOf = [&](Vec3 world) {
+            const Vec4 clip = vp * Vec4(world, 1.0f);
+            const Vec3 ndc = clip.xyz() / clip.w;
+            return Vec2{(ndc.x * 0.5f + 0.5f) * W, (1.0f - (ndc.y * 0.5f + 0.5f)) * H};
+        };
+
+        const int probes = 8;
+        int onRim = 0;
+        for (int i = 0; i < probes; ++i) {
+            const Real a = 2.0 * kPi * i / probes;
+            const Vec3 on{centre.x + radius * std::cos(a),
+                          centre.y + radius * std::sin(a), centre.z};
+            // Aim the ray just outside the rim so it lands on the top face and
+            // the cursor sits right on the drawn curve.
+            const Vec3 aim{centre.x + (radius + 0.4) * std::cos(a),
+                           centre.y + (radius + 0.4) * std::sin(a), centre.z};
+            const ElementHit h = s.pickElement(Ray{{static_cast<float>(aim.x),
+                                                    static_cast<float>(aim.y), 200.0f},
+                                                   {0, 0, -1}},
+                                               vp, W, H, pixelOf(on));
+            if (h.hit() && h.ref.kind == ElementKind::Edge &&
+                body.edgeKind(h.ref.index) == CurveKind::Circle) ++onRim;
+        }
+        check(onRim == probes, "a rim picks all the way round, not only at its seam");
+        std::printf("[pick] rim clickable at %d of %d points around it\n", onRim, probes);
+    }
+
     // ---- Element selection bookkeeping -------------------------------------
     {
         Scene s;

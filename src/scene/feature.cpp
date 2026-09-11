@@ -19,6 +19,7 @@ const char* featureKindName(FeatureKind k) {
         case FeatureKind::Inset:      return "Inset";
         case FeatureKind::Bevel:      return "Bevel";
         case FeatureKind::VertexEdit: return "Edit Vertices";
+        case FeatureKind::Shell:      return "Shell";
     }
     return "Feature";
 }
@@ -78,6 +79,17 @@ std::string Feature::summary() const {
         case FeatureKind::VertexEdit:
             std::snprintf(buf, sizeof(buf), "Edit  %zu vert%s", verts.size(),
                           verts.size() == 1 ? "ex" : "ices");
+            break;
+        case FeatureKind::Shell:
+            // An open face is the point of most shells, so say when there is
+            // none rather than leaving the reader to infer it from a blank.
+            if (faces.empty())
+                std::snprintf(buf, sizeof(buf), "Shell  %.2f mm  (sealed)",
+                              static_cast<double>(thickness));
+            else
+                std::snprintf(buf, sizeof(buf), "Shell  %.2f mm  (%s open)",
+                              static_cast<double>(thickness),
+                              faces.describe("face").c_str());
             break;
     }
     return buf;
@@ -274,6 +286,21 @@ bool evaluateFrom(std::vector<Feature>& features, size_t from,
             std::string reason;
             if (!filletEdges(body, spec, &reason))
                 fail(reason.empty() ? "the fillet could not be built" : reason.c_str());
+            break;
+        }
+
+        case FeatureKind::Shell: {
+            if (body.empty()) { fail("nothing to shell"); break; }
+            // An empty selection means a sealed cavity, not "every face", so it
+            // resolves to nothing rather than going through resolveFaces.
+            scratchFaces.clear();
+            if (!f.faces.empty() && !f.faces.resolveFaces(body, scratchFaces)) {
+                fail("the faces to open no longer exist");
+                break;
+            }
+            std::string why;
+            if (!shellBody(body, scratchFaces, f.thickness, f.uid, &why))
+                fail(why.empty() ? "the shell could not be built" : why.c_str());
             break;
         }
 

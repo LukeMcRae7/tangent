@@ -144,6 +144,16 @@ Vec3 Body::edgeMidpoint(EdgeId e) const {
     return (a + b) * 0.5;
 }
 
+void Body::edgePolyline(EdgeId e, Real deviationMm, std::vector<Vec3>& out) const {
+    if (brep_) { brep::edgePolyline(*brep_, e, deviationMm, out); return; }
+    out.clear();
+    if (!hasEdge(e)) return;
+    Vec3 a{}, b{};
+    edgePositions(e, a, b);
+    out.push_back(a);           // a mesh edge is a straight line, and this is it
+    out.push_back(b);
+}
+
 void Body::coplanarFaceGroup(FaceId f, std::vector<FaceId>& out) const {
     if (brep_) {
         // A B-rep face is already the whole flat region: there is nothing to

@@ -50,6 +50,7 @@ struct UiActions {
     bool bevel = false;
     bool split = false;
     bool fillet = false;
+    bool shell = false;
 
     bool      booleanRequested = false;
     BooleanOp booleanOp = BooleanOp::Difference;

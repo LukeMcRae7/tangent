@@ -400,6 +400,34 @@ int main() {
         check(o->body.faceCount() == facesBefore, "re-evaluates to the same mesh");
         check(near(o->localBounds.size().z, boundsBefore.size().z, 1e-9),
               "same dimensions");
+        // Version 6 added the shell's wall thickness. A field written at the
+        // end of a feature is the easiest kind to get subtly wrong, so it is
+        // checked by value rather than by the file merely loading.
+        if (brep::available()) {
+            Scene s2;
+            s2.setDefaultBackend(Backend::Brep);
+            const ObjectId id2 = s2.addPrimitive(PrimitiveKind::Box);
+            Feature sh;
+            sh.kind = FeatureKind::Shell;
+            sh.thickness = 1.75;
+            std::string why2;
+            check(s2.addFeature(id2, sh, &why2), std::string("shelled: ") + why2);
+            const Real hollow = s2.find(id2)->body.health(false).volume;
+
+            const std::string p2 = tmp("shell.tng");
+            check(saveProject(s2, p2).ok, "saved a shelled project");
+            Scene back;
+            check(loadProject(back, p2).ok, "loaded it again");
+            const SceneObject* o2 = back.objects().front().get();
+            check(o2->features.size() == 2, "both features came back");
+            check(o2->features[1].kind == FeatureKind::Shell, "the shell is still a shell");
+            check(near(o2->features[1].thickness, 1.75), "and kept its wall thickness");
+            check(near(o2->body.health(false).volume, hollow, 1e-6),
+                  "re-evaluating gives the same hollow body");
+            std::remove(p2.c_str());
+            std::printf("[project] a shell round-trips at version %u\n", kProjectVersion);
+        }
+
         std::printf("[project] round trip: %zu features, %d faces\n",
                     o->features.size(), o->body.faceCount());
 

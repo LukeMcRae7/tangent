@@ -37,6 +37,10 @@ struct ViewOptions {
     // Bevel parameters, driven from the Modify menu.
     Real  bevelWidth    = 1.0;
     int   bevelSegments = 1;
+
+    // The wall a shell leaves. 2mm is a few perimeters at a common nozzle
+    // width, which is the thinnest wall most printers make well.
+    Real  shellThickness = 2.0;
 };
 
 // Sub-rectangle of the framebuffer to draw into, in physical pixels and in

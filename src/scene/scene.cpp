@@ -341,6 +341,42 @@ float distToSegment(Vec2 p, Vec2 a, Vec2 b) {
     return length(p - (a + ab * t));
 }
 
+// Pixel distance from the cursor to an edge *as it is drawn*: along the curve,
+// rather than across the chord between its two ends. Negative when nothing
+// projected in front of the camera.
+//
+// This is where measuring the chord failed worst. A closed rim's two ends are
+// the same point, so the chord collapsed to that point and the only part of a
+// whole circle that could be clicked was the handful of pixels around its
+// seam. Sampled fine enough to stay inside a pixel at any zoom worth clicking
+// at; picking runs on a click and not per frame, so this is not a frame cost.
+float distToEdgePx(const Body& body, const Mat4& model, EdgeId e,
+                   const Mat4& viewProj, int w, int h, Vec2 cursorPx,
+                   std::vector<Vec3>& scratch) {
+    body.edgePolyline(e, body.edgeLength(e) * 0.0005, scratch);
+
+    float best = -1.0f;
+    Vec2 prev{};
+    bool havePrev = false;
+    for (const Vec3& local : scratch) {
+        Vec2 px;
+        if (!projectPx(viewProj, w, h, transformPoint(model, local), px)) {
+            havePrev = false;
+            continue;
+        }
+        if (havePrev) {
+            const float d = distToSegment(cursorPx, prev, px);
+            if (best < 0.0f || d < best) best = d;
+        }
+        prev = px;
+        havePrev = true;
+    }
+    // One lone point still has a distance: a degenerate edge should not become
+    // unpickable just because it has no length to measure along.
+    if (best < 0.0f && havePrev) best = length(cursorPx - prev);
+    return best;
+}
+
 } // namespace
 
 ElementHit Scene::pickElement(const Ray& ray, const Mat4& viewProj,
@@ -378,18 +414,16 @@ ElementHit Scene::pickElement(const Ray& ray, const Mat4& viewProj,
             }
 
             std::vector<EdgeId> fe;
+            std::vector<Vec3> edgePts;
             body.faceEdges(surface.face, fe);
             for (EdgeId e : fe) {
                 // A cut that only exists because a face cannot hold a hole is
                 // not drawn, so it must not be pickable either -- clicking one
                 // would select a line the user cannot see.
                 if (body.isBridgeEdge(e)) continue;
-                Vec3 a, b;
-                body.edgePositions(e, a, b);
-                Vec2 p0, p1;
-                if (!atPixel(a, p0) || !atPixel(b, p1)) continue;
-                const float d = distToSegment(cursorPx, p0, p1);
-                if (d < bestEdge) { bestEdge = d; edgePick = e; }
+                const float d = distToEdgePx(body, model, e, viewProj, viewportW,
+                                             viewportH, cursorPx, edgePts);
+                if (d >= 0.0f && d < bestEdge) { bestEdge = d; edgePick = e; }
             }
 
             if (vertPick != kInvalid)      out.ref = {surface.object, ElementKind::Vertex, vertPick};
@@ -411,6 +445,7 @@ ElementHit Scene::pickElement(const Ray& ray, const Mat4& viewProj,
 
     std::vector<VertexId> verts;
     std::vector<EdgeId> edges;
+    std::vector<Vec3> edgePts;
     for (const auto& obj : objects_) {
         if (!obj->visible || obj->body.empty()) continue;
         const Mat4 model = obj->modelMatrix();
@@ -432,12 +467,9 @@ ElementHit Scene::pickElement(const Ray& ray, const Mat4& viewProj,
         body.allEdges(edges);
         for (EdgeId e : edges) {
             if (body.isBridgeEdge(e)) continue;
-            Vec3 a, b;
-            body.edgePositions(e, a, b);
-            Vec2 p0, p1;
-            if (!atPixel(a, p0) || !atPixel(b, p1)) continue;
-            const float d = distToSegment(cursorPx, p0, p1);
-            if (d < bestEdge) { bestEdge = d; edgePick = e; edgeObj = obj->id; }
+            const float d = distToEdgePx(body, model, e, viewProj, viewportW,
+                                         viewportH, cursorPx, edgePts);
+            if (d >= 0.0f && d < bestEdge) { bestEdge = d; edgePick = e; edgeObj = obj->id; }
         }
     }
 

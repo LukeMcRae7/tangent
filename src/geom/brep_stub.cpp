@@ -38,6 +38,11 @@ BrepRef insetFaces(const BrepRef&, const std::vector<FaceId>&, Real, ElementId,
     if (reason) *reason = "built without OpenCASCADE";
     return {};
 }
+BrepRef shell(const BrepRef&, const std::vector<FaceId>&, Real, ElementId,
+              std::string* reason) {
+    if (reason) *reason = "built without OpenCASCADE";
+    return {};
+}
 BrepRef prism(const std::vector<Vec3>&, const std::vector<Real>&, Vec3, Real, Real,
               ElementId, std::string* reason) {
     if (reason) *reason = "built without OpenCASCADE";
@@ -83,6 +88,7 @@ bool edgeCircle(const BrepShape&, EdgeId, Vec3&, Vec3&, Real&) { return false; }
 bool faceCylinder(const BrepShape&, FaceId, Vec3&, Vec3&, Real&) { return false; }
 Real edgeLength(const BrepShape&, EdgeId) { return 0.0; }
 Vec3 edgeMidpoint(const BrepShape&, EdgeId) { return {0, 0, 0}; }
+void edgePolyline(const BrepShape&, EdgeId, Real, std::vector<Vec3>& out) { out.clear(); }
 
 ElementId faceName(const BrepShape&, FaceId) { return kNoId; }
 ElementId edgeName(const BrepShape&, EdgeId) { return kNoId; }

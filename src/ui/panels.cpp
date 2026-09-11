@@ -201,6 +201,19 @@ void drawMenuBar(UiContext& ctx) {
                             ctx.scene->contextObject() != kNoObject))
             ctx.actions.bevel = true;
         ImGui::TextColored(kDim, "  segments 1 = chamfer, more = round");
+
+        ImGui::Separator();
+        ImGui::SetNextItemWidth(140.0f);
+        ImGui::DragScalarN("Wall", ImGuiDataType_Double, &ctx.view->shellThickness, 1,
+                           0.05f, nullptr, nullptr, "%.2f mm");
+        if (ImGui::MenuItem("Shell (Hollow Out)", nullptr, false,
+                            ctx.scene->contextObject() != kNoObject))
+            ctx.actions.shell = true;
+        if (faceCount > 0)
+            ImGui::TextColored(kDim, "  %zu selected face%s left open", faceCount,
+                               faceCount == 1 ? "" : "s");
+        else
+            ImGui::TextColored(kDim, "  no faces selected: a sealed cavity");
         ImGui::EndMenu();
     }
 
@@ -502,6 +515,12 @@ void drawHistory(UiContext& ctx) {
             }
             case FeatureKind::Inset:
                 changed |= labeledDrag("Amount", f.amount, 0.05f, 0.01f, 10000.0f);
+                break;
+            case FeatureKind::Shell:
+                changed |= labeledDrag("Wall", f.thickness, 0.05f, 0.01f, 10000.0f);
+                ImGui::TextColored(kDim, "%s", f.faces.empty()
+                                                   ? "sealed: no face left open"
+                                                   : f.faces.describe("face").c_str());
                 break;
             case FeatureKind::Bevel: {
                 const bool wasChamfer = f.segments == 1;

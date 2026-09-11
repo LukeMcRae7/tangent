@@ -16,10 +16,12 @@
 
 namespace tg {
 
-inline constexpr uint32_t kProjectVersion = 5;   // 3: features name what they act on
+inline constexpr uint32_t kProjectVersion = 6;   // 3: features name what they act on
                                                 //  4: geometry is a tagged Body
                                                 //  5: bodies may be exact, and
                                                 //     say which kernel built them
+                                                //  6: a feature may be a shell,
+                                                //     which carries a wall thickness
 
 // The oldest a file may be and still open. Reading an older format costs a
 // branch or two and keeps someone's work openable; writing one does not, so

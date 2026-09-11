@@ -171,6 +171,21 @@ bool Application::init() {
         applyBoolean(static_cast<BooleanOp>(booleanDemo_));
     }
 
+    if (shellDemo_ > 0.0f && !scene_.objects().empty()) {
+        // Drives the menu's own path -- select the top face, then shell -- so
+        // this exercises the action and the feature rather than the kernel call.
+        const ObjectId id = scene_.objects().front()->id;
+        std::vector<FaceId> faces;
+        scene_.find(id)->body.allFaces(faces);
+        for (FaceId f : faces)
+            if (dot(scene_.find(id)->body.faceNormal(f), Vec3{0, 0, 1}) > 0.99)
+                scene_.selectElement({id, ElementKind::Face, f}, true);
+        view_.shellThickness = shellDemo_;
+        shellActiveObject();
+        if (!notice_.empty()) std::fprintf(stderr, "[app] %s\n", notice_.c_str());
+        scene_.select(id);
+    }
+
     if (measureDemo_ && !scene_.objects().empty()) {
         const ObjectId id = scene_.objects().front()->id;
         const Body& m = scene_.find(id)->body;
@@ -459,6 +474,20 @@ void Application::drawSelectionHighlights() {
             return p + toEye * (camera_.pixelWorldSize(p) * 2.0f / len);
         };
 
+        // An edge is drawn along its curve, not across it. A rim's two ends are
+        // the same point, or nearly, so the chord between them runs through the
+        // hole instead of around it -- and a fillet or a bore reads as a
+        // polygon. Sampled to half a pixel, which is the tolerance the
+        // wireframe underneath it already uses.
+        std::vector<Vec3> pts;
+        auto outlineEdge = [&](EdgeId edge) {
+            const Vec3 midW = transformPoint(model, o->body.edgeMidpoint(edge));
+            o->body.edgePolyline(edge, camera_.pixelWorldSize(midW) * 0.5, pts);
+            for (size_t k = 1; k < pts.size(); ++k)
+                renderer_.addLine(lift(transformPoint(model, pts[k - 1])),
+                                  lift(transformPoint(model, pts[k])), edgeCol);
+        };
+
         switch (e.kind) {
         case ElementKind::Face: {
             if (!o->body.hasFace(e.index)) break;
@@ -475,19 +504,18 @@ void Application::drawSelectionHighlights() {
             std::vector<EdgeId> fe;
             o->body.faceEdges(e.index, fe);
             for (EdgeId edge : fe) {
-                Vec3 a, b;
-                o->body.edgePositions(edge, a, b);
-                renderer_.addLine(lift(transformPoint(model, a)),
-                                  lift(transformPoint(model, b)), edgeCol);
+                // A bridge edge is not an edge of the part: it exists only
+                // because a mesh face cannot hold a hole, so it runs from the
+                // outline across to the rim. Outlining it draws a line over
+                // the opening. A B-rep body has none and answers false.
+                if (o->body.isBridgeEdge(edge)) continue;
+                outlineEdge(edge);
             }
             break;
         }
         case ElementKind::Edge: {
             if (!o->body.hasEdge(e.index)) break;
-            Vec3 a, b;
-            o->body.edgePositions(e.index, a, b);
-            renderer_.addLine(lift(transformPoint(model, a)),
-                              lift(transformPoint(model, b)), edgeCol);
+            outlineEdge(e.index);
             break;
         }
         case ElementKind::Vertex: {
@@ -925,6 +953,31 @@ void Application::bevelActiveObject() {
     if (!scene_.addFeature(target, f)) return;
     undo_.push(std::make_unique<FeatureCommand>(target, std::move(chainBefore),
                                                 obj->features, "Bevel"));
+}
+
+void Application::shellActiveObject() {
+    const ObjectId target = scene_.contextObject();
+    SceneObject* obj = scene_.find(target);
+    if (!obj) return;
+
+    Feature f;
+    f.kind = FeatureKind::Shell;
+    f.thickness = view_.shellThickness;
+
+    // Whatever faces are selected are the ones left open. None is not an error:
+    // it is a sealed cavity, and the summary says so.
+    const std::vector<FaceId> open = scene_.selectedFaces(target);
+    if (!open.empty()) f.faces = nameFaces(obj->body, open);
+
+    std::vector<Feature> chainBefore = obj->features;
+    std::string why;
+    if (!scene_.addFeature(target, f, &why)) {
+        notice_ = why.empty() ? "the shell could not be built" : "Shell: " + why;
+        return;
+    }
+    scene_.clearElementSelection();
+    undo_.push(std::make_unique<FeatureCommand>(target, std::move(chainBefore),
+                                                obj->features, "Shell"));
 }
 
 namespace {
@@ -1761,6 +1814,7 @@ void Application::applyActions() {
     if (a.bevel)   bevelActiveObject();
     if (a.split)   splitActiveObject();
     if (a.fillet)  beginFillet();
+    if (a.shell)   shellActiveObject();
     if (a.booleanRequested) applyBoolean(a.booleanOp);
 
     if (a.rebuildObject != kNoObject) {

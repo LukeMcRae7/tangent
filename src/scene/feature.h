@@ -32,6 +32,7 @@ enum class FeatureKind {
     Bevel,
     VertexEdit,
     Boolean,     // combine with a baked copy of another body
+    Shell,       // hollow it out, opening the faces named
 };
 
 const char* featureKindName(FeatureKind k);
@@ -113,6 +114,11 @@ struct Feature {
     Real distance = 5.0;    // Extrude, signed
     ExtrudeOp extrudeOp = ExtrudeOp::Auto;
     Real amount   = 2.0;    // Inset
+
+    // Shell: the wall left behind, measured inward. `faces` holds the faces to
+    // open, and may be empty -- that is a sealed cavity, which is a thing
+    // someone may want and a thing a printer will want a drain hole in.
+    Real thickness = 2.0;
 
     // Bevel / fillet. `edges` empty means every edge of the body; otherwise
     // just those, named by half-edge as numbered at this point in the chain.

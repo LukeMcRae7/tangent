@@ -137,6 +137,14 @@ bool faceCylinder(const BrepShape& s, FaceId f, Vec3& point, Vec3& axis, Real& r
 Real edgeLength(const BrepShape& s, EdgeId e);
 Vec3 edgeMidpoint(const BrepShape& s, EdgeId e);
 
+// The edge as a chain of points along the curve, close enough that no chord
+// sits further than `deviationMm` from it. Pass 0 to let the backend choose.
+//
+// Anything that *draws* an edge needs this rather than the two ends: the line
+// between a rim's ends runs across the hole instead of around it.
+void edgePolyline(const BrepShape& s, EdgeId e, Real deviationMm,
+                  std::vector<Vec3>& out);
+
 // ---- Names -----------------------------------------------------------------
 ElementId faceName(const BrepShape& s, FaceId f);
 ElementId edgeName(const BrepShape& s, EdgeId e);
@@ -191,6 +199,17 @@ BrepRef extrudeFaces(const BrepRef& s, const std::vector<FaceId>& faces, Real di
 // reason rather than approximated.
 BrepRef insetFaces(const BrepRef& s, const std::vector<FaceId>& faces, Real amount,
                    ElementId salt, std::vector<ElementId>* newFaces, std::string* reason);
+
+// Hollows the solid out, leaving a wall `thickness` thick, and opens the faces
+// named: a box shelled with its top open is a tray, and with nothing open it is
+// a sealed void that a printer will want a drain hole in.
+//
+// `thickness` is the wall and is measured inward, so it must be positive.
+// Refused with a reason when the wall does not fit -- two sides that would meet
+// in the middle, a thickness wider than the part -- rather than handing back a
+// solid that self-intersects.
+BrepRef shell(const BrepRef& s, const std::vector<FaceId>& openFaces, Real thickness,
+              ElementId salt, std::string* reason);
 
 // A solid from a closed outline on a plane, swept between two heights along the
 // plane's normal. The create tool's profiles arrive this way.
