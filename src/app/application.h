@@ -83,6 +83,11 @@ public:
     void setAutoExtrude(float mm) { autoExtrude_ = true; autoExtrudeMm_ = mm; }
     void setShellDemo(float wallMm) { shellDemo_ = wallMm; }
 
+    // Shell, then extrude what is left of the face that was opened -- the
+    // sequence that crashed. Kept because it crossed three subsystems that had
+    // each been tested on their own.
+    void setShellExtrudeDemo(float mm) { shellExtrudeDemo_ = mm; }
+
     // Rounds one edge of a box and then the edge opposite it, through the same
     // path the keyboard takes, and reports whether the part came out symmetric.
     // Two opposite edges rounded to the same radius can only give a symmetric
@@ -167,6 +172,15 @@ private:
         // to. Rebuilt as the cursor moves between edges of a chain so the guide
         // follows the pointer rather than sitting on whichever edge came first.
         DragAxis axis;
+
+        // The largest radius that builds, found once when the gesture starts.
+        //
+        // It used to be rediscovered every frame by bisecting whenever the
+        // asked-for radius failed, so near the limit the preview flickered
+        // between two answers and the number under the cursor jittered. The
+        // limit is a property of the geometry, not of where the pointer is:
+        // finding it once costs a dozen builds at the start and nothing after.
+        Real maxRadius = 0.0;
         Body meshBefore;
         std::vector<Feature> chainBefore;
         std::string typedValue;
@@ -279,6 +293,7 @@ private:
     bool        autoExtrude_ = false;
     float       autoExtrudeMm_ = 10.0f;
     float       filletDemo_ = 0.0f;     // radius in mm; 0 means do not
+    float       shellExtrudeDemo_ = 0.0f;
     float       shellDemo_ = 0.0f;      // wall in mm; 0 means do not
     bool        holdTransform_ = false;
 

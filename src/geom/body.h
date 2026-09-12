@@ -72,7 +72,8 @@ public:
     void faceEdges(FaceId f, std::vector<EdgeId>& out) const;
     void faceVertices(FaceId f, std::vector<VertexId>& out) const;
     int  faceDegree(FaceId f) const {
-        return brep_ ? brep::faceDegree(*brep_, f) : mesh_.faceDegree(f);
+        if (brep_) return brep::faceDegree(*brep_, f);
+        return hasFace(f) ? mesh_.faceDegree(f) : 0;
     }
 
     void edgeEnds(EdgeId e, VertexId& a, VertexId& b) const;
@@ -83,20 +84,34 @@ public:
     void vertexEdges(VertexId v, std::vector<EdgeId>& out) const;
 
     // ---- Geometry ----------------------------------------------------------
+    // Every one of these checks the handle first.
+    //
+    // A handle does not survive an edit, and something always ends up holding
+    // one that did not -- a selection made before an operation, a tool that
+    // cached one, a panel drawing last frame's highlight. The B-rep backend has
+    // always answered those safely; the mesh backend indexed straight into a
+    // vector and took the process down with it. Two backends behind one
+    // interface have to fail the same way, and the safe way is the one that
+    // leaves a user's work on screen.
     Vec3 faceNormal(FaceId f)   const {
-        return brep_ ? brep::faceNormal(*brep_, f) : mesh_.faceNormal(f);
+        if (brep_) return brep::faceNormal(*brep_, f);
+        return hasFace(f) ? mesh_.faceNormal(f) : Vec3{};
     }
     Vec3 faceCentroid(FaceId f) const {
-        return brep_ ? brep::faceCentroid(*brep_, f) : mesh_.faceCentroid(f);
+        if (brep_) return brep::faceCentroid(*brep_, f);
+        return hasFace(f) ? mesh_.faceCentroid(f) : Vec3{};
     }
     Real faceArea(FaceId f)     const {
-        return brep_ ? brep::faceArea(*brep_, f) : mesh_.faceArea(f);
+        if (brep_) return brep::faceArea(*brep_, f);
+        return hasFace(f) ? mesh_.faceArea(f) : Real(0);
     }
     AABB faceBounds(FaceId f)   const {
-        return brep_ ? brep::faceBounds(*brep_, f) : mesh_.faceBounds(f);
+        if (brep_) return brep::faceBounds(*brep_, f);
+        return hasFace(f) ? mesh_.faceBounds(f) : AABB{};
     }
     Vec3 vertexPosition(VertexId v) const {
-        return brep_ ? brep::vertexPosition(*brep_, v) : mesh_.verts[v].position;
+        if (brep_) return brep::vertexPosition(*brep_, v);
+        return hasVertex(v) ? mesh_.verts[v].position : Vec3{};
     }
     AABB bounds() const { return brep_ ? brep::bounds(*brep_) : mesh_.bounds(); }
 
@@ -195,10 +210,10 @@ public:
     // canMoveVertices() first: a feature that silently did nothing would be
     // worse than one that refuses with a reason.
     void moveVertex(VertexId v, Vec3 delta) {
-        if (!brep_) mesh_.verts[v].position += delta;
+        if (!brep_ && hasVertex(v)) mesh_.verts[v].position += delta;
     }
     void setVertexPosition(VertexId v, Vec3 p) {
-        if (!brep_) mesh_.verts[v].position = p;
+        if (!brep_ && hasVertex(v)) mesh_.verts[v].position = p;
     }
     bool canMoveVertices() const { return !brep_; }
 

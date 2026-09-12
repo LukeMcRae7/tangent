@@ -47,51 +47,91 @@ Real DragAxis::valueAt(const Camera& camera, Vec2 mousePx) const {
     return length(mousePx - originPx) * static_cast<Real>(camera.pixelWorldSize(origin));
 }
 
+namespace {
+
+// A line of a given thickness in pixels, drawn as parallel strands.
+//
+// Not glLineWidth: a core profile is only required to support a width of one,
+// and several drivers give exactly that. Strands cost a few more vertices in a
+// batch that already holds hundreds.
+void thickLine(Renderer& renderer, const Camera& camera, Vec3 a, Vec3 b, Vec4 color,
+               Real widthPx) {
+    Vec3 along = b - a;
+    if (lengthSq(along) < 1e-18) return;
+    along = normalize(along);
+
+    Vec3 across = cross(along, normalize(camera.eye() - a));
+    if (lengthSq(across) < 1e-12) across = perpendicular(along);
+    across = normalize(across);
+
+    const Real px = static_cast<Real>(camera.pixelWorldSize(a));
+    const int strands = std::max(1, static_cast<int>(std::lround(widthPx)));
+    for (int i = 0; i < strands; ++i) {
+        const Real offset = (static_cast<Real>(i) - (strands - 1) * 0.5) * px * 0.8;
+        renderer.addLine(a + across * offset, b + across * offset, color);
+    }
+}
+
+}  // namespace
+
 void DragAxis::drawGuide(Renderer& renderer, const Camera& camera, Real value,
-                         Real step) const {
+                         Real step, Real limit) const {
     if (!valid) return;
 
-    const Vec4 line = toVec4(palette::kBrand, 0.55f);
-    const Vec4 lit  = toVec4(palette::kBrand, 1.0f);
+    const Vec4 track = toVec4(palette::kBrand, 0.45f);
+    const Vec4 lit   = toVec4(palette::kBrand, 1.0f);
 
-    // Long enough to read as a direction, sized in pixels so it looks the same
-    // at any zoom, and at least as long as the value being dragged so the
-    // cursor never runs off the end of its own guide.
     const Real px = static_cast<Real>(camera.pixelWorldSize(origin));
-    const Real ahead = std::max(px * 160.0, std::fabs(value) * 1.35);
-    const Real behind = px * 28.0;
 
-    const Vec3 tip = origin + direction * ahead;
-    renderer.addLine(origin - direction * behind, tip, line);
+    // The track runs to the limit when there is one, so the end of the travel
+    // is a place on screen rather than something discovered by pushing into it.
+    const Real reach = limit > 0.0 ? limit : std::max(px * 170.0, std::fabs(value) * 1.4);
+    const Real behind = px * 26.0;
 
-    // The arrow says which way is more. Built from the axis and whatever is
-    // across it on screen, so it reads as an arrow from wherever you look.
     Vec3 across = cross(direction, normalize(camera.eye() - origin));
     if (lengthSq(across) < 1e-12) across = perpendicular(direction);
     across = normalize(across);
-    const Real head = px * 9.0;
-    renderer.addLine(tip, tip - direction * head + across * (head * 0.45), lit);
-    renderer.addLine(tip, tip - direction * head - across * (head * 0.45), lit);
 
-    // Ticks at the snap increment: how far the mouse has to travel for one
-    // step, shown rather than discovered.
+    const Vec3 tip = origin + direction * reach;
+    thickLine(renderer, camera, origin - direction * behind, tip, track, 2.0);
+
+    // A cap at the end when the end means something.
+    if (limit > 0.0) {
+        const Real cap = px * 7.0;
+        thickLine(renderer, camera, tip - across * cap, tip + across * cap, track, 2.0);
+    } else {
+        const Real head = px * 9.0;
+        thickLine(renderer, camera, tip, tip - direction * head + across * (head * 0.45), lit, 2.0);
+        thickLine(renderer, camera, tip, tip - direction * head - across * (head * 0.45), lit, 2.0);
+    }
+
+    // Ticks at the snap increment: how far the mouse travels for one step,
+    // shown rather than discovered.
     if (step > 0.0) {
-        const Real span = ahead;
-        const int most = 48;                      // a tick every few pixels is noise
+        const int most = 60;
         int drawn = 0;
-        for (Real at = step; at <= span && drawn < most; at += step, ++drawn) {
+        for (Real at = step; at <= reach && drawn < most; at += step, ++drawn) {
             const Vec3 p = origin + direction * at;
-            const Real len = px * ((drawn + 1) % 5 == 0 ? 5.0 : 2.5);
-            renderer.addLine(p - across * len, p + across * len, line);
+            const Real len = px * ((drawn + 1) % 5 == 0 ? 4.5 : 2.2);
+            renderer.addLine(p - across * len, p + across * len, track);
         }
     }
 
-    // Where the value currently sits.
-    if (std::fabs(value) > 1e-9) {
-        const Vec3 at = origin + direction * value;
-        const Real mark = px * 7.0;
-        renderer.addLine(at - across * mark, at + across * mark, lit);
+    // The part that moves. Everything above is fixed for the whole gesture, so
+    // this is the only thing the eye has to follow: the travelled length, and a
+    // bar across the track at the value itself.
+    const Real travelled = clampf(value, 0.0, reach);
+    if (travelled > 1e-9) {
+        thickLine(renderer, camera, origin, origin + direction * travelled, lit, 3.0);
     }
+    const Vec3 at = origin + direction * travelled;
+    const Real mark = px * 11.0;
+    thickLine(renderer, camera, at - across * mark, at + across * mark, lit, 3.0);
+    // A short stem either side of the bar, so it reads as a slider rather than
+    // as another tick.
+    const Real stem = px * 4.0;
+    thickLine(renderer, camera, at + across * mark, at + across * mark - direction * stem, lit, 2.0);
+    thickLine(renderer, camera, at - across * mark, at - across * mark - direction * stem, lit, 2.0);
 }
 
 DragAxis filletAxis(const Body& body, const Mat4& model, EdgeId edge, Vec3 nearPoint) {

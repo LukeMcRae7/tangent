@@ -370,6 +370,56 @@ int main() {
         }
     }
 
+    std::printf("\n--- Body: a handle that is no longer ours ---\n");
+    {
+        // Something always ends up holding a handle from before an edit: a
+        // selection made a moment ago, a tool that cached one, a panel drawing
+        // last frame's highlight. Both backends have to answer the same way,
+        // and the answer has to be an answer rather than a crash.
+        for (int pass = 0; pass < 2; ++pass) {
+            const Backend backend = pass == 0 ? Backend::Mesh : Backend::Brep;
+            if (backend == Backend::Brep && !brep::available()) continue;
+            gBackend = backend;
+            const Body b = box();
+            const char* which = pass == 0 ? "mesh" : "exact";
+
+            // Only handles that are stale for every kind. faceCount() + 7 is
+            // not one of them: a mesh numbers edges by half-edge, so a cube has
+            // twenty-four of them and 13 is a perfectly good edge.
+            for (Index stale : {-1, 9999}) {
+                check(!b.hasFace(stale), std::string(which) + ": a stale face is not ours");
+                check(length(b.faceNormal(stale)) < 1e-9, std::string(which) + ": its normal is nothing");
+                check(near(b.faceArea(stale), 0.0), std::string(which) + ": its area is nothing");
+                check(b.faceDegree(stale) == 0, std::string(which) + ": it has no corners");
+                std::vector<EdgeId> fe;
+                b.faceEdges(stale, fe);
+                check(fe.empty(), std::string(which) + ": and no edges");
+
+                check(!b.hasVertex(stale), std::string(which) + ": a stale vertex is not ours");
+                check(length(b.vertexPosition(stale)) < 1e-9,
+                      std::string(which) + ": it is nowhere");
+
+                check(!b.hasEdge(stale), std::string(which) + ": a stale edge is not ours");
+                VertexId ea = 0, eb = 0;
+                b.edgeEnds(stale, ea, eb);
+                check(ea == kInvalid && eb == kInvalid, std::string(which) + ": it has no ends");
+                FaceId fa = 0, fb = 0;
+                b.edgeFaces(stale, fa, fb);
+                check(fa == kNoFace && fb == kNoFace, std::string(which) + ": and no faces");
+            }
+
+            // Moving one does nothing rather than writing past the end.
+            Body edit = box();
+            const Real volumeBefore = edit.health(false).volume;
+            edit.moveVertex(4242, {5, 5, 5});
+            edit.setVertexPosition(-3, {1, 1, 1});
+            check(near(edit.health(false).volume, volumeBefore, 1e-9),
+                  std::string(which) + ": moving a vertex that is not there changes nothing");
+        }
+        gBackend = Backend::Mesh;
+        std::printf("  both backends answer a stale handle rather than taking the process with them\n");
+    }
+
     // Operations are still mesh-only; Stage 2 moves them across one at a time,
     // and this section joins the contract above as it does.
     std::printf("\n--- Body: operations go through the seam ---\n");

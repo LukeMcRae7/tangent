@@ -291,6 +291,60 @@ bool Application::init() {
                      separate, refused, wrong == 0 ? "all correct" : "WRONG EDGE");
     }
 
+    // A negative distance means the same sequence but selecting every up-facing
+    // face -- the rim and the cavity floor together -- which is a second way a
+    // person lands here.
+    if (shellExtrudeDemo_ != 0.0f && !scene_.objects().empty()) {
+        const ObjectId id = scene_.objects().front()->id;
+        // Shell the top, the way the menu does.
+        {
+            SceneObject* o = scene_.find(id);
+            std::vector<FaceId> faces;
+            o->body.allFaces(faces);
+            scene_.clearElementSelection();
+            for (FaceId f : faces)
+                if (dot(o->body.faceNormal(f), Vec3{0, 0, 1}) > 0.99)
+                    scene_.selectElement({id, ElementKind::Face, f}, true);
+            view_.shellThickness = 2.0;
+            shellActiveObject();
+        }
+        // Then select what is left of that face -- the rim around the opening
+        // -- and extrude it, as a person would by clicking it.
+        {
+            SceneObject* o = scene_.find(id);
+            std::vector<FaceId> faces;
+            o->body.allFaces(faces);
+            const AABB bb = o->body.bounds();
+            scene_.clearElementSelection();
+            int picked = 0;
+            for (FaceId f : faces) {
+                if (dot(o->body.faceNormal(f), Vec3{0, 0, 1}) < 0.99) continue;
+                // A negative distance means "every face that points up",
+                // which after a shell is the rim *and* the cavity floor --
+                // two faces at different heights pushed in one gesture.
+                if (shellExtrudeDemo_ > 0.0f &&
+                    std::fabs(o->body.faceCentroid(f).z - bb.max.z) > 1e-6) continue;
+                scene_.selectElement({id, ElementKind::Face, f}, true);
+                ++picked;
+            }
+            std::fprintf(stderr, "[shell-extrude] rim faces selected: %d\n", picked);
+            extrudeSelection();
+            // Dragged, not typed: the mouse path is the one that was used.
+            for (int step = 1; step <= 6; ++step)
+                tool_.update(scene_, camera_,
+                             Vec2{800.0 + step * 12.0, 450.0 - step * 9.0}, true);
+            char buf[32];
+            std::snprintf(buf, sizeof buf, "%g", static_cast<double>(std::fabs(shellExtrudeDemo_)));
+            for (const char* p = buf; *p; ++p) tool_.typeCharacter(*p);
+            tool_.update(scene_, camera_, Vec2{860.0, 400.0}, false);
+            commitTransform();
+            const SceneObject* after = scene_.find(id);
+            std::fprintf(stderr, "[shell-extrude] %d features, %d faces, %.1f mm3, valid=%d\n",
+                         static_cast<int>(after->features.size()), after->body.faceCount(),
+                         after->body.health(false).volume, (int)after->body.validate());
+        }
+    }
+
     if (shellDemo_ > 0.0f && !scene_.objects().empty()) {
         // Drives the menu's own path -- select the top face, then shell -- so
         // this exercises the action and the feature rather than the kernel call.
@@ -1214,6 +1268,33 @@ void Application::beginFillet() {
         return;
     }
 
+    // How far this gesture can go, settled now rather than rediscovered under
+    // the cursor. Doubling until it fails, then bisecting: about a dozen builds
+    // once, against one or more on every frame near the limit.
+    Real maxRadius = initialWidth;
+    {
+        auto builds = [&](Real r) {
+            Body test = obj->body;
+            FilletSpec spec;
+            spec.segments = std::max(1, view_.bevelSegments);
+            for (Index e : edges) spec.edges.push_back({e, r});
+            return filletEdges(test, spec);
+        };
+        Real lo = initialWidth, hi = initialWidth;
+        for (int i = 0; i < 7; ++i) {
+            const Real next = hi * 2.0;
+            if (!builds(next)) break;
+            lo = next;
+            hi = next;
+        }
+        Real fail = hi * 2.0;
+        for (int i = 0; i < 7; ++i) {
+            const Real mid = 0.5 * (lo + fail);
+            if (builds(mid)) lo = mid; else fail = mid;
+        }
+        maxRadius = lo;
+    }
+
     // Select all extended edges in the scene so the highlight displays them
     scene_.clearElementSelection();
     for (Index e : edges) {
@@ -1228,12 +1309,39 @@ void Application::beginFillet() {
     // rather than jumping to an arbitrary width.
     filletTool_.baseRadius = initialWidth;
     filletTool_.currentRadius = initialWidth;
+    filletTool_.maxRadius = maxRadius;
     filletTool_.currentSegments = std::max(1, view_.bevelSegments);
     filletTool_.meshBefore = obj->body;
     filletTool_.chainBefore = obj->features;
     filletTool_.typedValue.clear();
 
     preEditSolid_ = obj->healthVersion == obj->meshVersion && obj->health.solid();
+
+    // The guide is anchored once, to the edge the pointer is nearest right now,
+    // and does not move again for the rest of the gesture.
+    {
+        const Vec2 at = mouseInViewport();
+        const Mat4 model = obj->modelMatrix();
+        Real bestPx = -1.0;
+        Vec3 bestAt{};
+        EdgeId bestEdge = kInvalid;
+        for (EdgeId e : edges) {
+            if (!filletTool_.meshBefore.hasEdge(e)) continue;
+            Vec3 aL, bL;
+            filletTool_.meshBefore.edgePositions(e, aL, bL);
+            const Vec3 aW = transformPoint(model, aL);
+            const Vec3 bW = transformPoint(model, bL);
+            Vec2 aPx, bPx;
+            if (!camera_.projectToPixel(aW, aPx) || !camera_.projectToPixel(bW, bPx)) continue;
+            const Vec2 ab = bPx - aPx;
+            const Real len2 = lengthSq(ab);
+            const Real t = len2 > 1e-9 ? clampf(dot(at - aPx, ab) / len2, 0.0, 1.0) : 0.0;
+            const Real d = length(at - (aPx + ab * t));
+            if (bestPx < 0.0 || d < bestPx) { bestPx = d; bestAt = lerp(aW, bW, t); bestEdge = e; }
+        }
+        if (bestEdge != kInvalid)
+            filletTool_.axis = filletAxis(filletTool_.meshBefore, model, bestEdge, bestAt);
+    }
 
     updateFillet(false);
 }
@@ -1274,52 +1382,38 @@ void Application::updateFillet(bool snap) {
         const Mat4 model = obj->modelMatrix();
         const Body& m = filletTool_.meshBefore;
 
-        // Which edge of the chain the pointer is nearest: that is the one the
-        // guide anchors to, so on a chain of edges the line appears under the
-        // cursor rather than on whichever edge happened to be first.
-        Real bestPx = -1.0;
-        Vec3 bestAt{};
-        EdgeId bestEdge = kInvalid;
-        for (EdgeId e : filletTool_.edges) {
-            if (!m.hasEdge(e)) continue;
-            Vec3 aL, bL;
-            m.edgePositions(e, aL, bL);
-            const Vec3 aW = transformPoint(model, aL);
-            const Vec3 bW = transformPoint(model, bL);
-            Vec2 aPx, bPx;
-            if (!camera_.projectToPixel(aW, aPx) || !camera_.projectToPixel(bW, bPx)) continue;
-
-            const Vec2 ab = bPx - aPx;
-            const Real len2 = lengthSq(ab);
-            const Real t = len2 > 1e-9 ? clampf(dot(curMouse - aPx, ab) / len2, 0.0, 1.0) : 0.0;
-            const Real d = length(curMouse - (aPx + ab * t));
-            if (bestPx < 0.0 || d < bestPx) { bestPx = d; bestAt = lerp(aW, bW, t); bestEdge = e; }
-        }
-
-        if (bestEdge != kInvalid) {
-            filletTool_.axis = filletAxis(m, model, bestEdge, bestAt);
-
-            // Along the axis, not away from the edge in every direction. Off to
-            // the side now changes nothing, and the line on screen says which
-            // way is more -- which is the whole difference between aiming and
-            // discovering.
-            //
-            // Unless the axis is pointing at the eye, where a pixel of movement
-            // is worth an unbounded amount and the old measure is the steadier
-            // one.
-            newR = filletTool_.axis.facingCamera(camera_)
-                       ? filletTool_.axis.valueAt(camera_, curMouse)
-                       : bestPx * camera_.pixelWorldSize(bestAt);
+        // Along the axis fixed when the gesture began. Off to the side changes
+        // nothing, and the line on screen says which way is more -- the whole
+        // difference between aiming and discovering.
+        if (filletTool_.axis.valid) {
+            if (filletTool_.axis.facingCamera(camera_)) {
+                newR = filletTool_.axis.valueAt(camera_, curMouse);
+            } else {
+                // The axis points near the eye, where a pixel of movement is
+                // worth an unbounded amount. Distance from the anchor on screen
+                // is cruder but steady.
+                Vec2 anchorPx{};
+                if (camera_.projectToPixel(filletTool_.axis.origin, anchorPx))
+                    newR = length(curMouse - anchorPx) *
+                           camera_.pixelWorldSize(filletTool_.axis.origin);
+            }
 
             if (snap) {
-                const Real step = camera_.snapStep(bestAt);
+                const Real step = camera_.snapStep(filletTool_.axis.origin);
                 if (step > 0.0) newR = std::round(newR / step) * step;
             }
         }
+        (void)m;
+        (void)model;
         newR = std::max(Real(0.05), newR);
     }
 
-    // Live preview on mesh without artificial whole-mesh bevel limits
+    // Held inside the travel found when the gesture began. Bisecting for the
+    // limit here instead -- which is what this did -- made the preview flicker
+    // between two answers as the cursor approached it, and the number jitter
+    // with it. The limit belongs to the geometry, not to the pointer.
+    if (filletTool_.maxRadius > 0.0) newR = std::min(newR, filletTool_.maxRadius);
+
     Body scratch = filletTool_.meshBefore;
     FilletSpec spec;
     spec.segments = filletTool_.currentSegments;
@@ -1329,34 +1423,10 @@ void Application::updateFillet(bool snap) {
         obj->refreshDerived();
         filletTool_.currentRadius = newR;
         view_.bevelWidth = newR;
-    } else {
-        // Clamp to the highest valid radius so the preview remains accurate and responsive
-        Real validR = 0.05;
-        Real lo = 0.05, hi = newR;
-        for (int iter = 0; iter < 6; ++iter) {
-            const Real mid = 0.5 * (lo + hi);
-            Body test = filletTool_.meshBefore;
-            FilletSpec testSpec;
-            testSpec.segments = filletTool_.currentSegments;
-            for (Index e : filletTool_.edges) testSpec.edges.push_back({e, mid});
-            if (filletEdges(test, testSpec)) {
-                validR = mid;
-                lo = mid;
-            } else {
-                hi = mid;
-            }
-        }
-        Body best = filletTool_.meshBefore;
-        FilletSpec bestSpec;
-        bestSpec.segments = filletTool_.currentSegments;
-        for (Index e : filletTool_.edges) bestSpec.edges.push_back({e, validR});
-        if (filletEdges(best, bestSpec)) {
-            obj->body = std::move(best);
-            obj->refreshDerived();
-            filletTool_.currentRadius = validR;
-            view_.bevelWidth = validR;
-        }
     }
+    // A refusal inside the travel means the segment count changed under the
+    // limit that was measured for it. The last good preview stands rather than
+    // the tool hunting for a new one mid-gesture.
 }
 
 void Application::commitFillet() {
@@ -2380,7 +2450,8 @@ int Application::run() {
         if (filletTool_.active && filletTool_.axis.valid) {
             const SceneObject* o = scene_.find(filletTool_.objectId);
             const Real step = o ? camera_.snapStep(filletTool_.axis.origin) : 0.0;
-            filletTool_.axis.drawGuide(renderer_, camera_, filletTool_.currentRadius, step);
+            filletTool_.axis.drawGuide(renderer_, camera_, filletTool_.currentRadius, step,
+                                       filletTool_.maxRadius);
         }
 
         camera_.update(dt);

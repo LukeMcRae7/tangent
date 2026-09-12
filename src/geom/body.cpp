@@ -70,7 +70,7 @@ void Body::faceVertices(FaceId f, std::vector<VertexId>& out) const {
 void Body::edgeEnds(EdgeId e, VertexId& a, VertexId& b) const {
     if (brep_) { brep::edgeEnds(*brep_, e, a, b); return; }
     a = b = kInvalid;
-    if (e < 0 || e >= mesh_.halfedgeCount()) return;
+    if (!hasEdge(e)) return;
     a = mesh_.fromVertex(e);
     b = mesh_.halfedges[e].vertex;
 }
@@ -78,7 +78,7 @@ void Body::edgeEnds(EdgeId e, VertexId& a, VertexId& b) const {
 void Body::edgeFaces(EdgeId e, FaceId& a, FaceId& b) const {
     if (brep_) { brep::edgeFaces(*brep_, e, a, b); return; }
     a = b = kNoFace;
-    if (e < 0 || e >= mesh_.halfedgeCount()) return;
+    if (!hasEdge(e)) return;
     a = mesh_.halfedges[e].face;
     const Index tw = mesh_.halfedges[e].twin;
     b = tw == kInvalid ? kNoFace : mesh_.halfedges[tw].face;
