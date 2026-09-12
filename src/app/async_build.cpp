@@ -10,7 +10,18 @@ void AsyncBuild::request(const Body& base, std::function<bool(Body&)> build) {
 }
 
 void AsyncBuild::startPending() {
-    inFlightInput_ = std::move(pendingBase_);
+    // The worker gets a shape of its own.
+    //
+    // A Body copy shares the shape it came from, and meshing writes the
+    // triangulation *into* that shape. The frame loop tessellates whatever is
+    // on screen, so handing the worker a shape the screen is also holding is a
+    // write on one thread against a read on another -- which is a crash, and
+    // which showed up exactly where a drag passes back through its start and
+    // the displayed body becomes the one the gesture began with again.
+    //
+    // Detached here rather than inside the worker: copying it there would mean
+    // reading the shared shape from the wrong thread to do it.
+    inFlightInput_ = pendingBase_.detached();
     inFlightWork_ = std::move(pendingWork_);
     hasPending_ = false;
     pendingBase_ = Body();

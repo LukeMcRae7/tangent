@@ -114,6 +114,12 @@ public:
     // 6 the same pull as an extrude, which keeps the boss's outline.
     void setFaceDemo(int mode) { faceDemo_ = mode; }
 
+    // Throws a fast, wandering drag at the extrude, including the places a
+    // hand actually goes: the corners of the window, and straight through the
+    // start. Looking for the value the gesture computes, not for a pretty
+    // picture.
+    void setFaceStress() { faceStress_ = true; }
+
     // Parks the interface's pointer somewhere, for screenshots of hover states.
     void setUiMouse(float x, float y, bool down) {
         uiMouse_ = {x, y};
@@ -151,6 +157,12 @@ private:
     bool filletOpenDone_ = false;
     int  faceDemo_ = 0;
     bool faceDemoDone_ = false;
+    bool faceStress_ = false;
+    bool faceStressDone_ = false;
+    int  faceStressFrame_ = 0;
+    int  faceStressCrossings_ = 0;
+    int  faceStressBad_ = 0;
+    Real faceStressWorst_ = 0.0;
     Vec2 uiMouse_{-1.0f, -1.0f};
     bool uiMouseDown_ = false;
     void beginTransform(TransformMode mode);
@@ -422,6 +434,7 @@ private:
     void stepProfileDemo();
     void stepFilletOpenDemo();
     void stepFaceDemo();
+    void stepFaceStress();
     void stepFilletFloorSearch();
     void startFilletTrial(Real radius);
     static const Real kFilletFloorLadder[6];

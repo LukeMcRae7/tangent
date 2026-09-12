@@ -348,6 +348,28 @@ BrepRef primitive(const PrimitiveSpec& spec) {
 
 BrepRef clone(const BrepShape& s) { return makeBrep(s.shape, s.faceNames); }
 
+BrepRef detach(const BrepShape& s) {
+    if (s.shape.IsNull()) return {};
+    try {
+        // Without the triangulation: the copy exists to be computed on, not
+        // drawn, and carrying a mesh it will not use is the one cost worth
+        // avoiding here.
+        BRepBuilderAPI_Copy copier(s.shape, Standard_False);
+        if (!copier.IsDone()) return clone(s);
+        const TopoDS_Shape out = copier.Shape();
+
+        // The copy is isomorphic to the original, so mapping its faces walks
+        // them in the same order and the names line up by index. tessellate
+        // already relies on this for the same reason.
+        TopTools_IndexedMapOfShape fs;
+        TopExp::MapShapes(out, TopAbs_FACE, fs);
+        if (fs.Extent() != s.faces.Extent()) return clone(s);
+        return makeBrep(out, s.faceNames);
+    } catch (const Standard_Failure&) {
+        return clone(s);
+    }
+}
+
 bool empty(const BrepShape& s) { return s.shape.IsNull() || s.faces.Extent() == 0; }
 int  faceCount(const BrepShape& s)   { return s.faces.Extent(); }
 int  edgeCount(const BrepShape& s)   { return s.edges.Extent(); }

@@ -228,6 +228,18 @@ public:
     // where the second backend will be dispatched from.
     bool isMesh() const { return !brep_; }
 
+    // A body that shares nothing with this one.
+    //
+    // Copying a Body is cheap because an exact body is a handle to an immutable
+    // shape, and every copy points at the same one. That is right until two
+    // threads are involved: meshing writes its triangulation into the shape, so
+    // a shape being drawn on one thread must not be read by an algorithm on
+    // another. Anything handed to a worker gets one of these.
+    Body detached() const {
+        if (!brep_) return *this;          // a mesh is already a value
+        return Body(brep::detach(*brep_));
+    }
+
     // Valid only on a mesh body; ask isMesh() first. An empty Mesh comes back
     // for a B-rep body rather than anything undefined.
     const Mesh& mesh() const { return mesh_; }

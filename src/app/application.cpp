@@ -663,6 +663,7 @@ void Application::handleViewportMouse() {
     stepProfileDemo();
     stepFilletOpenDemo();
     stepFaceDemo();
+    stepFaceStress();
 
     // Interactive Object Creation & Sketching Tool:
     if (createTool_.active()) {
@@ -2696,6 +2697,70 @@ void Application::stepFaceDemo() {
     updateFaceMove(false);
     report(faceDemo_ == 3 ? "rotated" : (faceDemo_ == 2 ? "pulled in" : "pushed out"));
     if (faceDemo_ != 3) commitFaceMove();     // leave the rotate open, to be seen
+}
+
+// A fast, wandering drag, spread over real frames.
+//
+// In one loop it proves nothing: the builds never finish, so nothing is ever
+// taken back and the frame loop never tessellates against them. What broke in
+// practice needed both -- a preview being built on one thread while the shape
+// it came from was being meshed on the other -- and that only happens frame by
+// frame, most reliably as the drag passes back through its start.
+void Application::stepFaceStress() {
+    if (!faceStress_ || viewRect_.w <= 0 || scene_.objects().empty()) return;
+
+    const ObjectId id = scene_.objects().front()->id;
+    if (!faceStressDone_) {
+        faceStressDone_ = true;
+        camera_.yaw = 0.6f;
+        camera_.pitch = 0.5f;
+        camera_.distance = 95.0f;
+        camera_.snapToGoal();
+        scene_.select(id);
+
+        const SceneObject* o = scene_.find(id);
+        std::vector<FaceId> fs;
+        o->body.allFaces(fs);
+        FaceId top = fs.front();
+        Real best = -1e30;
+        for (FaceId f : fs) {
+            const Real d = dot(o->body.faceNormal(f), Vec3{0, 0, 1});
+            if (d > best) { best = d; top = f; }
+        }
+        scene_.clearElementSelection();
+        scene_.selectElement({id, ElementKind::Face, top}, true);
+
+        mouseOverride_ = Vec2{viewRect_.w * 0.5, viewRect_.h * 0.5};
+        beginFaceMove(FaceOp::Extrude);
+        if (!faceTool_.active) std::fprintf(stderr, "[stress] would not start\n");
+        return;
+    }
+
+    if (!faceTool_.active) return;
+    ++faceStressFrame_;
+
+    // Straight through the start every other frame. At zero the body on screen
+    // becomes the one the gesture began with and is tessellated, while the
+    // build asked for on the frame before is very likely still running off the
+    // same shape. That is the window, and hitting it by waving the mouse is a
+    // matter of luck; this hits it on purpose.
+    const int phase = faceStressFrame_ % 4;
+    static const char* kPattern[4] = {"6", "0", "9", "0"};
+    faceTool_.typedValue = kPattern[phase];
+
+    if (std::fabs(faceTool_.value) < 0.5) ++faceStressCrossings_;
+    if (!std::isfinite(faceTool_.value)) ++faceStressBad_;
+    faceStressWorst_ = std::max(faceStressWorst_, std::fabs(faceTool_.value));
+
+    if (faceStressFrame_ >= 400) {
+        std::fprintf(stderr,
+                     "[stress] %d frames: %d near the start, worst %.1f mm, %d not finite\n",
+                     faceStressFrame_, faceStressCrossings_, faceStressWorst_, faceStressBad_);
+        abortFaceMove();
+        mouseOverride_ = Vec2{-1, -1};
+        faceStress_ = false;
+        std::fprintf(stderr, "[stress] survived\n");
+    }
 }
 
 void Application::stepFilletLimitSearch() {

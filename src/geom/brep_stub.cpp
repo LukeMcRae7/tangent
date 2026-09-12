@@ -16,6 +16,7 @@ namespace brep {
 bool available() { return false; }
 
 BrepRef clone(const BrepShape&) { return {}; }
+BrepRef detach(const BrepShape&) { return {}; }
 
 BrepRef primitive(const PrimitiveSpec&) { return {}; }
 

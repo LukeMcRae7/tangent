@@ -80,6 +80,16 @@ bool available();
 // Bodies share. Returns null when OCCT is absent.
 BrepRef clone(const BrepShape& s);
 
+// A copy that shares nothing with the original.
+//
+// `clone` shares the underlying shape, which is almost always what is wanted:
+// it is immutable and the triangulation hanging off it is a cache every copy
+// would otherwise rebuild. Almost always. Meshing writes that cache *into* the
+// shape, so a shape being tessellated on one thread cannot also be read by an
+// algorithm on another -- and a preview built in the background is exactly
+// that. This hands back a shape with its own topology to work on.
+BrepRef detach(const BrepShape& s);
+
 // ---- Enumeration -----------------------------------------------------------
 bool empty(const BrepShape& s);
 int  faceCount(const BrepShape& s);
