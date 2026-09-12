@@ -1274,8 +1274,12 @@ void Application::updateFillet(bool snap) {
         const Mat4 model = obj->modelMatrix();
         const Body& m = filletTool_.meshBefore;
 
+        // Which edge of the chain the pointer is nearest: that is the one the
+        // guide anchors to, so on a chain of edges the line appears under the
+        // cursor rather than on whichever edge happened to be first.
         Real bestPx = -1.0;
         Vec3 bestAt{};
+        EdgeId bestEdge = kInvalid;
         for (EdgeId e : filletTool_.edges) {
             if (!m.hasEdge(e)) continue;
             Vec3 aL, bL;
@@ -1289,11 +1293,24 @@ void Application::updateFillet(bool snap) {
             const Real len2 = lengthSq(ab);
             const Real t = len2 > 1e-9 ? clampf(dot(curMouse - aPx, ab) / len2, 0.0, 1.0) : 0.0;
             const Real d = length(curMouse - (aPx + ab * t));
-            if (bestPx < 0.0 || d < bestPx) { bestPx = d; bestAt = lerp(aW, bW, t); }
+            if (bestPx < 0.0 || d < bestPx) { bestPx = d; bestAt = lerp(aW, bW, t); bestEdge = e; }
         }
 
-        if (bestPx >= 0.0) {
-            newR = bestPx * camera_.pixelWorldSize(bestAt);
+        if (bestEdge != kInvalid) {
+            filletTool_.axis = filletAxis(m, model, bestEdge, bestAt);
+
+            // Along the axis, not away from the edge in every direction. Off to
+            // the side now changes nothing, and the line on screen says which
+            // way is more -- which is the whole difference between aiming and
+            // discovering.
+            //
+            // Unless the axis is pointing at the eye, where a pixel of movement
+            // is worth an unbounded amount and the old measure is the steadier
+            // one.
+            newR = filletTool_.axis.facingCamera(camera_)
+                       ? filletTool_.axis.valueAt(camera_, curMouse)
+                       : bestPx * camera_.pixelWorldSize(bestAt);
+
             if (snap) {
                 const Real step = camera_.snapStep(bestAt);
                 if (step > 0.0) newR = std::round(newR / step) * step;
@@ -2356,6 +2373,15 @@ int Application::run() {
         measureResult_ = measure_.active() ? measure_.compute(scene_) : MeasureResult{};
         measure_.drawOverlay(renderer_, camera_, measureResult_);
         tool_.drawOverlay(renderer_, camera_);
+
+        // The line that says which way makes the fillet bigger, with ticks at
+        // the step so the cost of a step is visible. Drawn after the preview so
+        // it sits on top of the geometry it is about.
+        if (filletTool_.active && filletTool_.axis.valid) {
+            const SceneObject* o = scene_.find(filletTool_.objectId);
+            const Real step = o ? camera_.snapStep(filletTool_.axis.origin) : 0.0;
+            filletTool_.axis.drawGuide(renderer_, camera_, filletTool_.currentRadius, step);
+        }
 
         camera_.update(dt);
 

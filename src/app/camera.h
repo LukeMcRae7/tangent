@@ -75,7 +75,24 @@ public:
     // on a 0.4mm wall. Lives here so every tool snaps the same way -- the
     // create tool used to carry its own hardcoded 5mm, 1mm and 0.5mm steps.
     float snapStep(Vec3 atPoint) const {
-        return static_cast<float>(niceStep(pixelWorldSize(atPoint) * 42.0f));
+        // Ten pixels a step, not forty.
+        //
+        // The step is the smallest change the user can ask for, so it decides
+        // how much control they have: at forty pixels a full-width drag offers
+        // about thirty distinct values and the hand is never the limit -- the
+        // step is. At ten, a hand that can hold itself within a few millimetres
+        // of screen can reach every one of them, which is the point.
+        //
+        // Still rounded to a value a person would choose, so the numbers stay
+        // 0.5 and 2 rather than 0.34 and 1.87.
+        return static_cast<float>(niceStep(pixelWorldSize(atPoint) * 10.0f));
+    }
+
+    // For placing things rather than sizing them, where landing on a round
+    // number matters more than fine control. Used by the create tool when
+    // there is no geometry to snap to.
+    float coarseSnapStep(Vec3 atPoint) const {
+        return static_cast<float>(niceStep(pixelWorldSize(atPoint) * 45.0f));
     }
 
     // ---- Smoothing -------------------------------------------------------

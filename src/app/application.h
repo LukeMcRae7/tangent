@@ -2,6 +2,7 @@
 #pragma once
 
 #include "app/camera.h"
+#include "app/drag_axis.h"
 #include "app/create_tool.h"
 #include "app/measure.h"
 #include "mesh/export_stl.h"
@@ -162,6 +163,10 @@ private:
         Real baseRadius = 1.0;
         Real currentRadius = 1.0;
         int currentSegments = 3;
+        // The direction the radius grows along, and the edge it is anchored
+        // to. Rebuilt as the cursor moves between edges of a chain so the guide
+        // follows the pointer rather than sitting on whichever edge came first.
+        DragAxis axis;
         Body meshBefore;
         std::vector<Feature> chainBefore;
         std::string typedValue;

@@ -134,6 +134,7 @@ add_executable(tangent
   src/app/create_tool.cpp
   src/app/measure.cpp
   src/app/snap.cpp
+  src/app/drag_axis.cpp
   src/app/undo.cpp
   src/mesh/halfedge.cpp
   src/mesh/primitives.cpp
@@ -277,6 +278,16 @@ target_include_directories(test_create_tool PRIVATE src ${imgui_SOURCE_DIR} ${im
 target_link_libraries(test_create_tool PRIVATE imgui tangent_epoxy)
 target_compile_options(test_create_tool PRIVATE ${TANGENT_WARNINGS_LOOSE})
 add_test(NAME create_tool COMMAND test_create_tool)
+
+add_executable(test_drag tests/test_drag.cpp
+  src/app/drag_axis.cpp src/app/camera.cpp
+  src/render/renderer.cpp src/render/shader.cpp src/render/gpu_mesh.cpp
+  src/scene/scene.cpp src/scene/feature.cpp src/mesh/boolean.cpp src/mesh/health.cpp
+  ${TANGENT_GEOM} src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp)
+target_include_directories(test_drag PRIVATE src)
+target_link_libraries(test_drag PRIVATE tangent_epoxy)
+target_compile_options(test_drag PRIVATE ${TANGENT_WARNINGS})
+add_test(NAME drag COMMAND test_drag)
 
 add_executable(test_snap tests/test_snap.cpp
   src/app/snap.cpp src/app/camera.cpp

@@ -1,0 +1,165 @@
+// The direction a drag is measured along.
+//
+// Headless: a camera is set up by hand, a world point is projected to find the
+// pixel that sits over it, and the axis is asked what value that pixel means.
+// The properties here are what separate aiming from discovering, so they are
+// tested as properties rather than as one worked example.
+#include "app/drag_axis.h"
+#include "geom/operations.h"
+
+#include <cmath>
+#include <cstdio>
+#include <string>
+
+using namespace tg;
+
+static int failures = 0;
+static void check(bool ok, const std::string& what) {
+    if (!ok) { std::printf("  FAIL: %s\n", what.c_str()); ++failures; }
+}
+static bool near(Real a, Real b, Real eps = 1e-3) { return std::fabs(a - b) < eps; }
+
+static Camera lookingDown(float distance = 200.0f) {
+    Camera c;
+    c.viewportW = 1600;
+    c.viewportH = 900;
+    c.distance = distance;
+    c.target = {0, 0, 0};
+    c.yaw = 0.0f;
+    c.pitch = 1.5707f;
+    c.snapToGoal();
+    return c;
+}
+static Vec2 pixelOf(const Camera& c, Vec3 world) {
+    Vec2 p{};
+    c.projectToPixel(world, p);
+    return p;
+}
+
+int main() {
+    std::printf("--- the value is the cursor projected onto the axis ---\n");
+    {
+        const Camera cam = lookingDown();
+        DragAxis axis;
+        axis.origin = {0, 0, 0};
+        axis.direction = {1, 0, 0};
+        axis.valid = true;
+
+        for (Real want : {2.0, 7.5, 25.0}) {
+            const Real got = axis.valueAt(cam, pixelOf(cam, Vec3{want, 0, 0}));
+            check(near(got, want, 1e-2), "a cursor over " + std::to_string(want) +
+                                         "mm along the axis reads " + std::to_string(got));
+        }
+        const Real back = axis.valueAt(cam, pixelOf(cam, Vec3{-6, 0, 0}));
+        check(back < 0.0 && near(back, -6.0, 1e-2), "the other way is negative");
+        std::printf("  25mm along reads %.4f\n", axis.valueAt(cam, pixelOf(cam, Vec3{25, 0, 0})));
+    }
+
+    std::printf("--- moving across the axis changes nothing ---\n");
+    {
+        // The property distance-from-a-point cannot have, and the reason this
+        // exists: sliding along an edge used to grow the fillet as fast as
+        // pulling away from it did.
+        const Camera cam = lookingDown();
+        DragAxis axis;
+        axis.origin = {0, 0, 0};
+        axis.direction = {1, 0, 0};
+        axis.valid = true;
+
+        // Under an orthographic camera this is exact: every ray is parallel,
+        // so a cursor anywhere on the line across the axis means one value.
+        Camera ortho = cam;
+        ortho.orthographic = true;
+        const Real flat = axis.valueAt(ortho, pixelOf(ortho, Vec3{10, 0, 0}));
+        for (Real off : {5.0, 20.0, -35.0}) {
+            check(near(axis.valueAt(ortho, pixelOf(ortho, Vec3{10, off, 0})), flat, 1e-6),
+                  "orthographic: across the axis reads exactly the same");
+        }
+
+        // Under perspective it drifts a little, because the ray through a pixel
+        // 35mm off to the side really does pass the axis at a slightly
+        // different place. A few percent over a third of the viewport, against
+        // the 260% that measuring distance from a point would give.
+        const Real straight = axis.valueAt(cam, pixelOf(cam, Vec3{10, 0, 0}));
+        for (Real off : {5.0, 20.0, -35.0}) {
+            const Real got = axis.valueAt(cam, pixelOf(cam, Vec3{10, off, 0}));
+            check(std::fabs(got - straight) < straight * 0.05,
+                  "perspective: across the axis stays within a few percent");
+            const Real asDistance = length(Vec3{10, off, 0});
+            check(std::fabs(asDistance - straight) > std::fabs(got - straight) * 5.0,
+                  "where distance from the origin would have moved far more");
+        }
+        std::printf("  10mm along, 35mm across: %.4f perspective, %.4f ortho "
+                    "(distance would say %.4f)\n",
+                    axis.valueAt(cam, pixelOf(cam, Vec3{10, -35, 0})),
+                    axis.valueAt(ortho, pixelOf(ortho, Vec3{10, -35, 0})),
+                    static_cast<double>(length(Vec3{10, -35, 0})));
+    }
+
+    std::printf("--- an axis pointing at the eye is not measurable ---\n");
+    {
+        const Camera cam = lookingDown();
+        DragAxis across;
+        across.origin = {0, 0, 0};
+        across.direction = {1, 0, 0};
+        across.valid = true;
+        check(across.facingCamera(cam), "an axis across the view is fine");
+
+        DragAxis atEye;
+        atEye.origin = {0, 0, 0};
+        atEye.direction = normalize(cam.eye());
+        atEye.valid = true;
+        check(!atEye.facingCamera(cam), "one pointing at the eye is not");
+
+        DragAxis oblique;
+        oblique.origin = {0, 0, 0};
+        oblique.direction = normalize(Vec3{1, 0, 1});
+        oblique.valid = true;
+        check(oblique.facingCamera(cam), "45 degrees off is still usable");
+    }
+
+    std::printf("--- a fillet grows out of the corner it rounds ---\n");
+    {
+        PrimitiveSpec spec;
+        spec.kind = PrimitiveKind::Box;
+        spec.box = {20, 20, 20};
+        Body cube;
+        check(makePrimitive(spec, cube, brep::available() ? Backend::Brep : Backend::Mesh),
+              "a cube");
+
+        // The edge along X at the top front: y = -10, z = +10.
+        EdgeId target = kInvalid;
+        std::vector<EdgeId> edges;
+        cube.allEdges(edges);
+        for (EdgeId e : edges) {
+            Vec3 a, b;
+            cube.edgePositions(e, a, b);
+            if (near(a.z, 10.0, 1e-6) && near(b.z, 10.0, 1e-6) &&
+                near(a.y, -10.0, 1e-6) && near(b.y, -10.0, 1e-6))
+                target = e;
+        }
+        check(target != kInvalid, "found the top front edge");
+
+        const Mat4 identity = translate({0, 0, 0});
+        const DragAxis axis = filletAxis(cube, identity, target, Vec3{0, -10, 10});
+        check(axis.valid, "it has an axis");
+
+        // Out of the corner: the bisector of the top face and the front face,
+        // which points up and forward at 45 degrees. Not along the edge.
+        check(near(axis.direction.x, 0.0, 1e-6), "square to the edge");
+        check(axis.direction.y < -0.6 && axis.direction.z > 0.6,
+              "and out of the corner, not into the solid");
+        check(near(length(axis.direction), 1.0, 1e-9), "normalised");
+        check(near(axis.origin.y, -10.0, 1e-6) && near(axis.origin.z, 10.0, 1e-6),
+              "anchored on the edge");
+        std::printf("  direction %.3f, %.3f, %.3f\n",
+                    axis.direction.x, axis.direction.y, axis.direction.z);
+
+        // Anchored under the pointer, not at the middle of the edge.
+        const DragAxis atEnd = filletAxis(cube, identity, target, Vec3{8, -10, 10});
+        check(near(atEnd.origin.x, 8.0, 1e-6), "the guide follows the cursor along the edge");
+    }
+
+    std::printf("\n%s (%d failures)\n", failures ? "FAILED" : "ALL PASS", failures);
+    return failures ? 1 : 0;
+}
