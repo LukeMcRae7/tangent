@@ -31,7 +31,8 @@ void AsyncBuild::startPending() {
     });
 }
 
-bool AsyncBuild::take(Body& out) {
+bool AsyncBuild::take(Body& out, bool* failed) {
+    if (failed) *failed = false;
     if (!running_) {
         if (hasPending_) startPending();
         return false;
@@ -42,6 +43,7 @@ bool AsyncBuild::take(Body& out) {
     running_ = false;
 
     const bool ok = ok_;
+    if (failed) *failed = !ok;
     if (ok) out = std::move(result_);
     result_ = Body();
     inFlightInput_ = Body();

@@ -162,6 +162,66 @@ int main() {
         std::printf("  tilted %.3f degrees\n", turned);
     }
 
+    std::printf("--- a face can be moved along an axis that is not its normal ---\n");
+    {
+        // Sweeping along a world axis rather than the face's own normal is the
+        // whole of what an axis constraint does underneath.
+        Body b = makeBox(20, 20, 20);
+        std::string why;
+        check(extrudeFaces(b, {facing(b, {0, 0, 1})}, 5.0, nullptr, 4201,
+                           ExtrudeOp::Auto, &why, true, Vec3{0, 0, 1}),
+              "moved along +Z: " + why);
+        check(near(b.health(false).volume, 8000.0 + 2000.0, 1e-3),
+              "the same as along its normal, since that is where +Z points");
+
+        // A direction lying in the face moves its plane nowhere, and says so
+        // rather than building something that looks like an answer.
+        Body flat = makeBox(20, 20, 20);
+        check(!extrudeFaces(flat, {facing(flat, {0, 0, 1})}, 5.0, nullptr, 4202,
+                            ExtrudeOp::Auto, &why, true, Vec3{1, 0, 0}),
+              "refused a sweep along the face");
+        check(!why.empty(), "and gave a reason: " + why);
+    }
+
+    std::printf("--- a rotation goes both ways ---\n");
+    {
+        // Positive and negative are mirror images about the hinge, which is
+        // what makes the sign mean "which way round" rather than "or not".
+        auto tilt = [&](Real deg) {
+            Body b = makeBox(20, 20, 20);
+            const FaceId top = facing(b, {0, 0, 1});
+            std::vector<EdgeId> edges;
+            b.faceEdges(top, edges);
+            EdgeId hinge = kInvalid;
+            Real lowest = 1e30;
+            for (EdgeId e : edges) {
+                Vec3 p, q;
+                b.edgePositions(e, p, q);
+                if (std::fabs((q - p).x) < 1e-6) continue;
+                const Real y = (p.y + q.y) * 0.5;
+                if (y < lowest) { lowest = y; hinge = e; }
+            }
+            Vec3 a2, c2;
+            b.edgePositions(hinge, a2, c2);
+            std::string w;
+            const bool ok = rotateFaces(b, {top}, radians(deg), a2, normalize(c2 - a2), 4203, &w);
+            return ok ? b.health(false).volume : -1.0;
+        };
+        const Real up = tilt(12.0), down = tilt(-12.0);
+        // Which sign tips which way depends on how the hinge happens to be
+        // oriented, and that is not a fact worth asserting: what matters is
+        // that the two are opposite and equal, so the sign means "which way
+        // round" rather than "or not". The tool ties the drag direction to the
+        // same hinge, so pulling one way always grows the number.
+        check(up > 0.0 && down > 0.0, "both directions build");
+        check(std::fabs(up - down) > 1.0, "and they are not the same shape");
+        check((up - 8000.0) * (down - 8000.0) < 0.0,
+              "one adds material and the other takes it");
+        check(near(up + down, 16000.0, 1e-3),
+              "mirror images about where it started");
+        std::printf("  +12 deg %.1f mm3, -12 deg %.1f\n", up, down);
+    }
+
     std::printf("--- a divide splits faces without splitting the body ---\n");
     {
         Body b = makeBox(30, 20, 10);

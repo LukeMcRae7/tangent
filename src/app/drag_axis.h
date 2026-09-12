@@ -52,6 +52,18 @@ struct DragAxis {
 
     bool valid = false;
 
+    // A drag that runs both ways from where it started.
+    //
+    // A fillet has a floor and a ceiling and nothing behind the origin: the
+    // track carries the whole range and the value cannot be negative. Moving a
+    // face is the opposite on every count. It starts at nothing, it can go
+    // either way -- out adds material, in takes it -- and there is no distance
+    // at which it stops being a sensible thing to ask for. So the value is
+    // measured from the origin in both directions and is not clamped at either
+    // end; `spanValue` is then a scale, how many millimetres a track's length
+    // of travel is worth, rather than a limit.
+    bool signedRange = false;
+
     // Where the cursor sits along the axis, in millimetres from the origin.
     // Signed, so a drag the other way gives a negative value and a caller that
     // only wants positive ones can clamp and say why.

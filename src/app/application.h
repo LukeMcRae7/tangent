@@ -280,32 +280,52 @@ private:
     // rotate tips the face about one of its own edges.
     // Three, and the first two are not the same operation said twice.
     //
-    //   PushPull  moves the face. Walls left flush with the walls they slid
-    //             along merge into them, so a box whose top is pulled up is a
-    //             taller box. Which way you pull decides whether that adds
-    //             material or takes it: there is nothing else to choose.
+    //   Move      moves the face, and the body follows. Along its own normal
+    //             unless X, Y or Z says otherwise. Out adds material and in
+    //             takes it, which is not a choice to be made but a description
+    //             of what moving a face does. This is what G means when a face
+    //             is selected.
     //
     //   Extrude   grows a boss off the face and leaves its outline drawn, so
     //             the new part is something you can point at and act on
-    //             afterwards. The operation is chosen rather than read off the
-    //             direction, so a positive distance can still cut.
+    //             afterwards. E.
     //
-    //   Rotate    tips the face about one of its own edges.
-    enum class FaceOp { PushPull, Extrude, Rotate };
+    //   Rotate    tips the face about an edge, either way. R when a face is
+    //             selected.
+    enum class FaceOp { Move, Extrude, Rotate };
 
     struct FaceToolState {
         bool     active = false;
-        FaceOp   op = FaceOp::PushPull;
+        FaceOp   op = FaceOp::Move;
         ObjectId objectId = kNoObject;
         std::vector<FaceId> faces;
 
-        Real value = 0.0;            // millimetres, or radians for a rotate
+        Real value = 0.0;            // millimetres, or degrees for a rotate
         Real requested = 1e30;       // what the kernel was last asked for
         bool previewValid = false;
 
+        // The furthest the kernel has actually managed, either way. A rotation
+        // runs out long before ninety degrees on most shapes, and the honest
+        // limit is the one that was reached rather than one guessed at: a
+        // refused build pins the travel where it last worked.
+        Real reachedMax = 1e30, reachedMin = -1e30;
+
         DragAxis axis;
+        Vec3 direction{};                // what a move sweeps along
+        int  lockedAxis = -1;            // 0/1/2 for X/Y/Z, -1 for the normal
         Vec3 hingePoint{}, hingeDir{};   // rotate only
-        ExtrudeOp combine = ExtrudeOp::Auto;
+
+        // The faces this began on, by name, so they can be found again in each
+        // rebuilt preview and stay selected throughout.
+        ElementRefs names;
+
+        // The other body this one has grown into, if any, and what to do about
+        // it. Nothing is asked until the material actually meets something:
+        // a tool that offers to combine on every extrude is asking a question
+        // the answer to which is almost always "no".
+        ObjectId  meets = kNoObject;
+        BooleanOp meetOp = BooleanOp::Union;
+        bool      combineWithMeet = false;
 
         Body before;
         std::vector<Feature> chainBefore;
@@ -319,12 +339,18 @@ private:
             preview.cancel();
             objectId = kNoObject;
             faces.clear();
+            names = ElementRefs{};
             value = 0.0;
             requested = 1e30;
             previewValid = false;
+            reachedMax = 1e30;
+            reachedMin = -1e30;
+            meets = kNoObject;
+            meetOp = BooleanOp::Union;
+            combineWithMeet = false;
             axis = DragAxis{};
-            hingePoint = hingeDir = Vec3{};
-            combine = ExtrudeOp::Auto;
+            direction = hingePoint = hingeDir = Vec3{};
+            lockedAxis = -1;
             before = Body();
             chainBefore.clear();
             typedValue.clear();
@@ -333,6 +359,15 @@ private:
     FaceToolState faceTool_;
 
     void beginFaceMove(FaceOp op);
+
+    // Points the gesture along a world axis instead of the face's own normal,
+    // or back at the normal when the same key is pressed twice.
+    void setFaceAxis(int axis);
+
+    // Re-finds the faces the gesture began on in whatever the preview last
+    // built, and leaves them selected. Without it the highlight wanders onto
+    // the neighbours as the shape changes under it.
+    void refreshFaceSelection();
     void updateFaceMove(bool snap, bool follow = true);
     void commitFaceMove();
     void abortFaceMove();

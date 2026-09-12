@@ -75,6 +75,10 @@ Real DragAxis::valueAt(const Camera& camera, Vec2 mousePx) const {
 
     const Real along = offsetPx(camera, mousePx);
 
+    // Both ways from the start, and no end in either: a track's length of
+    // travel is worth `spanValue`, and going further goes further.
+    if (signedRange) return (along / kTrackPx) * spanValue;
+
     // Bounded: the track carries the whole range, so the same movement of the
     // hand always covers it, whatever the part and wherever the camera.
     if (spanValue > baseValue) {
@@ -119,7 +123,7 @@ void DragAxis::drawGuide(Renderer& renderer, const Camera& camera, Real value,
     const Vec4 arrow = toVec4(palette::kBrand, 1.0f);
 
     const Real px = static_cast<Real>(camera.pixelWorldSize(origin));
-    const bool bounded = spanValue > baseValue;
+    const bool bounded = !signedRange && spanValue > baseValue;
 
     // The track is the same length on screen every time. That is the whole
     // point of it: the gesture is the same size for a 2mm wall and a 200mm
@@ -128,8 +132,11 @@ void DragAxis::drawGuide(Renderer& renderer, const Camera& camera, Real value,
     (void)limit;   // the span is the limit; the parameter is kept for callers
                    // whose range is not known until the drag is under way.
 
-    // Where a value sits along the track.
+    // Where a value sits along the track. On a signed drag it may be behind
+    // the origin, and it may be past the end -- the line follows the value
+    // rather than the value stopping at the line.
     auto place = [&](Real v) {
+        if (signedRange) return spanValue > 0.0 ? (v / spanValue) * trackWorld : v;
         if (!bounded) return std::max(Real(0), v - baseValue);
         const Real t = std::clamp((v - baseValue) / (spanValue - baseValue), Real(0), Real(1));
         return t * trackWorld;
@@ -142,8 +149,15 @@ void DragAxis::drawGuide(Renderer& renderer, const Camera& camera, Real value,
     // Ticks, from the start forward. Nothing behind it: the gesture cannot go
     // there, so a scale there would describe travel that does not exist.
     if (step > 0.0) {
-        const Real last = bounded ? spanValue : baseValue + trackWorld;
-        const Real first = std::ceil(baseValue / step) * step;
+        // A signed drag has travel behind the origin as well, so its scale
+        // runs both ways from it.
+        Real first = std::ceil(baseValue / step) * step;
+        Real last = bounded ? spanValue : baseValue + trackWorld;
+        if (signedRange) {
+            const Real span = std::max(std::fabs(value), spanValue) * 1.15;
+            first = -std::ceil(span / step) * step;
+            last = -first;
+        }
         int drawn = 0;
         for (Real at = first; at <= last + 1e-9 && drawn < 90; at += step, ++drawn) {
             const Vec3 p = origin + direction * place(at);
@@ -156,8 +170,16 @@ void DragAxis::drawGuide(Renderer& renderer, const Camera& camera, Real value,
     // The road, and a bar at the end of it. With a limit the end of the track
     // *is* the limit, so the end of the travel is a place on screen rather
     // than something found by pushing into it.
-    const Vec3 tip = origin + direction * trackWorld;
-    thickLine(renderer, camera, origin, tip, track, 2.0);
+    // A signed drag runs both ways from the start, and its track grows to hold
+    // whatever has been asked for: the user pulling past the end of the line is
+    // not an error, it is a longer extrude, and a line that stopped would say
+    // the opposite.
+    const Real reach = signedRange
+                           ? std::max(trackWorld, std::fabs(place(value)) + px * 24.0)
+                           : trackWorld;
+    const Vec3 tip = origin + direction * reach;
+    thickLine(renderer, camera, signedRange ? origin - direction * reach : origin,
+              tip, track, 2.0);
 
     // The cap marks where the shape gives up, which is not always the end of
     // the track: the track carries everything the body could hold, and the
@@ -166,6 +188,14 @@ void DragAxis::drawGuide(Renderer& renderer, const Camera& camera, Real value,
         const Vec3 at = origin + direction * place(limit);
         const Real cap = px * 8.0;
         thickLine(renderer, camera, at - across * cap, at + across * cap, track, 3.0);
+    }
+
+    // A mark at the origin on a signed drag: zero is a value like any other
+    // here -- it means "leave it where it is" -- and it has to be findable.
+    if (signedRange) {
+        const Real tick = px * 7.0;
+        thickLine(renderer, camera, origin - across * tick, origin + across * tick,
+                  arrow, 2.5);
     }
 
     // The arrow: filled, in the front layer, from the start to the value.

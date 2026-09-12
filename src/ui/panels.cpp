@@ -313,6 +313,7 @@ void drawMenuBar(UiContext& ctx) {
         const bool has = !ctx.scene->selection().empty();
         ImGui::MenuItem("Move", "G", false, has);
         ImGui::MenuItem("Rotate", "R", false, has);
+        ImGui::TextColored(kDim, "  with a face selected these move the face");
         ImGui::MenuItem("Scale", "S", false, has);
         ImGui::Separator();
         ImGui::TextColored(kDim, "During a transform:");
@@ -493,22 +494,22 @@ float drawToolbar(UiContext& ctx) {
     ImGui::SameLine();
 
     if (iconButton(Icon::Extrude, "PushPull", icon,
-                   faces ? "Push / pull: move the face, the body absorbs it  (E)"
-                         : "Push / pull - select a face first",
+                   faces ? "Move face: the body follows  (G)"
+                         : "Move face - select a face first",
                    false, faces > 0))
         ctx.actions.pushPull = true;
     ImGui::SameLine();
 
     if (iconButton(Icon::Union, "Extrude", icon,
-                   faces ? "Extrude: grow a boss off the face, outline kept  (Shift+E)"
+                   faces ? "Extrude: grow a boss off the face, outline kept  (E)"
                          : "Extrude - select a face first",
                    false, faces > 0))
         ctx.actions.extrude = true;
     ImGui::SameLine();
 
     if (iconButton(Icon::Chamfer, "RotateFace", icon,
-                   faces ? "Tip the selected face about one of its edges  (T)"
-                         : "Rotate a face - select one first",
+                   faces ? "Rotate face: tip it about an edge  (R)"
+                         : "Rotate face - select one first",
                    false, faces > 0))
         ctx.actions.rotateFace = true;
     ImGui::SameLine();

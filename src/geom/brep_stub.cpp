@@ -29,7 +29,7 @@ BrepRef filletEdges(const BrepShape&, const std::vector<EdgeId>&, const std::vec
     return {};
 }
 BrepRef extrudeFaces(const BrepRef&, const std::vector<FaceId>&, Real, ElementId,
-                     std::vector<ElementId>*, std::string* reason, bool) {
+                     std::vector<ElementId>*, std::string* reason, bool, Vec3) {
     if (reason) *reason = "built without OpenCASCADE";
     return {};
 }

@@ -197,7 +197,7 @@ BrepRef filletEdges(const BrepShape& s, const std::vector<EdgeId>& edges,
 // extrude.
 BrepRef extrudeFaces(const BrepRef& s, const std::vector<FaceId>& faces, Real distance,
                      ElementId salt, std::vector<ElementId>* newFaces, std::string* reason,
-                     bool mergeFlush = true);
+                     bool mergeFlush = true, Vec3 along = Vec3{});
 
 // Splits each face into an inner face and the ring around it, the inner one
 // offset inward by `amount`. What a pocket or a boss is drawn from.

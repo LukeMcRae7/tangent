@@ -1153,7 +1153,7 @@ BrepRef unifyFlush(const BrepRef& made, const BrepRef& before, ElementId salt) {
 
 BrepRef extrudeFaces(const BrepRef& s, const std::vector<FaceId>& faces, Real distance,
                      ElementId salt, std::vector<ElementId>* newFaces, std::string* reason,
-                     bool mergeFlush) {
+                     bool mergeFlush, Vec3 along) {
     if (newFaces) newFaces->clear();
     if (reason) reason->clear();
     if (!s || faces.empty()) {
@@ -1200,7 +1200,18 @@ BrepRef extrudeFaces(const BrepRef& s, const std::vector<FaceId>& faces, Real di
                 if (reason) *reason = "a face has no direction to be pushed along";
                 return {};
             }
-            const gp_Vec sweep(n.x * distance, n.y * distance, n.z * distance);
+            // Along the face's own normal unless the caller named a
+            // direction. A sweep square to the normal moves the face's plane
+            // nowhere, so there is nothing to build and it says so.
+            Vec3 push = n;
+            if (lengthSq(along) > 1e-12) {
+                push = normalize(along);
+                if (std::fabs(dot(push, n)) < 1e-3) {
+                    if (reason) *reason = "that direction runs along the face, not into it";
+                    return {};
+                }
+            }
+            const gp_Vec sweep(push.x * distance, push.y * distance, push.z * distance);
 
             TopoDS_Shape solid;
             try {

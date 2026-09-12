@@ -129,7 +129,7 @@ bool Application::init() {
         scene_.selectElement({id, ElementKind::Face, static_cast<Index>(pickFace_)});
         if (autoExtrude_) {
             // The real interactive path: push the face, type a distance, commit.
-            beginFaceMove(FaceOp::PushPull);
+            beginFaceMove(FaceOp::Move);
             char buf[32];
             std::snprintf(buf, sizeof(buf), "%g", static_cast<double>(autoExtrudeMm_));
             faceTool_.typedValue = buf;
@@ -346,7 +346,7 @@ bool Application::init() {
                 ++picked;
             }
             std::fprintf(stderr, "[shell-extrude] rim faces selected: %d\n", picked);
-            beginFaceMove(FaceOp::PushPull);
+            beginFaceMove(FaceOp::Move);
             char buf[32];
             std::snprintf(buf, sizeof buf, "%g", static_cast<double>(std::fabs(shellExtrudeDemo_)));
             faceTool_.typedValue = buf;
@@ -865,7 +865,7 @@ void Application::drawFacePanel() {
     const bool extrude = faceTool_.op == FaceOp::Extrude;
 
     if (!ui::beginCommand("##faceop",
-                          rotate ? "Rotate Face" : extrude ? "Extrude" : "Push / Pull",
+                          rotate ? "Rotate Face" : extrude ? "Extrude" : "Move Face",
                           rotate ? Icon::Chamfer : Icon::Extrude,
                           viewRect_.x + 16.0f, viewRect_.y + 16.0f))
         return;
@@ -880,48 +880,87 @@ void Application::drawFacePanel() {
                   faceTool_.faces.size() == 1 ? "" : "s");
     ui::commandValue("Selection", sel);
 
-    if (!rotate) {
-        const bool cutting = faceTool_.combine == ExtrudeOp::Cut ||
-                             (faceTool_.combine == ExtrudeOp::Auto && faceTool_.value < 0.0);
-        ui::commandRow("Result");
-        ImGui::TextColored(cutting ? ImVec4(0.95f, 0.35f, 0.25f, 1.0f)
-                                   : ImVec4(palette::kBrand.r, palette::kBrand.g,
-                                            palette::kBrand.b, 1.0f),
-                           "%s", cutting ? "Cuts into the body" : "Adds to the body");
+    // Which way it goes. The face's own normal unless an axis key says
+    // otherwise -- for a rotate, which way round it turns.
+    ui::commandRow(rotate ? "Pivot" : "Along");
+    static const char* kAxisName[3] = {"X", "Y", "Z"};
+    {
+        const bool on = faceTool_.lockedAxis < 0;
+        if (on) ImGui::PushStyleColor(ImGuiCol_Button,
+                                      ImVec4(palette::kBrand.r, palette::kBrand.g,
+                                             palette::kBrand.b, 0.85f));
+        if (ImGui::Button(rotate ? "Edge" : "Normal")) setFaceAxis(-1);
+        if (on) ImGui::PopStyleColor();
+    }
+    for (int a = 0; a < 3; ++a) {
+        ImGui::SameLine();
+        const bool on = faceTool_.lockedAxis == a;
+        if (on) ImGui::PushStyleColor(ImGuiCol_Button,
+                                      ImVec4(palette::kBrand.r, palette::kBrand.g,
+                                             palette::kBrand.b, 0.85f));
+        if (ImGui::Button(kAxisName[a])) setFaceAxis(a);
+        if (on) ImGui::PopStyleColor();
+    }
 
-        // Only an extrude has an operation to choose. Push and pull is the
-        // face moving: which way you pull is the whole of the decision, and a
-        // button that said otherwise would be claiming a choice there is not.
-        if (extrude) {
-            const float ic = ImGui::GetTextLineHeight() * 1.4f;
-            ui::commandRow("Operation");
-            {
-                const bool on = faceTool_.combine == ExtrudeOp::Auto;
-                if (on) ImGui::PushStyleColor(ImGuiCol_Button,
-                                              ImVec4(palette::kBrand.r, palette::kBrand.g,
-                                                     palette::kBrand.b, 0.85f));
-                if (ImGui::Button("Auto")) faceTool_.combine = ExtrudeOp::Auto;
-                if (on) ImGui::PopStyleColor();
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("Add when pushed out, cut when pushed in  (A)");
-            }
-            ImGui::SameLine();
-            if (iconButton(Icon::Union, "fjoin", ic, "Always add  (J)",
-                           faceTool_.combine == ExtrudeOp::Join))
-                faceTool_.combine = ExtrudeOp::Join;
-            ImGui::SameLine();
-            if (iconButton(Icon::Difference, "fcut", ic, "Always cut  (D)",
-                           faceTool_.combine == ExtrudeOp::Cut))
-                faceTool_.combine = ExtrudeOp::Cut;
+    // What the number is doing to the body, said plainly. Not a choice: moving
+    // a face out adds material and moving it in takes some away, and offering
+    // to override that would be offering to make the tool lie.
+    if (!rotate) {
+        ui::commandRow("Result");
+        const bool cutting = faceTool_.value < 0.0;
+        if (std::fabs(faceTool_.value) < 1e-6)
+            ImGui::TextDisabled("unchanged");
+        else
+            ImGui::TextColored(cutting ? ImVec4(0.95f, 0.35f, 0.25f, 1.0f)
+                                       : ImVec4(palette::kBrand.r, palette::kBrand.g,
+                                                palette::kBrand.b, 1.0f),
+                               "%s", cutting ? "takes material away" : "adds material");
+    }
+
+    // Only when it has actually run into something. Fusion asks at this point
+    // and not before, and for the same reason: until the material meets
+    // another body there is no decision to make.
+    if (!rotate && faceTool_.meets != kNoObject) {
+        const SceneObject* other = scene_.find(faceTool_.meets);
+        ui::commandRow("Meets");
+        ImGui::TextColored(ImVec4(palette::kBrand.r, palette::kBrand.g,
+                                  palette::kBrand.b, 1.0f),
+                           "%s", other ? other->name.c_str() : "another body");
+
+        ui::commandRow("");
+        {
+            const bool on = !faceTool_.combineWithMeet;
+            if (on) ImGui::PushStyleColor(ImGuiCol_Button,
+                                          ImVec4(palette::kBrand.r, palette::kBrand.g,
+                                                 palette::kBrand.b, 0.85f));
+            if (ImGui::Button("Leave")) faceTool_.combineWithMeet = false;
+            if (on) ImGui::PopStyleColor();
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Two bodies that overlap, left as they are");
+        }
+        const float ic = ImGui::GetTextLineHeight() * 1.4f;
+        ImGui::SameLine();
+        if (iconButton(Icon::Union, "mjoin", ic, "Join them into one",
+                       faceTool_.combineWithMeet && faceTool_.meetOp == BooleanOp::Union)) {
+            faceTool_.combineWithMeet = true;
+            faceTool_.meetOp = BooleanOp::Union;
+        }
+        ImGui::SameLine();
+        if (iconButton(Icon::Difference, "mcut", ic, "Cut this one out of it",
+                       faceTool_.combineWithMeet && faceTool_.meetOp == BooleanOp::Difference)) {
+            faceTool_.combineWithMeet = true;
+            faceTool_.meetOp = BooleanOp::Difference;
         }
     }
 
     ui::commandHint(rotate
-        ? "Pull across the edge the face pivots on, or type an angle."
+        ? "Pull either way across the pivot, or type an angle. X / Y / Z choose "
+          "which way it turns."
         : extrude
-        ? "Grows a boss off the face and keeps its outline, so you can take "
-          "hold of it afterwards."
-        : "Moves the face; the body absorbs it. Pull out to add, in to cut.");
+        ? "Grows a boss off the face and leaves its outline, so you can take "
+          "hold of it afterwards. Negative cuts in."
+        : "Moves the face; the body follows. X / Y / Z move it along a world "
+          "axis instead of its own.");
 
     const int footer = ui::commandFooter("OK  (Click)");
     ui::endCommand();
@@ -1157,11 +1196,9 @@ void Application::handleShortcuts() {
         if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) { abortFaceMove(); return; }
         if (ImGui::IsKeyPressed(ImGuiKey_Enter, false) ||
             ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false)) { commitFaceMove(); return; }
-        if (faceTool_.op == FaceOp::PushPull) {
-            if (ImGui::IsKeyPressed(ImGuiKey_J, false)) faceTool_.combine = ExtrudeOp::Join;
-            if (ImGui::IsKeyPressed(ImGuiKey_D, false)) faceTool_.combine = ExtrudeOp::Cut;
-            if (ImGui::IsKeyPressed(ImGuiKey_A, false)) faceTool_.combine = ExtrudeOp::Auto;
-        }
+        if (ImGui::IsKeyPressed(ImGuiKey_X, false)) setFaceAxis(0);
+        if (ImGui::IsKeyPressed(ImGuiKey_Y, false)) setFaceAxis(1);
+        if (ImGui::IsKeyPressed(ImGuiKey_Z, false)) setFaceAxis(2);
         typedInto(faceTool_.typedValue, [&] { updateFaceMove(true); });
         return;
     }
@@ -1250,8 +1287,19 @@ void Application::handleShortcuts() {
 
     // Modal transforms, Blender's G / R / S.
     if (!ctrl && !alt) {
-        if (ImGui::IsKeyPressed(ImGuiKey_G, false)) beginTransform(TransformMode::Translate);
-        if (ImGui::IsKeyPressed(ImGuiKey_R, false)) beginTransform(TransformMode::Rotate);
+        // The same two keys, and the same two words, acting on whatever is
+        // selected. A face is a thing that can be moved and turned just as a
+        // body is, and giving those their own letters made the user remember
+        // which of two names meant the same operation on a different noun.
+        const bool onFace = !scene_.selectedFaces(scene_.contextObject()).empty();
+        if (ImGui::IsKeyPressed(ImGuiKey_G, false)) {
+            if (onFace) beginFaceMove(FaceOp::Move);
+            else        beginTransform(TransformMode::Translate);
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_R, false)) {
+            if (onFace) beginFaceMove(FaceOp::Rotate);
+            else        beginTransform(TransformMode::Rotate);
+        }
         if (ImGui::IsKeyPressed(ImGuiKey_S, false) && !shift)
             beginTransform(TransformMode::Scale);
     }
@@ -1280,11 +1328,7 @@ void Application::handleShortcuts() {
     }
 
     // Mesh edits act on the selected faces. Shift+E cuts inward.
-    if (!ctrl && !alt && ImGui::IsKeyPressed(ImGuiKey_E, false)) {
-        if (io.KeyShift) ui_.actions.extrude = true;
-        else             ui_.actions.pushPull = true;
-    }
-    if (!ctrl && !alt && ImGui::IsKeyPressed(ImGuiKey_T, false)) ui_.actions.rotateFace = true;
+    if (!ctrl && !alt && ImGui::IsKeyPressed(ImGuiKey_E, false)) ui_.actions.extrude = true;
     if (!ctrl && !alt && ImGui::IsKeyPressed(ImGuiKey_K, false)) ui_.actions.divide = true;
     if (ctrl && !shift && ImGui::IsKeyPressed(ImGuiKey_B, false)) ui_.actions.bevel = true;
 
@@ -1631,6 +1675,7 @@ void Application::beginFaceMove(FaceOp op) {
     faceTool_.op = op;
     faceTool_.objectId = id;
     faceTool_.faces = faces;
+    faceTool_.names = nameFaces(obj->body, faces);
     faceTool_.before = obj->body;
     faceTool_.chainBefore = obj->features;
     faceTool_.value = 0.0;
@@ -1654,6 +1699,7 @@ void Application::beginFaceMove(FaceOp op) {
 
     const Vec3 extent = obj->body.bounds().size();
     const Real span = std::max(std::min({extent.x, extent.y, extent.z}), Real(1.0));
+    faceTool_.direction = dir;
 
     if (op == FaceOp::Rotate) {
         // The hinge is the edge of the face nearest the cursor: you tip a face
@@ -1688,14 +1734,16 @@ void Application::beginFaceMove(FaceOp op) {
         faceTool_.axis.origin = anchor;
         faceTool_.axis.direction = normalize(across);
         faceTool_.axis.valid = true;
+        faceTool_.axis.signedRange = true;
         faceTool_.axis.baseValue = 0.0;
-        faceTool_.axis.spanValue = 60.0;          // degrees of travel on the track
+        faceTool_.axis.spanValue = 60.0;      // degrees for a track's travel
     } else {
         faceTool_.axis.origin = anchor;
         faceTool_.axis.direction = dir;
         faceTool_.axis.valid = true;
-        faceTool_.axis.baseValue = -span;
-        faceTool_.axis.spanValue = span;
+        faceTool_.axis.signedRange = true;
+        faceTool_.axis.baseValue = 0.0;
+        faceTool_.axis.spanValue = span;      // millimetres for a track's travel
     }
 
     // The track starts under the pointer, as the fillet's does, so the gesture
@@ -1708,6 +1756,79 @@ void Application::beginFaceMove(FaceOp op) {
     }
 }
 
+// Points the gesture along a world axis, or back at the face's own normal.
+//
+// Pressing the same key twice returns to the normal, which is the behaviour
+// every axis constraint in the program already has: a modifier you cannot take
+// off is a mode, and modes are what this is trying not to be.
+void Application::setFaceAxis(int axis) {
+    if (!faceTool_.active) return;
+    const SceneObject* obj = scene_.find(faceTool_.objectId);
+    if (!obj || faceTool_.faces.empty()) return;
+
+    faceTool_.lockedAxis = faceTool_.lockedAxis == axis ? -1 : axis;
+    faceTool_.requested = 1e30;          // whatever was built is about the old way
+    faceTool_.previewValid = false;
+    faceTool_.reachedMax = 1e30;
+    faceTool_.reachedMin = -1e30;
+
+    const Mat4 model = obj->modelMatrix();
+    Vec3 normal{};
+    for (FaceId f : faceTool_.faces)
+        normal += normalize(transformVector(normalMatrix(model), faceTool_.before.faceNormal(f)));
+    if (lengthSq(normal) < 1e-12) return;
+    normal = normalize(normal);
+
+    if (faceTool_.op == FaceOp::Rotate) {
+        // For a rotation the axis names the line the face turns about.
+        if (faceTool_.lockedAxis >= 0) {
+            Vec3 pivot{};
+            (&pivot.x)[faceTool_.lockedAxis] = 1.0;
+            // It has to lie in the face, or there is nothing to pivot on.
+            if (std::fabs(dot(pivot, faceTool_.before.faceNormal(faceTool_.faces.front()))) > 0.99) {
+                faceTool_.lockedAxis = -1;
+                setNotice("That axis points straight out of the face");
+            } else {
+                faceTool_.hingeDir = normalize(pivot);
+                faceTool_.hingePoint = faceTool_.before.faceCentroid(faceTool_.faces.front());
+            }
+        }
+        const Vec3 worldHinge = normalize(transformVector(model, faceTool_.hingeDir));
+        Vec3 across = cross(normal, worldHinge);
+        if (lengthSq(across) > 1e-12) faceTool_.axis.direction = normalize(across);
+        return;
+    }
+
+    Vec3 dir = normal;
+    if (faceTool_.lockedAxis >= 0) {
+        Vec3 pick{};
+        (&pick.x)[faceTool_.lockedAxis] = 1.0;
+        // Whichever way along that axis is the way out of the face, so a
+        // positive number still means "outward".
+        if (dot(pick, normal) < 0.0) pick = pick * Real(-1);
+        if (std::fabs(dot(pick, normal)) < 1e-3) {
+            faceTool_.lockedAxis = -1;
+            setNotice("That axis runs along the face, not into it");
+        } else {
+            dir = pick;
+        }
+    }
+    faceTool_.direction = dir;
+    faceTool_.axis.direction = dir;
+}
+
+// Finds the faces this began on in whatever the preview last built.
+void Application::refreshFaceSelection() {
+    SceneObject* obj = scene_.find(faceTool_.objectId);
+    if (!obj || faceTool_.names.empty()) return;
+
+    std::vector<FaceId> now;
+    if (!faceTool_.names.resolveFaces(obj->body, now) || now.empty()) return;
+
+    scene_.clearElementSelection();
+    for (FaceId f : now) scene_.selectElement({faceTool_.objectId, ElementKind::Face, f}, true);
+}
+
 void Application::updateFaceMove(bool snap, bool follow) {
     if (!faceTool_.active) return;
     SceneObject* obj = scene_.find(faceTool_.objectId);
@@ -1715,10 +1836,54 @@ void Application::updateFaceMove(bool snap, bool follow) {
 
     {
         Body built;
-        if (faceTool_.preview.take(built)) {
+        bool failed = false;
+        if (faceTool_.preview.take(built, &failed)) {
             obj->body = std::move(built);
             obj->refreshDerived();
             faceTool_.previewValid = true;
+            // The faces are found again by name, so the highlight stays on the
+            // ones the gesture began with rather than wandering onto their
+            // neighbours as the shape changes under it.
+            refreshFaceSelection();
+
+            // Has it grown into anything?
+            //
+            // Against the material this gesture added, not against the whole
+            // body: two bodies standing next to each other have overlapping
+            // bounds without touching, and a tool that offered to combine them
+            // every time would be asking a question whose answer is almost
+            // always no. What is tested is the ground the faces swept through.
+            faceTool_.meets = kNoObject;
+            if (faceTool_.value > 0.0) {
+                const Mat4 model = obj->modelMatrix();
+                AABB swept;
+                for (FaceId f : faceTool_.faces) {
+                    std::vector<VertexId> fv;
+                    faceTool_.before.faceVertices(f, fv);
+                    for (VertexId v : fv) {
+                        const Vec3 p = transformPoint(model, faceTool_.before.vertexPosition(v));
+                        swept.expand(p);
+                        swept.expand(p + faceTool_.direction * faceTool_.value);
+                    }
+                }
+                for (const auto& other : scene_.objects()) {
+                    if (other->id == faceTool_.objectId || !other->visible) continue;
+                    const AABB b = other->worldBounds();
+                    if (!b.valid() || !swept.valid()) continue;
+                    const bool apart = swept.max.x < b.min.x || swept.min.x > b.max.x ||
+                                       swept.max.y < b.min.y || swept.min.y > b.max.y ||
+                                       swept.max.z < b.min.z || swept.min.z > b.max.z;
+                    if (!apart) { faceTool_.meets = other->id; break; }
+                }
+            }
+            if (faceTool_.meets == kNoObject) faceTool_.combineWithMeet = false;
+        } else if (failed) {
+            // The kernel would not build that far. Where the travel stops is
+            // then a fact rather than a guess, and the gesture stops there.
+            if (faceTool_.requested > 0.0) faceTool_.reachedMax = faceTool_.requested;
+            else                           faceTool_.reachedMin = faceTool_.requested;
+            faceTool_.value = clampf(faceTool_.value, faceTool_.reachedMin,
+                                     faceTool_.reachedMax);
         }
     }
     if (!follow) return;
@@ -1738,6 +1903,8 @@ void Application::updateFaceMove(bool snap, bool follow) {
             if (step > 0.0) want = std::round(want / step) * step;
         }
     }
+    // Never past what the kernel has shown it can do.
+    want = clampf(want, faceTool_.reachedMin, faceTool_.reachedMax);
     faceTool_.value = want;
 
     if (std::fabs(want - faceTool_.requested) < 1e-9 && faceTool_.previewValid) return;
@@ -1760,10 +1927,13 @@ void Application::updateFaceMove(bool snap, bool follow) {
             return rotateFaces(b, faces, angle, hp, hd, 7001);
         });
     } else {
-        const ExtrudeOp combine = faceTool_.combine;
-        const bool merge = faceTool_.op == FaceOp::PushPull;
-        faceTool_.preview.request(faceTool_.before, [faces, want, combine, merge](Body& b) {
-            return extrudeFaces(b, faces, want, nullptr, 7002, combine, nullptr, merge);
+        // The sign is the operation. Out adds, in cuts; there is nothing else
+        // a moved face can mean.
+        const bool merge = faceTool_.op == FaceOp::Move;
+        const Vec3 along = faceTool_.direction;
+        faceTool_.preview.request(faceTool_.before, [faces, want, merge, along](Body& b) {
+            return extrudeFaces(b, faces, want, nullptr, 7002, ExtrudeOp::Auto, nullptr,
+                                merge, along);
         });
     }
     faceTool_.previewValid = false;
@@ -1794,18 +1964,49 @@ void Application::commitFaceMove() {
     } else {
         f.kind = FeatureKind::Extrude;
         f.distance = faceTool_.value;
-        f.extrudeOp = faceTool_.combine;
-        f.mergeFlush = faceTool_.op == FaceOp::PushPull;
+        f.extrudeOp = ExtrudeOp::Auto;
+        f.mergeFlush = faceTool_.op == FaceOp::Move;
+        f.axisDir = faceTool_.direction;
     }
     f.faces = nameFaces(faceTool_.before, faceTool_.faces);
 
+    const char* label = faceTool_.op == FaceOp::Rotate    ? "Rotate Face"
+                      : faceTool_.op == FaceOp::Extrude   ? "Extrude"
+                                                          : "Move Face";
     std::string why;
     if (scene_.addFeature(id, std::move(f), &why) && editKeepsSolid(id)) {
-        undo_.push(std::make_unique<FeatureCommand>(
-            id, std::move(chainBefore), obj->features,
-            faceTool_.op == FaceOp::Rotate     ? "Rotate Face"
-            : faceTool_.op == FaceOp::Extrude  ? "Extrude"
-                                               : "Push / Pull"));
+        // If it grew into another body and the user said to combine, that is
+        // one more step on the same chain and one more part of the same undo.
+        std::vector<std::unique_ptr<Command>> parts;
+        parts.push_back(std::make_unique<FeatureCommand>(id, std::move(chainBefore),
+                                                         obj->features, label));
+
+        const ObjectId meets = faceTool_.meets;
+        if (faceTool_.combineWithMeet && meets != kNoObject) {
+            if (SceneObject* other = scene_.find(meets)) {
+                std::vector<Feature> beforeBool = obj->features;
+                Body baked = other->body;
+                baked.transform(inverse(obj->modelMatrix()) * other->modelMatrix());
+
+                Feature b;
+                b.kind = FeatureKind::Boolean;
+                b.booleanOp = faceTool_.meetOp;
+                b.bakedBody = std::move(baked);
+                if (scene_.addFeature(id, std::move(b), &why)) {
+                    parts.push_back(std::make_unique<FeatureCommand>(
+                        id, std::move(beforeBool), obj->features,
+                        booleanOpName(faceTool_.meetOp)));
+                    renderer_.forget(meets);
+                    parts.push_back(ExistenceCommand::forDelete(scene_, {meets}));
+                } else {
+                    setNotice(why.empty() ? "They could not be combined"
+                                          : "Not combined: " + why);
+                }
+            }
+        }
+
+        if (parts.size() == 1) undo_.push(std::move(parts.front()));
+        else undo_.push(std::make_unique<CompositeCommand>(std::move(parts), label));
     } else {
         obj->features = std::move(chainBefore);
         obj->body = std::move(faceTool_.before);
@@ -2340,10 +2541,74 @@ void Application::stepFaceDemo() {
 
     auto report = [&](const char* what) {
         const SceneObject* o = scene_.find(id);
-        std::fprintf(stderr, "[face-demo] %s: %d faces, %.1f mm3, valid=%d, %zu features\n",
+        std::fprintf(stderr,
+                     "[face-demo] %s: %d faces, %.1f mm3, valid=%d, %zu features, "
+                     "%zu selected\n",
                      what, o->body.faceCount(), o->body.health(false).volume,
-                     (int)o->body.validate(), o->features.size());
+                     (int)o->body.validate(), o->features.size(),
+                     scene_.selectedFaces(id).size());
     };
+
+    if (faceDemo_ == 9) {
+        // A second body in the way, so the extrude runs into it and the tool
+        // has something to ask about.
+        PrimitiveSpec spec;
+        spec.kind = PrimitiveKind::Box;
+        spec.box = {10, 10, 10};
+        const ObjectId other = scene_.addPrimitive(PrimitiveKind::Box, spec, {0, 0, 40});
+        scene_.select(id);
+        scene_.clearElementSelection();
+        scene_.selectElement({id, ElementKind::Face, topFace()}, true);
+        beginFaceMove(FaceOp::Extrude);
+        faceTool_.typedValue = "3";
+        updateFaceMove(false);
+        while (faceTool_.preview.busy()) updateFaceMove(false);
+        updateFaceMove(false);
+        std::fprintf(stderr, "[face-demo] short extrude meets: %s\n",
+                     faceTool_.meets == kNoObject ? "nothing" : "something");
+        faceTool_.typedValue = "20";
+        updateFaceMove(false);
+        while (faceTool_.preview.busy()) updateFaceMove(false);
+        updateFaceMove(false);
+        std::fprintf(stderr, "[face-demo] long extrude meets: %s\n",
+                     faceTool_.meets == other ? "the other body" : "nothing");
+        faceTool_.combineWithMeet = true;
+        faceTool_.meetOp = BooleanOp::Union;
+        commitFaceMove();
+        std::fprintf(stderr, "[face-demo] after joining: %zu objects\n",
+                     scene_.objects().size());
+        report("joined on the way");
+        return;
+    }
+
+    if (faceDemo_ == 7) {
+        // A move along a world axis rather than the face's own normal.
+        scene_.clearElementSelection();
+        scene_.selectElement({id, ElementKind::Face, topFace()}, true);
+        beginFaceMove(FaceOp::Move);
+        setFaceAxis(2);
+        faceTool_.typedValue = "5";
+        updateFaceMove(false);
+        while (faceTool_.preview.busy()) updateFaceMove(false);
+        updateFaceMove(false);
+        report("moved along Z");
+        commitFaceMove();
+        return;
+    }
+
+    if (faceDemo_ == 8) {
+        // A rotation the other way, which the signed range has to allow.
+        scene_.clearElementSelection();
+        scene_.selectElement({id, ElementKind::Face, topFace()}, true);
+        beginFaceMove(FaceOp::Rotate);
+        faceTool_.typedValue = "-15";
+        updateFaceMove(false);
+        while (faceTool_.preview.busy()) updateFaceMove(false);
+        updateFaceMove(false);
+        report("rotated the other way");
+        commitFaceMove();
+        return;
+    }
 
     if (faceDemo_ == 6) {
         // The same pull, as an extrude: the boss keeps its outline.
@@ -2386,7 +2651,7 @@ void Application::stepFaceDemo() {
             const FaceId half = topFace();
             scene_.clearElementSelection();
             scene_.selectElement({id, ElementKind::Face, half}, true);
-            beginFaceMove(FaceOp::PushPull);
+            beginFaceMove(FaceOp::Move);
             faceTool_.typedValue = "4";
             updateFaceMove(false);
             while (faceTool_.preview.busy()) updateFaceMove(false);
@@ -2405,7 +2670,25 @@ void Application::stepFaceDemo() {
         faceTool_.typedValue = "15";
 
     } else {
-        beginFaceMove(FaceOp::PushPull);
+        beginFaceMove(FaceOp::Move);
+        // Several values in turn, the way a drag arrives at one: the selection
+        // has to survive every rebuild, not just the last.
+        for (const char* v : {"1", "3", "5"}) {
+            faceTool_.typedValue = v;
+            updateFaceMove(false);
+            while (faceTool_.preview.busy()) updateFaceMove(false);
+            updateFaceMove(false);
+            {
+                const SceneObject* o2 = scene_.find(id);
+                const std::vector<Index> sel = scene_.selectedFaces(id);
+                const Vec3 c = sel.empty() ? Vec3{} : o2->body.faceCentroid(sel.front());
+                const Vec3 n = sel.empty() ? Vec3{} : o2->body.faceNormal(sel.front());
+                std::fprintf(stderr,
+                             "[face-demo]   at %s mm: %zu selected, centre z %.2f, "
+                             "normal z %.2f\n",
+                             v, sel.size(), c.z, n.z);
+            }
+        }
         faceTool_.typedValue = faceDemo_ == 2 ? "-5" : "6";
     }
     updateFaceMove(false);
@@ -3235,8 +3518,8 @@ void Application::applyActions() {
         }
     }
 
-    if (a.pushPull) beginFaceMove(FaceOp::PushPull);
-    if (a.extrude)  beginFaceMove(FaceOp::Extrude);
+    if (a.pushPull)   beginFaceMove(FaceOp::Move);
+    if (a.extrude)    beginFaceMove(FaceOp::Extrude);
     if (a.rotateFace) beginFaceMove(FaceOp::Rotate);
     if (a.divide) beginDivide();
     if (a.bevel)   bevelActiveObject();

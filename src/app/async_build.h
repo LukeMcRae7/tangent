@@ -40,7 +40,10 @@ public:
     // Hands back a finished build, and starts the next one if the pointer has
     // moved on. Call once a frame. Returns false when there is nothing new,
     // which is most frames.
-    bool take(Body& out);
+    // `failed`, when given, says that a build finished and did not manage it
+    // -- which is different from there being nothing new, and is how a caller
+    // learns where its range runs out.
+    bool take(Body& out, bool* failed = nullptr);
 
     bool busy() const { return running_ || hasPending_; }
 

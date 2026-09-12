@@ -40,10 +40,14 @@ bool makePrimitive(const PrimitiveSpec& spec, Body& out, Backend backend = Backe
 //
 // `mergeFlush` is the difference between push-pull and extrude: see
 // brep::extrudeFaces.
+//
+// `along` is the direction the sweep runs, or a zero vector for each face's own
+// normal. Moving a face along a world axis rather than its normal is a thing
+// people want, and the only difference underneath is the vector swept.
 bool extrudeFaces(Body& body, const std::vector<FaceId>& faces, Real distance,
                   std::vector<FaceId>* newFaces = nullptr, ElementId salt = 0,
                   ExtrudeOp op = ExtrudeOp::Auto, std::string* reason = nullptr,
-                  bool mergeFlush = true);
+                  bool mergeFlush = true, Vec3 along = Vec3{});
 
 // A solid from a closed profile on a plane, swept between two heights along the
 // plane's normal -- what the create tool draws.
