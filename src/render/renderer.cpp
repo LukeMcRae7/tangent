@@ -113,6 +113,12 @@ void Renderer::addTriangle(Vec3 a, Vec3 b, Vec3 c, Vec4 color) {
     triVerts_.push_back(makeVert(c, color));
 }
 
+void Renderer::addFrontTriangle(Vec3 a, Vec3 b, Vec3 c, Vec4 color) {
+    frontVerts_.push_back(makeVert(a, color));
+    frontVerts_.push_back(makeVert(b, color));
+    frontVerts_.push_back(makeVert(c, color));
+}
+
 void Renderer::addBox(const AABB& box, Vec4 color) {
     if (!box.valid()) return;
     Vec3 c[8];
@@ -293,6 +299,26 @@ void Renderer::render(const Scene& scene, const Camera& camera, const ViewOption
     glDisable(GL_CULL_FACE);
     flushTriangles(camera);
     flushLines(camera);
+
+    // Last, and with the depth buffer ignored: whatever is in this layer is
+    // there to be read, so nothing -- not the model, not the overlay's own
+    // ticks -- may be drawn over it.
+    if (!frontVerts_.empty()) {
+        overlayShader_.bind();
+        overlayShader_.set("uViewProj", camera.viewProjection());
+        glDisable(GL_DEPTH_TEST);
+        glDepthMask(GL_FALSE);
+        glBindVertexArray(triVao_);
+        glBindBuffer(GL_ARRAY_BUFFER, triVbo_);
+        glBufferData(GL_ARRAY_BUFFER,
+                     static_cast<GLsizeiptr>(frontVerts_.size() * sizeof(LineVert)),
+                     frontVerts_.data(), GL_STREAM_DRAW);
+        glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(frontVerts_.size()));
+        glBindVertexArray(0);
+        glEnable(GL_DEPTH_TEST);
+        glDepthMask(GL_TRUE);
+        frontVerts_.clear();
+    }
 
     glDisable(GL_BLEND);
     glDisable(GL_LINE_SMOOTH);

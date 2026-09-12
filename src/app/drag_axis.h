@@ -24,11 +24,16 @@ struct DragAxis {
     Vec3 origin;         // where the value is zero
     Vec3 direction;      // unit; the way that increases it
 
-    // The value the cursor was at when the gesture started, which is where the
-    // guide is drawn from. The measurement still runs from `origin` -- a tick
-    // at 2mm is at 2mm -- but the line appears under the pointer rather than
-    // out on the edge, which may be a hand's width away.
-    Real startValue = 0.0;
+    // The value at the origin, which is where the gesture starts and the
+    // smallest it can go. The origin sits under the cursor at the moment the
+    // operation began, so the guide appears in the hand rather than out on the
+    // edge -- and the value is how far the pointer has been pulled from there.
+    //
+    // Nothing goes behind it. Projecting a ray onto a line gives a signed
+    // answer, and near the edge of the screen -- where a perspective ray is
+    // most oblique -- that sign flips and the arrow turns to point the other
+    // way. There is nothing behind the start to point at.
+    Real baseValue = 0.0;
 
     bool valid = false;
 
@@ -41,6 +46,10 @@ struct DragAxis {
     // eye that point is ill-conditioned -- a pixel of movement swings it
     // wildly -- so there is a screen-space fallback below.
     Real valueAt(const Camera& camera, Vec2 mousePx) const;
+
+    // How far along the axis the cursor is, signed and unclamped. valueAt is
+    // this, clamped forward and offset by baseValue.
+    Real rawOffset(const Camera& camera, Vec2 mousePx) const;
 
     // True when the axis is square enough to the view to measure along. Near
     // false the caller should say so rather than let the number jump about.
@@ -68,6 +77,16 @@ struct DragAxis {
 // two faces that meet there. Pulling the cursor off the edge into open space
 // increases the radius; sliding along the edge does nothing, which is what
 // distance-from-the-edge got wrong.
-DragAxis filletAxis(const Body& body, const Mat4& model, EdgeId edge, Vec3 nearPoint);
+// The axis a fillet grows along, for a whole selection rather than one edge.
+//
+// The direction is the sum of the outward normals of every face that meets the
+// selected edges, which gives the right answer in each case without any of
+// them being special: one edge of a cube sums its two faces and comes out at 45
+// degrees; the four edges around a face sum that face four times and its four
+// sides, which cancel in pairs, leaving the face's own normal; two
+// perpendicular faces meeting at an edge come out at 45 again. It is a
+// statement about the boundary, and the boundary is what a fillet eats into.
+DragAxis filletAxis(const Body& body, const Mat4& model,
+                    const std::vector<EdgeId>& edges, Vec3 nearPoint);
 
 } // namespace tg

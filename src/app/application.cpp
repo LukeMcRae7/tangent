@@ -1369,14 +1369,16 @@ void Application::beginFillet() {
 
     preEditSolid_ = obj->healthVersion == obj->meshVersion && obj->health.solid();
 
-    // The guide is anchored once, to the edge the pointer is nearest right now,
-    // and does not move again for the rest of the gesture.
+    // The guide is fixed once, now, and does not move again for the rest of
+    // the gesture.
     {
         const Vec2 at = mouseInViewport();
         const Mat4 model = obj->modelMatrix();
+
+        // A point on the selection to aim from: whichever part of it the
+        // pointer is nearest, in world space at the cursor's own depth.
+        Vec3 nearest{};
         Real bestPx = -1.0;
-        Vec3 bestAt{};
-        EdgeId bestEdge = kInvalid;
         for (EdgeId e : edges) {
             if (!filletTool_.meshBefore.hasEdge(e)) continue;
             Vec3 aL, bL;
@@ -1389,16 +1391,19 @@ void Application::beginFillet() {
             const Real len2 = lengthSq(ab);
             const Real t = len2 > 1e-9 ? clampf(dot(at - aPx, ab) / len2, 0.0, 1.0) : 0.0;
             const Real d = length(at - (aPx + ab * t));
-            if (bestPx < 0.0 || d < bestPx) { bestPx = d; bestAt = lerp(aW, bW, t); bestEdge = e; }
+            if (bestPx < 0.0 || d < bestPx) { bestPx = d; nearest = lerp(aW, bW, t); }
         }
-        if (bestEdge != kInvalid) {
-            filletTool_.axis = filletAxis(filletTool_.meshBefore, model, bestEdge, bestAt);
-            // Drawn from where the pointer is, not from the edge: the edge may
-            // be a hand's width away, and a guide that appears over there is a
-            // thing to go and find rather than a thing to pull on.
-            if (filletTool_.axis.valid && filletTool_.axis.facingCamera(camera_))
-                filletTool_.axis.startValue =
-                    std::max(Real(0), filletTool_.axis.valueAt(camera_, at));
+
+        filletTool_.axis = filletAxis(filletTool_.meshBefore, model, edges, nearest);
+        if (filletTool_.axis.valid) {
+            // Slide the origin out to sit under the pointer. The gesture is
+            // then "how far have I pulled from where I started", which cannot
+            // invert and does not depend on where on the edge the click landed.
+            const Real out = filletTool_.axis.facingCamera(camera_)
+                                 ? std::max(Real(0), filletTool_.axis.rawOffset(camera_, at))
+                                 : 0.0;
+            filletTool_.axis.origin = filletTool_.axis.origin + filletTool_.axis.direction * out;
+            filletTool_.axis.baseValue = initialWidth;
         }
     }
 
@@ -1455,11 +1460,13 @@ void Application::updateFillet(bool snap) {
                 // is cruder but steady.
                 Vec2 anchorPx{};
                 if (camera_.projectToPixel(filletTool_.axis.origin, anchorPx))
-                    newR = length(curMouse - anchorPx) *
-                           camera_.pixelWorldSize(filletTool_.axis.origin);
+                    newR = filletTool_.axis.baseValue +
+                           length(curMouse - anchorPx) *
+                               camera_.pixelWorldSize(filletTool_.axis.origin);
             }
 
             if (snap && step > 0.0) newR = std::round(newR / step) * step;
+            newR = std::max(newR, filletTool_.axis.baseValue);
         }
         (void)m;
         (void)model;

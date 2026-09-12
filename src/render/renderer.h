@@ -77,6 +77,14 @@ public:
     // it sits on without occluding anything.
     void addTriangle(Vec3 a, Vec3 b, Vec3 c, Vec4 color);
 
+    // A filled shape that goes over everything else in the overlay, including
+    // the overlay's own lines, and ignores the depth buffer.
+    //
+    // For the one thing that has to be read rather than seen: the arrow a drag
+    // is measured along. Behind the tick marks it is striped; behind the model
+    // it is gone; and it is the only part of the guide the eye follows.
+    void addFrontTriangle(Vec3 a, Vec3 b, Vec3 c, Vec4 color);
+
 private:
     struct CacheEntry {
         GpuMesh  gpu;
@@ -112,6 +120,7 @@ private:
     std::vector<LineVert> lineVerts_;
     uint32_t triVao_ = 0, triVbo_ = 0;
     std::vector<LineVert> triVerts_;
+    std::vector<LineVert> frontVerts_;
     std::unordered_map<ObjectId, CacheEntry> cache_;
 
     // Objects can leave the scene without passing through forget(): undo lifts

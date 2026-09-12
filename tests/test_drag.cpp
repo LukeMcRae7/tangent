@@ -50,8 +50,20 @@ int main() {
             check(near(got, want, 1e-2), "a cursor over " + std::to_string(want) +
                                          "mm along the axis reads " + std::to_string(got));
         }
-        const Real back = axis.valueAt(cam, pixelOf(cam, Vec3{-6, 0, 0}));
-        check(back < 0.0 && near(back, -6.0, 1e-2), "the other way is negative");
+        // Behind the start there is nothing to measure. A signed projection
+        // flips sign near the edge of the screen, where a perspective ray is
+        // most oblique, and the arrow used to turn round and point backwards.
+        check(near(axis.valueAt(cam, pixelOf(cam, Vec3{-6, 0, 0})), 0.0, 1e-9),
+              "behind the start reads as the start, not as a negative");
+        check(axis.rawOffset(cam, pixelOf(cam, Vec3{-6, 0, 0})) < 0.0,
+              "though the raw offset still knows which side it is on");
+
+        DragAxis offset = axis;
+        offset.baseValue = 1.5;
+        check(near(offset.valueAt(cam, pixelOf(cam, Vec3{-6, 0, 0})), 1.5, 1e-9),
+              "and with a base value, the start is the floor");
+        check(near(offset.valueAt(cam, pixelOf(cam, Vec3{4, 0, 0})), 5.5, 1e-2),
+              "with the travel measured from it");
         std::printf("  25mm along reads %.4f\n", axis.valueAt(cam, pixelOf(cam, Vec3{25, 0, 0})));
     }
 
@@ -141,7 +153,7 @@ int main() {
         check(target != kInvalid, "found the top front edge");
 
         const Mat4 identity = translate({0, 0, 0});
-        const DragAxis axis = filletAxis(cube, identity, target, Vec3{0, -10, 10});
+        const DragAxis axis = filletAxis(cube, identity, {target}, Vec3{0, -10, 10});
         check(axis.valid, "it has an axis");
 
         // Out of the corner: the bisector of the top face and the front face,
@@ -156,8 +168,42 @@ int main() {
                     axis.direction.x, axis.direction.y, axis.direction.z);
 
         // Anchored under the pointer, not at the middle of the edge.
-        const DragAxis atEnd = filletAxis(cube, identity, target, Vec3{8, -10, 10});
+        const DragAxis atEnd = filletAxis(cube, identity, {target}, Vec3{8, -10, 10});
         check(near(atEnd.origin.x, 8.0, 1e-6), "the guide follows the cursor along the edge");
+
+        // The direction is a statement about the boundary, so it needs no
+        // special case per selection: the four edges around a face sum that
+        // face four times and its four sides, which cancel in pairs.
+        FaceId top = kNoFace;
+        std::vector<FaceId> faces;
+        cube.allFaces(faces);
+        for (FaceId f : faces)
+            if (dot(cube.faceNormal(f), Vec3{0, 0, 1}) > 0.99) top = f;
+        check(top != kNoFace, "found the top face");
+
+        std::vector<EdgeId> ring;
+        cube.faceEdges(top, ring);
+        check(ring.size() == 4, "which has four edges");
+        const DragAxis wholeFace = filletAxis(cube, identity, ring, Vec3{0, 0, 10});
+        check(wholeFace.valid, "the ring has an axis");
+        check(near(wholeFace.direction.z, 1.0, 1e-6),
+              "and it points straight up out of the face, not at 45 degrees");
+
+        // Two edges on opposite sides of that face: their side normals cancel
+        // and the face's own is what is left, which is still straight up.
+        const DragAxis twoOfThem = filletAxis(cube, identity, {ring[0], ring[2]},
+                                              Vec3{0, 0, 10});
+        check(near(twoOfThem.direction.z, 1.0, 1e-6), "two opposite edges, still up");
+
+        // Two edges meeting at a corner: one side cancels nothing, and the
+        // answer leans that way, which is what a person would expect.
+        const DragAxis corner = filletAxis(cube, identity, {ring[0], ring[1]},
+                                           Vec3{0, 0, 10});
+        check(corner.direction.z > 0.6 && corner.direction.z < 0.98,
+              "two adjacent edges lean off the face normal");
+        std::printf("  one edge %.2f,%.2f,%.2f   face ring %.2f,%.2f,%.2f\n",
+                    axis.direction.x, axis.direction.y, axis.direction.z,
+                    wholeFace.direction.x, wholeFace.direction.y, wholeFace.direction.z);
     }
 
     std::printf("--- the step follows the zoom and the travel ---\n");
