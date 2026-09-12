@@ -1,4 +1,5 @@
 #include "app/application.h"
+#include "geom/kernel_guard.h"
 #include "render/lod.h"
 #include "ui/theme.h"
 
@@ -342,6 +343,47 @@ bool Application::init() {
             std::fprintf(stderr, "[shell-extrude] %d features, %d faces, %.1f mm3, valid=%d\n",
                          static_cast<int>(after->features.size()), after->body.faceCount(),
                          after->body.health(false).volume, (int)after->body.validate());
+        }
+    }
+
+    if (shellFilletDemo_ && !scene_.objects().empty()) {
+        const ObjectId id = scene_.objects().front()->id;
+        {
+            SceneObject* o = scene_.find(id);
+            std::vector<FaceId> faces;
+            o->body.allFaces(faces);
+            scene_.clearElementSelection();
+            for (FaceId f : faces)
+                if (dot(o->body.faceNormal(f), Vec3{0, 0, 1}) > 0.99)
+                    scene_.selectElement({id, ElementKind::Face, f}, true);
+            view_.shellThickness = 2.0;
+            shellActiveObject();
+            std::fprintf(stderr, "[shell-fillet] shelled: %d faces\n",
+                         scene_.find(id)->body.faceCount());
+        }
+        {
+            SceneObject* o = scene_.find(id);
+            std::vector<FaceId> faces;
+            o->body.allFaces(faces);
+            scene_.clearElementSelection();
+            int picked = 0;
+            for (FaceId f : faces) {
+                if (dot(o->body.faceNormal(f), Vec3{0, -1, 0}) < 0.99) continue;
+                scene_.selectElement({id, ElementKind::Face, f}, true);
+                ++picked;
+            }
+            std::fprintf(stderr, "[shell-fillet] side faces selected: %d\n", picked);
+            beginFillet();
+            std::fprintf(stderr, "[shell-fillet] began: %d  max %.3f  notice: %s\n",
+                         (int)filletTool_.active, filletTool_.maxRadius, notice_.c_str());
+            if (filletTool_.active) {
+                for (int step = 1; step <= 5; ++step)
+                    updateFillet(true);
+                commitFillet();
+                std::fprintf(stderr, "[shell-fillet] committed: %d features, %d faces\n",
+                             static_cast<int>(scene_.find(id)->features.size()),
+                             scene_.find(id)->body.faceCount());
+            }
         }
     }
 
@@ -1248,18 +1290,35 @@ void Application::beginFillet() {
     // ruled out, so whatever is left is the real obstruction -- which is what
     // the user needs to hear, rather than "no room".
     std::string why;
+    // Every trial runs where a crash is survivable. OpenCASCADE does not
+    // always refuse -- a fillet whose radius is exactly the wall thickness it
+    // is rounding takes the process with it -- and a modelling tool may decline
+    // an operation but may not lose the model. See geom/kernel_guard.h.
+    auto builds = [&](Real r) {
+        return tryInChild([&] {
+            Body test = obj->body;
+            FilletSpec spec;
+            spec.segments = std::max(1, view_.bevelSegments);
+            for (Index e : edges) spec.edges.push_back({e, r});
+            return filletEdges(test, spec);
+        }) == Attempt::Ok;
+    };
+
     const Real candidateRadii[] = {view_.bevelWidth, 1.0, 0.5, 0.2, 0.1, 0.05};
     for (Real r : candidateRadii) {
         if (r <= 0.0) continue;
-        Body testMesh = obj->body;
-        FilletSpec testSpec;
-        testSpec.segments = std::max(1, view_.bevelSegments);
-        for (Index e : edges) testSpec.edges.push_back({e, r});
-        if (filletEdges(testMesh, testSpec, &why)) {
+        if (builds(r)) {
             anyAccepted = true;
             initialWidth = r;
             break;
         }
+        // Only for the phrasing: the radius that failed is re-run in process
+        // to collect its reason, and only once it is known not to be fatal.
+        Body testMesh = obj->body;
+        FilletSpec testSpec;
+        testSpec.segments = std::max(1, view_.bevelSegments);
+        for (Index e : edges) testSpec.edges.push_back({e, r});
+        filletEdges(testMesh, testSpec, &why);
     }
 
     if (!anyAccepted) {
@@ -1273,13 +1332,6 @@ void Application::beginFillet() {
     // once, against one or more on every frame near the limit.
     Real maxRadius = initialWidth;
     {
-        auto builds = [&](Real r) {
-            Body test = obj->body;
-            FilletSpec spec;
-            spec.segments = std::max(1, view_.bevelSegments);
-            for (Index e : edges) spec.edges.push_back({e, r});
-            return filletEdges(test, spec);
-        };
         Real lo = initialWidth, hi = initialWidth;
         for (int i = 0; i < 7; ++i) {
             const Real next = hi * 2.0;
@@ -2021,6 +2073,33 @@ void Application::applyActions() {
     if (a.featuresEdited != kNoObject) {
         SceneObject* o = scene_.find(a.featuresEdited);
         if (o) {
+            // A radius typed or dragged in the timeline has never been tried,
+            // and a fillet can take the process with it rather than refusing --
+            // see geom/kernel_guard.h. So the edited chain is evaluated once
+            // where a crash is survivable before it is evaluated for real.
+            //
+            // Only for chains that round something: everything else has no way
+            // to fault, and a fork on every keystroke in the timeline would be
+            // paid by edits that never needed it.
+            bool rounds = false;
+            for (const Feature& f : o->features)
+                if (f.kind == FeatureKind::Bevel && f.enabled) rounds = true;
+
+            if (rounds) {
+                std::vector<Feature> trial = o->features;
+                const Attempt attempt = tryInChild([&] {
+                    Body out;
+                    return evaluateFeatures(trial, out);
+                });
+                if (attempt == Attempt::Crashed) {
+                    o->features = a.featuresBefore;
+                    scene_.reevaluate(a.featuresEdited);
+                    setNotice("That radius cannot be built on this shape");
+                    a.featuresEdited = kNoObject;
+                }
+            }
+        }
+        if (a.featuresEdited != kNoObject && o) {
             if (scene_.reevaluate(a.featuresEdited)) {
                 undo_.push(std::make_unique<FeatureCommand>(
                     a.featuresEdited, std::move(a.featuresBefore), o->features,

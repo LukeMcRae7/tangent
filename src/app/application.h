@@ -88,6 +88,10 @@ public:
     // each been tested on their own.
     void setShellExtrudeDemo(float mm) { shellExtrudeDemo_ = mm; }
 
+    // Shell the top, then press fillet with a side face selected -- the second
+    // way the crash was reached.
+    void setShellFilletDemo(bool on) { shellFilletDemo_ = on; }
+
     // Rounds one edge of a box and then the edge opposite it, through the same
     // path the keyboard takes, and reports whether the part came out symmetric.
     // Two opposite edges rounded to the same radius can only give a symmetric
@@ -294,6 +298,7 @@ private:
     float       autoExtrudeMm_ = 10.0f;
     float       filletDemo_ = 0.0f;     // radius in mm; 0 means do not
     float       shellExtrudeDemo_ = 0.0f;
+    bool        shellFilletDemo_ = false;
     float       shellDemo_ = 0.0f;      // wall in mm; 0 means do not
     bool        holdTransform_ = false;
 

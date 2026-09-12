@@ -44,6 +44,8 @@ int main(int argc, char** argv) {
             app.setHeadlessExport(argv[++i]);
         } else if (std::strcmp(argv[i], "--fillet-pair-demo") == 0 && i + 1 < argc) {
             app.setFilletDemo(static_cast<float>(std::atof(argv[++i])));
+        } else if (std::strcmp(argv[i], "--shell-fillet-demo") == 0) {
+            app.setShellFilletDemo(true);
         } else if (std::strcmp(argv[i], "--shell-extrude-demo") == 0 && i + 1 < argc) {
             app.setShellExtrudeDemo(static_cast<float>(std::atof(argv[++i])));
         } else if (std::strcmp(argv[i], "--shell-demo") == 0 && i + 1 < argc) {

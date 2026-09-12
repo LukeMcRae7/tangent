@@ -124,7 +124,8 @@ if(TANGENT_BREP)
     ${OpenCASCADE_ModelingAlgorithms_LIBRARIES})
 endif()
 
-set(TANGENT_GEOM src/geom/body.cpp src/geom/operations.cpp ${TANGENT_BREP_SRC})
+set(TANGENT_GEOM src/geom/body.cpp src/geom/operations.cpp
+                 src/geom/kernel_guard.cpp ${TANGENT_BREP_SRC})
 
 add_executable(tangent
   src/main.cpp
@@ -278,6 +279,14 @@ target_include_directories(test_create_tool PRIVATE src ${imgui_SOURCE_DIR} ${im
 target_link_libraries(test_create_tool PRIVATE imgui tangent_epoxy)
 target_compile_options(test_create_tool PRIVATE ${TANGENT_WARNINGS_LOOSE})
 add_test(NAME create_tool COMMAND test_create_tool)
+
+add_executable(test_guard tests/test_guard.cpp
+  src/scene/scene.cpp src/scene/feature.cpp src/mesh/boolean.cpp src/mesh/health.cpp
+  ${TANGENT_GEOM} src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp
+  src/app/camera.cpp)
+target_include_directories(test_guard PRIVATE src)
+target_compile_options(test_guard PRIVATE ${TANGENT_WARNINGS})
+add_test(NAME guard COMMAND test_guard)
 
 add_executable(test_drag tests/test_drag.cpp
   src/app/drag_axis.cpp src/app/camera.cpp
