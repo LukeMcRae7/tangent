@@ -864,18 +864,29 @@ void Application::drawFilletPanel() {
 void Application::drawFacePanel() {
     if (!faceTool_.active) return;
     const bool rotate  = faceTool_.op == FaceOp::Rotate;
+    const bool scale   = faceTool_.op == FaceOp::Scale;
     const bool extrude = faceTool_.op == FaceOp::Extrude;
 
     if (!ui::beginCommand("##faceop",
-                          rotate ? "Rotate Face" : extrude ? "Extrude" : "Move Face",
-                          rotate ? Icon::Chamfer : Icon::Extrude,
+                          rotate ? "Rotate Face" : scale ? "Scale Face"
+                                 : extrude ? "Extrude" : "Move Face",
+                          rotate ? Icon::Chamfer : scale ? Icon::Cone : Icon::Extrude,
                           viewRect_.x + 16.0f, viewRect_.y + 16.0f))
         return;
 
-    if (ui::commandNumber(rotate ? "Angle" : "Distance", faceTool_.value,
-                          rotate ? "deg" : "mm", !faceTool_.typedValue.empty(),
+    if (ui::commandNumber(rotate ? "Angle" : scale ? "Change" : "Distance",
+                          faceTool_.value, rotate ? "deg" : scale ? "%" : "mm",
+                          !faceTool_.typedValue.empty(),
                           !faceTool_.typedValue.empty(), faceTool_.typedValue.c_str()))
         faceTool_.typedValue.clear();
+
+    // The multiple the percentage comes to, since that is the number a person
+    // thinks in when they say "half again as big".
+    if (scale) {
+        char mult[32];
+        std::snprintf(mult, sizeof mult, "%.3g x", 1.0 + faceTool_.value / 100.0);
+        ui::commandValue("Size", mult);
+    }
 
     char sel[64];
     std::snprintf(sel, sizeof sel, "%zu face%s", faceTool_.faces.size(),
@@ -883,7 +894,9 @@ void Application::drawFacePanel() {
     ui::commandValue("Selection", sel);
 
     // Which way it goes. The face's own normal unless an axis key says
-    // otherwise -- for a rotate, which way round it turns.
+    // otherwise -- for a rotate, which way round it turns. A scale goes every
+    // way at once, so there is nothing to point.
+    if (!scale) {
     ui::commandRow(rotate ? "Pivot" : "Along");
     static const char* kAxisName[3] = {"X", "Y", "Z"};
     {
@@ -903,11 +916,12 @@ void Application::drawFacePanel() {
         if (ImGui::Button(kAxisName[a])) setFaceAxis(a);
         if (on) ImGui::PopStyleColor();
     }
+    }
 
     // What the number is doing to the body, said plainly. Not a choice: moving
     // a face out adds material and moving it in takes some away, and offering
     // to override that would be offering to make the tool lie.
-    if (!rotate) {
+    if (!rotate && !scale) {
         ui::commandRow("Result");
         const bool cutting = faceTool_.value < 0.0;
         if (std::fabs(faceTool_.value) < 1e-6)
@@ -955,7 +969,10 @@ void Application::drawFacePanel() {
         }
     }
 
-    ui::commandHint(rotate
+    ui::commandHint(scale
+        ? "Pull out from the middle of the face to grow it, in to shrink it. The "
+          "faces around it slant to follow."
+        : rotate
         ? "Pull either way across the pivot, or type an angle. X / Y / Z choose "
           "which way it turns."
         : extrude
@@ -1302,8 +1319,10 @@ void Application::handleShortcuts() {
             if (onFace) beginFaceMove(FaceOp::Rotate);
             else        beginTransform(TransformMode::Rotate);
         }
-        if (ImGui::IsKeyPressed(ImGuiKey_S, false) && !shift)
-            beginTransform(TransformMode::Scale);
+        if (ImGui::IsKeyPressed(ImGuiKey_S, false) && !shift) {
+            if (onFace) beginFaceMove(FaceOp::Scale);
+            else        beginTransform(TransformMode::Scale);
+        }
     }
 
     // Add menu at the cursor.
@@ -1703,7 +1722,25 @@ void Application::beginFaceMove(FaceOp op) {
     const Real span = std::max(std::min({extent.x, extent.y, extent.z}), Real(1.0));
     faceTool_.direction = dir;
 
-    if (op == FaceOp::Rotate) {
+    if (op == FaceOp::Scale) {
+        // Out from the middle of the face, in its own plane: the way its
+        // boundary travels as it grows.
+        Vec3 across = anchor - transformPoint(model, obj->body.faceCentroid(faces.front()));
+        across = across - dir * dot(across, dir);
+        if (lengthSq(across) < 1e-9) {
+            // Standing on the centre, so any direction in the plane will do.
+            across = cross(dir, camera_.up());
+            if (lengthSq(across) < 1e-9) across = cross(dir, camera_.right());
+        }
+        if (lengthSq(across) < 1e-12) { faceTool_.active = false; return; }
+        faceTool_.axis.origin = anchor;
+        faceTool_.axis.direction = normalize(across);
+        faceTool_.axis.valid = true;
+        faceTool_.axis.signedRange = true;
+        faceTool_.axis.baseValue = 0.0;
+        faceTool_.axis.spanValue = 100.0;     // per cent for a track's travel
+        faceTool_.reachedMin = -95.0;         // a face cannot shrink to nothing
+    } else if (op == FaceOp::Rotate) {
         // The hinge is the edge of the face nearest the cursor: you tip a face
         // about the side you are standing on.
         std::vector<EdgeId> edges;
@@ -1899,9 +1936,9 @@ void Application::updateFaceMove(bool snap, bool follow) {
             want = faceTool_.axis.valueAt(camera_, cur);
         }
         if (snap) {
-            const Real step = faceTool_.op == FaceOp::Rotate
-                                  ? 5.0
-                                  : static_cast<Real>(camera_.snapStep(faceTool_.axis.origin));
+            const Real step = faceTool_.op == FaceOp::Rotate ? 5.0
+                            : faceTool_.op == FaceOp::Scale  ? 5.0
+                            : static_cast<Real>(camera_.snapStep(faceTool_.axis.origin));
             if (step > 0.0) want = std::round(want / step) * step;
         }
     }
@@ -1922,7 +1959,12 @@ void Application::updateFaceMove(bool snap, bool follow) {
 
     faceTool_.requested = want;
     const std::vector<FaceId> faces = faceTool_.faces;
-    if (faceTool_.op == FaceOp::Rotate) {
+    if (faceTool_.op == FaceOp::Scale) {
+        const Real factor = 1.0 + want / 100.0;
+        faceTool_.preview.request(faceTool_.before, [faces, factor](Body& b) {
+            return scaleFaces(b, faces, factor, 7004);
+        });
+    } else if (faceTool_.op == FaceOp::Rotate) {
         const Real angle = radians(want);
         const Vec3 hp = faceTool_.hingePoint, hd = faceTool_.hingeDir;
         faceTool_.preview.request(faceTool_.before, [faces, angle, hp, hd](Body& b) {
@@ -1958,7 +2000,10 @@ void Application::commitFaceMove() {
     if (std::fabs(faceTool_.value) < 1e-6) { obj->refreshDerived(); return; }
 
     Feature f;
-    if (faceTool_.op == FaceOp::Rotate) {
+    if (faceTool_.op == FaceOp::Scale) {
+        f.kind = FeatureKind::FaceScale;
+        f.scale = 1.0 + faceTool_.value / 100.0;
+    } else if (faceTool_.op == FaceOp::Rotate) {
         f.kind = FeatureKind::FaceRotate;
         f.angle = radians(faceTool_.value);
         f.axisPoint = faceTool_.hingePoint;
@@ -1973,6 +2018,7 @@ void Application::commitFaceMove() {
     f.faces = nameFaces(faceTool_.before, faceTool_.faces);
 
     const char* label = faceTool_.op == FaceOp::Rotate    ? "Rotate Face"
+                      : faceTool_.op == FaceOp::Scale     ? "Scale Face"
                       : faceTool_.op == FaceOp::Extrude   ? "Extrude"
                                                           : "Move Face";
     std::string why;
@@ -2749,6 +2795,19 @@ void Application::stepFaceDemo() {
         std::fprintf(stderr, "[face-demo] after joining: %zu objects\n",
                      scene_.objects().size());
         report("joined on the way");
+        return;
+    }
+
+    if (faceDemo_ == 11 || faceDemo_ == 12) {
+        scene_.clearElementSelection();
+        scene_.selectElement({id, ElementKind::Face, topFace()}, true);
+        beginFaceMove(FaceOp::Scale);
+        faceTool_.typedValue = faceDemo_ == 11 ? "50" : "-40";
+        updateFaceMove(false);
+        while (faceTool_.preview.busy()) updateFaceMove(false);
+        updateFaceMove(false);
+        report(faceDemo_ == 11 ? "grown by half" : "shrunk to three fifths");
+        if (faceDemo_ == 12) commitFaceMove();     // 11 stays open, to be seen
         return;
     }
 
@@ -3838,6 +3897,7 @@ void Application::applyActions() {
     if (a.pushPull)   beginFaceMove(FaceOp::Move);
     if (a.extrude)    beginFaceMove(FaceOp::Extrude);
     if (a.rotateFace) beginFaceMove(FaceOp::Rotate);
+    if (a.scaleFace)  beginFaceMove(FaceOp::Scale);
     if (a.divide) beginDivide();
     if (a.mergeFaces) mergeSelected();
     if (a.bevel)   bevelActiveObject();

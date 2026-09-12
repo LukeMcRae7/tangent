@@ -231,6 +231,9 @@ void writeFeature(Writer& w, const Feature& f) {
     w.f64(f.axisPoint.x); w.f64(f.axisPoint.y); w.f64(f.axisPoint.z);
     w.f64(f.axisDir.x);   w.f64(f.axisDir.y);   w.f64(f.axisDir.z);
     w.u32(f.mergeFlush ? 1u : 0u);
+
+    // Version 8: how much a face was grown or shrunk.
+    w.f64(f.scale);
 }
 
 // `version` is the file's, not this build's: a project written before bodies
@@ -241,7 +244,7 @@ bool readFeature(Reader& r, Feature& f, uint32_t version) {
     const uint32_t kind = r.u32();
     // The last of the enum, not a name from the middle of it: a kind added
     // later would otherwise be rejected by a build that has it.
-    if (kind > static_cast<uint32_t>(FeatureKind::Merge)) return false;
+    if (kind > static_cast<uint32_t>(FeatureKind::FaceScale)) return false;
     f.kind = static_cast<FeatureKind>(kind);
     f.enabled = r.u8() != 0;
     if (!readSpec(r, f.primitive)) return false;
@@ -307,6 +310,9 @@ bool readFeature(Reader& r, Feature& f, uint32_t version) {
     } else {
         f.mergeFlush = false;
     }
+    // A file older than this has no scaled faces in it, so the multiple that
+    // changes nothing is the right one to leave standing.
+    if (version >= 8) f.scale = r.f64();
     return !r.bad;
 }
 

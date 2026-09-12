@@ -112,6 +112,7 @@ public:
     // Drives the face tools: 1 push out, 2 pull in, 3 rotate, 4 divide,
     // 5 divide then push one half -- the sequence the divide exists for -- and
     // 6 the same pull as an extrude, which keeps the boss's outline,
+    // 11 a face grown by half and 12 one shrunk,
     // 7 a move along a world axis, 8 a rotation the other way, 9 an extrude
     // that runs into another body, and 10 divide, move, then merge.
     void setFaceDemo(int mode) { faceDemo_ = mode; }
@@ -332,7 +333,13 @@ private:
     //
     //   Rotate    tips the face about an edge, either way. R when a face is
     //             selected.
-    enum class FaceOp { Move, Extrude, Rotate };
+    //
+    //   Scale     grows or shrinks the face in its own plane and the faces
+    //             around it slant to follow. S when a face is selected. Its
+    //             number is a percentage rather than a multiple so that the
+    //             gesture is the same as the other two: nothing at the start,
+    //             either way from there.
+    enum class FaceOp { Move, Extrude, Rotate, Scale };
 
     struct FaceToolState {
         bool     active = false;

@@ -126,6 +126,18 @@ bool rotateFaces(Body& body, const std::vector<FaceId>& faces, Real angleRad,
     return true;
 }
 
+bool scaleFaces(Body& body, const std::vector<FaceId>& faces, Real factor,
+                ElementId salt, std::string* reason) {
+    if (body.isMesh()) {
+        if (reason) *reason = "scaling a face needs the exact kernel, and this body is a mesh";
+        return false;
+    }
+    BrepRef result = brep::scaleFaces(body.brepRef(), faces, factor, salt, reason);
+    if (!result) return false;
+    body = Body(std::move(result));
+    return true;
+}
+
 bool mergeDivisions(Body& body, ElementId salt, std::string* reason) {
     if (body.isMesh()) {
         if (reason) *reason = "merging faces needs the exact kernel, and this body is a mesh";

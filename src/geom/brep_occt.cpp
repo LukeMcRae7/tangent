@@ -1417,6 +1417,119 @@ BrepRef rotateFaces(const BrepRef& s, const std::vector<FaceId>& faces, Real ang
     }
 }
 
+BrepRef scaleFaces(const BrepRef& s, const std::vector<FaceId>& faces, Real factor,
+                   ElementId salt, std::string* reason) {
+    if (reason) reason->clear();
+    if (!s || s->shape.IsNull() || faces.empty()) {
+        if (reason) *reason = "nothing to scale";
+        return {};
+    }
+    if (std::fabs(factor - 1.0) < 1e-9) {
+        if (reason) *reason = "that is the size it already is";
+        return {};
+    }
+    if (factor <= 0.0) {
+        if (reason) *reason = "a face cannot be scaled to nothing";
+        return {};
+    }
+
+    try {
+        BRepOffsetAPI_DraftAngle draft(s->shape);
+        int tilted = 0;
+
+        for (FaceId f : faces) {
+            if (!validFace(*s, f)) {
+                if (reason) *reason = "a face to scale no longer exists";
+                return {};
+            }
+            const Vec3 n = faceNormal(*s, f);
+            const Vec3 centre = faceCentroid(*s, f);
+            if (lengthSq(n) < 1e-18) continue;
+
+            // How far the body reaches back from this face. Every neighbour
+            // pivots about its own far end, and that is where the plane holding
+            // them still has to sit.
+            Real deepest = 0.0;
+            {
+                TopTools_IndexedMapOfShape vs;
+                TopExp::MapShapes(s->shape, TopAbs_VERTEX, vs);
+                for (int i = 1; i <= vs.Extent(); ++i) {
+                    const gp_Pnt p = BRep_Tool::Pnt(TopoDS::Vertex(vs(i)));
+                    deepest = std::max(deepest, -dot(Vec3{p.X(), p.Y(), p.Z()} - centre, n));
+                }
+            }
+            if (deepest < 1e-6) {
+                if (reason) *reason = "there is no depth behind that face to taper";
+                return {};
+            }
+
+            std::vector<EdgeId> es;
+            faceEdges(*s, f, es);
+            for (EdgeId e : es) {
+                FaceId a = kInvalid, b = kInvalid;
+                edgeFaces(*s, e, a, b);
+                const FaceId side = a == f ? b : a;
+                if (side == kInvalid || !validFace(*s, side)) continue;
+
+                const Vec3 sn = faceNormal(*s, side);
+                // The pull has to lie in the neighbour's own plane, or the
+                // angle is measured from somewhere the face is not: see
+                // rotateFaces, where the same mistake cost sixty-six degrees.
+                Vec3 pull = n - sn * dot(n, sn);
+                if (lengthSq(pull) < 1e-12) continue;      // parallel to the face
+                pull = normalize(pull);
+
+                // How far this edge has to travel: proportional to how far out
+                // it already is, which is what makes it a scale.
+                const Vec3 mid = edgeMidpoint(*s, e);
+                Vec3 out = mid - centre;
+                out = out - n * dot(out, n);               // in the face's plane
+                const Real reach = length(out);
+                if (reach < 1e-9) continue;
+                const Real travel = (factor - 1.0) * reach;
+
+                // Outward is whichever way the neighbour faces. Negated
+                // because a positive draft leans a face inward, so growing a
+                // face is the negative angle: measured on a box, 1.5 came back
+                // as 0.5 until this was the other way round.
+                const Real sense = dot(out, sn) >= 0.0 ? 1.0 : -1.0;
+                const Real angle = -std::atan2(travel * sense, deepest);
+                if (std::fabs(angle) < 1e-9) continue;
+
+                const gp_Pln neutral(gp_Pnt(centre.x - n.x * deepest,
+                                            centre.y - n.y * deepest,
+                                            centre.z - n.z * deepest),
+                                     gp_Dir(n.x, n.y, n.z));
+                draft.Add(TopoDS::Face(s->faces(static_cast<int>(side) + 1)),
+                          gp_Dir(pull.x, pull.y, pull.z),
+                          static_cast<Standard_Real>(angle), neutral);
+                if (!draft.AddDone()) {
+                    if (reason) *reason = "a face beside it will not take the taper";
+                    return {};
+                }
+                ++tilted;
+            }
+        }
+
+        if (tilted == 0) {
+            if (reason) *reason = "nothing beside that face could be tapered";
+            return {};
+        }
+
+        draft.Build();
+        if (!draft.IsDone()) {
+            if (reason) *reason = "the faces around it would not follow";
+            return {};
+        }
+        const TopoDS_Shape result = draft.Shape();
+        if (!acceptable(result, reason)) return {};
+        return makeBrep(result, propagateNames(draft, {{s.get()}}, result, salt));
+    } catch (const Standard_Failure& e) {
+        if (reason) *reason = kernelReason(e, "that face will not scale");
+        return {};
+    }
+}
+
 BrepRef mergeDivisions(const BrepRef& s, ElementId salt, std::string* reason) {
     if (reason) reason->clear();
     if (!s || s->shape.IsNull()) {

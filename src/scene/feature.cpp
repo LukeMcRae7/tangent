@@ -21,6 +21,7 @@ const char* featureKindName(FeatureKind k) {
         case FeatureKind::VertexEdit: return "Edit Vertices";
         case FeatureKind::Shell:      return "Shell";
         case FeatureKind::FaceRotate: return "Rotate Face";
+        case FeatureKind::FaceScale:  return "Scale Face";
         case FeatureKind::Divide:     return "Divide";
         case FeatureKind::Merge:      return "Merge Faces";
     }
@@ -96,6 +97,10 @@ std::string Feature::summary() const {
                 std::snprintf(buf, sizeof(buf), "Shell  %.2f mm  (%s open)",
                               static_cast<double>(thickness),
                               faces.describe("face").c_str());
+            break;
+        case FeatureKind::FaceScale:
+            std::snprintf(buf, sizeof(buf), "Scale  %.3g x  (%s)",
+                          static_cast<double>(scale), faces.describe("face").c_str());
             break;
         case FeatureKind::FaceRotate:
             std::snprintf(buf, sizeof(buf), "Rotate  %.1f deg  (%s)",
@@ -334,6 +339,19 @@ bool evaluateFrom(std::vector<Feature>& features, size_t from,
             std::string why;
             if (!shellBody(body, scratchFaces, f.thickness, f.uid, &why))
                 fail(why.empty() ? "the shell could not be built" : why.c_str());
+            break;
+        }
+
+        case FeatureKind::FaceScale: {
+            if (body.empty()) { fail("nothing to scale"); break; }
+            scratchFaces.clear();
+            if (!f.faces.resolveFaces(body, scratchFaces) || scratchFaces.empty()) {
+                fail("the face to scale no longer exists");
+                break;
+            }
+            std::string why;
+            if (!scaleFaces(body, scratchFaces, f.scale, f.uid, &why))
+                fail(why.empty() ? "the scale could not be built" : why.c_str());
             break;
         }
 

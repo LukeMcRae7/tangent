@@ -36,6 +36,11 @@ enum class FeatureKind {
     FaceRotate,  // tip a face about one of its own edges
     Divide,      // cut a line across the body without cutting it in two
     Merge,       // drop every division that does not define the shape
+    FaceScale,   // grow or shrink a face in its own plane
+
+    // New kinds go on the end and nowhere else. The value is what is written
+    // to a file, so inserting one in the middle renumbers every kind after it
+    // and quietly turns a divide in an old project into something else.
 };
 
 const char* featureKindName(FeatureKind k);
@@ -140,6 +145,7 @@ struct Feature {
     // of the chain uses; this is the honest version of what is built, not a
     // claim that it follows.
     Real angle = 0.0;                    // radians
+    Real scale = 1.0;                    // FaceScale: a multiple, 1 is unchanged
     Vec3 axisPoint{0, 0, 0};
     Vec3 axisDir{0, 0, 1};
 

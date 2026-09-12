@@ -222,6 +222,50 @@ int main() {
         std::printf("  +12 deg %.1f mm3, -12 deg %.1f\n", up, down);
     }
 
+    std::printf("--- scaling a face makes a frustum of a known size ---\n");
+    {
+        // A 40 x 30 x 20 box with its top grown by half is a prismatoid, and a
+        // prismatoid's volume is h/6 (bottom + 4 middle + top): 20/6 x (1200 +
+        // 4x1875 + 2700) = 38000. Not a number this code produced -- one worked
+        // out on paper, which is the only kind worth comparing against.
+        Body b = makeBox(40, 30, 20);
+        std::string why;
+        check(scaleFaces(b, {facing(b, {0, 0, 1})}, 1.5, 4701, &why),
+              "scaled the top by half again: " + why);
+        check(b.validate(), "still a solid");
+        check(near(b.health(false).volume, 38000.0, 1.0),
+              "38000 mm3, got " + std::to_string(b.health(false).volume));
+        check(b.faceCount() == 6, "and still six faces");
+
+        // The top really is 60 x 45, and the bottom is untouched.
+        const AABB box = b.bounds();
+        check(near(box.max.x - box.min.x, 60.0, 0.05), "60 across the top");
+        check(near(box.max.y - box.min.y, 45.0, 0.05), "45 deep at the top");
+        std::printf("  %.1f mm3, %.1f x %.1f overall\n", b.health(false).volume,
+                    box.max.x - box.min.x, box.max.y - box.min.y);
+    }
+
+    std::printf("--- and shrinking one is the same operation backwards ---\n");
+    {
+        // Half the size: 20/6 x (1200 + 4x675 + 300) = 20/6 x 4200 = 14000.
+        Body b = makeBox(40, 30, 20);
+        std::string why;
+        check(scaleFaces(b, {facing(b, {0, 0, 1})}, 0.5, 4702, &why),
+              "scaled the top to half: " + why);
+        check(b.validate(), "still a solid");
+        check(near(b.health(false).volume, 14000.0, 1.0),
+              "14000 mm3, got " + std::to_string(b.health(false).volume));
+        std::printf("  %.1f mm3\n", b.health(false).volume);
+
+        // One is not a change, and nothing is not a face.
+        Body u = makeBox(40, 30, 20);
+        check(!scaleFaces(u, {facing(u, {0, 0, 1})}, 1.0, 4703, &why),
+              "scaling by one is declined");
+        check(!scaleFaces(u, {facing(u, {0, 0, 1})}, 0.0, 4704, &why),
+              "and so is scaling to nothing");
+        check(near(u.health(false).volume, 24000.0), "with the body untouched");
+    }
+
     std::printf("--- a divide splits faces without splitting the body ---\n");
     {
         Body b = makeBox(30, 20, 10);

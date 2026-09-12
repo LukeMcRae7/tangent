@@ -49,6 +49,7 @@ struct UiActions {
     bool pushPull = false;
     bool extrude = false;
     bool rotateFace = false;
+    bool scaleFace = false;
     bool divide = false;
     bool mergeFaces = false;
     bool bevel = false;

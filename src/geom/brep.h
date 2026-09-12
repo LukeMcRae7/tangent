@@ -237,6 +237,21 @@ BrepRef rotateFaces(const BrepRef& s, const std::vector<FaceId>& faces, Real ang
 // and not a thing any other operation should do behind your back.
 BrepRef mergeDivisions(const BrepRef& s, ElementId salt, std::string* reason);
 
+// Grows or shrinks a face within its own plane, the faces around it stretching
+// to follow.
+//
+// A plane scaled about a point in itself is the same plane, so there is nothing
+// to do to the face: what moves is its boundary, and what moves that is every
+// face meeting it. Each of those tips about the edge furthest from the scaled
+// face, by the angle that carries their shared edge the right distance -- which
+// is the same draft the rotation uses, one per neighbour, in one operation.
+//
+// `factor` is a multiple: 1 is unchanged, 1.5 is half again as large, 0.5 is
+// half. Proportional, so a boundary twice as far from the middle moves twice as
+// far, which is what scaling means and is not the same as offsetting.
+BrepRef scaleFaces(const BrepRef& s, const std::vector<FaceId>& faces, Real factor,
+                   ElementId salt, std::string* reason);
+
 // Cuts a line across the body where a plane crosses it, without cutting the
 // body in two.
 //

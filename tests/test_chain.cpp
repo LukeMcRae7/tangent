@@ -70,6 +70,16 @@ static ObjectId buildChain(Scene& s) {
     const ObjectId id = s.addPrimitive(PrimitiveKind::Box, spec);
     SceneObject* o = s.find(id);
 
+    // Taper the sides by growing the top, while the box is still a box.
+    {
+        Feature f;
+        f.kind = FeatureKind::FaceScale;
+        f.scale = 1.2;
+        f.faces = nameFaces(o->body, {facing(o->body, {0, 0, 1})});
+        std::string why;
+        if (!s.addFeature(id, f, &why)) std::printf("  (scale refused: %s)\n", why.c_str());
+    }
+
     // A line across the middle, so there is a half to take hold of.
     {
         Feature f;

@@ -39,6 +39,7 @@ Icon iconFor(const Feature& f) {
         case FeatureKind::Bevel:     return Icon::Fillet;
         case FeatureKind::Shell:      return Icon::Shell;
         case FeatureKind::FaceRotate: return Icon::Chamfer;
+        case FeatureKind::FaceScale:  return Icon::Cone;
         case FeatureKind::Divide:     return Icon::Inset;
         case FeatureKind::Inset:     return Icon::Inset;
         case FeatureKind::Boolean:
@@ -520,6 +521,15 @@ float drawToolbar(UiContext& ctx) {
         ctx.actions.rotateFace = true;
     ImGui::SameLine();
 
+    // A cone, because a tapered solid is what scaling a face makes, and
+    // because the divide beside it already has the inset.
+    if (iconButton(Icon::Cone, "ScaleFace", icon,
+                   faces ? "Scale face: grow or shrink it in its own plane  (S)"
+                         : "Scale face - select one first",
+                   false, faces > 0))
+        ctx.actions.scaleFace = true;
+    ImGui::SameLine();
+
     if (iconButton(Icon::Inset, "Divide", icon,
                    edges ? "Divide the faces along an edge  (K)"
                          : "Divide - select an edge for the cut to run across",
@@ -760,6 +770,15 @@ void drawHistory(UiContext& ctx) {
                 ImGui::TextColored(kDim, "Drops every division that does not");
                 ImGui::TextColored(kDim, "define the shape.");
                 break;
+            case FeatureKind::FaceScale: {
+                Real pct = (f.scale - 1.0) * 100.0;
+                if (labeledDrag("Change", pct, 0.5f, -95.0f, 1000.0f, "%.1f %%")) {
+                    f.scale = 1.0 + pct / 100.0;
+                    changed = true;
+                }
+                ImGui::TextColored(kDim, "%.3g x its size", f.scale);
+                break;
+            }
             case FeatureKind::FaceRotate: {
                 Real deg = degrees(f.angle);
                 if (labeledDrag("Angle", deg, 0.2f, -89.0f, 89.0f, "%.1f deg")) {

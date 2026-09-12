@@ -66,6 +66,10 @@ bool rotateFaces(Body& body, const std::vector<FaceId>& faces, Real angleRad,
                  Vec3 hingePoint, Vec3 hingeDir, ElementId salt = 0,
                  std::string* reason = nullptr);
 
+// Grows or shrinks a face within its own plane; the faces around it follow.
+bool scaleFaces(Body& body, const std::vector<FaceId>& faces, Real factor,
+                ElementId salt = 0, std::string* reason = nullptr);
+
 // Drops every division that does not define the shape.
 bool mergeDivisions(Body& body, ElementId salt = 0, std::string* reason = nullptr);
 
