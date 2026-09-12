@@ -1,4 +1,5 @@
 #include "ui/panels.h"
+#include "ui/icons.h"
 #include "ui/theme.h"
 
 #include "core/palette.h"
@@ -19,6 +20,32 @@ inline ImVec4 im(Rgb c, float a = 1.0f) {
 const ImVec4 kAccent(palette::kBrand.r, palette::kBrand.g, palette::kBrand.b, 1.0f);
 const ImVec4 kDim(palette::kTextDim.r, palette::kTextDim.g, palette::kTextDim.b, 1.0f);
 
+// Which picture stands for a shape, and for a step of a history.
+Icon iconFor(PrimitiveKind kind) {
+    switch (kind) {
+        case PrimitiveKind::Cylinder: return Icon::Cylinder;
+        case PrimitiveKind::Sphere:   return Icon::Sphere;
+        case PrimitiveKind::Cone:     return Icon::Cone;
+        case PrimitiveKind::Torus:    return Icon::Torus;
+        default:                      return Icon::Box;
+    }
+}
+
+Icon iconFor(const Feature& f) {
+    switch (f.kind) {
+        case FeatureKind::Primitive: return iconFor(f.primitive.kind);
+        case FeatureKind::Extrude:   return Icon::Extrude;
+        case FeatureKind::Bevel:     return Icon::Fillet;
+        case FeatureKind::Shell:     return Icon::Shell;
+        case FeatureKind::Inset:     return Icon::Inset;
+        case FeatureKind::Boolean:
+            return f.booleanOp == BooleanOp::Union        ? Icon::Union
+                 : f.booleanOp == BooleanOp::Intersection ? Icon::Intersection
+                                                          : Icon::Difference;
+        default: return Icon::Box;
+    }
+}
+
 void sectionLabel(const char* text) {
     ImGui::PushStyleColor(ImGuiCol_Text, kDim);
     ImGui::SeparatorText(text);
@@ -30,13 +57,39 @@ void sectionLabel(const char* text) {
 // Geometry is double, so these bind ImGui's double scalar path rather than
 // round-tripping through float and quietly losing digits in the fields the
 // user types exact dimensions into.
+// Three fields, tinted by axis.
+//
+// A row of three identical boxes says nothing about which is which, and the
+// answer is needed on every glance: X, Y and Z are the same colours here as
+// they are on the grid and the transform gizmo, so the mapping is learned once.
+// The tint is on the field's background rather than on its text, which stays
+// legible.
 bool labeledDrag3(const char* label, Vec3& v, float speed, const char* fmt) {
+    static const ImVec4 kAxisTint[3] = {
+        ImVec4(0.46f, 0.20f, 0.17f, 0.55f),
+        ImVec4(0.24f, 0.38f, 0.17f, 0.55f),
+        ImVec4(0.18f, 0.29f, 0.47f, 0.55f),
+    };
     ImGui::PushID(label);
+    ImGui::AlignTextToFramePadding();
     ImGui::TextUnformatted(label);
     ImGui::SameLine(78.0f);
-    ImGui::SetNextItemWidth(-1.0f);
-    const bool changed = ImGui::DragScalarN("##v", ImGuiDataType_Double, &v.x, 3,
-                                            speed, nullptr, nullptr, fmt);
+
+    const ImGuiStyle& st = ImGui::GetStyle();
+    const float avail = ImGui::GetContentRegionAvail().x;
+    const float each = (avail - st.ItemInnerSpacing.x * 2.0f) / 3.0f;
+
+    bool changed = false;
+    for (int i = 0; i < 3; ++i) {
+        if (i) ImGui::SameLine(0.0f, st.ItemInnerSpacing.x);
+        ImGui::PushID(i);
+        ImGui::PushStyleColor(ImGuiCol_FrameBg, kAxisTint[i]);
+        ImGui::SetNextItemWidth(each);
+        changed |= ImGui::DragScalar("##v", ImGuiDataType_Double, &(&v.x)[i], speed,
+                                     nullptr, nullptr, fmt);
+        ImGui::PopStyleColor();
+        ImGui::PopID();
+    }
     ImGui::PopID();
     return changed;
 }
@@ -307,6 +360,149 @@ void drawMenuBar(UiContext& ctx) {
 }
 
 // ---------------------------------------------------------------------------
+float drawToolbar(UiContext& ctx) {
+    const Scene& scene = *ctx.scene;
+    const ObjectId ctxObj = scene.contextObject();
+    const bool hasObject = ctxObj != kNoObject;
+    const bool pair = scene.selection().size() == 2;
+    const size_t edges = scene.selectedEdges(ctxObj).size();
+    const size_t faces = scene.selectedFaces(ctxObj).size();
+
+    // Sized so the baked icons are read rather than guessed at: below about
+    // twenty pixels a filleted cube and a chamfered one are the same picture.
+    const float icon = 24.0f;
+    const ImGuiStyle& st = ImGui::GetStyle();
+    const float height = icon + st.FramePadding.y * 4.0f + st.ItemSpacing.y;
+
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10.0f, 5.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4.0f, 4.0f));
+    ImGui::BeginChild("##toolbar", ImVec2(0.0f, height), ImGuiChildFlags_None,
+                      ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+
+    // One button for all five shapes.
+    //
+    // Which shape you start from is a choice made once at the beginning of a
+    // part; the operations beside it are used over and over. Giving them equal
+    // room on the bar made the row read as ten things of equal weight, and put
+    // the five that matter further from the hand.
+    struct Shape { Icon icon; PrimitiveKind kind; const char* name; };
+    static const Shape kShapes[] = {
+        {Icon::Box,      PrimitiveKind::Box,      "Box"},
+        {Icon::Cylinder, PrimitiveKind::Cylinder, "Cylinder"},
+        {Icon::Sphere,   PrimitiveKind::Sphere,   "Sphere"},
+        {Icon::Cone,     PrimitiveKind::Cone,     "Cone"},
+        {Icon::Torus,    PrimitiveKind::Torus,    "Torus"},
+    };
+    // The last one used, so the button keeps its face and the common case is
+    // the same picture every time.
+    static int lastShape = 0;
+
+    if (iconButton(kShapes[lastShape].icon, "create", icon, "Create object  (Shift+A)"))
+        ImGui::OpenPopup("##createobject");
+
+    // A corner mark, so it reads as a button that opens rather than one that
+    // acts. Drawn over the button just laid out.
+    {
+        const ImVec2 lo = ImGui::GetItemRectMin(), hi = ImGui::GetItemRectMax();
+        const float d = 4.5f;
+        ImGui::GetWindowDrawList()->AddTriangleFilled(
+            ImVec2(hi.x - 2.0f, hi.y - 2.0f), ImVec2(hi.x - 2.0f - d, hi.y - 2.0f),
+            ImVec2(hi.x - 2.0f, hi.y - 2.0f - d),
+            ImGui::GetColorU32(ImGuiCol_Text, 0.65f));
+        (void)lo;
+    }
+
+    if (ImGui::BeginPopup("##createobject")) {
+        ImGui::TextDisabled("Create object");
+        ImGui::Separator();
+        const float line = ImGui::GetTextLineHeight();
+        for (int i = 0; i < static_cast<int>(sizeof kShapes / sizeof kShapes[0]); ++i) {
+            ImGui::PushID(i);
+            iconImage(kShapes[i].icon, line);
+            ImGui::SameLine();
+            if (ImGui::Selectable(kShapes[i].name)) {
+                ctx.actions.addRequested = true;
+                ctx.actions.addKind = kShapes[i].kind;
+                lastShape = i;
+            }
+            ImGui::PopID();
+        }
+        ImGui::EndPopup();
+    }
+    ImGui::SameLine();
+
+    auto gap = [&] {
+        ImGui::SameLine(0.0f, 10.0f);
+        const ImVec2 p = ImGui::GetCursorScreenPos();
+        ImGui::GetWindowDrawList()->AddLine(
+            ImVec2(p.x, p.y + 3.0f), ImVec2(p.x, p.y + icon + st.FramePadding.y * 2.0f - 3.0f),
+            ImGui::GetColorU32(ImGuiCol_Separator));
+        ImGui::SameLine(0.0f, 10.0f);
+    };
+    gap();
+
+    // Named operands, not just the verb. A boolean is the one operation where
+    // which body survives is decided by selection order, and a tooltip that
+    // says "Difference" leaves the user to remember the rule; one that says
+    // "Bracket minus Bore" does not.
+    const char* firstName = "the first";
+    const char* secondName = "the second";
+    if (pair) {
+        if (const SceneObject* a2 = scene.find(scene.selection()[0])) firstName = a2->name.c_str();
+        if (const SceneObject* b2 = scene.find(scene.selection()[1])) secondName = b2->name.c_str();
+    }
+    auto combine = [&](Icon ic, BooleanOp op, const char* name, const char* joiner) {
+        char tip[192];
+        if (pair) std::snprintf(tip, sizeof tip, "%s:  %s %s %s", name, firstName, joiner, secondName);
+        else      std::snprintf(tip, sizeof tip, "%s - select two objects (%zu selected)",
+                                name, scene.selection().size());
+        if (iconButton(ic, name, icon, tip, false, pair)) {
+            ctx.actions.booleanRequested = true;
+            ctx.actions.booleanOp = op;
+        }
+        ImGui::SameLine();
+    };
+    combine(Icon::Union,        BooleanOp::Union,        "Union",     "+");
+    combine(Icon::Difference,   BooleanOp::Difference,   "Difference", "minus");
+    combine(Icon::Intersection, BooleanOp::Intersection, "Intersect", "with");
+    gap();
+
+    // The modifiers each want something different selected, and saying which
+    // in the tooltip is the difference between a greyed-out button that
+    // teaches and one that just refuses.
+    if (iconButton(Icon::Fillet, "Fillet", icon,
+                   edges || faces ? "Fillet the selected edges (F)"
+                                  : "Fillet - select an edge or a face first",
+                   false, edges || faces))
+        ctx.actions.fillet = true;
+    ImGui::SameLine();
+
+    if (iconButton(Icon::Chamfer, "Bevel", icon,
+                   hasObject ? "Bevel every edge (Ctrl+B)"
+                             : "Bevel - select an object first",
+                   false, hasObject))
+        ctx.actions.bevel = true;
+    ImGui::SameLine();
+
+    if (iconButton(Icon::Shell, "Shell", icon,
+                   hasObject ? "Shell - selected faces are left open"
+                             : "Shell - select an object first",
+                   false, hasObject))
+        ctx.actions.shell = true;
+    ImGui::SameLine();
+
+    if (iconButton(Icon::Extrude, "Extrude", icon,
+                   faces ? "Extrude the selected faces (E)"
+                         : "Extrude - select a face first",
+                   false, faces > 0))
+        ctx.actions.extrude = true;
+
+    ImGui::EndChild();
+    ImGui::PopStyleVar(2);
+    return height;
+}
+
+// ---------------------------------------------------------------------------
 void drawOutliner(UiContext& ctx) {
     if (!ImGui::Begin("Outliner")) { ImGui::End(); return; }
 
@@ -320,9 +516,14 @@ void drawOutliner(UiContext& ctx) {
     for (const auto& obj : scene.objects()) {
         ImGui::PushID(static_cast<int>(obj->id));
 
-        // Visibility toggle, then the selectable name row.
+        // Visibility toggle, then the shape, then the selectable name row.
         bool visible = obj->visible;
         if (ImGui::Checkbox("##vis", &visible)) obj->visible = visible;
+        ImGui::SameLine();
+
+        const float line = ImGui::GetTextLineHeight();
+        ImGui::AlignTextToFramePadding();
+        iconImage(iconFor(obj->spec.kind), line, visible ? 1.0f : 0.35f);
         ImGui::SameLine();
 
         const bool selected = scene.isSelected(obj->id);
@@ -335,8 +536,13 @@ void drawOutliner(UiContext& ctx) {
                 ctx.actions.frameSelected = true;
         }
 
-        ImGui::SameLine();
-        ImGui::TextColored(kDim, "%s", primitiveName(obj->spec.kind));
+        // The kind, but only when it is not already the name. Every new object
+        // is called after its shape, so the default row used to read "Box Box".
+        const char* kind = primitiveName(obj->spec.kind);
+        if (obj->name != kind) {
+            ImGui::SameLine();
+            ImGui::TextColored(kDim, "%s", kind);
+        }
         ImGui::PopID();
     }
 
@@ -399,7 +605,7 @@ void drawInspector(UiContext& ctx) {
         ctx.actions.transformBefore = transformBefore;
     }
 
-    sectionLabel("GEOMETRY");
+    sectionLabel("REPRESENTATION");
     {
         // Which kernel this body is made of. Not a detail: the two refuse
         // different things and round different edges, so "why did that fillet
@@ -411,10 +617,13 @@ void drawInspector(UiContext& ctx) {
         ImGui::SameLine();
         ImGui::TextColored(kDim, "%d face%s", obj->body.faceCount(),
                            obj->body.faceCount() == 1 ? "" : "s");
-        if (exact)
-            ImGui::TextColored(kDim, "Curves are held as curves; a hole is round, not a polygon");
-        else
-            ImGui::TextColored(kDim, "Facets: a curve is as smooth as the segment count that made it");
+        // Wrapped: the panel is a fifth of the window and these sentences are
+        // not, so unwrapped they were simply cut off mid-word.
+        ImGui::PushStyleColor(ImGuiCol_Text, kDim);
+        ImGui::TextWrapped("%s", exact
+            ? "Curves are held as curves; a hole is round, not a polygon."
+            : "Facets: a curve is as smooth as the segment count that made it.");
+        ImGui::PopStyleColor();
     }
 
     sectionLabel("PRINTABILITY");
@@ -483,6 +692,14 @@ void drawHistory(UiContext& ctx) {
 
         bool enabled = f.enabled;
         if (ImGui::Checkbox("##on", &enabled)) { f.enabled = enabled; changed = true; }
+        ImGui::SameLine();
+
+        // The operation, as a picture. A chain of ten steps is read down this
+        // column rather than along the summaries, which is the whole reason
+        // for an icon here rather than a word.
+        ImGui::AlignTextToFramePadding();
+        iconImage(iconFor(f), ImGui::GetTextLineHeight(),
+                  f.errored ? 0.4f : (f.enabled ? 1.0f : 0.35f));
         ImGui::SameLine();
 
         const bool open = ImGui::TreeNodeEx("##row", ImGuiTreeNodeFlags_SpanAvailWidth,

@@ -12,7 +12,11 @@ int main(int argc, char** argv) {
             const int frames = (i + 1 < argc) ? std::atoi(argv[i + 1]) : 3;
             app.setSmokeTest(frames > 0 ? frames : 3);
         } else if (std::strcmp(argv[i], "--screenshot") == 0 && i + 1 < argc) {
-            app.setScreenshot(argv[++i], 4);
+            // Late enough that a window opened by the harness has been
+            // measured and drawn: ImGui hides an auto-sized window on its
+            // first frame while it works out how big it is, so a capture any
+            // earlier catches a menu that is open but not yet on screen.
+            app.setScreenshot(argv[++i], 6);
         } else if (std::strcmp(argv[i], "--camera") == 0 && i + 1 < argc) {
             float yaw = 0, pitch = 0, dist = 0;
             std::sscanf(argv[++i], "%f,%f,%f", &yaw, &pitch, &dist);

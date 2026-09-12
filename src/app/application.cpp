@@ -1,6 +1,7 @@
 #include "app/application.h"
 #include "geom/kernel_guard.h"
 #include "render/lod.h"
+#include "ui/icons.h"
 #include "ui/view_cube.h"
 #include "ui/theme.h"
 
@@ -34,6 +35,12 @@ std::string resolveShaderDir() {
     if (const char* env = SDL_getenv("TANGENT_SHADER_DIR")) return env;
     if (const char* base = SDL_GetBasePath()) return std::string(base) + "shaders";
     return "shaders";
+}
+
+std::string resolveAssetDir() {
+    if (const char* env = SDL_getenv("TANGENT_ASSET_DIR")) return env;
+    if (const char* base = SDL_GetBasePath()) return std::string(base) + "assets";
+    return "assets";
 }
 
 } // namespace
@@ -100,6 +107,10 @@ bool Application::init() {
     // ---- Renderer ---------------------------------------------------------
     shaderDir_ = resolveShaderDir();
     if (!renderer_.init(shaderDir_)) return false;
+
+    // Not fatal: without them the interface falls back to its words, which is
+    // what it had before there were icons at all.
+    loadIcons(resolveAssetDir() + "/icons");
 
     ui_.scene  = &scene_;
     ui_.camera = &camera_;
@@ -573,6 +584,7 @@ bool Application::init() {
 }
 
 void Application::shutdown() {
+    unloadIcons();
     renderer_.shutdown();
     if (ImGui::GetCurrentContext()) {
         ImGui_ImplOpenGL3_Shutdown();
@@ -2664,6 +2676,9 @@ void Application::buildUi() {
     ImGui::Begin("##DockHost", nullptr, hostFlags);
     ImGui::PopStyleVar(3);
 
+    // The operations, above the panels and the viewport both.
+    drawToolbar(ui_);
+
     const ImGuiID dockId = ImGui::GetID("TangentDockspace");
     // PassthruCentralNode leaves the central node unpainted, so the GL scene
     // drawn underneath shows through instead of needing a render target.
@@ -2896,15 +2911,23 @@ int Application::run() {
 
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplSDL3_NewFrame();
-        ImGui::NewFrame();
-
         // A cursor for a machine with nobody at it. Hover states are half of
         // what a widget is, and a screenshot of one taken with the pointer
         // parked at the origin shows the other half.
+        //
+        // Queued as events before NewFrame, not written into io afterwards:
+        // the click, the release and how long the button was held are all
+        // derived during NewFrame, so a MouseDown set after it is a button
+        // that is down but was never pressed, and nothing fires.
         if (uiMouse_.x >= 0.0f) {
-            ImGui::GetIO().MousePos = ImVec2(uiMouse_.x, uiMouse_.y);
-            ImGui::GetIO().MouseDown[0] = uiMouseDown_;
+            ImGuiIO& in = ImGui::GetIO();
+            in.AddMousePosEvent(uiMouse_.x, uiMouse_.y);
+            // Pressed on one frame and released on the next, because a button
+            // that fires on release never fires for a pointer never lifted.
+            in.AddMouseButtonEvent(0, uiMouseDown_ && frame >= 2 && frame < 4);
         }
+
+        ImGui::NewFrame();
 
         // Stats are gathered before the panels that display them.
         ui_.stats = UiStats{};

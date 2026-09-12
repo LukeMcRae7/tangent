@@ -1,6 +1,7 @@
 #include "app/create_tool.h"
 
 #include "app/overlay_shapes.h"
+#include "ui/icons.h"
 #include "app/snap_overlay.h"
 
 #include "app/camera.h"
@@ -1887,19 +1888,31 @@ bool CreateTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& ou
             if (hasTargetBody()) {
                 ImGui::Spacing();
                 ImGui::TextDisabled("Operation");
-                const struct { CreateOp op; const char* label; } modes[] = {
-                    {CreateOp::Auto,    "Auto (A)"},
-                    {CreateOp::Join,    "Join (J)"},
-                    {CreateOp::Cut,     "Cut (D)"},
-                    {CreateOp::NewBody, "New Body (N)"},
-                };
-                for (const auto& m : modes) {
-                    ImGui::SameLine();
-                    const bool on = op_ == m.op;
+
+                // What each choice does to the body underneath, as a picture of
+                // the result rather than as a verb. Auto is the two of them
+                // side by side, because that is exactly what it is: whichever
+                // way the depth goes.
+                const float ic = ImGui::GetTextLineHeight() * 1.6f;
+                ImGui::SameLine();
+                {
+                    const bool on = op_ == CreateOp::Auto;
                     if (on) ImGui::PushStyleColor(ImGuiCol_Button, kAccentIm);
-                    if (ImGui::Button(m.label)) op_ = m.op;
+                    if (ImGui::Button("Auto (A)")) op_ = CreateOp::Auto;
                     if (on) ImGui::PopStyleColor();
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Join when pushed out of the face, cut when pushed in");
                 }
+                ImGui::SameLine();
+                if (iconButton(Icon::Union, "join", ic, "Join (J)", op_ == CreateOp::Join))
+                    op_ = CreateOp::Join;
+                ImGui::SameLine();
+                if (iconButton(Icon::Difference, "cut", ic, "Cut (D)", op_ == CreateOp::Cut))
+                    op_ = CreateOp::Cut;
+                ImGui::SameLine();
+                if (iconButton(Icon::Box, "newbody", ic, "New Body (N)",
+                               op_ == CreateOp::NewBody))
+                    op_ = CreateOp::NewBody;
             }
             ImGui::Spacing();
             ImGui::PushStyleColor(ImGuiCol_Button, kAccentIm);

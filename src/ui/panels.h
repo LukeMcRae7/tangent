@@ -87,6 +87,13 @@ struct UiContext {
 };
 
 void drawMenuBar(UiContext& ctx);
+
+// The operations, along the top of the workspace. Returns the height it took.
+//
+// Every icon here is a render of the operation it stands for, made by the
+// kernel itself (see ui/icons.h), so the row doubles as a picture of what the
+// tool can do. Drawn inside the dockspace host, above the panels.
+float drawToolbar(UiContext& ctx);
 void drawOutliner(UiContext& ctx);
 void drawInspector(UiContext& ctx);
 void drawHistory(UiContext& ctx);

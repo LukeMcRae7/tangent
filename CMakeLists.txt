@@ -157,6 +157,7 @@ add_executable(tangent
   src/ui/theme.cpp
   src/ui/panels.cpp
   src/ui/view_cube.cpp
+  src/ui/icons.cpp
 )
 target_include_directories(tangent PRIVATE src)
 target_link_libraries(tangent PRIVATE imgui SDL3::SDL3 tangent_epoxy)
@@ -164,10 +165,13 @@ target_compile_options(tangent PRIVATE ${TANGENT_WARNINGS_LOOSE})
 
 # Shaders are compiled into the binary via #include of generated headers is
 # overkill for now; ship them next to the executable and locate at runtime.
+# The baked operation icons travel the same way.
 add_custom_command(TARGET tangent POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E copy_directory
           ${CMAKE_SOURCE_DIR}/shaders $<TARGET_FILE_DIR:tangent>/shaders
-  COMMENT "Staging shaders")
+  COMMAND ${CMAKE_COMMAND} -E copy_directory
+          ${CMAKE_SOURCE_DIR}/assets $<TARGET_FILE_DIR:tangent>/assets
+  COMMENT "Staging shaders and assets")
 
 # ---- Tests ----------------------------------------------------------------
 # Kernel-only, no GL context required, so it runs headless in CI.
@@ -278,6 +282,7 @@ add_test(NAME io COMMAND test_io)
 add_executable(test_create_tool tests/test_create_tool.cpp
   src/app/create_tool.cpp src/app/camera.cpp src/app/undo.cpp src/app/snap.cpp
   src/app/plane_snap.cpp src/app/snap_overlay.cpp src/app/overlay_shapes.cpp
+  src/ui/icons.cpp
   src/scene/scene.cpp src/scene/feature.cpp src/mesh/boolean.cpp
   src/mesh/health.cpp ${TANGENT_GEOM} src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp
   src/render/renderer.cpp src/render/shader.cpp src/render/gpu_mesh.cpp)
@@ -304,8 +309,15 @@ target_link_libraries(test_drag PRIVATE tangent_epoxy)
 target_compile_options(test_drag PRIVATE ${TANGENT_WARNINGS})
 add_test(NAME drag COMMAND test_drag)
 
+add_executable(test_icons tests/test_icons.cpp src/ui/icons.cpp tools/png_write.cpp)
+target_include_directories(test_icons PRIVATE src tools ${imgui_SOURCE_DIR})
+target_link_libraries(test_icons PRIVATE imgui tangent_epoxy)
+target_compile_options(test_icons PRIVATE ${TANGENT_WARNINGS})
+add_test(NAME icons COMMAND test_icons ${CMAKE_SOURCE_DIR}/assets/icons)
+
 add_executable(test_view_cube tests/test_view_cube.cpp
-  src/ui/view_cube.cpp src/ui/panels.cpp src/ui/theme.cpp src/app/camera.cpp src/app/measure.cpp
+  src/ui/view_cube.cpp src/ui/panels.cpp src/ui/theme.cpp src/ui/icons.cpp
+  src/app/camera.cpp src/app/measure.cpp
   src/scene/scene.cpp src/scene/feature.cpp src/mesh/boolean.cpp src/mesh/health.cpp
   ${TANGENT_GEOM} src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp
   src/render/renderer.cpp src/render/shader.cpp src/render/gpu_mesh.cpp)
@@ -346,7 +358,7 @@ endif()
 
 # Not a test: it bakes the toolbar icons out of the kernel. Run it by hand when
 # the icons change, and commit what it produces.
-add_executable(bake_icons EXCLUDE_FROM_ALL tools/bake_icons.cpp tools/icon_raster.cpp
+add_executable(bake_icons EXCLUDE_FROM_ALL tools/bake_icons.cpp tools/icon_raster.cpp tools/png_write.cpp
   src/mesh/health.cpp src/mesh/boolean.cpp ${TANGENT_GEOM}
   src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp)
 target_include_directories(bake_icons PRIVATE src tools)
