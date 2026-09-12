@@ -66,6 +66,9 @@ bool rotateFaces(Body& body, const std::vector<FaceId>& faces, Real angleRad,
                  Vec3 hingePoint, Vec3 hingeDir, ElementId salt = 0,
                  std::string* reason = nullptr);
 
+// Drops every division that does not define the shape.
+bool mergeDivisions(Body& body, ElementId salt = 0, std::string* reason = nullptr);
+
 // Adds a line across the body where a plane crosses it, splitting the faces it
 // passes through without splitting the body.
 bool divideBody(Body& body, Vec3 planePoint, Vec3 planeNormal,

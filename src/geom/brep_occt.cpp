@@ -1123,6 +1123,40 @@ BrepRef unifyFlush(const BrepRef& made, const BrepRef& before, ElementId salt) {
     try {
         ShapeUpgrade_UnifySameDomain unify(made->shape, Standard_True, Standard_True,
                                            Standard_False);
+
+        // Only the seams this operation left.
+        //
+        // UnifySameDomain merges every coplanar pair in the shape, which is far
+        // more than was asked for: a line the user cut on purpose divides two
+        // coplanar faces too, and merging it destroys their work to tidy up
+        // after ours. An edge between two faces that both existed before this
+        // operation is one of those, and is kept.
+        std::unordered_map<ElementId, bool> existed;
+        auto wasThereBefore = [&](ElementId id) {
+            if (id == kNoId) return false;
+            auto it = existed.find(id);
+            if (it != existed.end()) return it->second;
+            std::vector<FaceId> at;
+            findFaces(*before, id, at);
+            const bool yes = !at.empty();
+            existed.emplace(id, yes);
+            return yes;
+        };
+
+        TopTools_IndexedDataMapOfShapeListOfShape edgeFaces;
+        TopExp::MapShapesAndAncestors(made->shape, TopAbs_EDGE, TopAbs_FACE, edgeFaces);
+        for (int i = 1; i <= edgeFaces.Extent(); ++i) {
+            const TopTools_ListOfShape& adj = edgeFaces(i);
+            if (adj.Extent() != 2) continue;
+            bool bothOld = true;
+            for (TopTools_ListIteratorOfListOfShape it(adj); it.More() && bothOld; it.Next()) {
+                const int at = made->faces.FindIndex(it.Value());
+                bothOld = at > 0 &&
+                          wasThereBefore(made->faceNames[static_cast<size_t>(at - 1)]);
+            }
+            if (bothOld) unify.KeepShape(edgeFaces.FindKey(i));
+        }
+
         unify.Build();
         merged = unify.Shape();
         history = unify.History();
@@ -1364,6 +1398,69 @@ BrepRef rotateFaces(const BrepRef& s, const std::vector<FaceId>& faces, Real ang
     } catch (const Standard_Failure& e) {
         if (reason) *reason = e.GetMessageString() ? e.GetMessageString()
                                                    : "the rotation threw";
+        return {};
+    }
+}
+
+BrepRef mergeDivisions(const BrepRef& s, ElementId salt, std::string* reason) {
+    if (reason) reason->clear();
+    if (!s || s->shape.IsNull()) {
+        if (reason) *reason = "there is nothing to merge";
+        return {};
+    }
+
+    try {
+        ShapeUpgrade_UnifySameDomain unify(s->shape, Standard_True, Standard_True,
+                                           Standard_False);
+        unify.Build();
+        const TopoDS_Shape merged = unify.Shape();
+        Handle(BRepTools_History) history = unify.History();
+        if (merged.IsNull() || history.IsNull() || !acceptable(merged, reason)) {
+            if (reason && reason->empty()) *reason = "the merge left nothing valid";
+            return {};
+        }
+
+        TopTools_IndexedMapOfShape out;
+        TopExp::MapShapes(merged, TopAbs_FACE, out);
+        if (out.Extent() == s->faces.Extent()) {
+            if (reason) *reason = "there are no divisions to drop";
+            return {};
+        }
+
+        // Where two faces become one, the bigger of them gives the survivor its
+        // name: it is the piece a person would have been pointing at, and the
+        // one anything earlier in the history is most likely to have meant.
+        std::vector<ElementId> names(static_cast<size_t>(out.Extent()), kNoId);
+        std::vector<Real> claim(static_cast<size_t>(out.Extent()), -1.0);
+        for (int i = 1; i <= s->faces.Extent(); ++i) {
+            const ElementId id = s->faceNames[static_cast<size_t>(i - 1)];
+            if (id == kNoId) continue;
+
+            GProp_GProps props;
+            BRepGProp::SurfaceProperties(s->faces(i), props);
+            const Real area = props.Mass();
+
+            std::vector<TopoDS_Shape> landed;
+            const TopTools_ListOfShape& mods = history->Modified(s->faces(i));
+            if (mods.IsEmpty()) landed.push_back(s->faces(i));
+            else for (TopTools_ListIteratorOfListOfShape it(mods); it.More(); it.Next())
+                landed.push_back(it.Value());
+
+            for (const TopoDS_Shape& f : landed) {
+                const int at = out.FindIndex(f);
+                if (at <= 0) continue;
+                const size_t k = static_cast<size_t>(at - 1);
+                if (area > claim[k]) { claim[k] = area; names[k] = id; }
+            }
+        }
+        for (size_t k = 0; k < names.size(); ++k)
+            if (names[k] == kNoId)
+                names[k] = nameId(salt, IdRole::Patch, static_cast<ElementId>(k));
+
+        return makeBrep(merged, names);
+    } catch (const Standard_Failure& e) {
+        if (reason) *reason = e.GetMessageString() ? e.GetMessageString()
+                                                   : "the merge threw";
         return {};
     }
 }

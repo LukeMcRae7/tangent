@@ -228,6 +228,15 @@ BrepRef extrudeFaces(const BrepRef& s, const std::vector<FaceId>& faces, Real di
 BrepRef rotateFaces(const BrepRef& s, const std::vector<FaceId>& faces, Real angleRad,
                     Vec3 hingePoint, Vec3 hingeDir, ElementId salt, std::string* reason);
 
+// Drops every division that does not define the shape.
+//
+// Two coplanar faces sharing an edge are one face with a line drawn on it, and
+// the line may be there for a reason -- a divide puts one there on purpose --
+// or may be left over from an operation that had no way to avoid it. This
+// removes all of them, which is a thing worth being able to ask for outright
+// and not a thing any other operation should do behind your back.
+BrepRef mergeDivisions(const BrepRef& s, ElementId salt, std::string* reason);
+
 // Cuts a line across the body where a plane crosses it, without cutting the
 // body in two.
 //

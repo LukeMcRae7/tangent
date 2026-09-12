@@ -50,6 +50,7 @@ struct UiActions {
     bool extrude = false;
     bool rotateFace = false;
     bool divide = false;
+    bool mergeFaces = false;
     bool bevel = false;
     bool split = false;
     bool fillet = false;

@@ -35,6 +35,7 @@ enum class FeatureKind {
     Shell,       // hollow it out, opening the faces named
     FaceRotate,  // tip a face about one of its own edges
     Divide,      // cut a line across the body without cutting it in two
+    Merge,       // drop every division that does not define the shape
 };
 
 const char* featureKindName(FeatureKind k);

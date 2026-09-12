@@ -126,6 +126,17 @@ bool rotateFaces(Body& body, const std::vector<FaceId>& faces, Real angleRad,
     return true;
 }
 
+bool mergeDivisions(Body& body, ElementId salt, std::string* reason) {
+    if (body.isMesh()) {
+        if (reason) *reason = "merging faces needs the exact kernel, and this body is a mesh";
+        return false;
+    }
+    BrepRef result = brep::mergeDivisions(body.brepRef(), salt, reason);
+    if (!result) return false;
+    body = Body(std::move(result));
+    return true;
+}
+
 bool divideBody(Body& body, Vec3 planePoint, Vec3 planeNormal, ElementId salt,
                 std::string* reason) {
     if (body.isMesh()) {

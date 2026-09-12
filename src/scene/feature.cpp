@@ -22,6 +22,7 @@ const char* featureKindName(FeatureKind k) {
         case FeatureKind::Shell:      return "Shell";
         case FeatureKind::FaceRotate: return "Rotate Face";
         case FeatureKind::Divide:     return "Divide";
+        case FeatureKind::Merge:      return "Merge Faces";
     }
     return "Feature";
 }
@@ -100,6 +101,9 @@ std::string Feature::summary() const {
             std::snprintf(buf, sizeof(buf), "Rotate  %.1f deg  (%s)",
                           static_cast<double>(degrees(angle)),
                           faces.describe("face").c_str());
+            break;
+        case FeatureKind::Merge:
+            std::snprintf(buf, sizeof(buf), "Merge faces");
             break;
         case FeatureKind::Divide:
             std::snprintf(buf, sizeof(buf), "Divide  at %.2f, %.2f, %.2f",
@@ -332,6 +336,14 @@ bool evaluateFrom(std::vector<Feature>& features, size_t from,
             if (!rotateFaces(body, scratchFaces, f.angle, f.axisPoint, f.axisDir,
                              f.uid, &why))
                 fail(why.empty() ? "the rotation could not be built" : why.c_str());
+            break;
+        }
+
+        case FeatureKind::Merge: {
+            if (body.empty()) { fail("nothing to merge"); break; }
+            std::string why;
+            if (!mergeDivisions(body, f.uid, &why))
+                fail(why.empty() ? "the merge could not be built" : why.c_str());
             break;
         }
 

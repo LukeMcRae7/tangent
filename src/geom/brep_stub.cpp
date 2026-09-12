@@ -40,6 +40,11 @@ BrepRef rotateFaces(const BrepRef&, const std::vector<FaceId>&, Real, Vec3, Vec3
     return {};
 }
 
+BrepRef mergeDivisions(const BrepRef&, ElementId, std::string* reason) {
+    if (reason) *reason = "merging faces needs the exact kernel";
+    return {};
+}
+
 BrepRef divideBody(const BrepRef&, Vec3, Vec3, ElementId, std::string* reason) {
     if (reason) *reason = "dividing a face needs the exact kernel";
     return {};

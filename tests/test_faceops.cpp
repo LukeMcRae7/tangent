@@ -269,6 +269,70 @@ int main() {
                     c.x > 0 ? ">" : "<", added);
     }
 
+    std::printf("--- a move keeps the divisions someone put there ---\n");
+    {
+        // The seams a push leaves down the walls it slid along are worth
+        // merging: nothing intersects there and the line is an artefact. A line
+        // the user cut on purpose is the opposite, and a merge that cannot tell
+        // them apart destroys work.
+        Body b = makeBox(30, 20, 10);
+        std::string why;
+        check(divideBody(b, {0, 0, 0}, {1, 0, 0}, 4301, &why), "divided: " + why);
+        const int afterDivide = b.faceCount();
+        check(afterDivide == 10, "ten faces after the cut");
+
+        // Push a face that has nothing to do with the division: an end.
+        check(extrudeFaces(b, {facing(b, {0, 1, 0})}, 4.0, nullptr, 4302,
+                           ExtrudeOp::Auto, &why, /*mergeFlush=*/true),
+              "pushed an end out: " + why);
+        check(b.validate(), "still a solid");
+
+        // The cut round the middle is still there.
+        int onPlusZ = 0;
+        std::vector<FaceId> fs;
+        b.allFaces(fs);
+        for (FaceId f : fs)
+            if (dot(b.faceNormal(f), Vec3{0, 0, 1}) > 0.99) ++onPlusZ;
+        check(onPlusZ == 2, "the top is still two faces, not one");
+        std::printf("  %d faces after the cut, %d after the push, top in %d\n",
+                    afterDivide, b.faceCount(), onPlusZ);
+    }
+
+    std::printf("--- and merging is how you ask for them to go ---\n");
+    {
+        // What a move must not do behind your back is exactly what this does
+        // when you ask for it.
+        Body b = makeBox(30, 20, 10);
+        std::string why;
+        check(divideBody(b, {0, 0, 0}, {1, 0, 0}, 4401, &why), "divided: " + why);
+        check(b.faceCount() == 10, "ten faces");
+        const Real volume = b.health(false).volume;
+
+        check(mergeDivisions(b, 4402, &why), "merged: " + why);
+        check(b.faceCount() == 6, "back to six");
+        check(near(b.health(false).volume, volume, 1e-6),
+              "and not a cubic millimetre different: a division is a line, "
+              "not a shape");
+        check(b.validate(), "still a solid");
+
+        // Nothing to drop is not a failure to report as a broken operation,
+        // but it is not a change either, and saying so beats a no-op that
+        // claims to have done something.
+        check(!mergeDivisions(b, 4403, &why), "a second merge finds nothing");
+        check(!why.empty(), "and says so: " + why);
+        check(b.faceCount() == 6, "leaving the body alone");
+    }
+
+    std::printf("--- a division that defines the shape is not a division ---\n");
+    {
+        // The faces either side of a real edge are not coplanar, so there is
+        // nothing to merge and the box survives being asked.
+        Body b = makeBox(20, 20, 20);
+        std::string why;
+        check(!mergeDivisions(b, 4404, &why), "a plain box has nothing to merge");
+        check(b.faceCount() == 6, "and keeps its six sides");
+    }
+
     std::printf("\n%s (%d failures)\n", failures ? "FAILED" : "ALL PASS", failures);
     return failures ? 1 : 0;
 }

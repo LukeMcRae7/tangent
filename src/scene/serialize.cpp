@@ -239,7 +239,9 @@ void writeFeature(Writer& w, const Feature& f) {
 // has one possible value.
 bool readFeature(Reader& r, Feature& f, uint32_t version) {
     const uint32_t kind = r.u32();
-    if (kind > static_cast<uint32_t>(FeatureKind::Shell)) return false;
+    // The last of the enum, not a name from the middle of it: a kind added
+    // later would otherwise be rejected by a build that has it.
+    if (kind > static_cast<uint32_t>(FeatureKind::Merge)) return false;
     f.kind = static_cast<FeatureKind>(kind);
     f.enabled = r.u8() != 0;
     if (!readSpec(r, f.primitive)) return false;

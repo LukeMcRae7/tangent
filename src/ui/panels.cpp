@@ -293,6 +293,12 @@ void drawMenuBar(UiContext& ctx) {
             ImGui::TextColored(kDim, "  First selected is kept, second is the tool");
 
         ImGui::Separator();
+        if (ImGui::MenuItem("Merge Faces", nullptr, false,
+                            ctx.scene->contextObject() != kNoObject))
+            ctx.actions.mergeFaces = true;
+        ImGui::TextColored(kDim, "  drops divisions that do not define the shape");
+
+        ImGui::Separator();
         if (ImGui::MenuItem("Split Body", nullptr, false,
                             ctx.scene->contextObject() != kNoObject))
             ctx.actions.split = true;
@@ -519,6 +525,16 @@ float drawToolbar(UiContext& ctx) {
                          : "Divide - select an edge for the cut to run across",
                    false, edges > 0))
         ctx.actions.divide = true;
+    ImGui::SameLine();
+
+    // The opposite of divide, and the reason it is its own button: an
+    // operation that tidied up after itself would take these with it.
+    if (iconButton(Icon::Union, "MergeFaces", icon,
+                   hasObject ? "Merge faces: drop every division that does not "
+                               "define the shape"
+                             : "Merge faces - select an object first",
+                   false, hasObject))
+        ctx.actions.mergeFaces = true;
 
     ImGui::EndChild();
     ImGui::PopStyleVar(2);
@@ -739,6 +755,10 @@ void drawHistory(UiContext& ctx) {
             switch (f.kind) {
             case FeatureKind::Primitive:
                 ImGui::TextColored(kDim, "Edit dimensions in the Inspector");
+                break;
+            case FeatureKind::Merge:
+                ImGui::TextColored(kDim, "Drops every division that does not");
+                ImGui::TextColored(kDim, "define the shape.");
                 break;
             case FeatureKind::FaceRotate: {
                 Real deg = degrees(f.angle);

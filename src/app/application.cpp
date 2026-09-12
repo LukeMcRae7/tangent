@@ -2032,6 +2032,42 @@ void Application::abortFaceMove() {
 // Dividing a face
 // ---------------------------------------------------------------------------
 
+// Drops every division that does not define the shape.
+//
+// Not a gesture: there is nothing to drag and nothing to choose, so it happens
+// and says how much it removed. One step on the chain like any other, so it can
+// be undone and so a later edit rebuilds through it.
+void Application::mergeSelected() {
+    const ObjectId id = scene_.contextObject();
+    SceneObject* obj = scene_.find(id);
+    if (!obj) { setNotice("Select an object first"); return; }
+    if (obj->body.isMesh()) { setNotice("Merging faces needs the exact kernel"); return; }
+
+    const int before = obj->body.faceCount();
+    std::vector<Feature> chainBefore = obj->features;
+    preEditSolid_ = obj->healthVersion == obj->meshVersion && obj->health.solid();
+
+    Feature f;
+    f.kind = FeatureKind::Merge;
+
+    std::string why;
+    if (!scene_.addFeature(id, std::move(f), &why) || !editKeepsSolid(id)) {
+        obj->features = std::move(chainBefore);
+        scene_.reevaluate(id);
+        setNotice(why.empty() ? "Nothing to merge" : "Not merged: " + why);
+        return;
+    }
+
+    scene_.clearElementSelection();
+    undo_.push(std::make_unique<FeatureCommand>(id, std::move(chainBefore),
+                                                obj->features, "Merge Faces"));
+    const int after = obj->body.faceCount();
+    char msg[96];
+    std::snprintf(msg, sizeof msg, "Merged %d face%s into %d", before,
+                  before == 1 ? "" : "s", after);
+    setNotice(msg);
+}
+
 void Application::beginDivide() {
     if (tool_.active() || filletTool_.active || createTool_.active() ||
         faceTool_.active || divideTool_.active)
@@ -2549,6 +2585,53 @@ void Application::stepFaceDemo() {
                      (int)o->body.validate(), o->features.size(),
                      scene_.selectedFaces(id).size());
     };
+
+    if (faceDemo_ == 10) {
+        // Cut a line, move an unrelated face, then ask for the line to go.
+        const SceneObject* o0 = scene_.find(id);
+        std::vector<EdgeId> es;
+        o0->body.allEdges(es);
+        EdgeId along = kInvalid;
+        for (EdgeId e : es) {
+            Vec3 p, q;
+            o0->body.edgePositions(e, p, q);
+            if (std::fabs((q - p).z) > 1e-6) { along = e; break; }
+        }
+        if (along == kInvalid) return;
+        scene_.clearElementSelection();
+        scene_.selectElement({id, ElementKind::Edge, along}, true);
+        beginDivide();
+        divideTool_.typedValue = "10";
+        updateDivide(false);
+        while (divideTool_.preview.busy()) updateDivide(false);
+        updateDivide(false);
+        commitDivide();
+        report("divided");
+
+        const SceneObject* o = scene_.find(id);
+        std::vector<FaceId> fs;
+        o->body.allFaces(fs);
+        FaceId end = fs.front();
+        Real best = -1e30;
+        for (FaceId f : fs) {
+            const Real d = dot(o->body.faceNormal(f), Vec3{0, 1, 0});
+            if (d > best) { best = d; end = f; }
+        }
+        scene_.clearElementSelection();
+        scene_.selectElement({id, ElementKind::Face, end}, true);
+        beginFaceMove(FaceOp::Move);
+        faceTool_.typedValue = "4";
+        updateFaceMove(false);
+        while (faceTool_.preview.busy()) updateFaceMove(false);
+        updateFaceMove(false);
+        commitFaceMove();
+        report("moved an unrelated face");
+
+        scene_.select(id);
+        mergeSelected();
+        report("merged");
+        return;
+    }
 
     if (faceDemo_ == 9) {
         // A second body in the way, so the extrude runs into it and the tool
@@ -3587,6 +3670,7 @@ void Application::applyActions() {
     if (a.extrude)    beginFaceMove(FaceOp::Extrude);
     if (a.rotateFace) beginFaceMove(FaceOp::Rotate);
     if (a.divide) beginDivide();
+    if (a.mergeFaces) mergeSelected();
     if (a.bevel)   bevelActiveObject();
     if (a.split)   splitActiveObject();
     if (a.fillet)  beginFillet();

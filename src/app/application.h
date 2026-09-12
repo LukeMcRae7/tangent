@@ -111,7 +111,9 @@ public:
 
     // Drives the face tools: 1 push out, 2 pull in, 3 rotate, 4 divide,
     // 5 divide then push one half -- the sequence the divide exists for -- and
-    // 6 the same pull as an extrude, which keeps the boss's outline.
+    // 6 the same pull as an extrude, which keeps the boss's outline,
+    // 7 a move along a world axis, 8 a rotation the other way, 9 an extrude
+    // that runs into another body, and 10 divide, move, then merge.
     void setFaceDemo(int mode) { faceDemo_ = mode; }
 
     // Throws a fast, wandering drag at the extrude, including the places a
@@ -419,6 +421,7 @@ private:
     };
     DivideToolState divideTool_;
 
+    void mergeSelected();
     void beginDivide();
     void updateDivide(bool snap, bool follow = true);
     void commitDivide();
