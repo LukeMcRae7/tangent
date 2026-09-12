@@ -31,6 +31,7 @@
 #include <BRepFeat_SplitShape.hxx>
 #include <BRepFilletAPI_MakeFillet.hxx>
 #include <BRepOffsetAPI_MakeOffset.hxx>
+#include <BRepOffsetAPI_MakeOffsetShape.hxx>
 #include <BRepOffsetAPI_MakeThickSolid.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
 #include <ShapeUpgrade_UnifySameDomain.hxx>
@@ -972,9 +973,12 @@ MeshHealth health(const BrepShape& s, bool) {
         BRepGProp::VolumeProperties(s.shape, props);
         h.volume = props.Mass();
 
-        int shells = 0;
-        for (TopExp_Explorer e(s.shape, TopAbs_SHELL); e.More(); e.Next()) ++shells;
-        h.shells = shells;
+        // Solids, not shells. A hollowed part has two shells -- its outside and
+        // the wall of its cavity -- and reporting that as two bodies tells the
+        // user they have something they do not.
+        int solids = 0;
+        for (TopExp_Explorer e(s.shape, TopAbs_SOLID); e.More(); e.Next()) ++solids;
+        h.shells = solids;
 
         // A B-rep solid is closed by construction, so the question a mesh has
         // to answer by counting boundary edges is answered by whether it checks
@@ -1309,6 +1313,48 @@ BrepRef shell(const BrepRef& s, const std::vector<FaceId>& openFaces, Real thick
     for (FaceId f : openFaces) {
         if (!validFace(*s, f)) {
             if (reason) *reason = "a face to open no longer exists";
+            return {};
+        }
+    }
+
+    // A sealed cavity is a different construction, not the same one with an
+    // empty list. MakeThickSolidByJoin with no faces to open does not hollow
+    // anything: it offsets the solid inward and hands back a smaller solid --
+    // a 20mm cube shelled 2mm comes back as a 16mm cube, valid, watertight,
+    // smaller than it was, and completely wrong. Nothing downstream could tell:
+    // the volume went down, so even a guard against no-ops is satisfied.
+    //
+    // The cavity has to be built and subtracted instead.
+    if (openFaces.empty()) {
+        try {
+            BRepOffsetAPI_MakeOffsetShape inward;
+            inward.PerformByJoin(s->shape, -thickness, 1e-3);
+            inward.Build();
+            if (!inward.IsDone() || inward.Shape().IsNull()) {
+                if (reason) *reason = "the wall does not fit: try a thinner one";
+                return {};
+            }
+
+            // Name the cavity from the faces it was offset from, so the inside
+            // of the top is recognisably the inside of the top.
+            const TopoDS_Shape innerShape = inward.Shape();
+            BrepRef inner = makeBrep(innerShape,
+                                     propagateNames(inward, {{s.get()}}, innerShape,
+                                                    nameId(salt, IdRole::Wall, 1)));
+
+            BrepRef out = booleanOp(*s, *inner, BooleanOp::Difference, salt, reason);
+            if (!out) return {};
+
+            GProp_GProps was, now;
+            BRepGProp::VolumeProperties(s->shape, was);
+            BRepGProp::VolumeProperties(out->shape, now);
+            if (now.Mass() > was.Mass() * 0.999) {
+                if (reason) *reason = "the wall is too thick to leave a cavity";
+                return {};
+            }
+            return out;
+        } catch (const Standard_Failure& e) {
+            if (reason) *reason = e.GetMessageString() ? e.GetMessageString() : "shelling threw";
             return {};
         }
     }

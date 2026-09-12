@@ -152,6 +152,36 @@ int main() {
         check(!shellBody(zero, {topFace(zero)}, 0.0, 13, &why),
               "so is a wall of no thickness");
 
+        // A sealed cavity: no face opened. This is a different construction and
+        // not the same one with an empty list -- offsetting inward with nothing
+        // to open hands back a *smaller solid*, which is watertight, valid, and
+        // smaller than it was, so nothing downstream can tell it is wrong.
+        //
+        // The three numbers together are what pin it. Volume alone passes on a
+        // shrunken solid (it went down); bounds alone passes on a body that was
+        // never hollowed; the face count alone passes on plenty of things. A
+        // hollow box is twelve faces, the size it always was, with the wall's
+        // volume and nothing else.
+        {
+            const Real sw = 20, st = 2;
+            Body sealed = plate(sw, sw, sw);
+            check(shellBody(sealed, {}, st, 15, &why), std::string("sealed shell: ") + why);
+
+            check(near(sealed.health(false).volume,
+                       sw * sw * sw - (sw - 2 * st) * (sw - 2 * st) * (sw - 2 * st), 1e-6),
+                  "the wall is the wall, not the cavity");
+            const AABB bb = sealed.bounds();
+            check(near(bb.max.x - bb.min.x, sw, 1e-6) &&
+                  near(bb.max.z - bb.min.z, sw, 1e-6),
+                  "the part is still the size it was, not shrunk to the cavity");
+            check(sealed.faceCount() == 12, "six faces outside and six in");
+            check(sealed.validate(), "and it is a valid solid");
+            check(sealed.health(false).shells == 1,
+                  "one body with a void in it, not two bodies");
+            std::printf("  sealed: %.1f mm3 of wall, %d faces, %.0f mm across\n",
+                        sealed.health(false).volume, sealed.faceCount(), bb.max.x - bb.min.x);
+        }
+
         // A mesh body says plainly that this is not its operation.
         PrimitiveSpec boxSpec;
         boxSpec.kind = PrimitiveKind::Box;
