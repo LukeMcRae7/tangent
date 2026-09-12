@@ -1,5 +1,6 @@
 #include "app/create_tool.h"
 
+#include "app/overlay_shapes.h"
 #include "app/snap_overlay.h"
 
 #include "app/camera.h"
@@ -458,6 +459,30 @@ void CreateTool::setHoveredPlane(PlaneChoice choice, Vec3 point, Vec3 normal,
     faceIndex_ = faceIdx;
 }
 
+Vec2 CreateTool::handlePointUV(HandleId id) const {
+    const Real uMin = pt1_.x, uMax = pt2_.x;
+    const Real vMin = pt1_.y, vMax = pt2_.y;
+    switch (id) {
+        case HandleId::Corner0:    return {uMax, vMin};
+        case HandleId::Corner1:    return {uMax, vMax};
+        case HandleId::Corner2:    return {uMin, vMax};
+        case HandleId::Corner3:    return {uMin, vMin};
+        case HandleId::EdgeLeft:   return {uMin, (vMin + vMax) * 0.5};
+        case HandleId::EdgeRight:  return {uMax, (vMin + vMax) * 0.5};
+        case HandleId::EdgeBottom: return {(uMin + uMax) * 0.5, vMin};
+        case HandleId::EdgeTop:    return {(uMin + uMax) * 0.5, vMax};
+        case HandleId::FaceCenter: return (pt1_ + pt2_) * 0.5;
+        case HandleId::RadiusHandle: return {pt1_.x + currentRadius_, pt1_.y};
+        case HandleId::None:       break;
+    }
+    return pt1_;
+}
+
+void CreateTool::clampCornerRadii() {
+    const Real maxR = std::min(currentWidth_, currentDepth_) * 0.499;
+    for (int i = 0; i < 4; ++i) cornerRadii_[i] = clampf(cornerRadii_[i], 0.0, maxR);
+}
+
 // Puts the view back where the tool found it.
 //
 // Over the animation rather than in one frame, the same as going in: the view
@@ -488,6 +513,7 @@ void CreateTool::commitPlaneSelection(Camera& camera) {
     camera.animateTo(planeOrigin_, camera.distance, y, p);
     camera.orthographic = true;
 
+    clearFields();   // each step asks its own questions
     stage_ = CreateStage::DrawProfile_Pt1;
     pt1_ = Vec2{0, 0};
     pt2_ = Vec2{0, 0};
@@ -616,34 +642,63 @@ void CreateTool::update(const Scene& scene, const Camera& camera, Vec2 mousePx, 
     }
 
     if (stage_ == CreateStage::DrawProfile_Pt2) {
-        if (typing()) return;               // the keyboard has the dimension
         Vec2 uv{0, 0};
         if (unprojectToPlane(camera, mousePx, uv)) {
             // The point already placed is a reference in its own right: keeping
             // the second corner level with the first is the commonest thing
             // anyone does here, and the scene knows nothing about it.
             uv = placePoint(uv, true);
-            pt2_ = uv;
+
             if (kind_ == PrimitiveKind::Cylinder) {
-                // A circle is drawn by its radius, so that is what has to land
-                // on a round number -- snapping the point on the rim leaves the
-                // radius at whatever the diagonal happened to be. When the rim
-                // has caught something real, the point wins: matching a hole
-                // exactly is worth more than a tidy number.
-                const bool onFeature =
-                    activeSnap_.valid() && activeSnap_.kind != SnapKind::GridPoint &&
-                    activeSnap_.kind != SnapKind::GridLine;
-                Real r = std::max(length(pt2_ - pt1_), Real(1.0));
-                if (!onFeature && snap) {
-                    r = std::max(quantise(r), Real(0.1));
-                    const Vec2 dir = pt2_ - pt1_;
+                if (fieldFixed_[0]) {
+                    // Typed. The cursor still says which way round, and nothing
+                    // more: the radius is the user's.
+                    const Vec2 dir = uv - pt1_;
                     const Real len = length(dir);
-                    pt2_ = len > 1e-9 ? pt1_ + dir * (r / len) : pt1_ + Vec2{r, 0};
+                    pt2_ = len > 1e-9 ? pt1_ + dir * (fieldValue_[0] / len)
+                                      : pt1_ + Vec2{fieldValue_[0], 0};
+                    currentRadius_ = fieldValue_[0];
+                } else {
+                    // A circle is drawn by its radius, so that is what has to
+                    // land on a round number -- snapping the point on the rim
+                    // leaves the radius at whatever the diagonal happened to
+                    // be. When the rim has caught something real, the point
+                    // wins: matching a hole exactly is worth more than a tidy
+                    // number.
+                    pt2_ = uv;
+                    const bool onFeature =
+                        activeSnap_.valid() && activeSnap_.kind != SnapKind::GridPoint &&
+                        activeSnap_.kind != SnapKind::GridLine;
+                    Real r = std::max(length(pt2_ - pt1_), Real(1.0));
+                    if (!onFeature && snap) {
+                        r = std::max(quantise(r), Real(0.1));
+                        const Vec2 dir = pt2_ - pt1_;
+                        const Real len = length(dir);
+                        pt2_ = len > 1e-9 ? pt1_ + dir * (r / len) : pt1_ + Vec2{r, 0};
+                    }
+                    currentRadius_ = r;
                 }
-                currentRadius_ = r;
             } else {
-                currentWidth_ = std::max(std::fabs(pt2_.x - pt1_.x), Real(1.0));
-                currentDepth_ = std::max(std::fabs(pt2_.y - pt1_.y), Real(1.0));
+                // Each side independently: a width that has been typed stays
+                // typed while the depth is swept out by hand. Which side of the
+                // first corner the rectangle goes is always the cursor's, even
+                // for a dimension that is fixed -- that is direction, not size.
+                const Real w = fieldFixed_[0] ? fieldValue_[0]
+                                              : std::max(std::fabs(uv.x - pt1_.x), Real(1.0));
+                const Real d = fieldFixed_[1] ? fieldValue_[1]
+                                              : std::max(std::fabs(uv.y - pt1_.y), Real(1.0));
+                pt2_ = {pt1_.x + (uv.x < pt1_.x ? -w : w),
+                        pt1_.y + (uv.y < pt1_.y ? -d : d)};
+                currentWidth_ = w;
+                currentDepth_ = d;
+
+                // An alignment along an axis the cursor no longer controls is
+                // not what put the corner there, so it is not claimed.
+                if (activeSnap_.kind == SnapKind::Alignment &&
+                    (activeSnap_.refs[0].alongU ? fieldFixed_[0] : fieldFixed_[1]))
+                    activeSnap_ = PlaneSnap{};
+                else if (activeSnap_.valid() && fieldFixed_[0] && fieldFixed_[1])
+                    activeSnap_ = PlaneSnap{};
             }
         }
         return;
@@ -653,47 +708,86 @@ void CreateTool::update(const Scene& scene, const Camera& camera, Vec2 mousePx, 
         Vec2 currentUV{};
         unprojectToPlane(camera, mousePx, currentUV);
 
-        if (isDragging_ && activeHandle_ != HandleId::None) {
-            if (isFilleting_) {
-                if (typing()) return;
-                // Fillet measured from mouse distance away from reference point!
-                // Mouse on corner/reference point creates 0 fillet (sharp), further away creates more fillet!
-                Real dist = quantise(length(currentUV - filletRefUV_));
-                const Real maxDim = std::min(currentWidth_, currentDepth_) * 0.499f;
-                const Real newR = clampf(dist, 0.0f, maxDim);
-                for (int c : activeFilletCorners_) {
-                    cornerRadii_[c] = newR;
-                }
-            } else if (kind_ == PrimitiveKind::Cylinder && activeHandle_ == HandleId::RadiusHandle) {
-                currentRadius_ = std::max(quantise(length(currentUV - pt1_)), Real(0.1));
-                pt2_ = pt1_ + Vec2{currentRadius_, 0};
-            } else {
-                // Edge dragging (held mouse button): the edge being moved is a
-                // point as far as snapping is concerned, so it gets the same
-                // treatment -- an edge brought level with a hole on the part
-                // below is the reason any of this exists.
-                //
-                // pt1_ is always (uMin, vMin) and pt2_ is always (uMax, vMax).
-                const Vec2 placed = placePoint(currentUV, false);
-                const bool vertical = activeHandle_ == HandleId::EdgeLeft ||
-                                      activeHandle_ == HandleId::EdgeRight;
-                // An alignment on the axis this handle does not move says
-                // nothing about where the edge went, so it is not shown.
-                if (activeSnap_.kind == SnapKind::Alignment &&
-                    activeSnap_.refs[0].alongU != vertical)
-                    activeSnap_ = PlaneSnap{};
+        // Rounding a corner is a mode now, not a drag.
+        //
+        // It used to be what a corner handle did when you pulled on it, which
+        // meant the profile could not be resized from its corners at all -- the
+        // one thing a rectangle's corners are for in every other tool that has
+        // them. So dragging moves, and a fillet is asked for by name: hover the
+        // corner and press F.
+        if (isFilleting_) {
+            if (!fieldFixed_[0]) {
+                // Sit on the corner for nothing, pull away for more. The same
+                // gesture the main fillet tool uses, and the same ladder.
+                const Real dist = quantise(length(currentUV - filletRefUV_));
+                const Real maxR = std::min(currentWidth_, currentDepth_) * 0.499;
+                const Real r = clampf(dist, 0.0, maxR);
+                for (int c : activeFilletCorners_) cornerRadii_[c] = r;
+            }
+            return;
+        }
 
-                if (activeHandle_ == HandleId::EdgeLeft) {
-                    pt1_.x = std::min(placed.x, dragStartPt2_.x - 1.0);
-                } else if (activeHandle_ == HandleId::EdgeRight) {
-                    pt2_.x = std::max(placed.x, dragStartPt1_.x + 1.0);
-                } else if (activeHandle_ == HandleId::EdgeBottom) {
-                    pt1_.y = std::min(placed.y, dragStartPt2_.y - 1.0);
-                } else if (activeHandle_ == HandleId::EdgeTop) {
-                    pt2_.y = std::max(placed.y, dragStartPt1_.y + 1.0);
+        if (isDragging_ && activeHandle_ != HandleId::None) {
+            // The handle is what moves, so the handle is what snaps: the
+            // cursor's own position is an accident of where inside the grab
+            // circle the press landed. A corner brought level with a hole below
+            // has to be the corner that got there, not the pointer.
+            const Vec2 placed = placePoint(currentUV + dragGrabOffset_, false);
+
+            // An alignment on an axis this handle does not move says nothing
+            // about where it went, so it is not shown.
+            const bool movesU = activeHandle_ != HandleId::EdgeBottom &&
+                                activeHandle_ != HandleId::EdgeTop;
+            const bool movesV = activeHandle_ != HandleId::EdgeLeft &&
+                                activeHandle_ != HandleId::EdgeRight;
+            if (activeSnap_.kind == SnapKind::Alignment &&
+                (activeSnap_.refs[0].alongU ? !movesU : !movesV))
+                activeSnap_ = PlaneSnap{};
+
+            // Never inside out, and never smaller than something that can still
+            // be grabbed by its own handles.
+            constexpr Real kMin = 0.5;
+            switch (activeHandle_) {
+                case HandleId::RadiusHandle:
+                    currentRadius_ = std::max(quantise(length(currentUV - pt1_)), Real(0.1));
+                    pt2_ = pt1_ + Vec2{currentRadius_, 0};
+                    break;
+
+                // The whole profile follows, keeping its size.
+                case HandleId::FaceCenter: {
+                    const Vec2 half = (pt2_ - pt1_) * 0.5;
+                    pt1_ = placed - half;
+                    pt2_ = placed + half;
+                    break;
                 }
+
+                case HandleId::Corner0:
+                    pt2_.x = std::max(placed.x, pt1_.x + kMin);
+                    pt1_.y = std::min(placed.y, pt2_.y - kMin);
+                    break;
+                case HandleId::Corner1:
+                    pt2_.x = std::max(placed.x, pt1_.x + kMin);
+                    pt2_.y = std::max(placed.y, pt1_.y + kMin);
+                    break;
+                case HandleId::Corner2:
+                    pt1_.x = std::min(placed.x, pt2_.x - kMin);
+                    pt2_.y = std::max(placed.y, pt1_.y + kMin);
+                    break;
+                case HandleId::Corner3:
+                    pt1_.x = std::min(placed.x, pt2_.x - kMin);
+                    pt1_.y = std::min(placed.y, pt2_.y - kMin);
+                    break;
+
+                case HandleId::EdgeLeft:   pt1_.x = std::min(placed.x, pt2_.x - kMin); break;
+                case HandleId::EdgeRight:  pt2_.x = std::max(placed.x, pt1_.x + kMin); break;
+                case HandleId::EdgeBottom: pt1_.y = std::min(placed.y, pt2_.y - kMin); break;
+                case HandleId::EdgeTop:    pt2_.y = std::max(placed.y, pt1_.y + kMin); break;
+                case HandleId::None:       break;
+            }
+            if (kind_ != PrimitiveKind::Cylinder) {
                 currentWidth_ = pt2_.x - pt1_.x;
                 currentDepth_ = pt2_.y - pt1_.y;
+                clampCornerRadii();
             }
             return;
         }
@@ -743,7 +837,7 @@ void CreateTool::update(const Scene& scene, const Camera& camera, Vec2 mousePx, 
     }
 
     if (stage_ == CreateStage::ExtrudeDepth) {
-        if (typing()) return;
+        if (fieldFixed_[0]) return;             // typed, so the mouse is out of it
         const Real d = quantise(rayPlaneExtrudeDepth(camera, mousePx));
         if (std::fabs(d) > 1e-4) extrudeDepth_ = d;
         return;
@@ -770,6 +864,7 @@ void CreateTool::handleMouseDown(Vec2 mousePx, Scene& scene, Camera& camera, Und
     // exactly this reason.
     if (stage_ == CreateStage::DrawProfile_Pt1) {
         pt2_ = pt1_;
+        clearFields();   // each step asks its own questions
         stage_ = CreateStage::DrawProfile_Pt2;
         return;
     }
@@ -787,11 +882,21 @@ void CreateTool::handleMouseDown(Vec2 mousePx, Scene& scene, Camera& camera, Und
         // Restore perspective camera
         restoreCamera(camera);
 
+        clearFields();   // each step asks its own questions
         stage_ = CreateStage::AdjustProfile;
         return;
     }
 
     if (stage_ == CreateStage::AdjustProfile) {
+        // A click while rounding a corner is what confirms it, the same as it
+        // is for the fillet tool proper.
+        if (isFilleting_) {
+            isFilleting_ = false;
+            activeFilletCorners_.clear();
+            activeHandle_ = HandleId::None;
+            return;
+        }
+
         if (hoveredHandle_ != HandleId::None) {
             activeHandle_ = hoveredHandle_;
             selectedElement_ = hoveredHandle_;
@@ -804,33 +909,11 @@ void CreateTool::handleMouseDown(Vec2 mousePx, Scene& scene, Camera& camera, Und
             Vec2 currentUV{};
             unprojectToPlane(camera, mousePx, currentUV);
             dragStartMouseUV_ = currentUV;
+            dragGrabOffset_ = handlePointUV(activeHandle_) - currentUV;
 
-            const Real uMin = pt1_.x, uMax = pt2_.x;
-            const Real vMin = pt1_.y, vMax = pt2_.y;
-
-            if (activeHandle_ == HandleId::Corner0) {
-                isFilleting_ = true;
-                filletRefUV_ = {uMax, vMin};
-                activeFilletCorners_ = {0};
-            } else if (activeHandle_ == HandleId::Corner1) {
-                isFilleting_ = true;
-                filletRefUV_ = {uMax, vMax};
-                activeFilletCorners_ = {1};
-            } else if (activeHandle_ == HandleId::Corner2) {
-                isFilleting_ = true;
-                filletRefUV_ = {uMin, vMax};
-                activeFilletCorners_ = {2};
-            } else if (activeHandle_ == HandleId::Corner3) {
-                isFilleting_ = true;
-                filletRefUV_ = {uMin, vMin};
-                activeFilletCorners_ = {3};
-            } else if (activeHandle_ == HandleId::FaceCenter) {
-                isFilleting_ = true;
-                filletRefUV_ = (pt1_ + pt2_) * 0.5f;
-                activeFilletCorners_ = {0, 1, 2, 3};
-            } else {
-                isFilleting_ = false;
-            }
+            // A handle grabbed by hand is being taken back from the keyboard:
+            // a dimension cannot be both pinned to a typed number and dragged.
+            clearLocks(activeHandle_);
         }
         return;
     }
@@ -846,9 +929,13 @@ void CreateTool::handleMouseUp(Vec2 mousePx, Camera& camera) {
     (void)camera;
     isMouseDown_ = false;
     if (stage_ == CreateStage::AdjustProfile) {
-        isDragging_ = false;
-        isFilleting_ = false;
-        activeHandle_ = HandleId::None;
+        // Only the drag ends here. Rounding a corner is a mode that a press
+        // began and a press ends, so letting go of the button that started it
+        // must not also finish it.
+        if (!isFilleting_) {
+            isDragging_ = false;
+            activeHandle_ = HandleId::None;
+        }
     }
 }
 
@@ -873,14 +960,23 @@ bool CreateTool::handleTypedKey(int key) {
         stage_ != CreateStage::ExtrudeDepth)
         return false;
 
+    // Every accepted keystroke re-reads the buffer into the dimension, so the
+    // profile follows the digits rather than waiting for Enter. Backspacing a
+    // field back to empty hands it to the mouse again.
     if (key == 8 || key == 127) {                       // backspace
         if (typedValue_.empty()) return false;
         typedValue_.pop_back();
+        syncTypedField();
         return true;
     }
-    if (key >= '0' && key <= '9') { typedValue_.push_back(static_cast<char>(key)); return true; }
+    if (key >= '0' && key <= '9') {
+        typedValue_.push_back(static_cast<char>(key));
+        syncTypedField();
+        return true;
+    }
     if (key == '.' && typedValue_.find('.') == std::string::npos) {
         typedValue_.push_back('.');
+        syncTypedField();
         return true;
     }
     // A leading minus only, and only where a negative reads as something: a
@@ -892,51 +988,117 @@ bool CreateTool::handleTypedKey(int key) {
     return false;
 }
 
-bool CreateTool::applyTypedValue() {
-    if (typedValue_.empty()) return false;
+int CreateTool::fieldCount() const {
+    if (stage_ == CreateStage::ExtrudeDepth) return 1;
+    if (stage_ == CreateStage::AdjustProfile && isFilleting_) return 1;
+    return kind_ == PrimitiveKind::Cylinder ? 1 : 2;
+}
 
-    Real v = 0.0;
-    try {
-        size_t used = 0;
-        v = std::stod(typedValue_, &used);
-        if (used != typedValue_.size()) { typedValue_.clear(); return false; }
-    } catch (...) {
-        typedValue_.clear();                            // "-" or "." on their own
-        return false;
-    }
-    typedValue_.clear();
+const char* CreateTool::fieldName(int field) const {
+    if (stage_ == CreateStage::ExtrudeDepth) return "Depth";
+    if (stage_ == CreateStage::AdjustProfile && isFilleting_) return "Radius";
+    if (kind_ == PrimitiveKind::Cylinder) return "Radius";
+    return field == 0 ? "Width" : "Depth";
+}
+
+Real CreateTool::fieldDisplay(int field) const {
+    if (stage_ == CreateStage::ExtrudeDepth) return extrudeDepth_;
+    if (stage_ == CreateStage::AdjustProfile && isFilleting_)
+        return activeFilletCorners_.empty() ? 0.0 : cornerRadii_[activeFilletCorners_.front()];
+    if (kind_ == PrimitiveKind::Cylinder) return currentRadius_;
+    return field == 0 ? currentWidth_ : currentDepth_;
+}
+
+void CreateTool::setField(int field, Real v) {
+    if (field < 0 || field > 1) return;
+
+    auto fix = [&](Real applied) {
+        fieldFixed_[field] = true;
+        fieldValue_[field] = applied;
+    };
 
     if (stage_ == CreateStage::ExtrudeDepth) {
-        extrudeDepth_ = v;
-        return true;
+        extrudeDepth_ = v;                      // a cut is a negative depth
+        fix(v);
+        return;
     }
 
-    // A fillet being dragged takes the number as its radius, since that is the
-    // dimension the user is looking at.
-    if (stage_ == CreateStage::AdjustProfile && isFilleting_ && !activeFilletCorners_.empty()) {
-        const Real maxR = std::min(currentWidth_, currentDepth_) * 0.499f;
-        const Real r = clampf(v, 0.0f, maxR);
+    if (stage_ == CreateStage::AdjustProfile && isFilleting_) {
+        const Real maxR = std::min(currentWidth_, currentDepth_) * 0.499;
+        const Real r = clampf(v, 0.0, maxR);
         for (int c : activeFilletCorners_) cornerRadii_[c] = r;
-        return true;
+        fix(r);
+        return;
     }
 
-    if (v <= 0.0) return false;                         // a size has to be positive
+    if (v <= 0.0) return;                       // a size has to be positive
 
     if (kind_ == PrimitiveKind::Cylinder) {
         currentRadius_ = v;
         pt2_ = pt1_ + Vec2{currentRadius_, 0};
-        return true;
+        fix(v);
+        return;
     }
 
     // Keep the corner the user started from where it is and move the opposite
     // one, in whichever direction the rectangle is already being drawn.
-    if (typedField_ == 0) {
+    if (field == 0) {
         currentWidth_ = v;
         pt2_.x = pt1_.x + (pt2_.x < pt1_.x ? -v : v);
     } else {
         currentDepth_ = v;
         pt2_.y = pt1_.y + (pt2_.y < pt1_.y ? -v : v);
     }
+    if (stage_ == CreateStage::AdjustProfile) clampCornerRadii();
+    fix(v);
+}
+
+void CreateTool::syncTypedField() {
+    if (typedValue_.empty()) {
+        // Backspaced away to nothing: the mouse has it again.
+        if (typedField_ >= 0 && typedField_ < 2) fieldFixed_[typedField_] = false;
+        return;
+    }
+    Real v = 0.0;
+    try {
+        size_t used = 0;
+        v = std::stod(typedValue_, &used);
+        if (used != typedValue_.size()) return;   // "12." part-way through
+    } catch (...) {
+        return;                                   // "-" or "." on their own
+    }
+    setField(typedField_, v);
+}
+
+void CreateTool::clearLocks(HandleId id) {
+    switch (id) {
+        case HandleId::EdgeLeft:
+        case HandleId::EdgeRight:
+        case HandleId::RadiusHandle:
+            fieldFixed_[0] = false;
+            break;
+        case HandleId::EdgeBottom:
+        case HandleId::EdgeTop:
+            fieldFixed_[1] = false;
+            break;
+        case HandleId::Corner0:
+        case HandleId::Corner1:
+        case HandleId::Corner2:
+        case HandleId::Corner3:
+            fieldFixed_[0] = fieldFixed_[1] = false;
+            break;
+        // Moving the profile does not resize it, so nothing typed is disturbed.
+        case HandleId::FaceCenter:
+        case HandleId::None:
+            break;
+    }
+    typedValue_.clear();
+}
+
+bool CreateTool::applyTypedValue() {
+    if (typedValue_.empty()) return false;
+    syncTypedField();
+    typedValue_.clear();
     return true;
 }
 
@@ -945,19 +1107,38 @@ bool CreateTool::handleKey(int key, bool shift, bool ctrl, Camera& camera, Scene
     (void)ctrl;
     if (stage_ == CreateStage::None) return false;
 
-    // Esc gives back the mouse before it gives up the tool.
+    // Esc undoes the smallest thing it can: what is half-typed, then the
+    // dimension it was pinning, then the fillet being adjusted, and only then
+    // the tool itself. A modal key that always cancels everything is one users
+    // learn not to press.
     if (key == 27) {
-        if (typing()) { typedValue_.clear(); return true; }
+        if (typing()) {
+            typedValue_.clear();
+            syncTypedField();               // releases the field to the mouse
+            return true;
+        }
+        if (typedField_ < 2 && fieldFixed_[typedField_]) {
+            fieldFixed_[typedField_] = false;
+            return true;
+        }
+        if (isFilleting_) {
+            for (int i = 0; i < 4; ++i) cornerRadii_[i] = dragStartFillets_[i];
+            isFilleting_ = false;
+            activeFilletCorners_.clear();
+            activeHandle_ = HandleId::None;
+            clearFields();
+            return true;
+        }
         cancel(camera);
         return true;
     }
 
-    // Tab moves between the two dimensions of a rectangle, committing whatever
-    // was typed for the one being left.
-    if (key == 9 && kind_ != PrimitiveKind::Cylinder &&
+    // Tab moves between the dimensions this stage has, fixing whatever was
+    // typed for the one being left.
+    if (key == 9 && fieldCount() > 1 &&
         (stage_ == CreateStage::DrawProfile_Pt2 || stage_ == CreateStage::AdjustProfile)) {
         applyTypedValue();
-        typedField_ = 1 - typedField_;
+        typedField_ = (typedField_ + 1) % fieldCount();
         return true;
     }
 
@@ -973,6 +1154,7 @@ bool CreateTool::handleKey(int key, bool shift, bool ctrl, Camera& camera, Scene
             return true;
         }
         if (stage_ == CreateStage::DrawProfile_Pt1) {
+            clearFields();   // each step asks its own questions
             stage_ = CreateStage::DrawProfile_Pt2;
             return true;
         }
@@ -986,10 +1168,22 @@ bool CreateTool::handleKey(int key, bool shift, bool ctrl, Camera& camera, Scene
                 pt2_ = {uMax, vMax};
             }
             restoreCamera(camera);
+            clearFields();   // each step asks its own questions
             stage_ = CreateStage::AdjustProfile;
             return true;
         }
         if (stage_ == CreateStage::AdjustProfile) {
+            // Enter finishes what is in front of you. While a corner is being
+            // rounded that is the round, not the extrude: moving on before the
+            // fillet is settled is never what was meant.
+            if (isFilleting_) {
+                isFilleting_ = false;
+                activeFilletCorners_.clear();
+                activeHandle_ = HandleId::None;
+                clearFields();
+                return true;
+            }
+            clearFields();   // each step asks its own questions
             stage_ = CreateStage::ExtrudeDepth;
             extrudeBaseDepth_ = 20.0;
             extrudeDepth_ = 20.0;
@@ -1008,9 +1202,15 @@ bool CreateTool::handleKey(int key, bool shift, bool ctrl, Camera& camera, Scene
             const Real uMin = pt1_.x, uMax = pt2_.x;
             const Real vMin = pt1_.y, vMax = pt2_.y;
 
+            // A mode rather than a drag: nothing is being held down, so the
+            // radius follows the pointer until a click or Enter confirms it,
+            // and Esc puts back what was there.
             isFilleting_ = true;
-            isDragging_ = true;
+            isDragging_ = false;
             activeHandle_ = target;
+            selectedElement_ = target;
+            for (int i = 0; i < 4; ++i) dragStartFillets_[i] = cornerRadii_[i];
+            clearFields();
 
             if (target == HandleId::Corner0) {
                 filletRefUV_ = {uMax, vMin};
@@ -1394,20 +1594,46 @@ void CreateTool::drawOverlay(const Scene& scene, const Camera& camera, Renderer&
         }
     }
 
-    // Handles in AdjustProfile stage
+    // Handles in AdjustProfile stage.
+    //
+    // Each shape says what pulling on it does, because they no longer all do
+    // the same thing: a square corner resizes both ways, a bar moves the side
+    // it lies along, and the cross in the middle slides the whole profile. They
+    // used to be nine identical crosses, four of which quietly rounded a corner
+    // instead of moving it.
     if (stage_ == CreateStage::AdjustProfile) {
-        auto drawDotHandle = [&](Vec3 pos, bool active, bool isCorner = false) {
-            const float r = active ? 3.0f : (isCorner ? 2.0f : 1.5f);
-            const Vec4 col = active ? Vec4{1.0f, 0.9f, 0.2f, 1.0f}
-                                    : (isCorner ? Vec4{0.95f, 0.6f, 0.2f, 0.9f} : toVec4(palette::kBrand, 0.9f));
-            renderer.addLine(pos - planeU_ * r, pos + planeU_ * r, col);
-            renderer.addLine(pos - planeV_ * r, pos + planeV_ * r, col);
-            renderer.addLine(pos - planeNormal_ * r, pos + planeNormal_ * r, col);
+        using overlay::frameAt;
+        const Vec4 idle = toVec4(palette::kBrand, 0.92f);
+        const Vec4 lit{1.0f, 0.82f, 0.35f, 1.0f};
+        const Vec4 dark{0.10f, 0.10f, 0.11f, 0.95f};
+
+        auto state = [&](HandleId id) {
+            return hoveredHandle_ == id || activeHandle_ == id;
+        };
+
+        // Filled, with a dark rim: a profile is drawn over a face that may be
+        // any colour, and an outline alone disappears against a light one.
+        auto corner = [&](Vec3 pos, HandleId id) {
+            const bool on = state(id);
+            overlay::square(renderer, camera, pos, frameAt(camera, pos),
+                            on ? 5.6 : 4.4, on ? lit : idle, dark, 1.6);
+        };
+
+        // A bar lying along the edge it moves, so which side it belongs to is
+        // never in doubt.
+        auto edge = [&](Vec3 pos, HandleId id, bool horizontal) {
+            const bool on = state(id);
+            const Real half = on ? 11.0 : 9.0, thick = on ? 3.0 : 2.4;
+            const Real ax = horizontal ? half : thick;
+            const Real ay = horizontal ? thick : half;
+            const Vec2 pts[4] = {{-ax, -ay}, {ax, -ay}, {ax, ay}, {-ax, ay}};
+            overlay::filled(renderer, pos, frameAt(camera, pos), pts, 4, on ? lit : idle);
         };
 
         if (kind_ == PrimitiveKind::Cylinder) {
             const Vec3 rPt = planeOrigin_ + planeU_ * (pt1_.x + currentRadius_) + planeV_ * pt1_.y;
-            drawDotHandle(rPt, hoveredHandle_ == HandleId::RadiusHandle || activeHandle_ == HandleId::RadiusHandle);
+            const bool on = state(HandleId::RadiusHandle);
+            overlay::disc(renderer, rPt, frameAt(camera, rPt), on ? 5.0 : 3.8, on ? lit : idle);
         } else {
             const Real uMin = pt1_.x, uMax = pt2_.x;
             const Real vMin = pt1_.y, vMax = pt2_.y;
@@ -1417,30 +1643,43 @@ void CreateTool::drawOverlay(const Scene& scene, const Camera& camera, Renderer&
             const Vec3 c2 = planeOrigin_ + planeU_ * uMin + planeV_ * vMax; // TL
             const Vec3 c3 = planeOrigin_ + planeU_ * uMin + planeV_ * vMin; // BL
 
-            drawDotHandle(c0, hoveredHandle_ == HandleId::Corner0 || activeHandle_ == HandleId::Corner0, true);
-            drawDotHandle(c1, hoveredHandle_ == HandleId::Corner1 || activeHandle_ == HandleId::Corner1, true);
-            drawDotHandle(c2, hoveredHandle_ == HandleId::Corner2 || activeHandle_ == HandleId::Corner2, true);
-            drawDotHandle(c3, hoveredHandle_ == HandleId::Corner3 || activeHandle_ == HandleId::Corner3, true);
+            corner(c0, HandleId::Corner0);
+            corner(c1, HandleId::Corner1);
+            corner(c2, HandleId::Corner2);
+            corner(c3, HandleId::Corner3);
 
-            drawDotHandle((c0 + c3) * 0.5f, hoveredHandle_ == HandleId::EdgeBottom || activeHandle_ == HandleId::EdgeBottom);
-            drawDotHandle((c0 + c1) * 0.5f, hoveredHandle_ == HandleId::EdgeRight  || activeHandle_ == HandleId::EdgeRight);
-            drawDotHandle((c1 + c2) * 0.5f, hoveredHandle_ == HandleId::EdgeTop    || activeHandle_ == HandleId::EdgeTop);
-            drawDotHandle((c2 + c3) * 0.5f, hoveredHandle_ == HandleId::EdgeLeft   || activeHandle_ == HandleId::EdgeLeft);
+            edge((c0 + c3) * 0.5f, HandleId::EdgeBottom, true);
+            edge((c0 + c1) * 0.5f, HandleId::EdgeRight,  false);
+            edge((c1 + c2) * 0.5f, HandleId::EdgeTop,    true);
+            edge((c2 + c3) * 0.5f, HandleId::EdgeLeft,   false);
 
-            // Face center handle
+            // The four-way cross every tool uses for "move this".
             const Vec3 mFace = (c0 + c2) * 0.5f;
-            drawDotHandle(mFace, hoveredHandle_ == HandleId::FaceCenter || activeHandle_ == HandleId::FaceCenter);
-
-            // If filleting, draw guide line from reference point to cursor
-            if (isFilleting_) {
-                const Vec3 refPt3D = planeOrigin_ + planeU_ * filletRefUV_.x + planeV_ * filletRefUV_.y;
-                for (int c : activeFilletCorners_) {
-                    const float rad = cornerRadii_[c];
-                    if (rad > 0.1f) {
-                        renderer.addLine(refPt3D, refPt3D + planeU_ * rad, Vec4{1.0f, 0.9f, 0.2f, 0.8f});
-                    }
-                }
+            const bool onFace = state(HandleId::FaceCenter);
+            const overlay::ScreenFrame ff = frameAt(camera, mFace);
+            const Real arm = onFace ? 11.0 : 9.0;
+            const Vec4 fc = onFace ? lit : idle;
+            renderer.addFrontLine(camera, mFace - ff.right * (arm - 3.0),
+                                  mFace + ff.right * (arm - 3.0), fc, 2.6);
+            renderer.addFrontLine(camera, mFace - ff.up * (arm - 3.0),
+                                  mFace + ff.up * (arm - 3.0), fc, 2.6);
+            for (int k = 0; k < 4; ++k) {
+                const Vec3 dir = (k & 1) ? ff.up : ff.right;
+                const Real sgn = (k & 2) ? -1.0 : 1.0;
+                const Vec3 across = (k & 1) ? ff.right : ff.up;
+                const Vec3 tip = mFace + dir * (arm * sgn);
+                renderer.addFrontTriangle(tip, tip - dir * (sgn * 4.5) + across * 3.6,
+                                          tip - dir * (sgn * 4.5) - across * 3.6, fc);
             }
+        }
+
+        // While a corner is being rounded, a ring on the corner that is
+        // listening. Not the arc as well: the profile outline already draws
+        // exactly that curve, and the same line in two colours reads as a bug.
+        if (isFilleting_) {
+            const Vec3 ref = planeOrigin_ + planeU_ * filletRefUV_.x + planeV_ * filletRefUV_.y;
+            overlay::ring(renderer, camera, ref, overlay::frameAt(camera, ref), 8.0,
+                          Vec4{1.0f, 0.82f, 0.35f, 1.0f}, 2.2);
         }
     }
 
@@ -1482,6 +1721,29 @@ void CreateTool::drawOverlay(const Scene& scene, const Camera& camera, Renderer&
 // ---------------------------------------------------------------------------
 // ImGui 2D HUD Overlays
 // ---------------------------------------------------------------------------
+
+// One row, whatever the stage is asking for.
+//
+// A dimension the keyboard is holding is shown in brackets and in the accent
+// colour; one the mouse still drives is plain. Without that the two are
+// indistinguishable, and a user who typed a width has no way of knowing why it
+// stopped following the pointer.
+void CreateTool::drawDimensionFields() {
+    const int n = fieldCount();
+    for (int f = 0; f < n; ++f) {
+        if (f) ImGui::SameLine(0.0f, 16.0f);
+        ImGui::TextDisabled("%s", fieldName(f));
+        ImGui::SameLine(0.0f, 6.0f);
+
+        if (f == typedField_ && typing()) {
+            ImGui::TextColored(kAccentIm, "%s_", typedValue_.c_str());
+        } else if (fieldFixed_[f]) {
+            ImGui::TextColored(kAccentIm, "[%.2f]", fieldDisplay(f));
+        } else {
+            ImGui::Text("%.2f", fieldDisplay(f));
+        }
+    }
+}
 
 bool CreateTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& outFinished) {
     if (stage_ == CreateStage::None) return false;
@@ -1529,19 +1791,13 @@ bool CreateTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& ou
             ImGui::SameLine();
             if (ImGui::Button("Cancel (Esc)")) cancel(camera);
         } else if (stage_ == CreateStage::DrawProfile_Pt2) {
-            if (kind_ == PrimitiveKind::Cylinder) {
-                ImGui::TextColored(kAccentIm, "Radius: %.2f mm", currentRadius_);
-            } else {
-                ImGui::TextColored(kAccentIm, "Width: %.2f mm  |  Depth: %.2f mm", currentWidth_, currentDepth_);
-            }
-            ImGui::SameLine();
-            if (typing()) {
-                ImGui::TextColored(kAccentIm, " %s = %s_",
-                                   kind_ == PrimitiveKind::Cylinder ? "Radius"
-                                          : (typedField_ == 0 ? "Width" : "Depth"),
-                                   typedValue_.c_str());
-                ImGui::SameLine();
-                ImGui::TextDisabled(kind_ == PrimitiveKind::Cylinder ? "(Enter)" : "(Tab / Enter)");
+            ImGui::TextColored(kAccentIm, "Step 2: Size");
+            ImGui::SameLine(0.0f, 14.0f);
+            drawDimensionFields();
+            ImGui::SameLine(0.0f, 14.0f);
+            if (typing() || fieldFixed_[0] || fieldFixed_[1]) {
+                ImGui::TextDisabled(fieldCount() > 1 ? "Tab next   Enter confirm"
+                                                     : "Enter confirm");
             } else if (activeSnap_.valid()) {
                 ImGui::TextColored(kAccentIm, " %s", describeSnap(activeSnap_).c_str());
                 if (activeSnap_.radius > 0.0) {
@@ -1554,16 +1810,18 @@ bool CreateTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& ou
             ImGui::SameLine();
             if (ImGui::Button("Cancel (Esc)")) cancel(camera);
         } else if (stage_ == CreateStage::AdjustProfile) {
-            ImGui::TextColored(kAccentIm, "Adjust Profile");
-            ImGui::SameLine();
-            if (typing()) {
-                ImGui::TextColored(kAccentIm, "| %s = %s_",
-                                   isFilleting_ ? "Fillet"
-                                   : kind_ == PrimitiveKind::Cylinder ? "Radius"
-                                   : (typedField_ == 0 ? "Width" : "Depth"),
-                                   typedValue_.c_str());
+            ImGui::TextColored(kAccentIm, isFilleting_ ? "Round Corner" : "Adjust Profile");
+            ImGui::SameLine(0.0f, 14.0f);
+            drawDimensionFields();
+            ImGui::SameLine(0.0f, 14.0f);
+            if (isFilleting_) {
+                ImGui::TextDisabled("Move to set   click or Enter confirm   Esc undo");
+            } else if (hoveredHandle_ != HandleId::None &&
+                       hoveredHandle_ != HandleId::FaceCenter &&
+                       kind_ != PrimitiveKind::Cylinder) {
+                ImGui::TextColored(kAccentIm, "F to round");
             } else {
-                ImGui::TextDisabled("| Drag edge to resize, drag corner for fillet (F), or type a number");
+                ImGui::TextDisabled("Drag a handle to move   hover + F to round   type a number");
             }
             ImGui::Separator();
 
@@ -1576,11 +1834,13 @@ bool CreateTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& ou
                 ImGui::SetNextItemWidth(100.0f);
                 if (ImGui::DragScalar("Width", ImGuiDataType_Double, &currentWidth_, 0.1f, nullptr, nullptr, "%.2f mm")) {
                     pt2_.x = pt1_.x + currentWidth_;
+                    clampCornerRadii();
                 }
                 ImGui::SameLine();
                 ImGui::SetNextItemWidth(100.0f);
                 if (ImGui::DragScalar("Depth", ImGuiDataType_Double, &currentDepth_, 0.1f, nullptr, nullptr, "%.2f mm")) {
                     pt2_.y = pt1_.y + currentDepth_;
+                    clampCornerRadii();
                 }
                 ImGui::SameLine();
                 ImGui::SetNextItemWidth(100.0f);
@@ -1593,6 +1853,7 @@ bool CreateTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& ou
             ImGui::Spacing();
             ImGui::PushStyleColor(ImGuiCol_Button, kAccentIm);
             if (ImGui::Button("  OK / Extrude (E)  ")) {
+                clearFields();   // each step asks its own questions
                 stage_ = CreateStage::ExtrudeDepth;
                 extrudeBaseDepth_ = 20.0;
                 extrudeDepth_ = 20.0;
@@ -1608,11 +1869,9 @@ bool CreateTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& ou
             const SceneObject* target = hasTargetBody() ? scene.find(faceObject_) : nullptr;
             const ImVec4 cutCol(0.95f, 0.35f, 0.25f, 1.0f);
             ImGui::TextColored(shown == CreateOp::Cut ? cutCol : kAccentIm,
-                               "%s  %+.2f mm", createOpName(shown), extrudeDepth_);
-            if (typing()) {
-                ImGui::SameLine();
-                ImGui::TextColored(kAccentIm, " Depth = %s_", typedValue_.c_str());
-            }
+                               "%s", createOpName(shown));
+            ImGui::SameLine(0.0f, 12.0f);
+            drawDimensionFields();
             if (target) {
                 ImGui::SameLine();
                 ImGui::TextDisabled(shown == CreateOp::Cut   ? "from %s"

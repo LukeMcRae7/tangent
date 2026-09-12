@@ -1,5 +1,6 @@
 #include "app/snap_overlay.h"
 
+#include "app/overlay_shapes.h"
 #include "core/palette.h"
 
 #include <cmath>
@@ -8,51 +9,8 @@ namespace tg {
 
 namespace {
 
-// The eye's own axes at a point, scaled to one pixel. Every glyph is drawn in
-// these, which is what keeps it the same size and shape whatever the geometry
-// underneath is doing.
-struct ScreenFrame {
-    Vec3 right{}, up{};
-};
-
-ScreenFrame frameAt(const Camera& camera, Vec3 at) {
-    const Real px = static_cast<Real>(camera.pixelWorldSize(at));
-    return {camera.right() * px, camera.up() * px};
-}
-
-void polygon(Renderer& r, const Camera& c, Vec3 at, const ScreenFrame& f,
-             const Vec2* pts, int n, Vec4 col, Real widthPx) {
-    for (int i = 0; i < n; ++i) {
-        const Vec2 a = pts[i];
-        const Vec2 b = pts[(i + 1) % n];
-        r.addFrontLine(c, at + f.right * a.x + f.up * a.y,
-                       at + f.right * b.x + f.up * b.y, col, widthPx);
-    }
-}
-
-void ring(Renderer& r, const Camera& c, Vec3 at, const ScreenFrame& f,
-          Real radiusPx, Vec4 col, Real widthPx) {
-    constexpr int kSides = 20;
-    Vec3 prev{};
-    for (int i = 0; i <= kSides; ++i) {
-        const Real a = kTwoPi * i / kSides;
-        const Vec3 p = at + f.right * (radiusPx * std::cos(a)) +
-                            f.up * (radiusPx * std::sin(a));
-        if (i > 0) r.addFrontLine(c, prev, p, col, widthPx);
-        prev = p;
-    }
-}
-
-void dot(Renderer& r, Vec3 at, const ScreenFrame& f, Real radiusPx, Vec4 col) {
-    constexpr int kSides = 12;
-    for (int i = 0; i < kSides; ++i) {
-        const Real a0 = kTwoPi * i / kSides, a1 = kTwoPi * (i + 1) / kSides;
-        r.addFrontTriangle(at,
-                           at + f.right * (radiusPx * std::cos(a0)) + f.up * (radiusPx * std::sin(a0)),
-                           at + f.right * (radiusPx * std::cos(a1)) + f.up * (radiusPx * std::sin(a1)),
-                           col);
-    }
-}
+using overlay::ScreenFrame;
+using overlay::frameAt;
 
 } // namespace
 
@@ -82,30 +40,30 @@ void drawSnapIndicator(Renderer& renderer, const Camera& camera,
         // shapes mean "the point landed here", and the far end of a dotted line
         // is the one place that is certainly not true.
         const ScreenFrame rf = frameAt(camera, snap.refs[i].from);
-        dot(renderer, snap.refs[i].from, rf, 2.6, dashCol);
+        overlay::disc(renderer, snap.refs[i].from, rf, 2.6, dashCol);
     }
 
     switch (snap.kind) {
         case SnapKind::Vertex: {
             const Vec2 sq[4] = {{-g, -g}, {g, -g}, {g, g}, {-g, g}};
-            polygon(renderer, camera, at, f, sq, 4, feature, w);
+            overlay::outline(renderer, camera, at, f, sq, 4, feature, w);
             break;
         }
         case SnapKind::CircleCentre:
-            ring(renderer, camera, at, f, g, feature, w);
+            overlay::ring(renderer, camera, at, f, g, feature, w);
             break;
         case SnapKind::FaceCentre:
-            ring(renderer, camera, at, f, g, feature, w);
-            dot(renderer, at, f, g * 0.32, feature);
+            overlay::ring(renderer, camera, at, f, g, feature, w);
+            overlay::disc(renderer, at, f, g * 0.32, feature);
             break;
         case SnapKind::ArcQuadrant: {
             const Vec2 di[4] = {{0, -g * 1.15}, {g * 1.15, 0}, {0, g * 1.15}, {-g * 1.15, 0}};
-            polygon(renderer, camera, at, f, di, 4, feature, w);
+            overlay::outline(renderer, camera, at, f, di, 4, feature, w);
             break;
         }
         case SnapKind::EdgeMidpoint: {
             const Vec2 tri[3] = {{-g, -g * 0.72}, {g, -g * 0.72}, {0, g}};
-            polygon(renderer, camera, at, f, tri, 3, feature, w);
+            overlay::outline(renderer, camera, at, f, tri, 3, feature, w);
             break;
         }
         case SnapKind::Alignment: {

@@ -127,11 +127,28 @@ public:
     // The sketch plane, as the snapper wants it.
     PlaneFrame plane() const { return {planeOrigin_, planeU_, planeV_, planeNormal_}; }
 
-    // What is being typed, for the HUD and for tests. Empty when the mouse is
-    // in charge, which is the normal state.
+    // What is being typed, for the HUD and for tests. Empty when nothing is
+    // half-entered, which is the normal state.
     const std::string& typedValue() const { return typedValue_; }
     int typedField() const { return typedField_; }
     bool typing() const { return !typedValue_.empty(); }
+
+    // Whether a dimension has been pinned to a typed number, and to what.
+    bool fieldFixed(int field) const { return field >= 0 && field < 2 && fieldFixed_[field]; }
+    Real fieldValue(int field) const { return field >= 0 && field < 2 ? fieldValue_[field] : 0.0; }
+
+    // How many dimensions this stage has: one for a circle, a depth or a
+    // fillet, two for a rectangle.
+    int fieldCount() const;
+    const char* fieldName(int field) const;
+
+    // What the dimension currently reads, fixed or not.
+    Real fieldDisplay(int field) const;
+
+    // The profile's extent on its plane, as the tool currently holds it.
+    Vec2 profileMin() const { return pt1_; }
+    Vec2 profileMax() const { return pt2_; }
+    bool rounding() const { return isFilleting_; }
 
     // What the solid will do to the body it was drawn on. `Auto` resolves to
     // Join or Cut from the sign of the depth; resolvedOp() reports which.
@@ -199,6 +216,12 @@ private:
 
     Vec2 dragStartMouse_{0, 0};
     Vec2 dragStartMouseUV_{0, 0};
+
+    // Where the handle sat relative to the cursor when it was grabbed. Held so
+    // a handle does not jump to the pointer on the first frame of a drag, and
+    // so it is the handle's own point that gets snapped rather than the
+    // cursor's -- a corner brought level with a hole has to be the corner.
+    Vec2 dragGrabOffset_{0, 0};
     Vec2 dragStartPt1_{0, 0};
     Vec2 dragStartPt2_{0, 0};
     Real dragStartFillets_[4] = {0.0, 0.0, 0.0, 0.0};
@@ -215,16 +238,20 @@ private:
     Vec2 extrudeStartMouse_{0, 0};
     Real extrudeBaseDepth_ = 20.0;
 
-    // Numeric entry. The README has always promised it ("type a number ->
-    // exact value") and the buffer has been here, cleared and never read,
-    // since the tool was written.
+    // Numeric entry.
     //
-    // While anything is typed the mouse stops driving the dimension being
-    // typed. Otherwise the next mouse-move would overwrite the number before
-    // it could be committed, which is the one behaviour that would make the
-    // feature worse than not having it.
+    // A dimension that has been typed is *fixed*: the mouse stops driving that
+    // one and goes on driving the others. Typing a width and then sweeping the
+    // depth out by hand is the whole reason to be able to type at all, and the
+    // tool used to freeze the mouse entirely while anything was in the buffer
+    // -- which made every dimension wait on one of them.
+    //
+    // The digits apply as they are typed rather than on Enter, so the profile
+    // follows them. Backspacing the field empty hands it back to the mouse.
     std::string typedValue_;
-    int typedField_ = 0;   // 0 = width, radius or depth; 1 = the rectangle's depth
+    int  typedField_ = 0;              // 0 = width, radius or depth; 1 = depth
+    bool fieldFixed_[2] = {false, false};
+    Real fieldValue_[2] = {0.0, 0.0};
 
     // Set by finishCreation when it refuses; drained by the application.
     std::string lastError_;
@@ -240,6 +267,34 @@ private:
     bool applyTypedValue();
 
     void restoreCamera(Camera& camera);
+
+    // Where a handle sits, in plane coordinates.
+    Vec2 handlePointUV(HandleId id) const;
+
+    // Corner radii that no longer fit after a resize. A rectangle dragged down
+    // to eight millimetres cannot keep the five-millimetre rounds it had.
+    void clampCornerRadii();
+
+    // Releases the dimensions a handle moves from whatever was typed for them.
+    void clearLocks(HandleId id);
+
+    // Pins one dimension to a value, applying it to the profile as it goes.
+    void setField(int field, Real v);
+
+    // Re-reads the buffer into the field being typed. Called on every
+    // keystroke, so "2", "25", "25." and "25.4" each land as they are typed.
+    void syncTypedField();
+
+    // Forgets every fixed dimension. Each stage asks its own questions.
+    // The row of dimensions in the banner: name, value, and whether the
+    // keyboard is holding it or the mouse still has it.
+    void drawDimensionFields();
+
+    void clearFields() {
+        typedValue_.clear();
+        typedField_ = 0;
+        fieldFixed_[0] = fieldFixed_[1] = false;
+    }
     void computePlaneBasis(Vec3 normal);
     bool unprojectToPlane(const Camera& camera, Vec2 mousePx, Vec2& outUV) const;
     Real rayPlaneExtrudeDepth(const Camera& camera, Vec2 mousePx) const;

@@ -1714,6 +1714,196 @@ static void testSection13_SnapToGeometry() {
 // ===========================================================================
 // MAIN ENTRY POINT
 // ===========================================================================
+// ===========================================================================
+// SECTION 14: Handles move. A fillet is asked for by name.
+// ===========================================================================
+//
+// Dragging a corner used to round it, which meant a rectangle could not be
+// resized from its corners at all -- the one thing corners are for in every
+// other tool that has them. So every handle moves now, and a round is asked
+// for: hover the corner, press F.
+static void testSection14_HandlesAndFillets() {
+    std::printf("\n--- Section 14: Handles Move, Fillets Are Named ---\n");
+    if (!brep::available()) { std::printf("  (needs the exact kernel)\n"); return; }
+
+    Scene scene; Camera camera; UndoStack undo;
+    PrimitiveSpec plate;
+    plate.kind = PrimitiveKind::Box;
+    plate.box = {120, 120, 10};
+    const ObjectId id = scene.addPrimitive(PrimitiveKind::Box, plate);
+
+    camera.viewportW = 1600;
+    camera.viewportH = 900;
+    camera.distance = 240.0f;
+    camera.target = {0, 0, 0};
+    camera.yaw = 0.0f;
+    camera.pitch = 1.5707f;
+    camera.snapToGoal();
+
+    // Where a point of the sketch plane lands on screen. The plane has to be
+    // read from the tool each time: a lambda that captured it would outlive it.
+    auto pixelAt = [&](const CreateTool& t, Vec2 uv) {
+        Vec2 p{};
+        camera.projectToPixel(t.plane().toWorld(uv), p);
+        return p;
+    };
+
+    // A rectangle on the top face, drawn corner to corner with snapping off so
+    // the numbers here are the ones that were asked for.
+    auto freshRect = [&](CreateTool& t) {
+        t.start(PrimitiveKind::Box);
+        t.setHoveredPlane(PlaneChoice::Face, {0, 0, 5}, {0, 0, 1}, id, 0);
+        t.commitPlaneSelection(camera);
+        camera.snapToGoal();
+        t.update(scene, camera, pixelAt(t, {-20, -15}), false);
+        t.handleMouseDown(pixelAt(t, {-20, -15}), scene, camera, undo);
+        t.update(scene, camera, pixelAt(t, {20, 15}), false);
+        t.handleMouseDown(pixelAt(t, {20, 15}), scene, camera, undo);
+        camera.snapToGoal();
+    };
+
+    std::printf("--- a corner drag resizes, it does not round ---\n");
+    {
+        CreateTool t;
+        freshRect(t);
+        auto px = [&](Vec2 uv) { return pixelAt(t, uv); };
+        check(t.stage() == CreateStage::AdjustProfile, "drawn and adjusting");
+        check(near(t.profileMin().x, -20.0) && near(t.profileMax().x, 20.0), "40 wide");
+
+        // Hover the top-right corner, grab it, pull it out.
+        t.update(scene, camera, px({20, 15}), false);
+        t.handleMouseDown(px({20, 15}), scene, camera, undo);
+        t.update(scene, camera, px({34, 27}), false);
+        t.handleMouseUp(px({34, 27}), camera);
+
+        check(near(t.profileMax().x, 34.0, 0.2) && near(t.profileMax().y, 27.0, 0.2),
+              "the corner went where it was pulled");
+        check(near(t.profileMin().x, -20.0, 1e-3) && near(t.profileMin().y, -15.0, 1e-3),
+              "and the opposite corner stayed put");
+        check(t.uniformCornerRadius() == 0.0, "nothing got rounded by accident");
+        std::printf("  corner pulled to %.2f, %.2f\n", t.profileMax().x, t.profileMax().y);
+    }
+
+    std::printf("--- the centre handle moves the whole profile ---\n");
+    {
+        CreateTool t;
+        freshRect(t);
+        auto px = [&](Vec2 uv) { return pixelAt(t, uv); };
+        const Vec2 sizeBefore = t.profileMax() - t.profileMin();
+
+        t.update(scene, camera, px({0, 0}), false);
+        t.handleMouseDown(px({0, 0}), scene, camera, undo);
+        t.update(scene, camera, px({12, -8}), false);
+        t.handleMouseUp(px({12, -8}), camera);
+
+        const Vec2 centre = (t.profileMin() + t.profileMax()) * 0.5;
+        check(near(centre.x, 12.0, 0.2) && near(centre.y, -8.0, 0.2), "slid to the cursor");
+        const Vec2 sizeAfter = t.profileMax() - t.profileMin();
+        check(near(sizeAfter.x, sizeBefore.x, 1e-6) && near(sizeAfter.y, sizeBefore.y, 1e-6),
+              "and kept its size");
+    }
+
+    std::printf("--- hover a corner, press F, and it rounds ---\n");
+    {
+        CreateTool t;
+        freshRect(t);
+        auto px = [&](Vec2 uv) { return pixelAt(t, uv); };
+
+        t.update(scene, camera, px({20, 15}), false);      // hover the corner
+        check(t.handleKey('F', false, false, camera, scene, undo), "F was taken");
+        check(t.rounding(), "and started a round");
+        check(t.fieldCount() == 1 && std::string(t.fieldName(0)) == "Radius",
+              "the dimension being asked for is a radius");
+
+        // Pull away from the corner: the distance is the radius.
+        t.update(scene, camera, px({20, 9}), false);
+        check(near(t.cornerRadius(1), 6.0, 0.2), "radius follows the pointer");
+        check(t.cornerRadius(0) == 0.0 && t.cornerRadius(2) == 0.0,
+              "only the corner that was hovered");
+
+        check(t.handleKey(13, false, false, camera, scene, undo), "Enter was taken");
+        check(!t.rounding(), "and confirmed it");
+        check(near(t.cornerRadius(1), 6.0, 0.2), "the round stayed");
+        check(t.stage() == CreateStage::AdjustProfile,
+              "Enter finished the round, not the profile");
+    }
+
+    std::printf("--- Esc during a round puts the corner back ---\n");
+    {
+        CreateTool t;
+        freshRect(t);
+        auto px = [&](Vec2 uv) { return pixelAt(t, uv); };
+        t.update(scene, camera, px({20, -15}), false);
+        t.handleKey('F', false, false, camera, scene, undo);
+        t.update(scene, camera, px({20, -9}), false);
+        check(t.cornerRadius(0) > 1.0, "rounding");
+        t.handleKey(27, false, false, camera, scene, undo);
+        check(!t.rounding(), "Esc ended the round");
+        check(t.cornerRadius(0) == 0.0, "and put the corner back sharp");
+        check(t.stage() == CreateStage::AdjustProfile, "without cancelling the tool");
+    }
+
+    std::printf("--- a rectangle cannot keep a round it no longer fits ---\n");
+    {
+        CreateTool t;
+        freshRect(t);
+        auto px = [&](Vec2 uv) { return pixelAt(t, uv); };
+        t.setCornerRadius(8.0);
+        check(near(t.cornerRadius(1), 8.0), "8mm rounds on a 40 x 30 profile");
+
+        // Pull the top-right corner right in.
+        t.update(scene, camera, px({20, 15}), false);
+        t.handleMouseDown(px({20, 15}), scene, camera, undo);
+        t.update(scene, camera, px({-14, -9}), false);
+        t.handleMouseUp(px({-14, -9}), camera);
+        check(t.uniformCornerRadius() < 3.1,
+              "the rounds came down with it rather than turning the profile inside out");
+        std::printf("  %.2f x %.2f profile, rounds now %.2f\n",
+                    t.profileMax().x - t.profileMin().x,
+                    t.profileMax().y - t.profileMin().y, t.cornerRadius(1));
+    }
+
+    std::printf("--- a typed dimension is fixed; the others are not ---\n");
+    {
+        CreateTool t;
+        t.start(PrimitiveKind::Box);
+        t.setHoveredPlane(PlaneChoice::Face, {0, 0, 5}, {0, 0, 1}, id, 0);
+        t.commitPlaneSelection(camera);
+        camera.snapToGoal();
+        auto px = [&](Vec2 uv) { return pixelAt(t, uv); };
+        t.update(scene, camera, px({0, 0}), false);
+        t.handleMouseDown(px({0, 0}), scene, camera, undo);
+        check(t.stage() == CreateStage::DrawProfile_Pt2, "placing the second corner");
+
+        t.handleKey('2', false, false, camera, scene, undo);
+        t.handleKey('5', false, false, camera, scene, undo);
+        check(t.fieldFixed(0), "the width is held by the keyboard");
+        check(near(t.fieldValue(0), 25.0), "at 25");
+        check(near(t.fieldDisplay(0), 25.0), "and the profile is already 25 wide");
+
+        // The mouse still has the depth. This is the whole point: the old tool
+        // froze every dimension the moment anything was typed.
+        t.update(scene, camera, px({60, 40}), false);
+        check(near(t.fieldDisplay(0), 25.0), "the width did not move");
+        check(near(t.fieldDisplay(1), 40.0, 0.2), "the depth followed the pointer");
+
+        // Which side of the first corner is still the cursor's to say. Until
+        // the second click the two points are the corners as drawn, not sorted,
+        // so "to the left" means the second one has gone negative.
+        t.update(scene, camera, px({-60, 40}), false);
+        check(near(std::fabs(t.profileMax().x - t.profileMin().x), 25.0, 1e-3),
+              "still 25 wide");
+        check(t.profileMax().x < -1.0, "but now drawn to the left");
+
+        // Backspacing it empty hands it back.
+        t.handleKey(8, false, false, camera, scene, undo);
+        t.handleKey(8, false, false, camera, scene, undo);
+        check(!t.fieldFixed(0), "emptied, so the mouse has it again");
+        t.update(scene, camera, px({50, 40}), false);
+        check(near(t.fieldDisplay(0), 50.0, 0.2), "and it follows");
+    }
+}
+
 int main() {
     std::printf("=========================================================\n");
     std::printf("  Running Comprehensive Object Creation Test Suite       \n");
@@ -1732,6 +1922,7 @@ int main() {
     testSection11_NumericEntry();
     testSection12_ParametricOnAnyPlane();
     testSection13_SnapToGeometry();
+    testSection14_HandlesAndFillets();
 
     std::printf("\n=========================================================\n");
     std::printf("  Test Suite Summary: %s\n", gFailures == 0 ? "ALL PASS" : "FAILED");

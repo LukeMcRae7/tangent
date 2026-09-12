@@ -100,6 +100,11 @@ public:
     // 3 on a grid crossing, 4 on the hole's centre.
     void setSnapDemo(int mode) { snapDemo_ = mode; }
 
+    // Drives the create tool to a given step so the handles and the dimension
+    // row can be looked at: 1 adjusting a profile, 2 rounding a corner,
+    // 3 setting the depth.
+    void setProfileDemo(int mode) { profileDemo_ = mode; }
+
     // Parks the interface's pointer somewhere, for screenshots of hover states.
     void setUiMouse(float x, float y, bool down) {
         uiMouse_ = {x, y};
@@ -131,6 +136,8 @@ private:
     // Set only by the headless demos, which have no pointer of their own.
     Vec2 mouseOverride_{-1.0, -1.0};
     int  snapDemo_ = 0;
+    int  profileDemo_ = 0;
+    bool profileDemoDone_ = false;
     Vec2 uiMouse_{-1.0f, -1.0f};
     bool uiMouseDown_ = false;
     void beginTransform(TransformMode mode);
@@ -257,6 +264,7 @@ private:
     // trial per frame, without waiting for any of them.
     void stepFilletLimitSearch();
     void stepSnapDemo();
+    void stepProfileDemo();
     void stepFilletFloorSearch();
     void startFilletTrial(Real radius);
     static const Real kFilletFloorLadder[6];

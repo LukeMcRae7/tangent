@@ -647,9 +647,19 @@ void Application::handleViewportMouse() {
         }
     }
 
+    stepProfileDemo();
+
     // Interactive Object Creation & Sketching Tool:
     if (createTool_.active()) {
         stepSnapDemo();
+
+        // The view stays yours while you draw on it. Orbit and pan are already
+        // live above; the wheel was not, because it is handled below a return
+        // this branch never reaches -- so zooming in to place a point on a
+        // small feature meant cancelling the tool and starting again.
+        if (io.MouseWheel != 0.0f && overViewport && !io.WantCaptureMouse)
+            camera_.dolly(io.MouseWheel);
+
         createTool_.update(scene_, camera_, mouseInViewport(), !io.KeyCtrl);
         if (!io.WantCaptureMouse) {
             if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
@@ -1705,6 +1715,62 @@ void Application::stepSnapDemo() {
                      uv.x, uv.y, hit.valid() ? describeSnap(hit).c_str() : "nothing",
                      hit.uv.x, hit.uv.y, hit.refCount, each);
     }
+}
+
+// Drives the create tool through its steps so the interface can be looked at.
+// Runs once, on the first frame the viewport has a size: a pixel worked out
+// before then points somewhere else by the time anything is drawn.
+void Application::stepProfileDemo() {
+    if (profileDemo_ <= 0 || profileDemoDone_ || viewRect_.w <= 0) return;
+    profileDemoDone_ = true;
+
+    const ObjectId id = scene_.objects().empty() ? kNoObject : scene_.objects().front()->id;
+    if (id == kNoObject) return;
+    const SceneObject* o = scene_.find(id);
+    const Real top = o->worldBounds().max.z;   // the face you can see, not local z
+
+    camera_.yaw = 0.55f;
+    camera_.pitch = 0.85f;
+    camera_.distance = 90.0f;
+    camera_.target = {0, 0, 0};
+    camera_.snapToGoal();
+
+    createTool_.start(PrimitiveKind::Box);
+    createTool_.setHoveredPlane(PlaneChoice::Face, {0, 0, top}, {0, 0, 1}, id, 0);
+    createTool_.commitPlaneSelection(camera_);
+    camera_.snapToGoal();
+
+    auto px = [&](Vec2 uv) {
+        Vec2 p{};
+        camera_.projectToPixel(createTool_.plane().toWorld(uv), p);
+        return p;
+    };
+    createTool_.update(scene_, camera_, px({-6, -5}), false);
+    createTool_.handleMouseDown(px({-6, -5}), scene_, camera_, undo_);
+    createTool_.update(scene_, camera_, px({6, 5}), false);
+    createTool_.handleMouseDown(px({6, 5}), scene_, camera_, undo_);
+    camera_.snapToGoal();
+
+    if (profileDemo_ >= 2) {
+        createTool_.update(scene_, camera_, px({6, 5}), false);
+        createTool_.handleKey('F', false, false, camera_, scene_, undo_);
+        createTool_.update(scene_, camera_, px({6, 2.5}), false);
+        // Held, or every frame after this one re-runs the update from wherever
+        // the real pointer happens to be -- which on a machine with nobody at
+        // it is the corner of the window.
+        mouseOverride_ = px({6, 2.5});
+    } else {
+        mouseOverride_ = px({9, 5});        // off the profile, nothing hovered
+    }
+    if (profileDemo_ >= 3) {
+        createTool_.handleKey(13, false, false, camera_, scene_, undo_);
+        createTool_.handleKey(13, false, false, camera_, scene_, undo_);
+    }
+    std::fprintf(stderr, "[profile-demo] stage %d, %.2f x %.2f, rounds %.2f\n",
+                 static_cast<int>(createTool_.stage()),
+                 createTool_.profileMax().x - createTool_.profileMin().x,
+                 createTool_.profileMax().y - createTool_.profileMin().y,
+                 createTool_.uniformCornerRadius());
 }
 
 void Application::stepFilletLimitSearch() {
