@@ -333,6 +333,110 @@ int main() {
         check(b.faceCount() == 6, "and keeps its six sides");
     }
 
+    std::printf("--- what hollowing can be asked to hollow ---\n");
+    {
+        auto probe = [&](const char* what, Body b) {
+            std::string why;
+            Body t = b;
+            const bool ok = shellBody(t, {facing(b, {0, 0, -1})}, 2.0, 4501, &why);
+            std::printf("  %-32s %s %s\n", what, ok ? "hollowed" : "REFUSED",
+                        why.c_str());
+            return ok;
+        };
+        auto anUprightEdge = [](const Body& b) {
+            std::vector<EdgeId> es;
+            b.allEdges(es);
+            for (EdgeId e : es) {
+                Vec3 p, q;
+                b.edgePositions(e, p, q);
+                if (std::fabs((q - p).z) > 5.0) return e;
+            }
+            return EdgeId(kInvalid);
+        };
+        std::string w;
+
+        check(probe("a plain box", makeBox(40, 30, 20)), "a plain box hollows");
+
+        { Body b = makeBox(40, 30, 20);
+          divideBody(b, {0, 0, 0}, {1, 0, 0}, 4502, &w);
+          probe("divided, one half opened", b);
+
+          // The same body, opening both halves of the bottom rather than one.
+          std::vector<FaceId> fs, bottom;
+          b.allFaces(fs);
+          for (FaceId f : fs)
+            if (dot(b.faceNormal(f), Vec3{0, 0, -1}) > 0.99) bottom.push_back(f);
+          Body t = b;
+          std::string w2;
+          const bool ok = shellBody(t, bottom, 2.0, 4507, &w2);
+          std::printf("  %-32s %s %s  (%zu faces opened)\n",
+                      "divided, both halves opened", ok ? "hollowed" : "REFUSED",
+                      w2.c_str(), bottom.size()); }
+
+        { Body b = makeBox(40, 30, 20);
+          const EdgeId up = anUprightEdge(b);
+          FilletSpec sp; sp.edges.push_back({up, 3.0});
+          filletEdges(b, sp, &w);
+          probe("one vertical edge rounded", b); }
+
+        { Body b = makeBox(40, 30, 20);
+          divideBody(b, {0, 0, 0}, {1, 0, 0}, 4503, &w);
+          extrudeFaces(b, {facing(b, {0, 0, 1})}, 6.0, nullptr, 4504,
+                       ExtrudeOp::Auto, &w, true);
+          probe("divided, then half pushed up", b); }
+
+        { Body b = makeBox(40, 30, 20);
+          divideBody(b, {0, 0, 0}, {1, 0, 0}, 4505, &w);
+          extrudeFaces(b, {facing(b, {0, 0, 1})}, 6.0, nullptr, 4506,
+                       ExtrudeOp::Auto, &w, true);
+          const EdgeId up = anUprightEdge(b);
+          if (up != kInvalid) { FilletSpec sp; sp.edges.push_back({up, 3.0});
+                                filletEdges(b, sp, &w); }
+          probe("both, then rounded", b); }
+    }
+
+    std::printf("--- what a face can be asked to turn about ---\n");
+    {
+        auto turn = [&](const char* what, Body b, Vec3 dir, int pick) {
+            const FaceId f = facing(b, dir);
+            std::vector<EdgeId> es;
+            b.faceEdges(f, es);
+            if (es.empty()) { std::printf("  %-32s no edges\n", what); return false; }
+            const EdgeId hinge = es[static_cast<size_t>(pick) % es.size()];
+            Vec3 p, q;
+            b.edgePositions(hinge, p, q);
+            std::string why;
+            Body t = b;
+            const bool ok = rotateFaces(t, {f}, radians(8.0), p, normalize(q - p),
+                                        4601, &why);
+            std::printf("  %-32s %s %s\n", what, ok ? "turned" : "REFUSED", why.c_str());
+            return ok;
+        };
+        std::string w;
+
+        check(turn("a plain box, first edge", makeBox(40, 30, 20), {0, 1, 0}, 0),
+              "a plain box turns");
+        check(turn("a plain box, second edge", makeBox(40, 30, 20), {0, 1, 0}, 1),
+              "about any of its edges");
+
+        { Body b = makeBox(40, 30, 20);
+          divideBody(b, {0, 0, 0}, {1, 0, 0}, 4602, &w);
+          turn("half of a divided face", b, {0, 1, 0}, 0); }
+
+        { Body b = makeBox(40, 30, 20);
+          std::vector<EdgeId> es;
+          b.allEdges(es);
+          EdgeId up = kInvalid;
+          for (EdgeId e : es) {
+              Vec3 p, q;
+              b.edgePositions(e, p, q);
+              if (std::fabs((q - p).z) > 5.0) { up = e; break; }
+          }
+          FilletSpec sp; sp.edges.push_back({up, 3.0});
+          filletEdges(b, sp, &w);
+          turn("a face next to a round", b, {0, 1, 0}, 0); }
+    }
+
     std::printf("\n%s (%d failures)\n", failures ? "FAILED" : "ALL PASS", failures);
     return failures ? 1 : 0;
 }

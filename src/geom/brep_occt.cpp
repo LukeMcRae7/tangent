@@ -792,6 +792,22 @@ std::vector<ElementId> propagateNames(BRepBuilderAPI_MakeShape& op,
 // A result worth handing back: not null, has faces, and passes OCCT's own
 // check. The alternative is geometry that looks right and is not, which this
 // project has already decided it will not ship.
+// What to tell the user when the kernel throws.
+//
+// OpenCASCADE's exception text is written for whoever is debugging OpenCASCADE:
+// "NCollection_Sequence::Value" and "BRepAlgoAPI::Build() failed" name the line
+// it gave up on, not anything the person at the screen did or could do
+// differently. Putting that in front of them was worse than saying nothing --
+// it looks like an answer and is not one.
+//
+// So the operation says what it could not do, in its own words, and the raw
+// text goes to the log where it is useful.
+std::string kernelReason(const Standard_Failure& e, const char* said) {
+    const char* raw = e.GetMessageString();
+    std::fprintf(stderr, "[kernel] %s (%s)\n", said, raw && *raw ? raw : "no detail");
+    return said;
+}
+
 bool acceptable(const TopoDS_Shape& shape, std::string* reason) {
     if (shape.IsNull()) {
         if (reason) *reason = "no shape came out of it";
@@ -809,7 +825,7 @@ bool acceptable(const TopoDS_Shape& shape, std::string* reason) {
             return false;
         }
     } catch (const Standard_Failure& e) {
-        if (reason) *reason = e.GetMessageString() ? e.GetMessageString() : "the check threw";
+        if (reason) *reason = kernelReason(e, "the body could not be checked");
         return false;
     }
     return true;
@@ -984,7 +1000,7 @@ bool validate(const BrepShape& s, std::string* err) {
             return false;
         }
     } catch (const Standard_Failure& e) {
-        if (err) *err = e.GetMessageString() ? e.GetMessageString() : "check threw";
+        if (err) *err = kernelReason(e, "the body could not be checked");
         return false;
     }
     return true;
@@ -1046,7 +1062,7 @@ BrepRef booleanOp(const BrepShape& a, const BrepShape& b, BooleanOp op,
         if (!acceptable(result, reason)) return {};
         return makeBrep(result, propagateNames(*algo, {{&a}, {&b}}, result, salt));
     } catch (const Standard_Failure& e) {
-        if (reason) *reason = e.GetMessageString() ? e.GetMessageString() : "the boolean threw";
+        if (reason) *reason = kernelReason(e, "the two bodies could not be combined");
         return {};
     }
 }
@@ -1096,7 +1112,7 @@ BrepRef filletEdges(const BrepShape& s, const std::vector<EdgeId>& edges,
         if (!acceptable(result, reason)) return {};
         return makeBrep(result, propagateNames(fil, {{&s}}, result, salt));
     } catch (const Standard_Failure& e) {
-        if (reason) *reason = e.GetMessageString() ? e.GetMessageString() : "the fillet threw";
+        if (reason) *reason = kernelReason(e, "that radius will not round these edges");
         return {};
     }
 }
@@ -1279,7 +1295,7 @@ BrepRef extrudeFaces(const BrepRef& s, const std::vector<FaceId>& faces, Real di
                 }
                 solid = prism.Shape();
             } catch (const Standard_Failure& e) {
-                if (reason) *reason = e.GetMessageString() ? e.GetMessageString() : "the sweep threw";
+                if (reason) *reason = kernelReason(e, "the face could not be swept that far");
                 return {};
             }
 
@@ -1396,8 +1412,7 @@ BrepRef rotateFaces(const BrepRef& s, const std::vector<FaceId>& faces, Real ang
         if (!acceptable(result, reason)) return {};
         return makeBrep(result, propagateNames(draft, {{s.get()}}, result, salt));
     } catch (const Standard_Failure& e) {
-        if (reason) *reason = e.GetMessageString() ? e.GetMessageString()
-                                                   : "the rotation threw";
+        if (reason) *reason = kernelReason(e, "that face will not turn about this edge");
         return {};
     }
 }
@@ -1459,8 +1474,7 @@ BrepRef mergeDivisions(const BrepRef& s, ElementId salt, std::string* reason) {
 
         return makeBrep(merged, names);
     } catch (const Standard_Failure& e) {
-        if (reason) *reason = e.GetMessageString() ? e.GetMessageString()
-                                                   : "the merge threw";
+        if (reason) *reason = kernelReason(e, "those faces could not be merged");
         return {};
     }
 }
@@ -1543,8 +1557,7 @@ BrepRef divideBody(const BrepRef& s, Vec3 planePoint, Vec3 planeNormal,
         }
         return makeBrep(result, names);
     } catch (const Standard_Failure& e) {
-        if (reason) *reason = e.GetMessageString() ? e.GetMessageString()
-                                                   : "the divide threw";
+        if (reason) *reason = kernelReason(e, "the body could not be divided there");
         return {};
     }
 }
@@ -1661,11 +1674,46 @@ BrepRef insetFaces(const BrepRef& s, const std::vector<FaceId>& faces, Real amou
             current = makeBrep(result, names);
             if (newFaces) newFaces->push_back(target);
         } catch (const Standard_Failure& e) {
-            if (reason) *reason = e.GetMessageString() ? e.GetMessageString() : "the inset threw";
+            if (reason) *reason = kernelReason(e, "the face could not be inset that far");
             return {};
         }
     }
     return current;
+}
+
+// Why an offset might have handed back a solid it did not hollow.
+//
+// The commonest reason by far is an open face that is only part of a flat
+// region: divide the bottom of a box and ask to open one half, and the offset
+// reports success and changes nothing. "The wall is too thick" was the guess
+// made here before, and it sends the user to make the wall thinner, which will
+// never help. If a face next to an opened one lies in the same plane and was
+// not opened, that is worth saying outright.
+std::string whyNotHollowed(const BrepShape& s, const std::vector<FaceId>& open) {
+    for (FaceId f : open) {
+        if (!validFace(s, f)) continue;
+        const Vec3 n = faceNormal(s, f);
+        const Vec3 at = faceCentroid(s, f);
+
+        std::vector<EdgeId> es;
+        faceEdges(s, f, es);
+        for (EdgeId e : es) {
+            FaceId a = kInvalid, b = kInvalid;
+            edgeFaces(s, e, a, b);
+            const FaceId other = a == f ? b : a;
+            if (other == kInvalid || !validFace(s, other)) continue;
+            if (std::find(open.begin(), open.end(), other) != open.end()) continue;
+
+            const Vec3 on = faceNormal(s, other);
+            if (dot(n, on) < 0.9999) continue;                       // not flat with it
+            if (std::fabs(dot(faceCentroid(s, other) - at, n)) > 1e-6) continue;
+
+            return "a face that was divided has only part of it open: open the "
+                   "rest of it too";
+        }
+    }
+    return "the wall is too thick to leave a cavity, or this shape defeated the "
+           "offset";
 }
 
 BrepRef shell(const BrepRef& s, const std::vector<FaceId>& openFaces, Real thickness,
@@ -1723,7 +1771,7 @@ BrepRef shell(const BrepRef& s, const std::vector<FaceId>& openFaces, Real thick
             }
             return out;
         } catch (const Standard_Failure& e) {
-            if (reason) *reason = e.GetMessageString() ? e.GetMessageString() : "shelling threw";
+            if (reason) *reason = kernelReason(e, "the body could not be hollowed");
             return {};
         }
     }
@@ -1759,7 +1807,7 @@ BrepRef shell(const BrepRef& s, const std::vector<FaceId>& openFaces, Real thick
         BRepGProp::VolumeProperties(s->shape, was);
         BRepGProp::VolumeProperties(out, now);
         if (now.Mass() > was.Mass() * 0.999) {
-            if (reason) *reason = "the wall is too thick to leave a cavity";
+            if (reason) *reason = whyNotHollowed(*s, openFaces);
             return {};
         }
 
@@ -1770,7 +1818,7 @@ BrepRef shell(const BrepRef& s, const std::vector<FaceId>& openFaces, Real thick
         // hollowed out.
         return makeBrep(out, propagateNames(op, {{s.get()}}, out, salt));
     } catch (const Standard_Failure& e) {
-        if (reason) *reason = e.GetMessageString() ? e.GetMessageString() : "shelling threw";
+        if (reason) *reason = kernelReason(e, "the body could not be hollowed");
         return {};
     }
 }
@@ -1888,7 +1936,7 @@ BrepRef prism(const std::vector<Vec3>& points, const std::vector<Real>& arcs,
 
         return makeBrep(shape, names);
     } catch (const Standard_Failure& e) {
-        if (reason) *reason = e.GetMessageString() ? e.GetMessageString() : "the profile threw";
+        if (reason) *reason = kernelReason(e, "the profile could not be swept into a solid");
         return {};
     }
 }

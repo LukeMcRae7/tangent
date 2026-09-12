@@ -310,6 +310,22 @@ target_link_libraries(test_drag PRIVATE tangent_epoxy)
 target_compile_options(test_drag PRIVATE ${TANGENT_WARNINGS})
 add_test(NAME drag COMMAND test_drag)
 
+add_executable(test_chain tests/test_chain.cpp
+  src/scene/scene.cpp src/scene/feature.cpp src/scene/serialize.cpp
+  src/mesh/boolean.cpp src/mesh/health.cpp ${TANGENT_GEOM} src/mesh/operations.cpp
+  src/mesh/halfedge.cpp src/mesh/primitives.cpp)
+target_include_directories(test_chain PRIVATE src)
+target_compile_options(test_chain PRIVATE ${TANGENT_WARNINGS})
+add_test(NAME chain COMMAND test_chain)
+
+add_executable(test_robust tests/test_robust.cpp
+  src/geom/kernel_guard.cpp
+  ${TANGENT_GEOM} src/mesh/boolean.cpp src/mesh/health.cpp src/mesh/operations.cpp
+  src/mesh/halfedge.cpp src/mesh/primitives.cpp)
+target_include_directories(test_robust PRIVATE src)
+target_compile_options(test_robust PRIVATE ${TANGENT_WARNINGS})
+add_test(NAME robust COMMAND test_robust)
+
 add_executable(test_faceops tests/test_faceops.cpp
   ${TANGENT_GEOM} src/mesh/boolean.cpp src/mesh/health.cpp src/mesh/operations.cpp
   src/mesh/halfedge.cpp src/mesh/primitives.cpp)
