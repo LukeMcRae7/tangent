@@ -1,6 +1,7 @@
 #include "app/create_tool.h"
 
 #include "app/overlay_shapes.h"
+#include "ui/command_panel.h"
 #include "ui/icons.h"
 #include "app/snap_overlay.h"
 
@@ -1750,182 +1751,159 @@ bool CreateTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& ou
     if (stage_ == CreateStage::None) return false;
     outFinished = false;
 
-    ImGuiIO& io = ImGui::GetIO();
-    const ImVec2 displaySize = io.DisplaySize;
+    // The panel says what is being done now, which during a round is not the
+    // same as what the command is called.
+    const bool rounding = stage_ == CreateStage::AdjustProfile && isFilleting_;
+    const Icon icon = rounding                            ? Icon::Fillet
+                    : kind_ == PrimitiveKind::Cylinder    ? Icon::Cylinder
+                    : kind_ == PrimitiveKind::Sphere      ? Icon::Sphere
+                    : kind_ == PrimitiveKind::Cone        ? Icon::Cone
+                    : kind_ == PrimitiveKind::Torus       ? Icon::Torus
+                                                          : Icon::Box;
+    char title[64];
+    if (rounding)
+        std::snprintf(title, sizeof title, "Round %s",
+                      activeFilletCorners_.size() > 1 ? "Corners" : "Corner");
+    else
+        std::snprintf(title, sizeof title, "Create %s", primitiveName(kind_));
 
-    // Top action banner
-    ImGui::SetNextWindowPos(ImVec2(displaySize.x * 0.5f, 50.0f), ImGuiCond_Always, ImVec2(0.5f, 0.0f));
-    ImGui::SetNextWindowBgAlpha(0.85f);
-    ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
-                            ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
-                            ImGuiWindowFlags_NoNav;
+    if (!ui::beginCommand("##create", title, icon, hudX_, hudY_)) return true;
 
-    if (ImGui::Begin("##CreateToolHud", nullptr, flags)) {
-        if (stage_ == CreateStage::SelectPlane) {
-            ImGui::TextColored(kAccentIm, "Select Plane for %s", primitiveName(kind_));
-            ImGui::SameLine();
-            ImGui::TextDisabled("| Click origin tile or object face");
-            ImGui::Spacing();
-            if (ImGui::Button("Top (XY / 7)"))   choosePlane(PlaneChoice::XY, camera, scene);
-            ImGui::SameLine();
-            if (ImGui::Button("Front (XZ / 1)")) choosePlane(PlaneChoice::XZ, camera, scene);
-            ImGui::SameLine();
-            if (ImGui::Button("Right (YZ / 3)")) choosePlane(PlaneChoice::YZ, camera, scene);
-            ImGui::SameLine();
-            if (ImGui::Button("Cancel (Esc)")) cancel(camera);
-        } else if (stage_ == CreateStage::DrawProfile_Pt1) {
-            ImGui::TextColored(kAccentIm, "Step 1: %s",
-                              kind_ == PrimitiveKind::Cylinder ? "Center Point" : "First Corner");
-            ImGui::SameLine();
-            // Where the point actually is, and why it is there. The panel is
-            // where the eye already is, and the starting point is the one the
-            // whole sketch is measured from.
-            ImGui::TextDisabled("%.2f, %.2f", pt1_.x, pt1_.y);
-            if (activeSnap_.valid()) {
-                ImGui::SameLine();
-                ImGui::TextColored(kAccentIm, "%s", describeSnap(activeSnap_).c_str());
-                if (activeSnap_.radius > 0.0) {
-                    ImGui::SameLine();
-                    ImGui::TextDisabled("(\u00D8 %.3f mm)", activeSnap_.radius * 2.0);
-                }
-            }
-            ImGui::SameLine();
-            if (ImGui::Button("Cancel (Esc)")) cancel(camera);
-        } else if (stage_ == CreateStage::DrawProfile_Pt2) {
-            ImGui::TextColored(kAccentIm, "Step 2: Size");
-            ImGui::SameLine(0.0f, 14.0f);
-            drawDimensionFields();
-            ImGui::SameLine(0.0f, 14.0f);
-            if (typing() || fieldFixed_[0] || fieldFixed_[1]) {
-                ImGui::TextDisabled(fieldCount() > 1 ? "Tab next   Enter confirm"
-                                                     : "Enter confirm");
-            } else if (activeSnap_.valid()) {
-                ImGui::TextColored(kAccentIm, " %s", describeSnap(activeSnap_).c_str());
-                if (activeSnap_.radius > 0.0) {
-                    ImGui::SameLine();
-                    ImGui::TextDisabled("(\u00D8 %.3f mm)", activeSnap_.radius * 2.0);
-                }
-            } else {
-                ImGui::TextDisabled("(Click to set / type a number / E to adjust)");
-            }
-            ImGui::SameLine();
-            if (ImGui::Button("Cancel (Esc)")) cancel(camera);
-        } else if (stage_ == CreateStage::AdjustProfile) {
-            ImGui::TextColored(kAccentIm, isFilleting_ ? "Round Corner" : "Adjust Profile");
-            ImGui::SameLine(0.0f, 14.0f);
-            drawDimensionFields();
-            ImGui::SameLine(0.0f, 14.0f);
-            if (isFilleting_) {
-                ImGui::TextDisabled("Move to set   click or Enter confirm   Esc undo");
-            } else if (hoveredHandle_ != HandleId::None &&
-                       hoveredHandle_ != HandleId::FaceCenter &&
-                       kind_ != PrimitiveKind::Cylinder) {
-                ImGui::TextColored(kAccentIm, "F to round");
-            } else {
-                ImGui::TextDisabled("Drag a handle to move   hover + F to round   type a number");
-            }
-            ImGui::Separator();
-
-            if (kind_ == PrimitiveKind::Cylinder) {
-                ImGui::SetNextItemWidth(120.0f);
-                if (ImGui::DragScalar("Radius", ImGuiDataType_Double, &currentRadius_, 0.1f, nullptr, nullptr, "%.2f mm")) {
-                    pt2_ = pt1_ + Vec2{currentRadius_, 0};
-                }
-            } else {
-                ImGui::SetNextItemWidth(100.0f);
-                if (ImGui::DragScalar("Width", ImGuiDataType_Double, &currentWidth_, 0.1f, nullptr, nullptr, "%.2f mm")) {
-                    pt2_.x = pt1_.x + currentWidth_;
-                    clampCornerRadii();
-                }
-                ImGui::SameLine();
-                ImGui::SetNextItemWidth(100.0f);
-                if (ImGui::DragScalar("Depth", ImGuiDataType_Double, &currentDepth_, 0.1f, nullptr, nullptr, "%.2f mm")) {
-                    pt2_.y = pt1_.y + currentDepth_;
-                    clampCornerRadii();
-                }
-                ImGui::SameLine();
-                ImGui::SetNextItemWidth(100.0f);
-                Real avgFillet = uniformCornerRadius();
-                if (ImGui::DragScalar("All Fillets (F)", ImGuiDataType_Double, &avgFillet, 0.1f, nullptr, nullptr, "%.2f mm")) {
-                    setCornerRadius(avgFillet);
-                }
-            }
-
-            ImGui::Spacing();
-            ImGui::PushStyleColor(ImGuiCol_Button, kAccentIm);
-            if (ImGui::Button("  OK / Extrude (E)  ")) {
-                clearFields();   // each step asks its own questions
-                stage_ = CreateStage::ExtrudeDepth;
-                extrudeBaseDepth_ = 20.0;
-                extrudeDepth_ = 20.0;
-            }
-            ImGui::PopStyleColor();
-            ImGui::SameLine();
-            if (ImGui::Button("Cancel (Esc)")) cancel(camera);
-        } else if (stage_ == CreateStage::ExtrudeDepth) {
-            // Say what will happen, not what was asked for: with Auto the
-            // operation follows the sign of the depth, and the user should be
-            // able to read the outcome before committing to it.
-            const CreateOp shown = resolvedOp();
-            const SceneObject* target = hasTargetBody() ? scene.find(faceObject_) : nullptr;
-            const ImVec4 cutCol(0.95f, 0.35f, 0.25f, 1.0f);
-            ImGui::TextColored(shown == CreateOp::Cut ? cutCol : kAccentIm,
-                               "%s", createOpName(shown));
-            ImGui::SameLine(0.0f, 12.0f);
-            drawDimensionFields();
-            if (target) {
-                ImGui::SameLine();
-                ImGui::TextDisabled(shown == CreateOp::Cut   ? "from %s"
-                                  : shown == CreateOp::Join  ? "onto %s"
-                                                             : "beside %s", target->name.c_str());
-            }
-
-            ImGui::SameLine();
-            ImGui::SetNextItemWidth(110.0f);
-            ImGui::DragScalar("##depth", ImGuiDataType_Double, &extrudeDepth_, 0.1f,
-                              nullptr, nullptr, "%.2f mm");
-
-            if (hasTargetBody()) {
-                ImGui::Spacing();
-                ImGui::TextDisabled("Operation");
-
-                // What each choice does to the body underneath, as a picture of
-                // the result rather than as a verb. Auto is the two of them
-                // side by side, because that is exactly what it is: whichever
-                // way the depth goes.
-                const float ic = ImGui::GetTextLineHeight() * 1.6f;
-                ImGui::SameLine();
-                {
-                    const bool on = op_ == CreateOp::Auto;
-                    if (on) ImGui::PushStyleColor(ImGuiCol_Button, kAccentIm);
-                    if (ImGui::Button("Auto (A)")) op_ = CreateOp::Auto;
-                    if (on) ImGui::PopStyleColor();
-                    if (ImGui::IsItemHovered())
-                        ImGui::SetTooltip("Join when pushed out of the face, cut when pushed in");
-                }
-                ImGui::SameLine();
-                if (iconButton(Icon::Union, "join", ic, "Join (J)", op_ == CreateOp::Join))
-                    op_ = CreateOp::Join;
-                ImGui::SameLine();
-                if (iconButton(Icon::Difference, "cut", ic, "Cut (D)", op_ == CreateOp::Cut))
-                    op_ = CreateOp::Cut;
-                ImGui::SameLine();
-                if (iconButton(Icon::Box, "newbody", ic, "New Body (N)",
-                               op_ == CreateOp::NewBody))
-                    op_ = CreateOp::NewBody;
-            }
-            ImGui::Spacing();
-            ImGui::PushStyleColor(ImGuiCol_Button, kAccentIm);
-            if (ImGui::Button("  Finish (Click / E)  ")) {
-                finishCreation(scene, camera, undo);
-                outFinished = true;
-            }
-            ImGui::PopStyleColor();
-            ImGui::SameLine();
-            if (ImGui::Button("Cancel (Esc)")) cancel(camera);
-        }
+    int footer = 0;
+    switch (stage_) {
+    // -----------------------------------------------------------------------
+    case CreateStage::SelectPlane: {
+        ui::commandRow("Plane");
+        if (ImGui::Button("Top")) choosePlane(PlaneChoice::XY, camera, scene);
+        ImGui::SameLine();
+        if (ImGui::Button("Front")) choosePlane(PlaneChoice::XZ, camera, scene);
+        ImGui::SameLine();
+        if (ImGui::Button("Right")) choosePlane(PlaneChoice::YZ, camera, scene);
+        ui::commandHint("Or click a face of an object to draw on it.  7 / 1 / 3 pick a plane.");
+        footer = ui::commandFooter(nullptr);
+        break;
     }
-    ImGui::End();
+
+    // -----------------------------------------------------------------------
+    case CreateStage::DrawProfile_Pt1: {
+        char at[64];
+        std::snprintf(at, sizeof at, "%.2f, %.2f", pt1_.x, pt1_.y);
+        ui::commandValue(kind_ == PrimitiveKind::Cylinder ? "Centre" : "Corner", at);
+        if (activeSnap_.valid()) ui::commandValue("Snapped", describeSnap(activeSnap_).c_str());
+        ui::commandHint("Click to place it.  Ctrl for free placement.");
+        footer = ui::commandFooter(nullptr);
+        break;
+    }
+
+    // -----------------------------------------------------------------------
+    case CreateStage::DrawProfile_Pt2: {
+        for (int f = 0; f < fieldCount(); ++f)
+            if (ui::commandNumber(fieldName(f), fieldDisplay(f), "mm", fieldFixed_[f],
+                                  f == typedField_ && typing(), typedValue_.c_str()))
+                typedField_ = f;
+        if (activeSnap_.valid()) ui::commandValue("Snapped", describeSnap(activeSnap_).c_str());
+        ui::commandHint(fieldCount() > 1
+            ? "Type a number to fix a side; the other still follows the mouse.  Tab next, Enter confirm."
+            : "Type a number to fix the radius.  Enter confirms.");
+        footer = ui::commandFooter(nullptr);
+        break;
+    }
+
+    // -----------------------------------------------------------------------
+    case CreateStage::AdjustProfile: {
+        for (int f = 0; f < fieldCount(); ++f)
+            if (ui::commandNumber(fieldName(f), fieldDisplay(f), "mm", fieldFixed_[f],
+                                  f == typedField_ && typing(), typedValue_.c_str()))
+                typedField_ = f;
+
+        if (kind_ != PrimitiveKind::Cylinder && !isFilleting_) {
+            ui::commandRow("Corners");
+            char r[32];
+            std::snprintf(r, sizeof r, "%.2f mm", uniformCornerRadius());
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted(r);
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Round all  (F)")) {
+                isFilleting_ = true;
+                isDragging_ = false;
+                activeHandle_ = HandleId::FaceCenter;
+                filletRefUV_ = (pt1_ + pt2_) * 0.5;
+                activeFilletCorners_ = {0, 1, 2, 3};
+                for (int i = 0; i < 4; ++i) dragStartFillets_[i] = cornerRadii_[i];
+                clearFields();
+            }
+        }
+
+        ui::commandHint(isFilleting_
+            ? "Move away from the corner to open it out.  Click or Enter confirms, Esc puts it back."
+            : "Drag a handle to move it.  Hover one and press F to round that corner.");
+        footer = ui::commandFooter(isFilleting_ ? "Done  (Enter)" : "Extrude  (E)");
+        break;
+    }
+
+    // -----------------------------------------------------------------------
+    case CreateStage::ExtrudeDepth: {
+        if (ui::commandNumber("Depth", extrudeDepth_, "mm", fieldFixed_[0],
+                              typing(), typedValue_.c_str()))
+            typedField_ = 0;
+
+        if (hasTargetBody()) {
+            const float ic = ImGui::GetTextLineHeight() * 1.4f;
+            ui::commandRow("Operation");
+            {
+                const bool on = op_ == CreateOp::Auto;
+                if (on) ImGui::PushStyleColor(ImGuiCol_Button, kAccentIm);
+                if (ImGui::Button("Auto")) op_ = CreateOp::Auto;
+                if (on) ImGui::PopStyleColor();
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Join when pushed out of the face, cut when pushed in  (A)");
+            }
+            ImGui::SameLine();
+            if (iconButton(Icon::Union, "join", ic, "Join  (J)", op_ == CreateOp::Join))
+                op_ = CreateOp::Join;
+            ImGui::SameLine();
+            if (iconButton(Icon::Difference, "cut", ic, "Cut  (D)", op_ == CreateOp::Cut))
+                op_ = CreateOp::Cut;
+            ImGui::SameLine();
+            if (iconButton(Icon::Box, "newbody", ic, "New body  (N)", op_ == CreateOp::NewBody))
+                op_ = CreateOp::NewBody;
+
+            // What will actually happen, spelled out. With Auto the operation
+            // follows the sign of the depth, so the choice above does not say
+            // it on its own.
+            const CreateOp shown = resolvedOp();
+            const SceneObject* target = scene.find(faceObject_);
+            char result[128];
+            std::snprintf(result, sizeof result, "%s %s %s", createOpName(shown),
+                          shown == CreateOp::Cut  ? "from"
+                        : shown == CreateOp::Join ? "onto"
+                                                  : "beside",
+                          target ? target->name.c_str() : "the body");
+            ui::commandRow("Result");
+            ImGui::TextColored(shown == CreateOp::Cut ? ImVec4(0.95f, 0.35f, 0.25f, 1.0f)
+                                                      : kAccentIm,
+                               "%s", result);
+        }
+
+        ui::commandHint("Move to set the depth, or type one.  A negative depth cuts.");
+        footer = ui::commandFooter("Finish  (E)");
+        break;
+    }
+
+    case CreateStage::None:
+        break;
+    }
+
+    if (footer > 0) {
+        // The same path the keys take, so there is one answer to what a step
+        // means rather than two that can drift apart.
+        handleKey(13, false, false, camera, scene, undo);
+        if (stage_ == CreateStage::None) outFinished = true;
+    } else if (footer < 0) {
+        cancel(camera);
+    }
+
+    ui::endCommand();
     return true;
 }
 

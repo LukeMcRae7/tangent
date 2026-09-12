@@ -1,6 +1,7 @@
 #include "app/application.h"
 #include "geom/kernel_guard.h"
 #include "render/lod.h"
+#include "ui/command_panel.h"
 #include "ui/icons.h"
 #include "ui/view_cube.h"
 #include "ui/theme.h"
@@ -660,6 +661,7 @@ void Application::handleViewportMouse() {
     }
 
     stepProfileDemo();
+    stepFilletOpenDemo();
 
     // Interactive Object Creation & Sketching Tool:
     if (createTool_.active()) {
@@ -672,7 +674,11 @@ void Application::handleViewportMouse() {
         if (io.MouseWheel != 0.0f && overViewport && !io.WantCaptureMouse)
             camera_.dolly(io.MouseWheel);
 
-        createTool_.update(scene_, camera_, mouseInViewport(), !io.KeyCtrl);
+        // Held still while the pointer is on the dialog, for the same reason
+        // the fillet is: the way to a button is across the screen, and the
+        // profile must not follow the pointer there.
+        if (!io.WantCaptureMouse)
+            createTool_.update(scene_, camera_, mouseInViewport(), !io.KeyCtrl);
         if (!io.WantCaptureMouse) {
             if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
                 createTool_.handleMouseDown(mouseInViewport(), scene_, camera_, undo_);
@@ -689,7 +695,7 @@ void Application::handleViewportMouse() {
 
     // Modal Fillet tool:
     if (filletTool_.active) {
-        updateFillet(!io.KeyCtrl);
+        updateFillet(!io.KeyCtrl, /*follow=*/!io.WantCaptureMouse);
         if (!io.WantCaptureMouse) {
             if (ImGui::IsMouseClicked(ImGuiMouseButton_Left))      commitFillet();
             else if (ImGui::IsMouseClicked(ImGuiMouseButton_Right)) abortFillet();
@@ -788,6 +794,57 @@ void Application::drawReadout(const std::string& text, float px, float py,
     dl->AddRect(a, b, IM_COL32(u8(border.r), u8(border.g), u8(border.b), 255), 4.0f);
     dl->AddText(ImVec2(px + 7.0f, py + 4.0f),
                 IM_COL32(u8(fg.r), u8(fg.g), u8(fg.b), 255), text.c_str());
+}
+
+// The fillet's own dialog, in the same shape as the create tool's.
+//
+// The gesture already says what the radius is -- the arrow, and the number by
+// the cursor -- but a gesture cannot say how many segments are being used, how
+// many edges were caught, or how to commit without a keyboard. An operation
+// with parameters gets a panel; that is the rule the create tool follows and
+// there is no reason for this one to be different.
+void Application::drawFilletPanel() {
+    if (!filletTool_.active) return;
+
+    if (!ui::beginCommand("##fillet", "Fillet", Icon::Fillet,
+                          viewRect_.x + 16.0f, viewRect_.y + 16.0f))
+        return;
+
+    if (ui::commandNumber("Radius", filletTool_.currentRadius, "mm",
+                          !filletTool_.typedValue.empty(), !filletTool_.typedValue.empty(),
+                          filletTool_.typedValue.c_str())) {
+        // Clicking the field is a way in for the mouse: it clears whatever was
+        // typed and hands the radius back to the pointer.
+        filletTool_.typedValue.clear();
+    }
+
+    ui::commandRow("Segments");
+    ImGui::SetNextItemWidth(-1.0f);
+    if (ImGui::SliderInt("##seg", &filletTool_.currentSegments, 1, 32)) {
+        view_.bevelSegments = filletTool_.currentSegments;
+        filletTool_.previewValid = false;
+    }
+
+    char edges[64];
+    std::snprintf(edges, sizeof edges, "%zu edge%s", filletTool_.edges.size(),
+                  filletTool_.edges.size() == 1 ? "" : "s");
+    ui::commandValue("Selection", edges);
+
+    // While the limit is still being found there is no honest number to show
+    // for it, and a maximum that grows as you read it is worse than none.
+    if (!filletTool_.search.active && filletTool_.maxRadius > 0.0) {
+        char limit[48];
+        std::snprintf(limit, sizeof limit, "%.2f mm", filletTool_.maxRadius);
+        ui::commandValue("Largest", limit);
+    }
+
+    ui::commandHint("Pull along the arrow, or type a radius.  Wheel changes the segments.");
+
+    const int footer = ui::commandFooter("OK  (Click)");
+    ui::endCommand();
+
+    if (footer > 0)      commitFillet();
+    else if (footer < 0) abortFillet();
 }
 
 // The live value sits next to the cursor rather than only in the status bar.
@@ -1748,6 +1805,7 @@ void Application::stepProfileDemo() {
     camera_.snapToGoal();
 
     createTool_.start(PrimitiveKind::Box);
+    if (profileDemo_ == 4) return;             // stop at the plane question
     createTool_.setHoveredPlane(PlaneChoice::Face, {0, 0, top}, {0, 0, 1}, id, 0);
     createTool_.commitPlaneSelection(camera_);
     camera_.snapToGoal();
@@ -1783,6 +1841,42 @@ void Application::stepProfileDemo() {
                  createTool_.profileMax().x - createTool_.profileMin().x,
                  createTool_.profileMax().y - createTool_.profileMin().y,
                  createTool_.uniformCornerRadius());
+}
+
+void Application::stepFilletOpenDemo() {
+    if (!filletOpen_ || filletOpenDone_ || viewRect_.w <= 0) return;
+    if (scene_.objects().empty()) return;
+    filletOpenDone_ = true;
+
+    const ObjectId id = scene_.objects().front()->id;
+    const SceneObject* o = scene_.find(id);
+    std::vector<EdgeId> es;
+    o->body.allEdges(es);
+    if (es.empty()) return;
+
+    camera_.yaw = 0.6f;
+    camera_.pitch = 0.55f;
+    camera_.distance = 80.0f;
+    camera_.snapToGoal();
+
+    // A top edge, so the arrow is drawn where it can be seen.
+    EdgeId pick = es.front();
+    Real best = -1e30;
+    for (EdgeId e : es) {
+        Vec3 a2, b2;
+        o->body.edgePositions(e, a2, b2);
+        const Real z = (a2.z + b2.z) * 0.5;
+        if (z > best) { best = z; pick = e; }
+    }
+    scene_.select(id);
+    scene_.clearElementSelection();
+    scene_.selectElement({id, ElementKind::Edge, pick}, true);
+
+    Vec2 px{};
+    camera_.projectToPixel(o->body.edgeMidpoint(pick), px);
+    mouseOverride_ = px;
+    beginFillet();
+    mouseOverride_ = px + Vec2{40.0, -40.0};
 }
 
 void Application::stepFilletLimitSearch() {
@@ -1840,7 +1934,7 @@ void Application::stepFilletLimitSearch() {
     startFilletTrial(s.pending);
 }
 
-void Application::updateFillet(bool snap) {
+void Application::updateFillet(bool snap, bool follow) {
     if (!filletTool_.active) return;
     SceneObject* obj = scene_.find(filletTool_.objectId);
     if (!obj) { abortFillet(); return; }
@@ -1857,6 +1951,15 @@ void Application::updateFillet(bool snap) {
             filletTool_.previewValid = true;
         }
     }
+
+    // Reaching for the panel is not a change of mind about the radius.
+    //
+    // The dialog has buttons on it, and the way to a button is across the
+    // screen: without this, moving to press OK pulled the fillet out to
+    // whatever radius the pointer passed through on the way, and pressed OK on
+    // that. The build already in flight still has to be collected, which is why
+    // this returns here and not at the top.
+    if (!follow) return;
 
     ImGuiIO& io = ImGui::GetIO();
     if (io.MouseWheel != 0.0f) {
@@ -2730,7 +2833,12 @@ void Application::buildUi() {
     drawMeasurePanel(ui_);
     drawMeasureLabel();
     drawTransformReadout();
+    drawFilletPanel();
     if (createTool_.active()) {
+        // Under the toolbar, in the corner of the viewport opposite the view
+        // cube: a dialog over the middle of the model is a dialog in the way of
+        // the thing being made.
+        createTool_.setHudOrigin(viewRect_.x + 16.0f, viewRect_.y + 16.0f);
         bool finished = false;
         createTool_.drawHud(scene_, camera_, undo_, finished);
         if (finished) justFinishedModal_ = true;

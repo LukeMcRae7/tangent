@@ -118,6 +118,7 @@ public:
     }
     void setExtrudeDepth(Real depth) { extrudeDepth_ = depth; }
     void setStage(CreateStage s) { stage_ = s; }
+    void setHudOrigin(float x, float y) { hudX_ = x; hudY_ = y; }
 
     // What the cursor is currently snapped to, if anything, and why. The
     // overlay marks it and the HUD names it: a snap that happens invisibly is
@@ -227,6 +228,10 @@ private:
     Real dragStartFillets_[4] = {0.0, 0.0, 0.0, 0.0};
 
     PlaneSnap activeSnap_;
+
+    // Where the dialog sits. Set by the application from the viewport's own
+    // corner, since the tool has no idea where the viewport is.
+    float hudX_ = 20.0f, hudY_ = 20.0f;
 
     Vec2 filletRefUV_{0, 0};
     std::vector<int> activeFilletCorners_;

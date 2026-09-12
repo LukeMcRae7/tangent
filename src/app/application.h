@@ -105,6 +105,10 @@ public:
     // 3 setting the depth.
     void setProfileDemo(int mode) { profileDemo_ = mode; }
 
+    // Starts a fillet and leaves it running, so the panel and the arrow can be
+    // looked at rather than only the result.
+    void setFilletOpen() { filletOpen_ = true; }
+
     // Parks the interface's pointer somewhere, for screenshots of hover states.
     void setUiMouse(float x, float y, bool down) {
         uiMouse_ = {x, y};
@@ -138,6 +142,8 @@ private:
     int  snapDemo_ = 0;
     int  profileDemo_ = 0;
     bool profileDemoDone_ = false;
+    bool filletOpen_ = false;
+    bool filletOpenDone_ = false;
     Vec2 uiMouse_{-1.0f, -1.0f};
     bool uiMouseDown_ = false;
     void beginTransform(TransformMode mode);
@@ -265,12 +271,17 @@ private:
     void stepFilletLimitSearch();
     void stepSnapDemo();
     void stepProfileDemo();
+    void stepFilletOpenDemo();
     void stepFilletFloorSearch();
     void startFilletTrial(Real radius);
     static const Real kFilletFloorLadder[6];
-    void updateFillet(bool snap);
+    // `follow` false keeps the radius where it is while still collecting a
+    // preview that is already building: the pointer is on the dialog, not on
+    // the model.
+    void updateFillet(bool snap, bool follow = true);
     void commitFillet();
     void abortFillet();
+    void drawFilletPanel();
 
     CreateTool createTool_;
 

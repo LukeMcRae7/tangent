@@ -1,4 +1,5 @@
 #include "ui/panels.h"
+#include "ui/command_panel.h"
 #include "ui/icons.h"
 #include "ui/theme.h"
 
@@ -816,73 +817,49 @@ void drawMeasurePanel(UiContext& ctx) {
     if (!ctx.measuring) return;
 
     ImGuiViewport* vp = ImGui::GetMainViewport();
-    ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + 16.0f, vp->WorkPos.y + 44.0f),
-                            ImGuiCond_Always);
-    ImGui::SetNextWindowSize(ImVec2(228.0f, 0.0f));
-    ImGui::SetNextWindowBgAlpha(0.94f);
+    // The same box every other operation runs in. A measurement is a reading
+    // rather than a change, so it has no commit -- but a panel that looks
+    // different for no reason is a panel the user has to learn twice.
+    if (!ui::beginCommand("##measure", "Measure", Icon::Count,
+                          vp->WorkPos.x + 16.0f, vp->WorkPos.y + 56.0f))
+        return;
 
-    const ImGuiWindowFlags flags = ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
-                                   ImGuiWindowFlags_NoCollapse |
-                                   ImGuiWindowFlags_NoSavedSettings |
-                                   ImGuiWindowFlags_NoDocking |
-                                   ImGuiWindowFlags_AlwaysAutoResize;
+    const MeasureResult& m = ctx.measurement;
+    auto value = [](const char* label, const char* fmt, double v, bool lead) {
+        ui::commandRow(label);
+        if (lead) ImGui::TextColored(kAccent, fmt, v);
+        else      ImGui::Text(fmt, v);
+    };
 
-    if (ImGui::Begin("Measure", nullptr, flags)) {
-        const MeasureResult& m = ctx.measurement;
-        if (!m.valid) {
-            ImGui::TextColored(kDim, "Click a vertex, edge or face.");
-            ImGui::TextColored(kDim, "Click a second to measure between.");
-        } else {
-            // A round thing leads with what it is. On an exact body the
-            // diameter is a fact about the geometry rather than a measurement
-            // taken across it, and it is the number someone is after.
-            if (m.hasDiameter) {
-                ImGui::TextColored(kDim, "Diameter");
-                ImGui::SameLine(96.0f);
-                ImGui::TextColored(kAccent, "%.4f mm", m.diameter);
-                ImGui::TextColored(kDim, "Radius");
-                ImGui::SameLine(96.0f);
-                ImGui::Text("%.4f mm", m.diameter * 0.5);
-                ImGui::TextColored(kDim, "Centre");
-                ImGui::SameLine(96.0f);
-                ImGui::Text("%.3f, %.3f, %.3f", m.centre.x, m.centre.y, m.centre.z);
-            }
-            if (m.hasLength) {
-                ImGui::TextColored(kDim, m.hasDiameter ? "Around" : "Length");
-                ImGui::SameLine(96.0f);
-                ImGui::TextColored(kAccent, "%.4f mm", m.length);
-            }
-            if (m.hasArea) {
-                ImGui::TextColored(kDim, "Area");
-                ImGui::SameLine(96.0f);
-                ImGui::TextColored(kAccent, "%.4f mm2", m.area);
-                ImGui::TextColored(kDim, "Perimeter");
-                ImGui::SameLine(96.0f);
-                ImGui::Text("%.4f mm", m.perimeter);
-            }
-            if (ctx.measurePicks == 2 || m.hasLength) {
-                if (ctx.measurePicks == 2) {
-                    ImGui::TextColored(kDim, "Distance");
-                    ImGui::SameLine(96.0f);
-                    ImGui::TextColored(kAccent, "%.4f mm", m.distance);
-                }
-                ImGui::TextColored(kDim, "dX");
-                ImGui::SameLine(96.0f); ImGui::Text("%.4f mm", m.delta.x);
-                ImGui::TextColored(kDim, "dY");
-                ImGui::SameLine(96.0f); ImGui::Text("%.4f mm", m.delta.y);
-                ImGui::TextColored(kDim, "dZ");
-                ImGui::SameLine(96.0f); ImGui::Text("%.4f mm", m.delta.z);
-            }
-            if (m.hasAngle) {
-                ImGui::TextColored(kDim, "Angle");
-                ImGui::SameLine(96.0f);
-                ImGui::TextColored(kAccent, "%.3f deg", m.angleDeg);
-            }
+    if (!m.valid) {
+        ui::commandHint("Click a vertex, edge or face. Click a second to measure between them.");
+    } else {
+        // A round thing leads with what it is. On an exact body the diameter is
+        // a fact about the geometry rather than a measurement taken across it,
+        // and it is the number someone is after.
+        if (m.hasDiameter) {
+            value("Diameter",  "%.4f mm", m.diameter, true);
+            value("Radius",    "%.4f mm", m.diameter * 0.5, false);
+            ui::commandRow("Centre");
+            ImGui::Text("%.3f, %.3f, %.3f", m.centre.x, m.centre.y, m.centre.z);
         }
-        ImGui::Separator();
-        ImGui::TextColored(kDim, "Esc clears   D exits");
+        if (m.hasLength)
+            value(m.hasDiameter ? "Around" : "Length", "%.4f mm", m.length, true);
+        if (m.hasArea) {
+            value("Area",      "%.4f mm2", m.area, true);
+            value("Perimeter", "%.4f mm",  m.perimeter, false);
+        }
+        if (ctx.measurePicks == 2 || m.hasLength) {
+            if (ctx.measurePicks == 2) value("Distance", "%.4f mm", m.distance, true);
+            value("dX", "%.4f mm", m.delta.x, false);
+            value("dY", "%.4f mm", m.delta.y, false);
+            value("dZ", "%.4f mm", m.delta.z, false);
+        }
+        if (m.hasAngle) value("Angle", "%.3f deg", m.angleDeg, true);
+
+        ui::commandHint("Esc clears   D exits");
     }
-    ImGui::End();
+    ui::endCommand();
 }
 
 // ---------------------------------------------------------------------------
