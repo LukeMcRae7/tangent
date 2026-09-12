@@ -81,6 +81,12 @@ public:
     }
     void setAutoExtrude(float mm) { autoExtrude_ = true; autoExtrudeMm_ = mm; }
     void setShellDemo(float wallMm) { shellDemo_ = wallMm; }
+
+    // Rounds one edge of a box and then the edge opposite it, through the same
+    // path the keyboard takes, and reports whether the part came out symmetric.
+    // Two opposite edges rounded to the same radius can only give a symmetric
+    // body, so asymmetry means the second fillet landed somewhere else.
+    void setFilletDemo(float radiusMm) { filletDemo_ = radiusMm; }
     void setHoldTransform() { holdTransform_ = true; }
 
     // Writes the viewport to a PPM after `afterFrames` frames. Reads back this
@@ -140,7 +146,13 @@ private:
 
     // Rounds the selected edges only, the way F does in Fusion.
     void filletSelectedEdges();
-    bool extendLastFillet(SceneObject& obj, const std::vector<Index>& edges, Real radius);
+    // `picked` is the body the edge handles were taken from, which during a
+    // fillet is the body as it was *before* the preview replaced it. Passing it
+    // rather than reading obj.body is the whole of the fix for a fillet landing
+    // on a different edge than the one previewed: handles do not survive an
+    // edit, and the preview is an edit.
+    bool extendLastFillet(SceneObject& obj, const Body& picked,
+                          const std::vector<Index>& edges, Real radius);
 
     // Modal interactive fillet (mouse radius, scroll wheel segments, Blender/CAD style)
     struct FilletToolState {
@@ -261,6 +273,7 @@ private:
     int         filletDemoEdges_ = 1;
     bool        autoExtrude_ = false;
     float       autoExtrudeMm_ = 10.0f;
+    float       filletDemo_ = 0.0f;     // radius in mm; 0 means do not
     float       shellDemo_ = 0.0f;      // wall in mm; 0 means do not
     bool        holdTransform_ = false;
 

@@ -171,6 +171,126 @@ bool Application::init() {
         applyBoolean(static_cast<BooleanOp>(booleanDemo_));
     }
 
+    if (filletDemo_ > 0.0f && !scene_.objects().empty()) {
+        // Round one edge, then another, each through beginFillet/commitFillet
+        // the way F does -- and check the result against rounding both in a
+        // single operation, which is unambiguous.
+        //
+        // Every pair, because which pairs go wrong depends on how the preview
+        // renumbered the edges, and guessing one pair is how this was missed.
+        // The second fillet goes through extendLastFillet, where a handle
+        // picked before the preview was read against the body the preview had
+        // replaced: if that stale handle happened to name a real edge, the
+        // fillet landed on it instead of the one the user chose.
+        const ObjectId id = scene_.objects().front()->id;
+        const std::vector<Feature> chain0 = scene_.find(id)->features;
+        const Real r = filletDemo_;
+
+        // The edges are remembered by where they are, not by their handles.
+        // A handle is only good until the next edit, and the whole point of the
+        // sequence being tested is that there is an edit in the middle of it --
+        // a harness that reused handles would be reproducing its own bug and
+        // blaming the program.
+        std::vector<Vec3> mids;
+        {
+            const Body& b0 = scene_.find(id)->body;
+            std::vector<EdgeId> all0;
+            b0.allEdges(all0);
+            for (EdgeId e : all0) mids.push_back(b0.edgeMidpoint(e));
+        }
+        const size_t edgeCount = mids.size();
+
+        // Whichever edge of the body as it stands now sits at that point.
+        // Rounding an edge shortens the ones that meet it by the same amount at
+        // each end, so their midpoints do not move.
+        auto edgeAtMidpoint = [&](Vec3 at) -> EdgeId {
+            const Body& b = scene_.find(id)->body;
+            std::vector<EdgeId> es;
+            b.allEdges(es);
+            EdgeId best = kInvalid;
+            Real bestD = 1e-4;
+            for (EdgeId e : es) {
+                const Real d = length(b.edgeMidpoint(e) - at);
+                if (d < bestD) { bestD = d; best = e; }
+            }
+            return best;
+        };
+
+        auto restore = [&] {
+            SceneObject* o = scene_.find(id);
+            o->features = chain0;
+            scene_.reevaluate(id);
+            scene_.clearElementSelection();
+        };
+
+        // Rounding both at once: the answer the sequence has to match.
+        auto together = [&](Vec3 am, Vec3 bm) -> Real {
+            restore();
+            SceneObject* o = scene_.find(id);
+            const EdgeId a = edgeAtMidpoint(am), b = edgeAtMidpoint(bm);
+            if (a == kInvalid || b == kInvalid) return -1.0;
+            Feature f;
+            f.kind = FeatureKind::Bevel;
+            f.edges = nameEdges(o->body, {a, b});
+            f.radii.assign(2, r);
+            f.width = r;
+            f.segments = 4;
+            if (!scene_.addFeature(id, std::move(f))) return -1.0;
+            return scene_.find(id)->body.health(false).volume;
+        };
+
+        // One after the other, through the tool. Reports the volume and how
+        // many features the chain ended up with, because the two cases are only
+        // comparable when the second fillet was folded into the first: two
+        // separate fillet features are a different solid by design -- the
+        // second cuts into the first one's surface rather than sharing a corner
+        // with it -- and that difference is not this bug.
+        int features = 0;
+        auto inSequence = [&](Vec3 am, Vec3 bm) -> Real {
+            restore();
+            view_.bevelSegments = 4;
+            for (Vec3 at : {am, bm}) {
+                const EdgeId e = edgeAtMidpoint(at);   // resolved against the body as it is now
+                if (e == kInvalid) return -1.0;
+                scene_.clearElementSelection();
+                scene_.selectElement({id, ElementKind::Edge, e}, true);
+                beginFillet();
+                if (!filletTool_.active) return -1.0;
+                filletTool_.typedValue = std::to_string(r);
+                updateFillet(false);
+                commitFillet();
+            }
+            features = static_cast<int>(scene_.find(id)->features.size());
+            return scene_.find(id)->body.health(false).volume;
+        };
+
+        int pairs = 0, wrong = 0, refused = 0, separate = 0;
+        for (size_t i = 0; i < edgeCount; ++i) {
+            for (size_t j = i + 1; j < edgeCount; ++j) {
+                const Real want = together(mids[i], mids[j]);
+                if (want < 0.0) continue;              // not a pair this body can round
+                const Real got = inSequence(mids[i], mids[j]);
+                ++pairs;
+                if (got < 0.0) { ++refused; continue; }
+                if (features != 2) { ++separate; continue; }   // not folded in; not comparable
+                if (std::fabs(got - want) > 1e-6) {
+                    ++wrong;
+                    if (wrong <= 3)
+                        std::fprintf(stderr,
+                                     "[fillet] edges %zu+%zu: one at a time gives %.3f mm3, "
+                                     "both at once gives %.3f mm3\n",
+                                     i, j, got, want);
+                }
+            }
+        }
+        restore();
+        std::fprintf(stderr,
+                     "[fillet] %d pairs at %.2f mm: %d folded into one fillet and %d of those "
+                     "landed somewhere else; %d added a second fillet, %d refused (%s)\n",
+                     pairs, static_cast<double>(r), pairs - separate - refused, wrong,
+                     separate, refused, wrong == 0 ? "all correct" : "WRONG EDGE");
+    }
+
     if (shellDemo_ > 0.0f && !scene_.objects().empty()) {
         // Drives the menu's own path -- select the top face, then shell -- so
         // this exercises the action and the feature rather than the kernel call.
@@ -456,6 +576,13 @@ void Application::drawMeasureLabel() {
 }
 
 void Application::drawSelectionHighlights() {
+    // While a fillet is being dragged, the object's body is the preview -- the
+    // edges that were selected have been rounded away and their handles now
+    // point at whatever inherited the numbers. Highlighting them draws a red
+    // line along an edge nobody chose, which is what made the fillet look like
+    // it was about to act on the wrong one. The preview is the feedback here.
+    if (filletTool_.active) return;
+
     const Vec4 faceTint = toVec4(palette::kBrand, 0.30f);
     const Vec4 edgeCol  = toVec4(palette::kBrand, 1.0f);
 
@@ -1224,7 +1351,10 @@ void Application::commitFillet() {
 
     if (!obj) return;
 
-    if (extendLastFillet(*obj, filletTool_.edges, filletTool_.currentRadius)) {
+    // The handles were picked on the body as it stood before the preview
+    // started rounding it, so that is the body they have to be read against.
+    if (extendLastFillet(*obj, filletTool_.meshBefore, filletTool_.edges,
+                         filletTool_.currentRadius)) {
         return;
     }
 
@@ -1276,8 +1406,8 @@ void Application::beginAddPrimitivePrompt(PrimitiveKind kind) {
 // cannot be traced back to an edge of the mesh that fillet saw, or if the
 // merged fillet does not evaluate -- in which case the caller adds a new
 // feature and the object is left exactly as it was.
-bool Application::extendLastFillet(SceneObject& obj, const std::vector<Index>& edges,
-                                   Real radius) {
+bool Application::extendLastFillet(SceneObject& obj, const Body& picked,
+                                   const std::vector<Index>& edges, Real radius) {
     if (obj.features.empty()) return false;
     const size_t last = obj.features.size() - 1;
     Feature& fillet = obj.features[last];
@@ -1304,9 +1434,15 @@ bool Application::extendLastFillet(SceneObject& obj, const std::vector<Index>& e
     for (size_t i = 0; i < merged.size(); ++i) radii.push_back(fillet.radiusFor(i));
 
     for (Index e : edges) {
-        if (!obj.body.hasEdge(e)) return false;
+        // `picked`, not obj.body. By the time this runs the preview has already
+        // replaced the object's body with a rounded one, where that same handle
+        // is a different edge -- and reading the endpoints from there mapped
+        // the fillet onto whichever edge had inherited the number. The preview
+        // was right and the committed result was not, which is the worst way
+        // for this to be wrong.
+        if (!picked.hasEdge(e)) return false;
         Vec3 a, b;
-        obj.body.edgePositions(e, a, b);
+        picked.edgePositions(e, a, b);
         const EdgeId mapped = edgeAlongSegment(before, a, b);
         if (mapped == kInvalid) return false;
 
