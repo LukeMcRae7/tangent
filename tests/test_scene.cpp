@@ -327,6 +327,20 @@ int main() {
         check(near(niceStep(0.23f), 0.25f), "0.23 -> 0.25");
         check(near(niceStep(2.4f), 2.5f), "2.4 -> 2.5");
 
+        // Rounding to the nearest is wrong when the value is a bound. Below,
+        // for a step that must not exceed a limit; above, for a tick spacing
+        // that must clear what the eye can separate.
+        check(near(niceStepBelow(1.75f), 1.0f), "below 1.75 -> 1");
+        check(near(niceStepAbove(1.75f), 2.5f), "above 1.75 -> 2.5");
+        check(near(niceStepBelow(2.5f), 2.5f), "a nice number is its own bound, below");
+        check(near(niceStepAbove(2.5f), 2.5f), "and above");
+        check(near(niceStepAbove(11.25f), 25.0f), "above 11.25 -> 25");
+        check(near(niceStepBelow(0.09f), 0.05f), "below 0.09 -> 0.05");
+        for (float v = 0.003f; v < 900.0f; v *= 1.07f) {
+            check(niceStepBelow(v) <= v * 1.0001f, "below never exceeds");
+            check(niceStepAbove(v) >= v * 0.9999f, "above never falls short");
+        }
+
         // Every step is 1, 2.5 or 5 times a power of ten -- halving, which is
         // how a person divides a measurement they are looking at -- and the
         // ladder never goes backwards as the requested size grows.

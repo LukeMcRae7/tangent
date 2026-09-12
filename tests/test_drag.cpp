@@ -55,8 +55,8 @@ int main() {
         // most oblique, and the arrow used to turn round and point backwards.
         check(near(axis.valueAt(cam, pixelOf(cam, Vec3{-6, 0, 0})), 0.0, 1e-9),
               "behind the start reads as the start, not as a negative");
-        check(axis.rawOffset(cam, pixelOf(cam, Vec3{-6, 0, 0})) < 0.0,
-              "though the raw offset still knows which side it is on");
+        check(axis.offsetPx(cam, pixelOf(cam, Vec3{-6, 0, 0})) < 0.0,
+              "though the offset on screen still knows which side it is on");
 
         DragAxis offset = axis;
         offset.baseValue = 1.5;
@@ -206,6 +206,67 @@ int main() {
                     wholeFace.direction.x, wholeFace.direction.y, wholeFace.direction.z);
     }
 
+    std::printf("--- a bounded drag lays its whole range on one track ---\n");
+    {
+        // The complaint this answers: the same gesture has to feel the same
+        // whether the range is two millimetres on a thin wall or two hundred on
+        // a plate, and whether the camera is close or far. So the range is
+        // mapped onto a track of one fixed length in pixels.
+        const Camera cam = lookingDown(200.0f);
+        DragAxis axis;
+        axis.origin = {0, 0, 0};
+        axis.direction = {1, 0, 0};
+        axis.baseValue = 0.05;
+        axis.spanValue = 1.992;          // the shelled box's real limit
+        axis.valid = true;
+
+        Vec2 at{};
+        check(cam.projectToPixel(axis.origin, at), "the anchor is on screen");
+
+        check(near(axis.valueAt(cam, at), 0.05, 1e-6), "at the anchor, the minimum");
+        check(near(axis.valueAt(cam, at + Vec2{DragAxis::kTrackPx, 0}), 1.992, 1e-6),
+              "a track's length along, the maximum");
+        check(near(axis.valueAt(cam, at + Vec2{DragAxis::kTrackPx * 0.5f, 0}),
+                   0.05 + (1.992 - 0.05) * 0.5, 1e-6),
+              "and halfway, halfway");
+
+        check(near(axis.valueAt(cam, at + Vec2{DragAxis::kTrackPx * 3.0f, 0}), 1.992, 1e-6),
+              "past the end it stops at the maximum");
+        check(near(axis.valueAt(cam, at - Vec2{400.0f, 0}), 0.05, 1e-6),
+              "and behind the start it stops at the minimum -- never below it");
+
+        // The same drag, on a part a hundred times the size and a camera a
+        // hundred times further away, is the same movement of the hand.
+        const Camera far_ = lookingDown(20000.0f);
+        DragAxis big = axis;
+        big.spanValue = 199.2;
+        Vec2 bigAt{};
+        check(far_.projectToPixel(big.origin, bigAt), "and on screen there too");
+        const Real half = big.valueAt(far_, bigAt + Vec2{DragAxis::kTrackPx * 0.5f, 0});
+        check(near(half, 0.05 + (199.2 - 0.05) * 0.5, 1e-4),
+              "half a track is half the range, whatever the scale");
+        std::printf("  2mm range and 200mm range: half a track gives %.3f and %.3f\n",
+                    axis.valueAt(cam, at + Vec2{DragAxis::kTrackPx * 0.5f, 0}), half);
+    }
+
+    std::printf("--- the ticks are a readable distance apart, always ---\n");
+    {
+        const Camera cam = lookingDown(120.0f);
+        for (Real reach : {0.4, 1.94, 12.0, 250.0}) {
+            const Real step = DragAxis::stepFor(cam, {0, 0, 0}, reach);
+            const Real spacingPx = step / reach * DragAxis::kTrackPx;
+            check(spacingPx >= 9.0 && spacingPx <= 32.0,
+                  "ticks " + std::to_string(spacingPx) + "px apart for a range of " +
+                  std::to_string(reach));
+            const Real m = step / std::pow(10.0, std::floor(std::log10(step)));
+            check(near(m, 1.0, 1e-3) || near(m, 2.5, 1e-3) || near(m, 5.0, 1e-3),
+                  "and the step is still a number a person would choose");
+        }
+        std::printf("  a 1.94mm range steps by %.3f, a 250mm range by %.1f\n",
+                    DragAxis::stepFor(cam, {0, 0, 0}, 1.94),
+                    DragAxis::stepFor(cam, {0, 0, 0}, 250.0));
+    }
+
     std::printf("--- the step follows the zoom and the travel ---\n");
     {
         // Two things decide it. Zoomed in, the step gets finer because a
@@ -215,13 +276,20 @@ int main() {
         const Camera close = lookingDown(40.0f);
         const Camera far_ = lookingDown(600.0f);
 
-        const Real fine = DragAxis::stepFor(close, at, 2.0);
-        const Real coarse = DragAxis::stepFor(far_, at, 2.0);
-        check(fine < coarse, "closer gives a finer step");
+        // A bounded drag's step comes from its range and nothing else. The
+        // zoom used to decide it, which is why the same operation felt
+        // different depending on where the camera happened to be.
+        check(near(DragAxis::stepFor(close, at, 2.0), DragAxis::stepFor(far_, at, 2.0), 1e-9),
+              "the same range gives the same step at any zoom");
 
         const Real shortTravel = DragAxis::stepFor(close, at, 2.0);
         const Real longTravel = DragAxis::stepFor(close, at, 400.0);
-        check(longTravel > shortTravel, "a longer travel gives a coarser one");
+        check(longTravel > shortTravel, "a longer range gives a coarser step");
+
+        // An unbounded drag has no range to divide, so there the zoom is all
+        // there is to go on.
+        check(DragAxis::stepFor(close, at, 0.0) < DragAxis::stepFor(far_, at, 0.0),
+              "unbounded, closer still gives a finer step");
 
         // And every one of them is a number a person would choose.
         for (Real reach : {1.0, 7.0, 40.0, 250.0}) {
@@ -245,8 +313,8 @@ int main() {
                       std::to_string(d) + "mm out: " + std::to_string(stops));
             }
         }
-        std::printf("  2mm travel: %.3f close, %.3f far; 400mm travel: %.3f\n",
-                    fine, coarse, longTravel);
+        std::printf("  2mm range steps by %.3f at any zoom; 400mm range by %.1f\n",
+                    shortTravel, longTravel);
     }
 
     std::printf("\n%s (%d failures)\n", failures ? "FAILED" : "ALL PASS", failures);

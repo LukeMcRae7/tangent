@@ -1285,7 +1285,6 @@ void Application::beginFillet() {
 
     // Test if any possible fillet would be accepted before presenting the interaction
     bool anyAccepted = false;
-    Real initialWidth = 1.0;
     // The reason from the last, smallest attempt. At 0.05 mm "too large" is
     // ruled out, so whatever is left is the real obstruction -- which is what
     // the user needs to hear, rather than "no room".
@@ -1304,12 +1303,17 @@ void Application::beginFillet() {
         }) == Attempt::Ok;
     };
 
-    const Real candidateRadii[] = {view_.bevelWidth, 1.0, 0.5, 0.2, 0.1, 0.05};
-    for (Real r : candidateRadii) {
-        if (r <= 0.0) continue;
+    // The smallest fillet this selection will take, searched upward from
+    // nothing. Not the first of a list starting at the width last used: that
+    // made the last fillet you did the smallest one you could ask for next
+    // time, so a 2mm fillet left 2mm as the floor and the arrow had nowhere to
+    // go but out. The floor belongs to the shape, not to the session.
+    Real minRadius = 0.0;
+    const Real minCandidates[] = {0.05, 0.1, 0.25, 0.5, 1.0, 2.5};
+    for (Real r : minCandidates) {
         if (builds(r)) {
             anyAccepted = true;
-            initialWidth = r;
+            minRadius = r;
             break;
         }
         // Only for the phrasing: the radius that failed is re-run in process
@@ -1326,6 +1330,7 @@ void Application::beginFillet() {
                               : "Cannot fillet these edges: " + why);
         return;
     }
+    Real initialWidth = minRadius;
 
     // How far this gesture can go, settled now rather than rediscovered under
     // the cursor. Doubling until it fails, then bisecting: about a dozen builds
@@ -1399,11 +1404,18 @@ void Application::beginFillet() {
             // Slide the origin out to sit under the pointer. The gesture is
             // then "how far have I pulled from where I started", which cannot
             // invert and does not depend on where on the edge the click landed.
-            const Real out = filletTool_.axis.facingCamera(camera_)
-                                 ? std::max(Real(0), filletTool_.axis.rawOffset(camera_, at))
-                                 : 0.0;
-            filletTool_.axis.origin = filletTool_.axis.origin + filletTool_.axis.direction * out;
-            filletTool_.axis.baseValue = initialWidth;
+            // Slide the origin out to sit under the pointer, so the track
+            // starts in the hand. Measured in pixels and converted, because
+            // the track itself is a screen-space length.
+            const Real outPx = std::max(Real(0), filletTool_.axis.offsetPx(camera_, at));
+            const Real px = camera_.pixelWorldSize(filletTool_.axis.origin);
+            filletTool_.axis.origin =
+                filletTool_.axis.origin + filletTool_.axis.direction * (outPx * px);
+
+            // The whole usable range, laid along one track: from the smallest
+            // fillet this selection will take to the largest.
+            filletTool_.axis.baseValue = minRadius;
+            filletTool_.axis.spanValue = maxRadius;
         }
     }
 

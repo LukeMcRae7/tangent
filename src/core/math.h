@@ -63,6 +63,21 @@ inline Real niceStepBelow(Real cap) {
     return cap;
 }
 
+// The smallest nice value that is at least `floor`. The mirror of
+// niceStepBelow, for when a step has a minimum it must clear -- a tick spacing
+// the eye can separate, say -- and rounding to the nearest would land under it.
+inline Real niceStepAbove(Real floorValue) {
+    if (!(floorValue > 0.0f)) return 0.0f;
+    Real e = std::floor(std::log10(floorValue));
+    for (int i = 0; i < 4; ++i) {
+        const Real base = std::pow(10.0f, e);
+        for (const Real mult : {1.0f, 2.5f, 5.0f})
+            if (base * mult >= floorValue * 0.999999f) return base * mult;
+        e += 1.0f;
+    }
+    return floorValue;
+}
+
 inline Real niceStep(Real approx) {
     if (!(approx > 0.0f)) return 0.0f;
     const Real e = std::floor(std::log10(approx));

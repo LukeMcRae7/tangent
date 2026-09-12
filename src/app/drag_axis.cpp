@@ -14,55 +14,12 @@ namespace {
 // times what it is worth head-on, and it gets worse fast.
 constexpr Real kMinViewAngleCos = 0.975;   // ~12 degrees off perpendicular
 
-}  // namespace
-
-bool DragAxis::facingCamera(const Camera& camera) const {
-    if (!valid) return false;
-    const Vec3 toEye = normalize(camera.eye() - origin);
-    return std::fabs(dot(toEye, direction)) < kMinViewAngleCos;
-}
-
-Real DragAxis::valueAt(const Camera& camera, Vec2 mousePx) const {
-    if (!valid) return baseValue;
-    // Forward only. Behind the start there is nothing to measure, and letting
-    // the number go negative is what made the arrow invert near the edge of
-    // the screen, where an oblique ray puts the nearest point on the wrong
-    // side of the anchor.
-    return baseValue + std::max(Real(0), rawOffset(camera, mousePx));
-}
-
-Real DragAxis::rawOffset(const Camera& camera, Vec2 mousePx) const {
-    if (!valid) return 0.0;
-    const Ray ray = camera.rayThroughPixel(static_cast<float>(mousePx.x),
-                                           static_cast<float>(mousePx.y));
-
-    // Closest point between the axis line and the cursor's ray. The usual
-    // two-line formulation, guarded for the parallel case.
-    const Vec3 w0 = origin - ray.origin;
-    const Real a = dot(direction, direction);          // 1
-    const Real b = dot(direction, ray.dir);
-    const Real c = dot(ray.dir, ray.dir);              // 1
-    const Real d = dot(direction, w0);
-    const Real e = dot(ray.dir, w0);
-    const Real denom = a * c - b * b;
-
-    if (std::fabs(denom) > 1e-9) return (b * e - c * d) / denom;
-
-    // Looking straight down the axis: the lines are parallel and there is no
-    // nearest point. Fall back to how far the cursor is from the origin on
-    // screen, in the axis's own units, which at least keeps moving.
-    Vec2 originPx{};
-    if (!camera.projectToPixel(origin, originPx)) return 0.0;
-    return length(mousePx - originPx) * static_cast<Real>(camera.pixelWorldSize(origin));
-}
-
-namespace {
-
 // A line of a given thickness in pixels, drawn as parallel strands.
 //
 // Not glLineWidth: a core profile is only required to support a width of one,
-// and several drivers give exactly that. Strands cost a few more vertices in a
-// batch that already holds hundreds.
+// and several drivers give exactly that. Good enough for the track and the
+// ticks, which are quiet; the arrow is filled triangles, because at four
+// strands a shallow angle shows them separately.
 void thickLine(Renderer& renderer, const Camera& camera, Vec3 a, Vec3 b, Vec4 color,
                Real widthPx) {
     Vec3 along = b - a;
@@ -83,82 +40,134 @@ void thickLine(Renderer& renderer, const Camera& camera, Vec3 a, Vec3 b, Vec4 co
 
 }  // namespace
 
-Real DragAxis::stepFor(const Camera& camera, Vec3 at, Real reach) {
-    const Real px = static_cast<Real>(camera.pixelWorldSize(at));
-    // Ten pixels is the finest worth offering -- below that the hand cannot
-    // pick one tick over its neighbour. A thirtieth of the travel is the
-    // coarsest -- above that the whole range is a handful of stops. Whichever
-    // is larger, rounded to a number a person would choose.
-    const Real byZoom = px * 10.0;
-    const Real byReach = reach > 0.0 ? reach / 30.0 : 0.0;
-    Real step = niceStep(std::max(byZoom, byReach));
+bool DragAxis::facingCamera(const Camera& camera) const {
+    if (!valid) return false;
+    const Vec3 toEye = normalize(camera.eye() - origin);
+    return std::fabs(dot(toEye, direction)) < kMinViewAngleCos;
+}
 
-    // And never coarser than a quarter of the travel. Zoomed far enough out,
-    // ten pixels is worth more than the whole gesture, and the step would be
-    // the only stop on the road -- which is a slider with one position.
-    if (reach > 0.0 && step > reach * 0.25) step = niceStepBelow(reach * 0.25);
-    return step;
+Real DragAxis::offsetPx(const Camera& camera, Vec2 mousePx) const {
+    if (!valid) return 0.0;
+
+    Vec2 originPx{};
+    if (!camera.projectToPixel(origin, originPx)) return 0.0;
+
+    // The axis as it appears on screen, taken from a sample far enough along it
+    // to be measurable -- a one-pixel step would be mostly rounding.
+    const Real px = static_cast<Real>(camera.pixelWorldSize(origin));
+    Vec2 aheadPx{};
+    if (camera.projectToPixel(origin + direction * (px * 60.0), aheadPx)) {
+        const Vec2 along = aheadPx - originPx;
+        if (lengthSq(along) > 4.0) {
+            const Vec2 unit = along / length(along);
+            return dot(mousePx - originPx, unit);
+        }
+    }
+
+    // Nearly end-on, where the axis has no length on screen to measure along.
+    // Distance from the anchor is cruder but it still moves in one direction
+    // and cannot flip, which is what matters.
+    return length(mousePx - originPx);
+}
+
+Real DragAxis::valueAt(const Camera& camera, Vec2 mousePx) const {
+    if (!valid) return baseValue;
+
+    const Real along = offsetPx(camera, mousePx);
+
+    // Bounded: the track carries the whole range, so the same movement of the
+    // hand always covers it, whatever the part and wherever the camera.
+    if (spanValue > baseValue) {
+        const Real t = std::clamp(along / kTrackPx, Real(0), Real(1));
+        return baseValue + t * (spanValue - baseValue);
+    }
+
+    // Unbounded: a pixel is worth what a pixel is worth out there.
+    const Real px = static_cast<Real>(camera.pixelWorldSize(origin));
+    return baseValue + std::max(Real(0), along) * px;
+}
+
+Real DragAxis::stepFor(const Camera& camera, Vec3 at, Real reach) {
+    // A bounded drag lays its whole range along a track of a fixed length, so
+    // the step is decided by that length and not by the zoom: twelve pixels is
+    // the finest spacing a hand can reliably pick one tick from its neighbour,
+    // and twelve pixels is the same distance whatever the camera is doing.
+    if (reach > 0.0) {
+        // Rounded *up*, so the spacing never falls under the nine pixels the
+        // eye needs to separate one tick from its neighbour. Rounding to the
+        // nearest lands below it about half the time -- a range of 250mm wants
+        // 11.25 and gets 10, which is eight pixels apart.
+        Real step = niceStepAbove(reach * 9.0 / kTrackPx);
+        // And never so coarse that the range is a handful of stops.
+        if (step > reach * 0.25) step = niceStepBelow(reach * 0.25);
+        return step;
+    }
+
+    // Unbounded: fall back to the zoom, where ten pixels is the finest worth
+    // offering.
+    return niceStep(static_cast<Real>(camera.pixelWorldSize(at)) * 10.0);
 }
 
 void DragAxis::drawGuide(Renderer& renderer, const Camera& camera, Real value,
                          Real step, Real limit) const {
     if (!valid) return;
 
-    // Three weights. The ticks sit behind, quiet enough to read as a scale
-    // rather than as content; the track is the road; the arrow is the thing
-    // being read, and it is drawn last, filled, over everything.
+    // Three weights: ticks behind, quiet enough to read as a scale; the track;
+    // and the arrow, filled and in front, which is the part being read.
     const Vec4 ticks = toVec4(palette::kBrand, 0.20f);
     const Vec4 track = toVec4(palette::kBrand, 0.38f);
     const Vec4 arrow = toVec4(palette::kBrand, 1.0f);
 
     const Real px = static_cast<Real>(camera.pixelWorldSize(origin));
+    const bool bounded = spanValue > baseValue;
 
-    // How much of the travel to draw. Ahead to the limit when the limit is
-    // close enough to show at a readable size, and a fixed length of road when
-    // it is further -- so the guide is about the same size on screen whatever
-    // the part is and wherever the camera is.
-    constexpr Real kShownPx = 180.0;
-    const Real toLimit = limit > 0.0 ? limit - baseValue : 0.0;
-    const bool limitInView = limit > 0.0 && toLimit <= px * kShownPx * 1.25;
-    const Real ahead = limitInView ? std::max(toLimit, px * 24.0) : px * kShownPx;
+    // The track is the same length on screen every time. That is the whole
+    // point of it: the gesture is the same size for a 2mm wall and a 200mm
+    // plate, and the ticks along it are spaced the same in both.
+    const Real trackWorld = px * kTrackPx;
+    (void)limit;   // the span is the limit; the parameter is kept for callers
+                   // whose range is not known until the drag is under way.
+
+    // Where a value sits along the track.
+    auto place = [&](Real v) {
+        if (!bounded) return std::max(Real(0), v - baseValue);
+        const Real t = std::clamp((v - baseValue) / (spanValue - baseValue), Real(0), Real(1));
+        return t * trackWorld;
+    };
 
     Vec3 across = cross(direction, normalize(camera.eye() - origin));
     if (lengthSq(across) < 1e-12) across = perpendicular(direction);
     across = normalize(across);
 
     // Ticks, from the start forward. Nothing behind it: the gesture cannot go
-    // there, so a scale there would be describing travel that does not exist.
+    // there, so a scale there would describe travel that does not exist.
     if (step > 0.0) {
+        const Real last = bounded ? spanValue : baseValue + trackWorld;
         const Real first = std::ceil(baseValue / step) * step;
         int drawn = 0;
-        for (Real at = first; at <= baseValue + ahead && drawn < 80; at += step, ++drawn) {
-            const Vec3 p = origin + direction * (at - baseValue);
+        for (Real at = first; at <= last + 1e-9 && drawn < 90; at += step, ++drawn) {
+            const Vec3 p = origin + direction * place(at);
             const bool major = std::fabs(std::fmod(at / step, 4.0)) < 1e-6;
             const Real len = px * (major ? 5.5 : 3.0);
             renderer.addLine(p - across * len, p + across * len, ticks);
         }
     }
 
-    // The road.
-    const Vec3 tip = origin + direction * ahead;
+    // The road, and a bar at the end of it. With a limit the end of the track
+    // *is* the limit, so the end of the travel is a place on screen rather
+    // than something found by pushing into it.
+    const Vec3 tip = origin + direction * trackWorld;
     thickLine(renderer, camera, origin, tip, track, 2.0);
-
-    // A bar at the end when the end is the limit: past here the shape will not
-    // take it, and that should be a place rather than a surprise.
-    if (limitInView) {
+    if (bounded) {
         const Real cap = px * 8.0;
         thickLine(renderer, camera, tip - across * cap, tip + across * cap, track, 3.0);
     }
 
-    // The arrow. Filled triangles rather than a bundle of parallel lines: at
-    // four strands a shallow angle shows them separately and it reads as a
-    // frayed rope rather than an arrow. In the front layer, so the ticks
-    // cannot stripe through it and the model cannot hide it.
-    const Real travelled = std::max(Real(0), value - baseValue);
-    const Vec3 head = origin + direction * travelled;
-
+    // The arrow: filled, in the front layer, from the start to the value.
+    const Vec3 head = origin + direction * place(value);
     const Real barb = px * 14.0;
     const Real shaftHalf = px * 2.6;
+    const Real travelled = length(head - origin);
     const Real shaftEnd = std::max(Real(0), travelled - barb * 0.82);
 
     if (shaftEnd > 1e-9) {

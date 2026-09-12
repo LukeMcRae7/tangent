@@ -35,6 +35,21 @@ struct DragAxis {
     // way. There is nothing behind the start to point at.
     Real baseValue = 0.0;
 
+    // The value at the far end of the track. Zero means the drag is unbounded
+    // and one millimetre of world is one millimetre of value.
+    //
+    // With a limit, the whole usable range is mapped onto a track of a fixed
+    // length on screen instead. That is the difference between a gesture that
+    // feels the same every time and one whose sensitivity depends on how big
+    // the part is and how far away the camera happens to be: rounding a 2mm
+    // wall and rounding a 200mm plate are then the same movement of the hand,
+    // and the ticks along the way are spaced the same in both.
+    Real spanValue = 0.0;
+
+    // How long that track is, in pixels. One number, so every bounded drag in
+    // the program is the same size and the same sensitivity.
+    static constexpr Real kTrackPx = 200.0;
+
     bool valid = false;
 
     // Where the cursor sits along the axis, in millimetres from the origin.
@@ -47,9 +62,11 @@ struct DragAxis {
     // wildly -- so there is a screen-space fallback below.
     Real valueAt(const Camera& camera, Vec2 mousePx) const;
 
-    // How far along the axis the cursor is, signed and unclamped. valueAt is
-    // this, clamped forward and offset by baseValue.
-    Real rawOffset(const Camera& camera, Vec2 mousePx) const;
+    // How far along the axis the cursor is, in pixels on screen, signed. This
+    // is what the value is built from: measuring on screen is what makes the
+    // track a fixed size, and it degrades gracefully when the axis points near
+    // the eye, where a world-space projection does not.
+    Real offsetPx(const Camera& camera, Vec2 mousePx) const;
 
     // True when the axis is square enough to the view to measure along. Near
     // false the caller should say so rather than let the number jump about.
