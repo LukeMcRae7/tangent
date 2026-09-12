@@ -37,9 +37,13 @@ bool makePrimitive(const PrimitiveSpec& spec, Body& out, Backend backend = Backe
 // ---- Modelling ------------------------------------------------------------
 // Pushes faces along the region's area-weighted normal. `newFaces` reports
 // where the moved faces ended up, in the order they were given.
+//
+// `mergeFlush` is the difference between push-pull and extrude: see
+// brep::extrudeFaces.
 bool extrudeFaces(Body& body, const std::vector<FaceId>& faces, Real distance,
                   std::vector<FaceId>* newFaces = nullptr, ElementId salt = 0,
-                  ExtrudeOp op = ExtrudeOp::Auto, std::string* reason = nullptr);
+                  ExtrudeOp op = ExtrudeOp::Auto, std::string* reason = nullptr,
+                  bool mergeFlush = true);
 
 // A solid from a closed profile on a plane, swept between two heights along the
 // plane's normal -- what the create tool draws.

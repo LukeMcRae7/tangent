@@ -1152,7 +1152,8 @@ BrepRef unifyFlush(const BrepRef& made, const BrepRef& before, ElementId salt) {
 }
 
 BrepRef extrudeFaces(const BrepRef& s, const std::vector<FaceId>& faces, Real distance,
-                     ElementId salt, std::vector<ElementId>* newFaces, std::string* reason) {
+                     ElementId salt, std::vector<ElementId>* newFaces, std::string* reason,
+                     bool mergeFlush) {
     if (newFaces) newFaces->clear();
     if (reason) reason->clear();
     if (!s || faces.empty()) {
@@ -1246,7 +1247,9 @@ BrepRef extrudeFaces(const BrepRef& s, const std::vector<FaceId>& faces, Real di
                                          distance > 0 ? BooleanOp::Union : BooleanOp::Difference,
                                          nameId(salt, IdRole::Split, targets[i]), reason);
             if (!combined) return {};
-            step = unifyFlush(combined, step, nameId(salt, IdRole::Patch, targets[i]));
+            step = mergeFlush
+                       ? unifyFlush(combined, step, nameId(salt, IdRole::Patch, targets[i]))
+                       : combined;
             break;   // the prism spans every piece of that face already
         }
         current = step;

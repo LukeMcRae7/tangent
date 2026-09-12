@@ -32,7 +32,7 @@ bool makePrimitive(const PrimitiveSpec& spec, Body& out, Backend backend) {
 
 bool extrudeFaces(Body& body, const std::vector<FaceId>& faces, Real distance,
                   std::vector<FaceId>* newFaces, ElementId salt, ExtrudeOp op,
-                  std::string* reason) {
+                  std::string* reason, bool mergeFlush) {
     if (!body.isMesh()) {
         // The exact backend sweeps the face and combines the result, so which
         // way the push goes decides whether that is a join or a cut. ExtrudeOp
@@ -43,7 +43,8 @@ bool extrudeFaces(Body& body, const std::vector<FaceId>& faces, Real distance,
 
         std::vector<ElementId> names;
         BrepRef result = brep::extrudeFaces(body.brepRef(), faces, signed_, salt,
-                                            newFaces ? &names : nullptr, reason);
+                                            newFaces ? &names : nullptr, reason,
+                                            mergeFlush);
         if (!result) return false;
         body = Body(std::move(result));
         if (newFaces) {

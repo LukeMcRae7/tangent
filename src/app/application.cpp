@@ -861,9 +861,11 @@ void Application::drawFilletPanel() {
 
 void Application::drawFacePanel() {
     if (!faceTool_.active) return;
-    const bool rotate = faceTool_.op == FaceOp::Rotate;
+    const bool rotate  = faceTool_.op == FaceOp::Rotate;
+    const bool extrude = faceTool_.op == FaceOp::Extrude;
 
-    if (!ui::beginCommand("##faceop", rotate ? "Rotate Face" : "Push / Pull",
+    if (!ui::beginCommand("##faceop",
+                          rotate ? "Rotate Face" : extrude ? "Extrude" : "Push / Pull",
                           rotate ? Icon::Chamfer : Icon::Extrude,
                           viewRect_.x + 16.0f, viewRect_.y + 16.0f))
         return;
@@ -879,39 +881,47 @@ void Application::drawFacePanel() {
     ui::commandValue("Selection", sel);
 
     if (!rotate) {
-        // Which way the material goes. Auto reads it from the sign, so say
-        // what that currently means rather than leaving it to be inferred.
-        const float ic = ImGui::GetTextLineHeight() * 1.4f;
-        ui::commandRow("Result");
         const bool cutting = faceTool_.combine == ExtrudeOp::Cut ||
                              (faceTool_.combine == ExtrudeOp::Auto && faceTool_.value < 0.0);
+        ui::commandRow("Result");
         ImGui::TextColored(cutting ? ImVec4(0.95f, 0.35f, 0.25f, 1.0f)
                                    : ImVec4(palette::kBrand.r, palette::kBrand.g,
                                             palette::kBrand.b, 1.0f),
                            "%s", cutting ? "Cuts into the body" : "Adds to the body");
 
-        ui::commandRow("Force");
-        {
-            const bool on = faceTool_.combine == ExtrudeOp::Auto;
-            if (on) ImGui::PushStyleColor(ImGuiCol_Button,
-                                          ImVec4(palette::kBrand.r, palette::kBrand.g,
-                                                 palette::kBrand.b, 0.85f));
-            if (ImGui::Button("Auto")) faceTool_.combine = ExtrudeOp::Auto;
-            if (on) ImGui::PopStyleColor();
+        // Only an extrude has an operation to choose. Push and pull is the
+        // face moving: which way you pull is the whole of the decision, and a
+        // button that said otherwise would be claiming a choice there is not.
+        if (extrude) {
+            const float ic = ImGui::GetTextLineHeight() * 1.4f;
+            ui::commandRow("Operation");
+            {
+                const bool on = faceTool_.combine == ExtrudeOp::Auto;
+                if (on) ImGui::PushStyleColor(ImGuiCol_Button,
+                                              ImVec4(palette::kBrand.r, palette::kBrand.g,
+                                                     palette::kBrand.b, 0.85f));
+                if (ImGui::Button("Auto")) faceTool_.combine = ExtrudeOp::Auto;
+                if (on) ImGui::PopStyleColor();
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Add when pushed out, cut when pushed in  (A)");
+            }
+            ImGui::SameLine();
+            if (iconButton(Icon::Union, "fjoin", ic, "Always add  (J)",
+                           faceTool_.combine == ExtrudeOp::Join))
+                faceTool_.combine = ExtrudeOp::Join;
+            ImGui::SameLine();
+            if (iconButton(Icon::Difference, "fcut", ic, "Always cut  (D)",
+                           faceTool_.combine == ExtrudeOp::Cut))
+                faceTool_.combine = ExtrudeOp::Cut;
         }
-        ImGui::SameLine();
-        if (iconButton(Icon::Union, "fjoin", ic, "Always add  (J)",
-                       faceTool_.combine == ExtrudeOp::Join))
-            faceTool_.combine = ExtrudeOp::Join;
-        ImGui::SameLine();
-        if (iconButton(Icon::Difference, "fcut", ic, "Always cut  (D)",
-                       faceTool_.combine == ExtrudeOp::Cut))
-            faceTool_.combine = ExtrudeOp::Cut;
     }
 
     ui::commandHint(rotate
         ? "Pull across the edge the face pivots on, or type an angle."
-        : "Pull along the arrow, or type a distance.  A negative one cuts.");
+        : extrude
+        ? "Grows a boss off the face and keeps its outline, so you can take "
+          "hold of it afterwards."
+        : "Moves the face; the body absorbs it. Pull out to add, in to cut.");
 
     const int footer = ui::commandFooter("OK  (Click)");
     ui::endCommand();
@@ -1270,7 +1280,10 @@ void Application::handleShortcuts() {
     }
 
     // Mesh edits act on the selected faces. Shift+E cuts inward.
-    if (!ctrl && !alt && ImGui::IsKeyPressed(ImGuiKey_E, false)) ui_.actions.extrude = true;
+    if (!ctrl && !alt && ImGui::IsKeyPressed(ImGuiKey_E, false)) {
+        if (io.KeyShift) ui_.actions.extrude = true;
+        else             ui_.actions.pushPull = true;
+    }
     if (!ctrl && !alt && ImGui::IsKeyPressed(ImGuiKey_T, false)) ui_.actions.rotateFace = true;
     if (!ctrl && !alt && ImGui::IsKeyPressed(ImGuiKey_K, false)) ui_.actions.divide = true;
     if (ctrl && !shift && ImGui::IsKeyPressed(ImGuiKey_B, false)) ui_.actions.bevel = true;
@@ -1748,8 +1761,9 @@ void Application::updateFaceMove(bool snap, bool follow) {
         });
     } else {
         const ExtrudeOp combine = faceTool_.combine;
-        faceTool_.preview.request(faceTool_.before, [faces, want, combine](Body& b) {
-            return extrudeFaces(b, faces, want, nullptr, 7002, combine);
+        const bool merge = faceTool_.op == FaceOp::PushPull;
+        faceTool_.preview.request(faceTool_.before, [faces, want, combine, merge](Body& b) {
+            return extrudeFaces(b, faces, want, nullptr, 7002, combine, nullptr, merge);
         });
     }
     faceTool_.previewValid = false;
@@ -1781,13 +1795,17 @@ void Application::commitFaceMove() {
         f.kind = FeatureKind::Extrude;
         f.distance = faceTool_.value;
         f.extrudeOp = faceTool_.combine;
+        f.mergeFlush = faceTool_.op == FaceOp::PushPull;
     }
     f.faces = nameFaces(faceTool_.before, faceTool_.faces);
 
     std::string why;
     if (scene_.addFeature(id, std::move(f), &why) && editKeepsSolid(id)) {
-        undo_.push(std::make_unique<FeatureCommand>(id, std::move(chainBefore),
-                                                    obj->features, "Move Face"));
+        undo_.push(std::make_unique<FeatureCommand>(
+            id, std::move(chainBefore), obj->features,
+            faceTool_.op == FaceOp::Rotate     ? "Rotate Face"
+            : faceTool_.op == FaceOp::Extrude  ? "Extrude"
+                                               : "Push / Pull"));
     } else {
         obj->features = std::move(chainBefore);
         obj->body = std::move(faceTool_.before);
@@ -2327,7 +2345,21 @@ void Application::stepFaceDemo() {
                      (int)o->body.validate(), o->features.size());
     };
 
-    if (faceDemo_ >= 4) {
+    if (faceDemo_ == 6) {
+        // The same pull, as an extrude: the boss keeps its outline.
+        scene_.clearElementSelection();
+        scene_.selectElement({id, ElementKind::Face, topFace()}, true);
+        beginFaceMove(FaceOp::Extrude);
+        faceTool_.typedValue = "6";
+        updateFaceMove(false);
+        while (faceTool_.preview.busy()) updateFaceMove(false);
+        updateFaceMove(false);
+        report("extruded");
+        commitFaceMove();
+        return;
+    }
+
+    if (faceDemo_ >= 4 && faceDemo_ <= 5) {
         // A loop cut across the top, then push one half of it up.
         const SceneObject* o = scene_.find(id);
         std::vector<EdgeId> es;
@@ -3203,9 +3235,8 @@ void Application::applyActions() {
         }
     }
 
-    // Push and pull *is* extrude on an existing face, and it is the same
-    // operation whichever name it is reached by.
-    if (a.extrude) beginFaceMove(FaceOp::PushPull);
+    if (a.pushPull) beginFaceMove(FaceOp::PushPull);
+    if (a.extrude)  beginFaceMove(FaceOp::Extrude);
     if (a.rotateFace) beginFaceMove(FaceOp::Rotate);
     if (a.divide) beginDivide();
     if (a.bevel)   bevelActiveObject();

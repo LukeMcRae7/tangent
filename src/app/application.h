@@ -109,8 +109,9 @@ public:
     // looked at rather than only the result.
     void setFilletOpen() { filletOpen_ = true; }
 
-    // Drives the face tools: 1 push out, 2 pull in, 3 rotate, 4 divide, and
-    // 5 divide then push one half -- the sequence the divide exists for.
+    // Drives the face tools: 1 push out, 2 pull in, 3 rotate, 4 divide,
+    // 5 divide then push one half -- the sequence the divide exists for -- and
+    // 6 the same pull as an extrude, which keeps the boss's outline.
     void setFaceDemo(int mode) { faceDemo_ = mode; }
 
     // Parks the interface's pointer somewhere, for screenshots of hover states.
@@ -277,7 +278,20 @@ private:
     // pointed at moves, with the ones around it stretching to follow. Push and
     // pull along the normal is what "extrude" means on an existing face, and
     // rotate tips the face about one of its own edges.
-    enum class FaceOp { PushPull, Rotate };
+    // Three, and the first two are not the same operation said twice.
+    //
+    //   PushPull  moves the face. Walls left flush with the walls they slid
+    //             along merge into them, so a box whose top is pulled up is a
+    //             taller box. Which way you pull decides whether that adds
+    //             material or takes it: there is nothing else to choose.
+    //
+    //   Extrude   grows a boss off the face and leaves its outline drawn, so
+    //             the new part is something you can point at and act on
+    //             afterwards. The operation is chosen rather than read off the
+    //             direction, so a positive distance can still cut.
+    //
+    //   Rotate    tips the face about one of its own edges.
+    enum class FaceOp { PushPull, Extrude, Rotate };
 
     struct FaceToolState {
         bool     active = false;

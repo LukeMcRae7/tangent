@@ -492,9 +492,16 @@ float drawToolbar(UiContext& ctx) {
         ctx.actions.shell = true;
     ImGui::SameLine();
 
-    if (iconButton(Icon::Extrude, "Extrude", icon,
-                   faces ? "Push or pull the selected faces  (E)"
+    if (iconButton(Icon::Extrude, "PushPull", icon,
+                   faces ? "Push / pull: move the face, the body absorbs it  (E)"
                          : "Push / pull - select a face first",
+                   false, faces > 0))
+        ctx.actions.pushPull = true;
+    ImGui::SameLine();
+
+    if (iconButton(Icon::Union, "Extrude", icon,
+                   faces ? "Extrude: grow a boss off the face, outline kept  (Shift+E)"
+                         : "Extrude - select a face first",
                    false, faces > 0))
         ctx.actions.extrude = true;
     ImGui::SameLine();

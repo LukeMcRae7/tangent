@@ -188,8 +188,16 @@ BrepRef filletEdges(const BrepShape& s, const std::vector<EdgeId>& edges,
 //
 // `newFaces` reports the name of each moved face's new position, in the order
 // the faces were given.
+//
+// `mergeFlush` decides which of the two operations this is. A prism swept off a
+// face has walls flush with the walls it slides along -- the same plane, in two
+// pieces. Merging them moves the face and lets the body absorb it, which is
+// push and pull. Leaving them draws the boss's own boundary, which is what
+// makes it a thing that can be selected and edited afterwards, and that is
+// extrude.
 BrepRef extrudeFaces(const BrepRef& s, const std::vector<FaceId>& faces, Real distance,
-                     ElementId salt, std::vector<ElementId>* newFaces, std::string* reason);
+                     ElementId salt, std::vector<ElementId>* newFaces, std::string* reason,
+                     bool mergeFlush = true);
 
 // Splits each face into an inner face and the ring around it, the inner one
 // offset inward by `amount`. What a pocket or a boss is drawn from.

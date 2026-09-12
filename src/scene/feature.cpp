@@ -28,6 +28,9 @@ const char* featureKindName(FeatureKind k) {
 
 const char* Feature::displayKind() const {
     if (kind == FeatureKind::Bevel) return segments == 1 ? "Chamfer" : "Fillet";
+    // Two operations share the kind: the one that moved a face and the one that
+    // grew a boss off it. What a person calls them is the difference.
+    if (kind == FeatureKind::Extrude) return mergeFlush ? "Push / Pull" : "Extrude";
     return featureKindName(kind);
 }
 
@@ -267,7 +270,8 @@ bool evaluateFrom(std::vector<Feature>& features, size_t from,
             // it was and the chain carries on from there.
             else {
                 std::string why;
-                if (!extrudeFaces(body, scratchFaces, f.distance, nullptr, f.uid, f.extrudeOp, &why))
+                if (!extrudeFaces(body, scratchFaces, f.distance, nullptr, f.uid, f.extrudeOp,
+                                  &why, f.mergeFlush))
                     fail(why.empty() ? "extrude failed" : why.c_str());
             }
             break;

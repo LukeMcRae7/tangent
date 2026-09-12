@@ -115,6 +115,12 @@ struct Feature {
     ElementRefs faces;
     Real distance = 5.0;    // Extrude, signed
     ExtrudeOp extrudeOp = ExtrudeOp::Auto;
+
+    // Whether the walls the sweep left flush with the walls it slid along are
+    // merged into them. True is push and pull -- the face moves and the body
+    // absorbs it. False is extrude -- the boss keeps its own outline, which is
+    // what makes it something you can point at afterwards.
+    bool mergeFlush = true;
     Real amount   = 2.0;    // Inset
 
     // FaceRotate: how far to tip, and the edge to tip about. Divide: a point on

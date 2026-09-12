@@ -68,6 +68,49 @@ int main() {
         std::printf("  %.0f -> %.0f mm3\n", before, b.health(false).volume);
     }
 
+    std::printf("--- push-pull and extrude are not the same operation ---\n");
+    {
+        // Both sweep the face and combine the result, and on the volume they
+        // agree exactly. What they disagree about is what is left behind: the
+        // prism's walls are flush with the walls they slid along, and whether
+        // those merge decides whether you moved a face or grew a boss with an
+        // outline of its own.
+        Body pushed = makeBox(20, 20, 20);
+        Body grown  = makeBox(20, 20, 20);
+        std::string why;
+
+        check(extrudeFaces(pushed, {facing(pushed, {0, 0, 1})}, 5.0, nullptr, 4101,
+                           ExtrudeOp::Auto, &why, /*mergeFlush=*/true),
+              "pushed: " + why);
+        check(extrudeFaces(grown, {facing(grown, {0, 0, 1})}, 5.0, nullptr, 4102,
+                           ExtrudeOp::Auto, &why, /*mergeFlush=*/false),
+              "extruded: " + why);
+
+        check(near(pushed.health(false).volume, grown.health(false).volume, 1e-6),
+              "the same material either way");
+        check(pushed.faceCount() == 6,
+              "pushed: a taller box is a box");
+        check(grown.faceCount() == 10,
+              "extruded: the boss keeps its own four walls, so ten faces");
+        check(pushed.validate() && grown.validate(), "both are solids");
+        std::printf("  push %d faces, extrude %d, both %.0f mm3\n",
+                    pushed.faceCount(), grown.faceCount(), grown.health(false).volume);
+
+        // And that is the point of the difference: on the extruded one the
+        // upper band of a side wall is a face of its own and can be taken hold
+        // of, where on the pushed one there is nothing there to take.
+        auto bandsOnPlusX = [](const Body& b) {
+            std::vector<FaceId> fs;
+            b.allFaces(fs);
+            int n = 0;
+            for (FaceId f : fs)
+                if (dot(b.faceNormal(f), Vec3{1, 0, 0}) > 0.99) ++n;
+            return n;
+        };
+        check(bandsOnPlusX(pushed) == 1, "one face on the pushed side");
+        check(bandsOnPlusX(grown) == 2, "two on the extruded one");
+    }
+
     std::printf("--- pulling one in takes material away ---\n");
     {
         Body b = makeBox(20, 20, 20);

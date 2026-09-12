@@ -199,9 +199,6 @@ void writeFeature(Writer& w, const Feature& f) {
     w.f64(f.amount);
     w.f64(f.width);
     w.i32(f.segments);
-    w.f64(f.angle);
-    w.f64(f.axisPoint.x); w.f64(f.axisPoint.y); w.f64(f.axisPoint.z);
-    w.f64(f.axisDir.x);   w.f64(f.axisDir.y);   w.f64(f.axisDir.z);
     w.u32(static_cast<uint32_t>(f.booleanOp));
     w.ids(f.verts);
     w.u32(static_cast<uint32_t>(f.offsets.size()));
@@ -227,6 +224,13 @@ void writeFeature(Writer& w, const Feature& f) {
     }
     w.u32(static_cast<uint32_t>(f.backend));
     w.f64(f.thickness);
+
+    // Version 7: the angle a face was tipped through, and the line it was
+    // tipped about -- which is also the plane a divide cuts on.
+    w.f64(f.angle);
+    w.f64(f.axisPoint.x); w.f64(f.axisPoint.y); w.f64(f.axisPoint.z);
+    w.f64(f.axisDir.x);   w.f64(f.axisDir.y);   w.f64(f.axisDir.z);
+    w.u32(f.mergeFlush ? 1u : 0u);
 }
 
 // `version` is the file's, not this build's: a project written before bodies
@@ -252,9 +256,6 @@ bool readFeature(Reader& r, Feature& f, uint32_t version) {
     f.amount = r.f64();
     f.width = r.f64();
     f.segments = r.i32();
-    f.angle = r.f64();
-    f.axisPoint = {r.f64(), r.f64(), r.f64()};
-    f.axisDir   = {r.f64(), r.f64(), r.f64()};
     const uint32_t op = r.u32();
     if (op > static_cast<uint32_t>(BooleanOp::Intersection)) return false;
     f.booleanOp = static_cast<BooleanOp>(op);
@@ -290,6 +291,20 @@ bool readFeature(Reader& r, Feature& f, uint32_t version) {
     // Version 6 added the shell. A file older than that has no shell features
     // in it, so the default wall stands and nothing reads it.
     if (version >= 6) f.thickness = r.f64();
+
+    // Version 7 added rotating a face and dividing one, and the geometry both
+    // of those hang on. At the end of the record, not in the middle of it: a
+    // field written among the others is seven doubles an older file does not
+    // have, and everything after it would be read from the wrong place.
+    if (version >= 7) {
+        f.angle = r.f64();
+        f.axisPoint = {r.f64(), r.f64(), r.f64()};
+        f.axisDir   = {r.f64(), r.f64(), r.f64()};
+        // A file written before this was an extrude, which kept its outline.
+        f.mergeFlush = r.u32() != 0;
+    } else {
+        f.mergeFlush = false;
+    }
     return !r.bad;
 }
 
