@@ -28,7 +28,10 @@
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
+#include <BRepAlgoAPI_Section.hxx>
+#include <BRepTools_History.hxx>
 #include <BRepFeat_SplitShape.hxx>
+#include <BRepOffsetAPI_DraftAngle.hxx>
 #include <BRepFilletAPI_MakeFillet.hxx>
 #include <BRepOffsetAPI_MakeOffset.hxx>
 #include <BRepOffsetAPI_MakeOffsetShape.hxx>
@@ -1076,6 +1079,78 @@ BrepRef filletEdges(const BrepShape& s, const std::vector<EdgeId>& edges,
     }
 }
 
+// Merges faces that a combine left split but that lie on one surface, and works
+// out what the survivor should be called.
+//
+// Pushing a face out unions a prism onto the body, and the prism's walls are
+// flush with the walls they slide along: the same plane, in two pieces, with a
+// seam drawn down it where nothing intersects. That is the oldest complaint
+// against this tool, and on a push it compounds -- push twice and the side is
+// in three pieces.
+//
+// The naming is the only reason this is not a one-liner. Two faces going into
+// one leaves two names for one thing, and a feature that referred to either has
+// to keep resolving. The rule is that the face that already existed wins: it is
+// the one the user has been pointing at and the one the history refers to, and
+// the newly generated strip is the part with no past.
+BrepRef unifyFlush(const BrepRef& made, const BrepRef& before, ElementId salt) {
+    if (!made || made->shape.IsNull()) return made;
+
+    TopoDS_Shape merged;
+    Handle(BRepTools_History) history;
+    try {
+        ShapeUpgrade_UnifySameDomain unify(made->shape, Standard_True, Standard_True,
+                                           Standard_False);
+        unify.Build();
+        merged = unify.Shape();
+        history = unify.History();
+    } catch (const Standard_Failure&) {
+        return made;                 // more faces than it needs is only a blemish
+    }
+    if (merged.IsNull() || history.IsNull() || !acceptable(merged, nullptr)) return made;
+
+    TopTools_IndexedMapOfShape out;
+    TopExp::MapShapes(merged, TopAbs_FACE, out);
+    if (out.Extent() >= made->faces.Extent()) return made;   // nothing was merged
+
+    std::vector<ElementId> names(static_cast<size_t>(out.Extent()), kNoId);
+    std::vector<bool> settled(static_cast<size_t>(out.Extent()), false);
+
+    for (int i = 1; i <= made->faces.Extent(); ++i) {
+        const ElementId id = made->faceNames[static_cast<size_t>(i - 1)];
+        if (id == kNoId) continue;
+
+        // Where this face ended up: itself if it survived untouched, or the
+        // face it was merged into.
+        std::vector<TopoDS_Shape> landed;
+        const TopTools_ListOfShape& mods = history->Modified(made->faces(i));
+        if (mods.IsEmpty()) landed.push_back(made->faces(i));
+        else for (TopTools_ListIteratorOfListOfShape it(mods); it.More(); it.Next())
+            landed.push_back(it.Value());
+
+        // Did this name exist before the operation? If so it is the one to keep.
+        std::vector<FaceId> was;
+        findFaces(*before, id, was);
+        const bool existed = !was.empty();
+
+        for (const TopoDS_Shape& f : landed) {
+            const int at = out.FindIndex(f);
+            if (at <= 0) continue;
+            const size_t k = static_cast<size_t>(at - 1);
+            if (settled[k]) continue;
+            names[k] = id;
+            if (existed) settled[k] = true;       // nothing may take it from here
+        }
+    }
+
+    // Anything the merge invented outright still needs a name of its own.
+    for (size_t k = 0; k < names.size(); ++k)
+        if (names[k] == kNoId)
+            names[k] = nameId(salt, IdRole::Patch, static_cast<ElementId>(k));
+
+    return makeBrep(merged, names);
+}
+
 BrepRef extrudeFaces(const BrepRef& s, const std::vector<FaceId>& faces, Real distance,
                      ElementId salt, std::vector<ElementId>* newFaces, std::string* reason) {
     if (newFaces) newFaces->clear();
@@ -1171,13 +1246,174 @@ BrepRef extrudeFaces(const BrepRef& s, const std::vector<FaceId>& faces, Real di
                                          distance > 0 ? BooleanOp::Union : BooleanOp::Difference,
                                          nameId(salt, IdRole::Split, targets[i]), reason);
             if (!combined) return {};
-            step = combined;
+            step = unifyFlush(combined, step, nameId(salt, IdRole::Patch, targets[i]));
             break;   // the prism spans every piece of that face already
         }
         current = step;
         if (newFaces) newFaces->push_back(targets[i]);
     }
     return current;
+}
+
+BrepRef rotateFaces(const BrepRef& s, const std::vector<FaceId>& faces, Real angleRad,
+                    Vec3 hingePoint, Vec3 hingeDir, ElementId salt, std::string* reason) {
+    if (reason) reason->clear();
+    if (!s || s->shape.IsNull() || faces.empty()) {
+        if (reason) *reason = "nothing to rotate";
+        return {};
+    }
+    if (std::fabs(angleRad) < 1e-9) {
+        if (reason) *reason = "the angle is zero";
+        return {};
+    }
+    if (lengthSq(hingeDir) < 1e-18) {
+        if (reason) *reason = "there is no edge to pivot about";
+        return {};
+    }
+
+    try {
+        BRepOffsetAPI_DraftAngle draft(s->shape);
+        const gp_Dir along(hingeDir.x, hingeDir.y, hingeDir.z);
+        bool any = false;
+
+        for (FaceId f : faces) {
+            if (!validFace(*s, f)) {
+                if (reason) *reason = "a face to rotate no longer exists";
+                return {};
+            }
+            const TopoDS_Face face = TopoDS::Face(s->faces(static_cast<int>(f) + 1));
+            const Vec3 n = faceNormal(*s, f);
+            if (lengthSq(n) < 1e-18) continue;
+
+            // The neutral plane is the one that cuts this face along the hinge:
+            // it contains the hinge line and stands perpendicular to the face,
+            // so the two planes meet in exactly that line and nowhere else.
+            const Vec3 across = cross(hingeDir, n);
+            if (lengthSq(across) < 1e-12) {
+                if (reason) *reason = "the pivot lies flat in the face";
+                return {};
+            }
+            const gp_Pln neutral(gp_Pnt(hingePoint.x, hingePoint.y, hingePoint.z),
+                                 gp_Dir(across.x, across.y, across.z));
+
+            // The angle a draft takes is the one between the face and the pull
+            // direction, not the one the face turns through. Pulling along the
+            // face's own normal therefore asks for a face at `angle` to its
+            // normal -- twelve degrees requested, seventy-eight delivered.
+            //
+            // A direction lying in the face and square to the hinge starts at
+            // zero, so asking for `angle` gets exactly `angle` of turn.
+            const Vec3 inPlane = normalize(cross(n, hingeDir));
+            draft.Add(face, gp_Dir(inPlane.x, inPlane.y, inPlane.z),
+                      static_cast<Standard_Real>(angleRad), neutral);
+            if (!draft.AddDone()) {
+                if (reason) *reason = "that face will not take a rotation about this edge";
+                return {};
+            }
+            any = true;
+        }
+        if (!any) {
+            if (reason) *reason = "no face could be rotated";
+            return {};
+        }
+
+        draft.Build();
+        if (!draft.IsDone()) {
+            if (reason) *reason = "the rotation could not be built";
+            return {};
+        }
+        const TopoDS_Shape result = draft.Shape();
+        if (!acceptable(result, reason)) return {};
+        return makeBrep(result, propagateNames(draft, {{s.get()}}, result, salt));
+    } catch (const Standard_Failure& e) {
+        if (reason) *reason = e.GetMessageString() ? e.GetMessageString()
+                                                   : "the rotation threw";
+        return {};
+    }
+}
+
+BrepRef divideBody(const BrepRef& s, Vec3 planePoint, Vec3 planeNormal,
+                   ElementId salt, std::string* reason) {
+    if (reason) reason->clear();
+    if (!s || s->shape.IsNull()) {
+        if (reason) *reason = "there is no body to divide";
+        return {};
+    }
+    if (lengthSq(planeNormal) < 1e-18) {
+        if (reason) *reason = "the cut has no direction";
+        return {};
+    }
+
+    try {
+        const gp_Pln plane(gp_Pnt(planePoint.x, planePoint.y, planePoint.z),
+                           gp_Dir(planeNormal.x, planeNormal.y, planeNormal.z));
+
+        // Where the plane crosses the body, as edges that know which face they
+        // came from. Without the pcurves the splitter has nothing to imprint
+        // the edge onto.
+        BRepAlgoAPI_Section section(s->shape, plane, Standard_False);
+        section.ComputePCurveOn1(Standard_True);
+        section.Approximation(Standard_True);
+        section.Build();
+        if (!section.IsDone()) {
+            if (reason) *reason = "the plane could not be crossed with the body";
+            return {};
+        }
+
+        // Imprint, rather than cut: BRepFeat_SplitShape adds the edges to the
+        // faces they lie on and hands the solid back whole. A boolean split
+        // would hand back two solids, which is a different operation and not
+        // the one anybody means by a loop cut.
+        BRepFeat_SplitShape splitter(s->shape);
+        int added = 0;
+        for (TopExp_Explorer e(section.Shape(), TopAbs_EDGE); e.More(); e.Next()) {
+            TopoDS_Shape host;
+            if (!section.HasAncestorFaceOn1(e.Current(), host)) continue;
+            if (host.ShapeType() != TopAbs_FACE) continue;
+            splitter.Add(TopoDS::Edge(e.Current()), TopoDS::Face(host));
+            ++added;
+        }
+        if (added == 0) {
+            if (reason) *reason = "the plane does not cross the body";
+            return {};
+        }
+
+        splitter.Build();
+        if (!splitter.IsDone()) {
+            if (reason) *reason = "the faces could not be divided";
+            return {};
+        }
+        const TopoDS_Shape result = splitter.Shape();
+        if (!acceptable(result, reason)) return {};
+
+        std::vector<ElementId> names = propagateNames(splitter, {{s.get()}}, result, salt);
+
+        // Both halves of a divided face come out carrying its name, which would
+        // make them one face again to everything downstream -- and the point of
+        // dividing is to be able to take hold of one half. Which side of the
+        // plane each piece sits gives them their own names, and does it the
+        // same way every time the feature is rebuilt.
+        TopTools_IndexedMapOfShape faceMap;
+        TopExp::MapShapes(result, TopAbs_FACE, faceMap);
+        std::unordered_map<ElementId, int> seen;
+        for (int i = 1; i <= faceMap.Extent(); ++i) ++seen[names[static_cast<size_t>(i - 1)]];
+        for (int i = 1; i <= faceMap.Extent(); ++i) {
+            const ElementId id = names[static_cast<size_t>(i - 1)];
+            if (id == kNoId || seen[id] < 2) continue;
+            GProp_GProps props;
+            BRepGProp::SurfaceProperties(faceMap(i), props);
+            const gp_Pnt c = props.CentreOfMass();
+            const Vec3 mid{c.X(), c.Y(), c.Z()};
+            const Real side = dot(mid - planePoint, normalize(planeNormal));
+            names[static_cast<size_t>(i - 1)] = nameId(salt, IdRole::Split, id,
+                                                       side >= 0.0 ? 0 : 1);
+        }
+        return makeBrep(result, names);
+    } catch (const Standard_Failure& e) {
+        if (reason) *reason = e.GetMessageString() ? e.GetMessageString()
+                                                   : "the divide threw";
+        return {};
+    }
 }
 
 BrepRef insetFaces(const BrepRef& s, const std::vector<FaceId>& faces, Real amount,

@@ -33,6 +33,8 @@ enum class FeatureKind {
     VertexEdit,
     Boolean,     // combine with a baked copy of another body
     Shell,       // hollow it out, opening the faces named
+    FaceRotate,  // tip a face about one of its own edges
+    Divide,      // cut a line across the body without cutting it in two
 };
 
 const char* featureKindName(FeatureKind k);
@@ -114,6 +116,18 @@ struct Feature {
     Real distance = 5.0;    // Extrude, signed
     ExtrudeOp extrudeOp = ExtrudeOp::Auto;
     Real amount   = 2.0;    // Inset
+
+    // FaceRotate: how far to tip, and the edge to tip about. Divide: a point on
+    // the cutting plane, and its normal.
+    //
+    // Held in the body's own space as plain geometry rather than as a named
+    // edge, which means an edit further up the chain that moves that edge does
+    // not carry the hinge with it. Names would be better and are what the rest
+    // of the chain uses; this is the honest version of what is built, not a
+    // claim that it follows.
+    Real angle = 0.0;                    // radians
+    Vec3 axisPoint{0, 0, 0};
+    Vec3 axisDir{0, 0, 1};
 
     // Shell: the wall left behind, measured inward. `faces` holds the faces to
     // open, and may be empty -- that is a sealed cavity, which is a thing

@@ -33,6 +33,17 @@ BrepRef extrudeFaces(const BrepRef&, const std::vector<FaceId>&, Real, ElementId
     if (reason) *reason = "built without OpenCASCADE";
     return {};
 }
+BrepRef rotateFaces(const BrepRef&, const std::vector<FaceId>&, Real, Vec3, Vec3,
+                    ElementId, std::string* reason) {
+    if (reason) *reason = "rotating a face needs the exact kernel";
+    return {};
+}
+
+BrepRef divideBody(const BrepRef&, Vec3, Vec3, ElementId, std::string* reason) {
+    if (reason) *reason = "dividing a face needs the exact kernel";
+    return {};
+}
+
 BrepRef insetFaces(const BrepRef&, const std::vector<FaceId>&, Real, ElementId,
                    std::vector<ElementId>*, std::string* reason) {
     if (reason) *reason = "built without OpenCASCADE";

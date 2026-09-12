@@ -1,24 +1,20 @@
-#include "app/fillet_preview.h"
+#include "app/async_build.h"
 
 namespace tg {
 
-void FilletPreview::request(const Body& base, const std::vector<EdgeId>& edges,
-                            Real radius, int segments) {
+void AsyncBuild::request(const Body& base, std::function<bool(Body&)> build) {
     pendingBase_ = base;
-    pendingEdges_ = edges;
-    pendingRadius_ = radius;
-    pendingSegments_ = segments;
+    pendingWork_ = std::move(build);
     hasPending_ = true;
     if (!running_) startPending();
 }
 
-void FilletPreview::startPending() {
+void AsyncBuild::startPending() {
     inFlightInput_ = std::move(pendingBase_);
-    inFlightEdges_ = std::move(pendingEdges_);
-    inFlightRadius_ = pendingRadius_;
-    inFlightSegments_ = pendingSegments_;
+    inFlightWork_ = std::move(pendingWork_);
     hasPending_ = false;
     pendingBase_ = Body();
+    pendingWork_ = nullptr;
 
     done_.store(false, std::memory_order_release);
     running_ = true;
@@ -28,17 +24,14 @@ void FilletPreview::startPending() {
     // safe without a lock.
     worker_ = std::thread([this] {
         Body scratch = inFlightInput_;
-        FilletSpec spec;
-        spec.segments = inFlightSegments_;
-        for (EdgeId e : inFlightEdges_) spec.edges.push_back({e, inFlightRadius_});
-        const bool ok = filletEdges(scratch, spec);
+        const bool ok = inFlightWork_ && inFlightWork_(scratch);
         if (ok) result_ = std::move(scratch);
         ok_ = ok;
         done_.store(true, std::memory_order_release);
     });
 }
 
-bool FilletPreview::take(Body& out, Real& radius, int& segments) {
+bool AsyncBuild::take(Body& out) {
     if (!running_) {
         if (hasPending_) startPending();
         return false;
@@ -49,14 +42,10 @@ bool FilletPreview::take(Body& out, Real& radius, int& segments) {
     running_ = false;
 
     const bool ok = ok_;
-    if (ok) {
-        out = std::move(result_);
-        radius = inFlightRadius_;
-        segments = inFlightSegments_;
-    }
+    if (ok) out = std::move(result_);
     result_ = Body();
     inFlightInput_ = Body();
-    inFlightEdges_.clear();
+    inFlightWork_ = nullptr;
 
     // The pointer kept moving while that was building, so the next build starts
     // now rather than waiting for another request.
@@ -64,7 +53,7 @@ bool FilletPreview::take(Body& out, Real& radius, int& segments) {
     return ok;
 }
 
-void FilletPreview::cancel() {
+void AsyncBuild::cancel() {
     if (running_) {
         worker_.join();
         running_ = false;
@@ -73,8 +62,8 @@ void FilletPreview::cancel() {
     result_ = Body();
     inFlightInput_ = Body();
     pendingBase_ = Body();
-    inFlightEdges_.clear();
-    pendingEdges_.clear();
+    inFlightWork_ = nullptr;
+    pendingWork_ = nullptr;
 }
 
 } // namespace tg

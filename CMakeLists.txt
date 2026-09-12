@@ -136,7 +136,7 @@ add_executable(tangent
   src/app/measure.cpp
   src/app/snap.cpp
   src/app/drag_axis.cpp
-  src/app/fillet_preview.cpp
+  src/app/async_build.cpp
   src/app/plane_snap.cpp
   src/app/snap_overlay.cpp
   src/app/overlay_shapes.cpp
@@ -309,6 +309,13 @@ target_include_directories(test_drag PRIVATE src)
 target_link_libraries(test_drag PRIVATE tangent_epoxy)
 target_compile_options(test_drag PRIVATE ${TANGENT_WARNINGS})
 add_test(NAME drag COMMAND test_drag)
+
+add_executable(test_faceops tests/test_faceops.cpp
+  ${TANGENT_GEOM} src/mesh/boolean.cpp src/mesh/health.cpp src/mesh/operations.cpp
+  src/mesh/halfedge.cpp src/mesh/primitives.cpp)
+target_include_directories(test_faceops PRIVATE src)
+target_compile_options(test_faceops PRIVATE ${TANGENT_WARNINGS})
+add_test(NAME faceops COMMAND test_faceops)
 
 add_executable(test_icons tests/test_icons.cpp src/ui/icons.cpp tools/png_write.cpp)
 target_include_directories(test_icons PRIVATE src tools ${imgui_SOURCE_DIR})

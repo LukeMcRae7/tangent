@@ -199,6 +199,9 @@ void writeFeature(Writer& w, const Feature& f) {
     w.f64(f.amount);
     w.f64(f.width);
     w.i32(f.segments);
+    w.f64(f.angle);
+    w.f64(f.axisPoint.x); w.f64(f.axisPoint.y); w.f64(f.axisPoint.z);
+    w.f64(f.axisDir.x);   w.f64(f.axisDir.y);   w.f64(f.axisDir.z);
     w.u32(static_cast<uint32_t>(f.booleanOp));
     w.ids(f.verts);
     w.u32(static_cast<uint32_t>(f.offsets.size()));
@@ -249,6 +252,9 @@ bool readFeature(Reader& r, Feature& f, uint32_t version) {
     f.amount = r.f64();
     f.width = r.f64();
     f.segments = r.i32();
+    f.angle = r.f64();
+    f.axisPoint = {r.f64(), r.f64(), r.f64()};
+    f.axisDir   = {r.f64(), r.f64(), r.f64()};
     const uint32_t op = r.u32();
     if (op > static_cast<uint32_t>(BooleanOp::Intersection)) return false;
     f.booleanOp = static_cast<BooleanOp>(op);

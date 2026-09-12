@@ -128,14 +128,16 @@ bool Application::init() {
         scene_.clearSelection();
         scene_.selectElement({id, ElementKind::Face, static_cast<Index>(pickFace_)});
         if (autoExtrude_) {
-            // Drive the real interactive path: extrude, type a distance, commit.
-            extrudeSelection();
+            // The real interactive path: push the face, type a distance, commit.
+            beginFaceMove(FaceOp::PushPull);
             char buf[32];
             std::snprintf(buf, sizeof(buf), "%g", static_cast<double>(autoExtrudeMm_));
-            for (const char* p = buf; *p; ++p) tool_.typeCharacter(*p);
-            tool_.update(scene_, camera_, Vec2{0.0, 0.0}, false);
+            faceTool_.typedValue = buf;
+            updateFaceMove(false);
+            while (faceTool_.preview.busy()) updateFaceMove(false);
+            updateFaceMove(false);
             // Held open so the live readout can be captured mid-gesture.
-            if (!holdTransform_) commitTransform();
+            if (!holdTransform_) commitFaceMove();
         }
     }
 
@@ -344,16 +346,14 @@ bool Application::init() {
                 ++picked;
             }
             std::fprintf(stderr, "[shell-extrude] rim faces selected: %d\n", picked);
-            extrudeSelection();
-            // Dragged, not typed: the mouse path is the one that was used.
-            for (int step = 1; step <= 6; ++step)
-                tool_.update(scene_, camera_,
-                             Vec2{800.0 + step * 12.0, 450.0 - step * 9.0}, true);
+            beginFaceMove(FaceOp::PushPull);
             char buf[32];
             std::snprintf(buf, sizeof buf, "%g", static_cast<double>(std::fabs(shellExtrudeDemo_)));
-            for (const char* p = buf; *p; ++p) tool_.typeCharacter(*p);
-            tool_.update(scene_, camera_, Vec2{860.0, 400.0}, false);
-            commitTransform();
+            faceTool_.typedValue = buf;
+            updateFaceMove(false);
+            while (faceTool_.preview.busy()) updateFaceMove(false);
+            updateFaceMove(false);
+            commitFaceMove();
             const SceneObject* after = scene_.find(id);
             std::fprintf(stderr, "[shell-extrude] %d features, %d faces, %.1f mm3, valid=%d\n",
                          static_cast<int>(after->features.size()), after->body.faceCount(),
@@ -662,6 +662,7 @@ void Application::handleViewportMouse() {
 
     stepProfileDemo();
     stepFilletOpenDemo();
+    stepFaceDemo();
 
     // Interactive Object Creation & Sketching Tool:
     if (createTool_.active()) {
@@ -689,6 +690,24 @@ void Application::handleViewportMouse() {
                 createTool_.handleRightClick(camera_);
                 if (!createTool_.active()) justFinishedModal_ = true;
             }
+        }
+        return;
+    }
+
+    // Modal face move, and the divide that makes a face to move.
+    if (faceTool_.active) {
+        updateFaceMove(!io.KeyCtrl, /*follow=*/!io.WantCaptureMouse);
+        if (!io.WantCaptureMouse) {
+            if (ImGui::IsMouseClicked(ImGuiMouseButton_Left))       commitFaceMove();
+            else if (ImGui::IsMouseClicked(ImGuiMouseButton_Right))  abortFaceMove();
+        }
+        return;
+    }
+    if (divideTool_.active) {
+        updateDivide(!io.KeyCtrl, /*follow=*/!io.WantCaptureMouse);
+        if (!io.WantCaptureMouse) {
+            if (ImGui::IsMouseClicked(ImGuiMouseButton_Left))       commitDivide();
+            else if (ImGui::IsMouseClicked(ImGuiMouseButton_Right))  abortDivide();
         }
         return;
     }
@@ -818,13 +837,6 @@ void Application::drawFilletPanel() {
         filletTool_.typedValue.clear();
     }
 
-    ui::commandRow("Segments");
-    ImGui::SetNextItemWidth(-1.0f);
-    if (ImGui::SliderInt("##seg", &filletTool_.currentSegments, 1, 32)) {
-        view_.bevelSegments = filletTool_.currentSegments;
-        filletTool_.previewValid = false;
-    }
-
     char edges[64];
     std::snprintf(edges, sizeof edges, "%zu edge%s", filletTool_.edges.size(),
                   filletTool_.edges.size() == 1 ? "" : "s");
@@ -847,16 +859,100 @@ void Application::drawFilletPanel() {
     else if (footer < 0) abortFillet();
 }
 
-// The live value sits next to the cursor rather than only in the status bar.
+void Application::drawFacePanel() {
+    if (!faceTool_.active) return;
+    const bool rotate = faceTool_.op == FaceOp::Rotate;
+
+    if (!ui::beginCommand("##faceop", rotate ? "Rotate Face" : "Push / Pull",
+                          rotate ? Icon::Chamfer : Icon::Extrude,
+                          viewRect_.x + 16.0f, viewRect_.y + 16.0f))
+        return;
+
+    if (ui::commandNumber(rotate ? "Angle" : "Distance", faceTool_.value,
+                          rotate ? "deg" : "mm", !faceTool_.typedValue.empty(),
+                          !faceTool_.typedValue.empty(), faceTool_.typedValue.c_str()))
+        faceTool_.typedValue.clear();
+
+    char sel[64];
+    std::snprintf(sel, sizeof sel, "%zu face%s", faceTool_.faces.size(),
+                  faceTool_.faces.size() == 1 ? "" : "s");
+    ui::commandValue("Selection", sel);
+
+    if (!rotate) {
+        // Which way the material goes. Auto reads it from the sign, so say
+        // what that currently means rather than leaving it to be inferred.
+        const float ic = ImGui::GetTextLineHeight() * 1.4f;
+        ui::commandRow("Result");
+        const bool cutting = faceTool_.combine == ExtrudeOp::Cut ||
+                             (faceTool_.combine == ExtrudeOp::Auto && faceTool_.value < 0.0);
+        ImGui::TextColored(cutting ? ImVec4(0.95f, 0.35f, 0.25f, 1.0f)
+                                   : ImVec4(palette::kBrand.r, palette::kBrand.g,
+                                            palette::kBrand.b, 1.0f),
+                           "%s", cutting ? "Cuts into the body" : "Adds to the body");
+
+        ui::commandRow("Force");
+        {
+            const bool on = faceTool_.combine == ExtrudeOp::Auto;
+            if (on) ImGui::PushStyleColor(ImGuiCol_Button,
+                                          ImVec4(palette::kBrand.r, palette::kBrand.g,
+                                                 palette::kBrand.b, 0.85f));
+            if (ImGui::Button("Auto")) faceTool_.combine = ExtrudeOp::Auto;
+            if (on) ImGui::PopStyleColor();
+        }
+        ImGui::SameLine();
+        if (iconButton(Icon::Union, "fjoin", ic, "Always add  (J)",
+                       faceTool_.combine == ExtrudeOp::Join))
+            faceTool_.combine = ExtrudeOp::Join;
+        ImGui::SameLine();
+        if (iconButton(Icon::Difference, "fcut", ic, "Always cut  (D)",
+                       faceTool_.combine == ExtrudeOp::Cut))
+            faceTool_.combine = ExtrudeOp::Cut;
+    }
+
+    ui::commandHint(rotate
+        ? "Pull across the edge the face pivots on, or type an angle."
+        : "Pull along the arrow, or type a distance.  A negative one cuts.");
+
+    const int footer = ui::commandFooter("OK  (Click)");
+    ui::endCommand();
+    if (footer > 0)      commitFaceMove();
+    else if (footer < 0) abortFaceMove();
+}
+
+void Application::drawDividePanel() {
+    if (!divideTool_.active) return;
+
+    if (!ui::beginCommand("##divide", "Divide", Icon::Inset,
+                          viewRect_.x + 16.0f, viewRect_.y + 16.0f))
+        return;
+
+    const Real len = length(divideTool_.dir);
+    if (ui::commandNumber("Along", divideTool_.t * len, "mm",
+                          !divideTool_.typedValue.empty(),
+                          !divideTool_.typedValue.empty(),
+                          divideTool_.typedValue.c_str()))
+        divideTool_.typedValue.clear();
+
+    char of[48];
+    std::snprintf(of, sizeof of, "%.2f mm", len);
+    ui::commandValue("Edge", of);
+
+    ui::commandHint("The cut runs square across the edge you chose and slides "
+                    "along it. The body stays whole.");
+
+    const int footer = ui::commandFooter("OK  (Click)");
+    ui::endCommand();
+    if (footer > 0)      commitDivide();
+    else if (footer < 0) abortDivide();
+}
+
+// The live value sits next to the cursor rather than only in the status bar.// The live value sits next to the cursor rather than only in the status bar.
 // During a drag the eye is on the geometry, and a number at the bottom of the
 // window is somewhere the user is not looking.
 void Application::drawTransformReadout() {
     if (filletTool_.active) {
         char buf[128];
-        std::snprintf(buf, sizeof(buf), "Fillet  %.2f mm  (%d seg%s)",
-                      filletTool_.currentRadius,
-                      filletTool_.currentSegments,
-                      filletTool_.currentSegments == 1 ? "" : "s");
+        std::snprintf(buf, sizeof(buf), "Fillet  %.2f mm", filletTool_.currentRadius);
         ImVec2 at(viewRect_.x + viewRect_.w * 0.5f, viewRect_.y + viewRect_.h * 0.5f);
         if (ImGui::IsMousePosValid()) {
             const ImVec2 m = ImGui::GetIO().MousePos;
@@ -1022,28 +1118,59 @@ void Application::handleShortcuts() {
     // delete the thing being moved.
     if (tool_.active()) { handleTransformKeys(); return; }
 
+    // The two face tools take a number the same way the fillet does. One
+    // helper, so a digit means the same thing in all three.
+    auto typedInto = [&](std::string& buffer, auto&& refresh) {
+        for (int d = 0; d <= 9; ++d) {
+            if (ImGui::IsKeyPressed(static_cast<ImGuiKey>(ImGuiKey_0 + d), false) ||
+                ImGui::IsKeyPressed(static_cast<ImGuiKey>(ImGuiKey_Keypad0 + d), false)) {
+                buffer += static_cast<char>('0' + d);
+                refresh();
+            }
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_Period, false) ||
+            ImGui::IsKeyPressed(ImGuiKey_KeypadDecimal, false)) {
+            buffer += '.';
+            refresh();
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_Minus, false) && buffer.empty()) {
+            buffer += '-';                       // a negative distance cuts
+            refresh();
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_Backspace, false) && !buffer.empty()) {
+            buffer.pop_back();
+            refresh();
+        }
+    };
+
+    if (faceTool_.active) {
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) { abortFaceMove(); return; }
+        if (ImGui::IsKeyPressed(ImGuiKey_Enter, false) ||
+            ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false)) { commitFaceMove(); return; }
+        if (faceTool_.op == FaceOp::PushPull) {
+            if (ImGui::IsKeyPressed(ImGuiKey_J, false)) faceTool_.combine = ExtrudeOp::Join;
+            if (ImGui::IsKeyPressed(ImGuiKey_D, false)) faceTool_.combine = ExtrudeOp::Cut;
+            if (ImGui::IsKeyPressed(ImGuiKey_A, false)) faceTool_.combine = ExtrudeOp::Auto;
+        }
+        typedInto(faceTool_.typedValue, [&] { updateFaceMove(true); });
+        return;
+    }
+
+    if (divideTool_.active) {
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) { abortDivide(); return; }
+        if (ImGui::IsKeyPressed(ImGuiKey_Enter, false) ||
+            ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false)) { commitDivide(); return; }
+        typedInto(divideTool_.typedValue, [&] { updateDivide(true); });
+        return;
+    }
+
     if (filletTool_.active) {
         if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) { abortFillet(); return; }
         if (ImGui::IsKeyPressed(ImGuiKey_Enter, false) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false)) {
             commitFillet();
             return;
         }
-        for (int d = 0; d <= 9; ++d) {
-            if (ImGui::IsKeyPressed(static_cast<ImGuiKey>(ImGuiKey_0 + d), false) ||
-                ImGui::IsKeyPressed(static_cast<ImGuiKey>(ImGuiKey_Keypad0 + d), false)) {
-                filletTool_.typedValue += static_cast<char>('0' + d);
-                updateFillet(true);
-            }
-        }
-        if (ImGui::IsKeyPressed(ImGuiKey_Period, false) ||
-            ImGui::IsKeyPressed(ImGuiKey_KeypadDecimal, false)) {
-            filletTool_.typedValue += '.';
-            updateFillet(true);
-        }
-        if (ImGui::IsKeyPressed(ImGuiKey_Backspace, false) && !filletTool_.typedValue.empty()) {
-            filletTool_.typedValue.pop_back();
-            updateFillet(true);
-        }
+        typedInto(filletTool_.typedValue, [&] { updateFillet(true); });
         return;
     }
 
@@ -1144,6 +1271,8 @@ void Application::handleShortcuts() {
 
     // Mesh edits act on the selected faces. Shift+E cuts inward.
     if (!ctrl && !alt && ImGui::IsKeyPressed(ImGuiKey_E, false)) ui_.actions.extrude = true;
+    if (!ctrl && !alt && ImGui::IsKeyPressed(ImGuiKey_T, false)) ui_.actions.rotateFace = true;
+    if (!ctrl && !alt && ImGui::IsKeyPressed(ImGuiKey_K, false)) ui_.actions.divide = true;
     if (ctrl && !shift && ImGui::IsKeyPressed(ImGuiKey_B, false)) ui_.actions.bevel = true;
 
     // Fillet the selected edges. F, as in Fusion, and reachable by the left
@@ -1217,62 +1346,6 @@ void Application::addPrimitiveAtCursor(PrimitiveKind kind) {
 // new faces' own normal, rather than committing a fixed distance. The extrusion
 // starts at a hair above zero so the side walls are valid geometry from the
 // first frame; the drag supplies the real height.
-void Application::extrudeSelection() {
-    if (tool_.active()) return;
-
-    if (const SceneObject* o = scene_.find(scene_.contextObject()))
-        preEditSolid_ = o->healthVersion == o->meshVersion && o->health.solid();
-
-    const ObjectId id = scene_.elementSelection().empty()
-                        ? kNoObject : scene_.elementSelection().front().object;
-    SceneObject* obj = scene_.find(id);
-    if (!obj) return;
-
-    const std::vector<Index> faces = scene_.selectedFaces(id);
-    if (faces.empty()) return;
-
-    // Direction to push, taken before the mesh changes underneath us.
-    Vec3 normal{};
-    for (Index f : faces) normal += obj->body.faceNormal(f) * obj->body.faceArea(f);
-    if (lengthSq(normal) < 1e-12f) return;
-    normal = normalize(normal);
-    const Vec3 worldNormal = normalize(transformVector(normalMatrix(obj->modelMatrix()), normal));
-
-    Body before = obj->body;
-    std::vector<Feature> chainBefore = obj->features;
-
-    constexpr float kSeed = 0.01f;   // mm
-    Body next = obj->body;
-    std::vector<Index> newFaces;
-    if (!extrudeFaces(next, faces, kSeed, &newFaces)) return;
-
-    // The drag edits the mesh directly for immediate feedback; on commit the
-    // whole gesture is replaced by one Extrude feature, so the history stays
-    // the authority rather than accumulating baked-in geometry.
-    obj->body = std::move(next);
-    obj->refreshDerived();
-
-    // The moved faces stay selected, so the drag acts on them and so the user
-    // can extrude again straight away.
-    scene_.clearElementSelection();
-    for (Index f : newFaces) scene_.selectElement({id, ElementKind::Face, f}, true);
-
-    if (!tool_.begin(TransformMode::Translate, scene_, camera_, mouseInViewport())) {
-        obj->body = std::move(before);
-        obj->refreshDerived();
-        return;
-    }
-    tool_.setCustomAxis(worldNormal, "N");
-
-    pendingMeshObject_ = id;
-    pendingMeshBefore_ = std::move(before);
-    pendingChainBefore_ = std::move(chainBefore);
-    pendingExtrudeFaces_ = faces;
-    pendingNewFaces_ = newFaces;
-    pendingLocalNormal_ = normal;
-    pendingLabel_ = "Extrude";
-}
-
 bool Application::editKeepsSolid(ObjectId id) {
     SceneObject* obj = scene_.find(id);
     if (!obj) return true;
@@ -1520,6 +1593,353 @@ static Real materialBehindEdges(const SceneObject& obj,
     return std::max(thinnest, Real(0.05));
 }
 
+// ---------------------------------------------------------------------------
+// Moving a face
+// ---------------------------------------------------------------------------
+
+void Application::beginFaceMove(FaceOp op) {
+    if (tool_.active() || filletTool_.active || createTool_.active() ||
+        faceTool_.active || divideTool_.active)
+        return;
+
+    const ObjectId id = scene_.contextObject();
+    SceneObject* obj = scene_.find(id);
+    if (!obj) { setNotice("Select an object first"); return; }
+
+    const std::vector<Index> faces = scene_.selectedFaces(id);
+    if (faces.empty()) { setNotice("Select a face to move"); return; }
+    if (obj->body.isMesh() && op == FaceOp::Rotate) {
+        setNotice("Rotating a face needs the exact kernel");
+        return;
+    }
+
+    faceTool_.reset();
+    faceTool_.active = true;
+    faceTool_.op = op;
+    faceTool_.objectId = id;
+    faceTool_.faces = faces;
+    faceTool_.before = obj->body;
+    faceTool_.chainBefore = obj->features;
+    faceTool_.value = 0.0;
+    preEditSolid_ = obj->healthVersion == obj->meshVersion && obj->health.solid();
+
+    const Mat4 model = obj->modelMatrix();
+    const Vec2 at = mouseInViewport();
+
+    // Where the material goes. The sum of the selected faces' normals, so two
+    // faces at right angles push out along their bisector rather than along
+    // whichever happened to be listed first.
+    Vec3 dir{};
+    Vec3 anchor{};
+    for (FaceId f : faces) {
+        dir += normalize(transformVector(normalMatrix(model), obj->body.faceNormal(f)));
+        anchor += transformPoint(model, obj->body.faceCentroid(f));
+    }
+    anchor *= 1.0 / static_cast<Real>(faces.size());
+    if (lengthSq(dir) < 1e-12) { faceTool_.active = false; return; }
+    dir = normalize(dir);
+
+    const Vec3 extent = obj->body.bounds().size();
+    const Real span = std::max(std::min({extent.x, extent.y, extent.z}), Real(1.0));
+
+    if (op == FaceOp::Rotate) {
+        // The hinge is the edge of the face nearest the cursor: you tip a face
+        // about the side you are standing on.
+        std::vector<EdgeId> edges;
+        obj->body.faceEdges(faces.front(), edges);
+        // The first edge unless one is nearer the cursor. Starting from
+        // "nothing found" makes the gesture depend on the pointer having a
+        // position at all, and a pointer that has never entered the window
+        // reports a sentinel that loses every comparison.
+        if (edges.empty()) { faceTool_.active = false; return; }
+        EdgeId best = edges.front();
+        Real bestPx = 1e30;
+        for (EdgeId e : edges) {
+            Vec2 sp{};
+            if (!camera_.projectToPixel(transformPoint(model, obj->body.edgeMidpoint(e)), sp))
+                continue;
+            const Real d = length(sp - at);
+            if (std::isfinite(d) && d < bestPx) { bestPx = d; best = e; }
+        }
+
+        Vec3 p, q;
+        obj->body.edgePositions(best, p, q);
+        faceTool_.hingePoint = p;
+        faceTool_.hingeDir = normalize(q - p);
+
+        // The gesture runs across the hinge, in the plane of the face: that is
+        // the way the far edge of the face travels as it tips.
+        const Vec3 worldHinge = normalize(transformVector(model, q - p));
+        Vec3 across = cross(dir, worldHinge);
+        if (lengthSq(across) < 1e-12) { faceTool_.active = false; return; }
+        faceTool_.axis.origin = anchor;
+        faceTool_.axis.direction = normalize(across);
+        faceTool_.axis.valid = true;
+        faceTool_.axis.baseValue = 0.0;
+        faceTool_.axis.spanValue = 60.0;          // degrees of travel on the track
+    } else {
+        faceTool_.axis.origin = anchor;
+        faceTool_.axis.direction = dir;
+        faceTool_.axis.valid = true;
+        faceTool_.axis.baseValue = -span;
+        faceTool_.axis.spanValue = span;
+    }
+
+    // The track starts under the pointer, as the fillet's does, so the gesture
+    // is "how far have I pulled from where I started".
+    if (faceTool_.axis.valid) {
+        const Real outPx = faceTool_.axis.offsetPx(camera_, at);
+        const Real px = static_cast<Real>(camera_.pixelWorldSize(faceTool_.axis.origin));
+        faceTool_.axis.origin = faceTool_.axis.origin +
+                                faceTool_.axis.direction * (outPx * px);
+    }
+}
+
+void Application::updateFaceMove(bool snap, bool follow) {
+    if (!faceTool_.active) return;
+    SceneObject* obj = scene_.find(faceTool_.objectId);
+    if (!obj) { abortFaceMove(); return; }
+
+    {
+        Body built;
+        if (faceTool_.preview.take(built)) {
+            obj->body = std::move(built);
+            obj->refreshDerived();
+            faceTool_.previewValid = true;
+        }
+    }
+    if (!follow) return;
+
+    Real want = faceTool_.value;
+    if (!faceTool_.typedValue.empty()) {
+        try { want = std::stod(faceTool_.typedValue); } catch (...) {}
+    } else if (faceTool_.axis.valid) {
+        const Vec2 cur = mouseInViewport();
+        if (faceTool_.axis.facingCamera(camera_)) {
+            want = faceTool_.axis.valueAt(camera_, cur);
+        }
+        if (snap) {
+            const Real step = faceTool_.op == FaceOp::Rotate
+                                  ? 5.0
+                                  : static_cast<Real>(camera_.snapStep(faceTool_.axis.origin));
+            if (step > 0.0) want = std::round(want / step) * step;
+        }
+    }
+    faceTool_.value = want;
+
+    if (std::fabs(want - faceTool_.requested) < 1e-9 && faceTool_.previewValid) return;
+    if (std::fabs(want) < 1e-6) {
+        // Back at the start: show the body as it was rather than asking the
+        // kernel for a zero-sized operation it will refuse.
+        obj->body = faceTool_.before;
+        obj->refreshDerived();
+        faceTool_.requested = want;
+        faceTool_.previewValid = true;
+        return;
+    }
+
+    faceTool_.requested = want;
+    const std::vector<FaceId> faces = faceTool_.faces;
+    if (faceTool_.op == FaceOp::Rotate) {
+        const Real angle = radians(want);
+        const Vec3 hp = faceTool_.hingePoint, hd = faceTool_.hingeDir;
+        faceTool_.preview.request(faceTool_.before, [faces, angle, hp, hd](Body& b) {
+            return rotateFaces(b, faces, angle, hp, hd, 7001);
+        });
+    } else {
+        const ExtrudeOp combine = faceTool_.combine;
+        faceTool_.preview.request(faceTool_.before, [faces, want, combine](Body& b) {
+            return extrudeFaces(b, faces, want, nullptr, 7002, combine);
+        });
+    }
+    faceTool_.previewValid = false;
+}
+
+void Application::commitFaceMove() {
+    if (!faceTool_.active) return;
+    const ObjectId id = faceTool_.objectId;
+    justFinishedModal_ = true;
+    faceTool_.active = false;
+    faceTool_.preview.cancel();
+
+    SceneObject* obj = scene_.find(id);
+    if (!obj) return;
+
+    std::vector<Feature> chainBefore = faceTool_.chainBefore;
+    obj->features = faceTool_.chainBefore;
+    obj->body = faceTool_.before;
+
+    if (std::fabs(faceTool_.value) < 1e-6) { obj->refreshDerived(); return; }
+
+    Feature f;
+    if (faceTool_.op == FaceOp::Rotate) {
+        f.kind = FeatureKind::FaceRotate;
+        f.angle = radians(faceTool_.value);
+        f.axisPoint = faceTool_.hingePoint;
+        f.axisDir = faceTool_.hingeDir;
+    } else {
+        f.kind = FeatureKind::Extrude;
+        f.distance = faceTool_.value;
+        f.extrudeOp = faceTool_.combine;
+    }
+    f.faces = nameFaces(faceTool_.before, faceTool_.faces);
+
+    std::string why;
+    if (scene_.addFeature(id, std::move(f), &why) && editKeepsSolid(id)) {
+        undo_.push(std::make_unique<FeatureCommand>(id, std::move(chainBefore),
+                                                    obj->features, "Move Face"));
+    } else {
+        obj->features = std::move(chainBefore);
+        obj->body = std::move(faceTool_.before);
+        obj->refreshDerived();
+        setNotice(why.empty() ? "The face could not be moved" : "Refused: " + why);
+    }
+}
+
+void Application::abortFaceMove() {
+    if (!faceTool_.active) return;
+    justFinishedModal_ = true;
+    faceTool_.active = false;
+    faceTool_.preview.cancel();
+    if (SceneObject* obj = scene_.find(faceTool_.objectId)) {
+        obj->features = std::move(faceTool_.chainBefore);
+        obj->body = std::move(faceTool_.before);
+        obj->refreshDerived();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Dividing a face
+// ---------------------------------------------------------------------------
+
+void Application::beginDivide() {
+    if (tool_.active() || filletTool_.active || createTool_.active() ||
+        faceTool_.active || divideTool_.active)
+        return;
+
+    const ObjectId id = scene_.contextObject();
+    SceneObject* obj = scene_.find(id);
+    if (!obj) { setNotice("Select an object first"); return; }
+    if (obj->body.isMesh()) { setNotice("Dividing a face needs the exact kernel"); return; }
+
+    // The cut runs square across a chosen edge and slides along it, which is
+    // what a loop cut is: pick the direction by pointing at an edge.
+    std::vector<Index> edges = scene_.selectedEdges(id);
+    if (edges.empty()) {
+        setNotice("Select an edge for the cut to run across");
+        return;
+    }
+
+    const Mat4 model = obj->modelMatrix();
+    Vec3 p, q;
+    obj->body.edgePositions(edges.front(), p, q);
+    if (lengthSq(q - p) < 1e-12) { setNotice("That edge has no length"); return; }
+
+    divideTool_.reset();
+    divideTool_.active = true;
+    divideTool_.objectId = id;
+    divideTool_.along = edges.front();
+    divideTool_.from = p;
+    divideTool_.dir = q - p;
+    divideTool_.t = 0.5;
+    divideTool_.before = obj->body;
+    divideTool_.chainBefore = obj->features;
+    preEditSolid_ = obj->healthVersion == obj->meshVersion && obj->health.solid();
+
+    divideTool_.axis.origin = transformPoint(model, p);
+    divideTool_.axis.direction = normalize(transformVector(model, q - p));
+    divideTool_.axis.valid = true;
+    divideTool_.axis.baseValue = 0.0;
+    divideTool_.axis.spanValue = length(q - p);
+}
+
+void Application::updateDivide(bool snap, bool follow) {
+    if (!divideTool_.active) return;
+    SceneObject* obj = scene_.find(divideTool_.objectId);
+    if (!obj) { abortDivide(); return; }
+
+    {
+        Body built;
+        if (divideTool_.preview.take(built)) {
+            obj->body = std::move(built);
+            obj->refreshDerived();
+            divideTool_.previewValid = true;
+        }
+    }
+    if (!follow) return;
+
+    const Real len = length(divideTool_.dir);
+    Real along = divideTool_.t * len;
+    if (!divideTool_.typedValue.empty()) {
+        try { along = std::stod(divideTool_.typedValue); } catch (...) {}
+    } else if (divideTool_.axis.valid && divideTool_.axis.facingCamera(camera_)) {
+        along = divideTool_.axis.valueAt(camera_, mouseInViewport());
+    }
+    if (snap) {
+        const Real step = static_cast<Real>(camera_.snapStep(divideTool_.axis.origin));
+        if (step > 0.0) along = std::round(along / step) * step;
+    }
+    // Never on top of either end: a cut through a corner divides nothing and
+    // the kernel will refuse it.
+    along = clampf(along, len * 0.02, len * 0.98);
+    divideTool_.t = along / len;
+
+    if (std::fabs(along - divideTool_.requested) < 1e-9 && divideTool_.previewValid) return;
+    divideTool_.requested = along;
+    divideTool_.previewValid = false;
+
+    const Vec3 at = divideTool_.from + normalize(divideTool_.dir) * along;
+    const Vec3 n = normalize(divideTool_.dir);
+    divideTool_.preview.request(divideTool_.before, [at, n](Body& b) {
+        return divideBody(b, at, n, 7003);
+    });
+}
+
+void Application::commitDivide() {
+    if (!divideTool_.active) return;
+    const ObjectId id = divideTool_.objectId;
+    justFinishedModal_ = true;
+    divideTool_.active = false;
+    divideTool_.preview.cancel();
+
+    SceneObject* obj = scene_.find(id);
+    if (!obj) return;
+
+    std::vector<Feature> chainBefore = divideTool_.chainBefore;
+    obj->features = divideTool_.chainBefore;
+    obj->body = divideTool_.before;
+
+    Feature f;
+    f.kind = FeatureKind::Divide;
+    f.axisPoint = divideTool_.from + normalize(divideTool_.dir) *
+                  (divideTool_.t * length(divideTool_.dir));
+    f.axisDir = normalize(divideTool_.dir);
+
+    std::string why;
+    if (scene_.addFeature(id, std::move(f), &why) && editKeepsSolid(id)) {
+        undo_.push(std::make_unique<FeatureCommand>(id, std::move(chainBefore),
+                                                    obj->features, "Divide"));
+        scene_.clearElementSelection();
+    } else {
+        obj->features = std::move(chainBefore);
+        obj->body = std::move(divideTool_.before);
+        obj->refreshDerived();
+        setNotice(why.empty() ? "The divide could not be made" : "Refused: " + why);
+    }
+}
+
+void Application::abortDivide() {
+    if (!divideTool_.active) return;
+    justFinishedModal_ = true;
+    divideTool_.active = false;
+    divideTool_.preview.cancel();
+    if (SceneObject* obj = scene_.find(divideTool_.objectId)) {
+        obj->features = std::move(divideTool_.chainBefore);
+        obj->body = std::move(divideTool_.before);
+        obj->refreshDerived();
+    }
+}
+
 void Application::beginFillet() {
     if (tool_.active() || filletTool_.active || createTool_.active()) return;
 
@@ -1622,10 +2042,9 @@ void Application::beginFillet() {
     filletTool_.search.pending = 0.0;
     filletTool_.search.testedTop = false;
     filletTool_.previewValid = false;
-    filletTool_.previewSegments = -1;
+
     filletTool_.requestedRadius = -1.0;
-    filletTool_.requestedSegments = -1;
-    filletTool_.currentSegments = std::max(1, view_.bevelSegments);
+
     filletTool_.meshBefore = obj->body;
     filletTool_.chainBefore = obj->features;
     filletTool_.typedValue.clear();
@@ -1724,7 +2143,6 @@ void Application::stepFilletFloorSearch() {
             if (s.trial.result() == Attempt::Refused) {
                 Body test = filletTool_.meshBefore;
                 FilletSpec spec;
-                spec.segments = filletTool_.currentSegments;
                 for (Index e : filletTool_.edges) spec.edges.push_back({e, tried});
                 filletEdges(test, spec, &why);
             }
@@ -1743,11 +2161,9 @@ void Application::stepFilletFloorSearch() {
 void Application::startFilletTrial(Real radius) {
     const Body start = filletTool_.meshBefore;
     const std::vector<Index> edges = filletTool_.edges;
-    const int segments = filletTool_.currentSegments;
-    filletTool_.search.trial.start([start, edges, segments, radius] {
+    filletTool_.search.trial.start([start, edges, radius] {
         Body test = start;
         FilletSpec spec;
-        spec.segments = segments;
         for (Index e : edges) spec.edges.push_back({e, radius});
         return filletEdges(test, spec);
     });
@@ -1879,6 +2295,94 @@ void Application::stepFilletOpenDemo() {
     mouseOverride_ = px + Vec2{40.0, -40.0};
 }
 
+void Application::stepFaceDemo() {
+    if (faceDemo_ <= 0 || faceDemoDone_ || viewRect_.w <= 0) return;
+    if (scene_.objects().empty()) return;
+    faceDemoDone_ = true;
+
+    const ObjectId id = scene_.objects().front()->id;
+    camera_.yaw = 0.6f;
+    camera_.pitch = 0.5f;
+    camera_.distance = 95.0f;
+    camera_.snapToGoal();
+    scene_.select(id);
+
+    auto topFace = [&] {
+        const SceneObject* o = scene_.find(id);
+        std::vector<FaceId> fs;
+        o->body.allFaces(fs);
+        FaceId best = kInvalid;
+        Real bestDot = -1e30;
+        for (FaceId f : fs) {
+            const Real d = dot(o->body.faceNormal(f), Vec3{0, 0, 1});
+            if (d > bestDot) { bestDot = d; best = f; }
+        }
+        return best;
+    };
+
+    auto report = [&](const char* what) {
+        const SceneObject* o = scene_.find(id);
+        std::fprintf(stderr, "[face-demo] %s: %d faces, %.1f mm3, valid=%d, %zu features\n",
+                     what, o->body.faceCount(), o->body.health(false).volume,
+                     (int)o->body.validate(), o->features.size());
+    };
+
+    if (faceDemo_ >= 4) {
+        // A loop cut across the top, then push one half of it up.
+        const SceneObject* o = scene_.find(id);
+        std::vector<EdgeId> es;
+        o->body.allEdges(es);
+        EdgeId along = kInvalid;
+        for (EdgeId e : es) {
+            Vec3 p, q;
+            o->body.edgePositions(e, p, q);
+            if (std::fabs((q - p).x) > 1e-6 && std::fabs((q - p).y) < 1e-6 &&
+                std::fabs((q - p).z) < 1e-6) { along = e; break; }
+        }
+        if (along == kInvalid) return;
+        scene_.clearElementSelection();
+        scene_.selectElement({id, ElementKind::Edge, along}, true);
+        beginDivide();
+        divideTool_.typedValue = "10";
+        updateDivide(false);
+        while (divideTool_.preview.busy()) updateDivide(false);
+        updateDivide(false);
+        commitDivide();
+        report("divided");
+
+        if (faceDemo_ >= 5) {
+            const FaceId half = topFace();
+            scene_.clearElementSelection();
+            scene_.selectElement({id, ElementKind::Face, half}, true);
+            beginFaceMove(FaceOp::PushPull);
+            faceTool_.typedValue = "4";
+            updateFaceMove(false);
+            while (faceTool_.preview.busy()) updateFaceMove(false);
+            updateFaceMove(false);
+            commitFaceMove();
+            report("pushed one half");
+        }
+        return;
+    }
+
+    scene_.clearElementSelection();
+    scene_.selectElement({id, ElementKind::Face, topFace()}, true);
+
+    if (faceDemo_ == 3) {
+        beginFaceMove(FaceOp::Rotate);
+        faceTool_.typedValue = "15";
+
+    } else {
+        beginFaceMove(FaceOp::PushPull);
+        faceTool_.typedValue = faceDemo_ == 2 ? "-5" : "6";
+    }
+    updateFaceMove(false);
+    while (faceTool_.preview.busy()) updateFaceMove(false);
+    updateFaceMove(false);
+    report(faceDemo_ == 3 ? "rotated" : (faceDemo_ == 2 ? "pulled in" : "pushed out"));
+    if (faceDemo_ != 3) commitFaceMove();     // leave the rotate open, to be seen
+}
+
 void Application::stepFilletLimitSearch() {
     FilletToolState::LimitSearch& s = filletTool_.search;
     if (!filletTool_.active || !s.active) return;
@@ -1942,12 +2446,9 @@ void Application::updateFillet(bool snap, bool follow) {
     // Whatever the kernel finished while the last few frames were drawn.
     {
         Body built;
-        Real builtR = 0.0;
-        int builtSegs = 0;
-        if (filletTool_.preview.take(built, builtR, builtSegs)) {
+        if (filletTool_.preview.take(built)) {
             obj->body = std::move(built);
             obj->refreshDerived();
-            filletTool_.previewSegments = builtSegs;
             filletTool_.previewValid = true;
         }
     }
@@ -1960,13 +2461,6 @@ void Application::updateFillet(bool snap, bool follow) {
     // that. The build already in flight still has to be collected, which is why
     // this returns here and not at the top.
     if (!follow) return;
-
-    ImGuiIO& io = ImGui::GetIO();
-    if (io.MouseWheel != 0.0f) {
-        if (io.MouseWheel > 0.0f) filletTool_.currentSegments = std::min(32, filletTool_.currentSegments + 1);
-        else if (io.MouseWheel < 0.0f) filletTool_.currentSegments = std::max(1, filletTool_.currentSegments - 1);
-        view_.bevelSegments = filletTool_.currentSegments;
-    }
 
     Real newR = filletTool_.baseRadius;
     if (!filletTool_.typedValue.empty()) {
@@ -2040,16 +2534,19 @@ void Application::updateFillet(bool snap, bool follow) {
     // frames of a drag land here -- and the ones that do not now cost the price
     // of handing a request to another thread rather than a full rebuild of the
     // body, which on an eight-edge fillet is twenty to fifty milliseconds.
-    if (std::fabs(newR - filletTool_.requestedRadius) < 1e-9 &&
-        filletTool_.currentSegments == filletTool_.requestedSegments &&
-        filletTool_.previewValid) {
+    if (std::fabs(newR - filletTool_.requestedRadius) < 1e-9 && filletTool_.previewValid) {
         return;
     }
 
     filletTool_.requestedRadius = newR;
-    filletTool_.requestedSegments = filletTool_.currentSegments;
-    filletTool_.preview.request(filletTool_.meshBefore, filletTool_.edges, newR,
-                                filletTool_.currentSegments);
+    {
+        const std::vector<Index> edges = filletTool_.edges;
+        filletTool_.preview.request(filletTool_.meshBefore, [edges, newR](Body& b) {
+            FilletSpec spec;
+            for (Index e : edges) spec.edges.push_back({e, newR});
+            return filletEdges(b, spec);
+        });
+    }
     // A refusal inside the travel means the segment count changed under the
     // limit that was measured for it. The last good preview stands rather than
     // the tool hunting for a new one mid-gesture.
@@ -2092,7 +2589,6 @@ void Application::commitFillet() {
     f.edges = nameEdges(filletTool_.meshBefore, filletTool_.edges);
     f.radii.assign(f.edges.count(), filletTool_.currentRadius);
     f.width = filletTool_.currentRadius;
-    f.segments = filletTool_.currentSegments;
 
     std::vector<Feature> chainBefore = filletTool_.chainBefore;
     obj->features = filletTool_.chainBefore;
@@ -2707,7 +3203,11 @@ void Application::applyActions() {
         }
     }
 
-    if (a.extrude) extrudeSelection();
+    // Push and pull *is* extrude on an existing face, and it is the same
+    // operation whichever name it is reached by.
+    if (a.extrude) beginFaceMove(FaceOp::PushPull);
+    if (a.rotateFace) beginFaceMove(FaceOp::Rotate);
+    if (a.divide) beginDivide();
     if (a.bevel)   bevelActiveObject();
     if (a.split)   splitActiveObject();
     if (a.fillet)  beginFillet();
@@ -2834,6 +3334,8 @@ void Application::buildUi() {
     drawMeasureLabel();
     drawTransformReadout();
     drawFilletPanel();
+    drawFacePanel();
+    drawDividePanel();
     if (createTool_.active()) {
         // Under the toolbar, in the corner of the viewport opposite the view
         // cube: a dialog over the middle of the model is a dialog in the way of
@@ -3065,10 +3567,24 @@ int Application::run() {
         ui_.measurement = measureResult_;
         ui_.measurePicks = measure_.picks().size();
 
-        if (filletTool_.active) {
+        if (faceTool_.active) {
+            char buf[160];
+            std::snprintf(buf, sizeof buf,
+                          faceTool_.op == FaceOp::Rotate
+                              ? "Rotate face  %.1f deg   type a number   Click confirm   Esc cancel"
+                              : "Push / pull  %.2f mm   A auto  J join  D cut   type a number   Click confirm   Esc cancel",
+                          faceTool_.value);
+            ui_.toolStatus = buf;
+        } else if (divideTool_.active) {
             char buf[128];
-            std::snprintf(buf, sizeof(buf), "Fillet  %.2f mm  (%d segments)   Wheel segments   type number   Click confirm   Esc cancel",
-                          filletTool_.currentRadius, filletTool_.currentSegments);
+            std::snprintf(buf, sizeof buf,
+                          "Divide  %.2f mm along the edge   type a number   Click confirm   Esc cancel",
+                          divideTool_.t * length(divideTool_.dir));
+            ui_.toolStatus = buf;
+        } else if (filletTool_.active) {
+            char buf[128];
+            std::snprintf(buf, sizeof(buf), "Fillet  %.2f mm   type a number   Click confirm   Esc cancel",
+                          filletTool_.currentRadius);
             ui_.toolStatus = buf;
         } else if (createTool_.active()) {
             if (createTool_.stage() == CreateStage::SelectPlane) {
@@ -3156,6 +3672,23 @@ int Application::run() {
                                 : 0.0;
             filletTool_.axis.drawGuide(renderer_, camera_, filletTool_.currentRadius, step,
                                        filletTool_.maxRadius);
+        }
+
+        // The same arrow for the face tools, since the gesture is the same one:
+        // pull along a line and watch the number.
+        if (faceTool_.active && faceTool_.axis.valid) {
+            const Real step = faceTool_.op == FaceOp::Rotate
+                                  ? 5.0
+                                  : DragAxis::stepFor(camera_, faceTool_.axis.origin,
+                                                      faceTool_.axis.spanValue);
+            faceTool_.axis.drawGuide(renderer_, camera_, faceTool_.value, step, 0.0);
+        }
+        if (divideTool_.active && divideTool_.axis.valid) {
+            const Real step = DragAxis::stepFor(camera_, divideTool_.axis.origin,
+                                                divideTool_.axis.spanValue);
+            divideTool_.axis.drawGuide(renderer_, camera_,
+                                       divideTool_.t * length(divideTool_.dir), step,
+                                       divideTool_.axis.spanValue);
         }
 
         camera_.update(dt);

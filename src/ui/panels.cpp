@@ -37,7 +37,9 @@ Icon iconFor(const Feature& f) {
         case FeatureKind::Primitive: return iconFor(f.primitive.kind);
         case FeatureKind::Extrude:   return Icon::Extrude;
         case FeatureKind::Bevel:     return Icon::Fillet;
-        case FeatureKind::Shell:     return Icon::Shell;
+        case FeatureKind::Shell:      return Icon::Shell;
+        case FeatureKind::FaceRotate: return Icon::Chamfer;
+        case FeatureKind::Divide:     return Icon::Inset;
         case FeatureKind::Inset:     return Icon::Inset;
         case FeatureKind::Boolean:
             return f.booleanOp == BooleanOp::Union        ? Icon::Union
@@ -235,8 +237,6 @@ void drawMenuBar(UiContext& ctx) {
         ImGui::SetNextItemWidth(140.0f);
         ImGui::DragScalarN("Width", ImGuiDataType_Double, &ctx.view->bevelWidth, 1,
                            0.05f, nullptr, nullptr, "%.2f mm");
-        ImGui::SetNextItemWidth(140.0f);
-        ImGui::DragInt("Segments", &ctx.view->bevelSegments, 0.1f, 1, 32);
         const size_t edgeCount = ctx.scene->selectedEdges(ctx.scene->contextObject()).size();
         const size_t faceCount = ctx.scene->selectedFaces(ctx.scene->contextObject()).size();
         const bool canFillet = (edgeCount > 0 || faceCount > 0);
@@ -251,10 +251,10 @@ void drawMenuBar(UiContext& ctx) {
         else
             ImGui::TextColored(kDim, "  click an edge or face in viewport first");
 
-        if (ImGui::MenuItem("Bevel All Edges", "Ctrl+B", false,
+        if (ImGui::MenuItem("Round All Edges", "Ctrl+B", false,
                             ctx.scene->contextObject() != kNoObject))
             ctx.actions.bevel = true;
-        ImGui::TextColored(kDim, "  segments 1 = chamfer, more = round");
+        ImGui::TextColored(kDim, "  every edge of the body at once");
 
         ImGui::Separator();
         ImGui::SetNextItemWidth(140.0f);
@@ -493,10 +493,24 @@ float drawToolbar(UiContext& ctx) {
     ImGui::SameLine();
 
     if (iconButton(Icon::Extrude, "Extrude", icon,
-                   faces ? "Extrude the selected faces (E)"
-                         : "Extrude - select a face first",
+                   faces ? "Push or pull the selected faces  (E)"
+                         : "Push / pull - select a face first",
                    false, faces > 0))
         ctx.actions.extrude = true;
+    ImGui::SameLine();
+
+    if (iconButton(Icon::Chamfer, "RotateFace", icon,
+                   faces ? "Tip the selected face about one of its edges  (T)"
+                         : "Rotate a face - select one first",
+                   false, faces > 0))
+        ctx.actions.rotateFace = true;
+    ImGui::SameLine();
+
+    if (iconButton(Icon::Inset, "Divide", icon,
+                   edges ? "Divide the faces along an edge  (K)"
+                         : "Divide - select an edge for the cut to run across",
+                   false, edges > 0))
+        ctx.actions.divide = true;
 
     ImGui::EndChild();
     ImGui::PopStyleVar(2);
@@ -718,6 +732,21 @@ void drawHistory(UiContext& ctx) {
             case FeatureKind::Primitive:
                 ImGui::TextColored(kDim, "Edit dimensions in the Inspector");
                 break;
+            case FeatureKind::FaceRotate: {
+                Real deg = degrees(f.angle);
+                if (labeledDrag("Angle", deg, 0.2f, -89.0f, 89.0f, "%.1f deg")) {
+                    f.angle = radians(deg);
+                    changed = true;
+                }
+                ImGui::TextColored(kDim, "about %.2f, %.2f, %.2f",
+                                   f.axisPoint.x, f.axisPoint.y, f.axisPoint.z);
+                break;
+            }
+            case FeatureKind::Divide:
+                ImGui::TextColored(kDim, "Cuts at %.2f, %.2f, %.2f",
+                                   f.axisPoint.x, f.axisPoint.y, f.axisPoint.z);
+                ImGui::TextColored(kDim, "The body stays whole; the faces divide.");
+                break;
             case FeatureKind::Extrude: {
                 changed |= labeledDrag("Distance", f.distance, 0.1f, -10000.0f, 10000.0f);
                 const char* const opNames[] = {"Auto", "Join", "Cut", "Intersect"};
@@ -743,6 +772,10 @@ void drawHistory(UiContext& ctx) {
                                                    : f.faces.describe("face").c_str());
                 break;
             case FeatureKind::Bevel: {
+                // A segment count is a mesh idea: an exact fillet is a surface
+                // rather than an approximation of one, and the kernel ignores
+                // the number outright. Shown only where it still does something.
+                const bool isMesh = obj->body.isMesh();
                 const bool wasChamfer = f.segments == 1;
                 if (labeledDrag("Radius", f.width, 0.05f, 0.01f, 10000.0f)) {
                     // Editing the feature radius restates every edge's, which
@@ -751,9 +784,11 @@ void drawHistory(UiContext& ctx) {
                     f.radii.assign(f.edges.count(), f.width);
                     changed = true;
                 }
-                changed |= labeledInt("Segments", f.segments, 1, 32);
-                if (wasChamfer != (f.segments == 1))
-                    ImGui::TextColored(kDim, f.segments == 1 ? "flat cut" : "rounded");
+                if (isMesh) {
+                    changed |= labeledInt("Segments", f.segments, 1, 32);
+                    if (wasChamfer != (f.segments == 1))
+                        ImGui::TextColored(kDim, f.segments == 1 ? "flat cut" : "rounded");
+                }
                 ImGui::TextColored(kDim, "%s", f.edges.describe("edge").c_str());
                 break;
             }

@@ -20,6 +20,8 @@ const char* featureKindName(FeatureKind k) {
         case FeatureKind::Bevel:      return "Bevel";
         case FeatureKind::VertexEdit: return "Edit Vertices";
         case FeatureKind::Shell:      return "Shell";
+        case FeatureKind::FaceRotate: return "Rotate Face";
+        case FeatureKind::Divide:     return "Divide";
     }
     return "Feature";
 }
@@ -90,6 +92,17 @@ std::string Feature::summary() const {
                 std::snprintf(buf, sizeof(buf), "Shell  %.2f mm  (%s open)",
                               static_cast<double>(thickness),
                               faces.describe("face").c_str());
+            break;
+        case FeatureKind::FaceRotate:
+            std::snprintf(buf, sizeof(buf), "Rotate  %.1f deg  (%s)",
+                          static_cast<double>(degrees(angle)),
+                          faces.describe("face").c_str());
+            break;
+        case FeatureKind::Divide:
+            std::snprintf(buf, sizeof(buf), "Divide  at %.2f, %.2f, %.2f",
+                          static_cast<double>(axisPoint.x),
+                          static_cast<double>(axisPoint.y),
+                          static_cast<double>(axisPoint.z));
             break;
     }
     return buf;
@@ -301,6 +314,28 @@ bool evaluateFrom(std::vector<Feature>& features, size_t from,
             std::string why;
             if (!shellBody(body, scratchFaces, f.thickness, f.uid, &why))
                 fail(why.empty() ? "the shell could not be built" : why.c_str());
+            break;
+        }
+
+        case FeatureKind::FaceRotate: {
+            if (body.empty()) { fail("nothing to rotate"); break; }
+            scratchFaces.clear();
+            if (!f.faces.resolveFaces(body, scratchFaces) || scratchFaces.empty()) {
+                fail("the face to rotate no longer exists");
+                break;
+            }
+            std::string why;
+            if (!rotateFaces(body, scratchFaces, f.angle, f.axisPoint, f.axisDir,
+                             f.uid, &why))
+                fail(why.empty() ? "the rotation could not be built" : why.c_str());
+            break;
+        }
+
+        case FeatureKind::Divide: {
+            if (body.empty()) { fail("nothing to divide"); break; }
+            std::string why;
+            if (!divideBody(body, f.axisPoint, f.axisDir, f.uid, &why))
+                fail(why.empty() ? "the divide could not be built" : why.c_str());
             break;
         }
 

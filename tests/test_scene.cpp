@@ -412,31 +412,38 @@ int main() {
                     (size_t)2, area);
     }
 
-    {
-        // A section line an extrude left behind divides a wall into two faces on
-        // purpose. Picking one must select one.
+    if (brep::available()) {
+        // A line the user put there divides a face into two on purpose. Picking
+        // one must pick one.
+        //
+        // This used to raise the whole top of a box and take the banding that
+        // left down the sides as its two coplanar faces. That banding was never
+        // wanted -- a taller box is a box, and drawing a seam across a wall
+        // where nothing intersects it is the complaint this tool started from;
+        // extrudeFaces merges them now. A divide is the operation that makes
+        // such a pair deliberately, so it is the one this asks about.
         Scene s;
         const ObjectId id = s.addPrimitive(PrimitiveKind::Box);
         SceneObject* o = s.find(id);
-        Index top = kInvalid;
-        for (Index f = 0; f < o->body.faceCount(); ++f)
-            if (dot(o->body.faceNormal(f), Vec3{0, 0, 1}) > 0.99) top = f;
-        check(extrudeFaces(o->body, {top}, 6.0), "raise the top of the box");
+        std::string why;
+        check(divideBody(o->body, {0, 0, 0}, {0, 0, 1}, 91, &why),
+              "cut a line round the box: " + why);
         o->refreshDerived();
 
-        // The two halves of a side wall: coplanar, one shared edge.
+        // The two halves of a side wall: coplanar, sharing one edge.
         Index lower = kInvalid, upper = kInvalid;
         for (Index f = 0; f < o->body.faceCount(); ++f) {
             if (dot(o->body.faceNormal(f), Vec3{1, 0, 0}) < 0.99) continue;
-            // after raising the top by 6, the wall is split at z = 10
-            if (o->body.faceCentroid(f).z < 8.0) lower = f; else upper = f;
+            if (o->body.faceCentroid(f).z < 0.0) lower = f; else upper = f;
         }
         check(lower != kInvalid && upper != kInvalid, "found both halves of the wall");
 
         s.selectElement({id, ElementKind::Face, lower});
         check(s.selectedFaces(id).size() == 1, "a user's section line still divides the face");
         check(s.selectedFaces(id).front() == lower, "and the piece picked is the one selected");
-        std::printf("[select] extruded wall: one click selects 1 piece\n");
+        std::printf("[select] divided wall: one click selects 1 piece\n");
+    } else {
+        std::printf("[select] no exact kernel, so nothing to divide\n");
     }
 
     std::printf("\n%s (%d failures)\n", failures ? "FAILED" : "ALL PASS", failures);

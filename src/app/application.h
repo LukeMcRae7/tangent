@@ -3,7 +3,7 @@
 
 #include "app/camera.h"
 #include "app/drag_axis.h"
-#include "app/fillet_preview.h"
+#include "app/async_build.h"
 #include "geom/kernel_guard.h"
 #include "app/create_tool.h"
 #include "app/measure.h"
@@ -109,6 +109,10 @@ public:
     // looked at rather than only the result.
     void setFilletOpen() { filletOpen_ = true; }
 
+    // Drives the face tools: 1 push out, 2 pull in, 3 rotate, 4 divide, and
+    // 5 divide then push one half -- the sequence the divide exists for.
+    void setFaceDemo(int mode) { faceDemo_ = mode; }
+
     // Parks the interface's pointer somewhere, for screenshots of hover states.
     void setUiMouse(float x, float y, bool down) {
         uiMouse_ = {x, y};
@@ -144,6 +148,8 @@ private:
     bool profileDemoDone_ = false;
     bool filletOpen_ = false;
     bool filletOpenDone_ = false;
+    int  faceDemo_ = 0;
+    bool faceDemoDone_ = false;
     Vec2 uiMouse_{-1.0f, -1.0f};
     bool uiMouseDown_ = false;
     void beginTransform(TransformMode mode);
@@ -183,7 +189,6 @@ private:
     // any filament printer resolves, and the number a user should be able to
     // argue with -- so it is offered rather than assumed.
     float       exportDeviationMm_ = 0.01f;
-    void extrudeSelection();
     void bevelActiveObject();
     void shellActiveObject();
 
@@ -197,14 +202,18 @@ private:
     bool extendLastFillet(SceneObject& obj, const Body& picked,
                           const std::vector<Index>& edges, Real radius);
 
-    // Modal interactive fillet (mouse radius, scroll wheel segments, Blender/CAD style)
+    // Modal interactive fillet: the radius is pulled out along an axis.
+    //
+    // No segment count. A fillet on an exact body is a surface, not an
+    // approximation of one, and the kernel was ignoring the number outright --
+    // a control that moved and changed nothing.
     struct FilletToolState {
         bool active = false;
         ObjectId objectId = kNoObject;
         std::vector<Index> edges;
         Real baseRadius = 1.0;
         Real currentRadius = 1.0;
-        int currentSegments = 3;
+
         // The direction the radius grows along, and the edge it is anchored
         // to. Rebuilt as the cursor moves between edges of a chain so the guide
         // follows the pointer rather than sitting on whichever edge came first.
@@ -249,20 +258,111 @@ private:
         // What the preview currently shows, so a frame that asks for the same
         // thing again can be skipped rather than rebuilt.
         bool previewValid = false;
-        int  previewSegments = 0;
 
         // What the kernel has been asked for, which runs ahead of what it has
         // finished: the number and the guide follow the cursor every frame and
         // the geometry catches up a build later.
         Real requestedRadius = -1.0;
-        int  requestedSegments = 0;
-        FilletPreview preview;
+        AsyncBuild preview;
 
         Body meshBefore;
         std::vector<Feature> chainBefore;
         std::string typedValue;
     };
     FilletToolState filletTool_;
+
+    // ---- Moving a face -----------------------------------------------------
+    //
+    // Direct modelling: the body stays one body and only the face the user
+    // pointed at moves, with the ones around it stretching to follow. Push and
+    // pull along the normal is what "extrude" means on an existing face, and
+    // rotate tips the face about one of its own edges.
+    enum class FaceOp { PushPull, Rotate };
+
+    struct FaceToolState {
+        bool     active = false;
+        FaceOp   op = FaceOp::PushPull;
+        ObjectId objectId = kNoObject;
+        std::vector<FaceId> faces;
+
+        Real value = 0.0;            // millimetres, or radians for a rotate
+        Real requested = 1e30;       // what the kernel was last asked for
+        bool previewValid = false;
+
+        DragAxis axis;
+        Vec3 hingePoint{}, hingeDir{};   // rotate only
+        ExtrudeOp combine = ExtrudeOp::Auto;
+
+        Body before;
+        std::vector<Feature> chainBefore;
+        std::string typedValue;
+        AsyncBuild preview;
+
+        // The worker owns a thread, so it cannot be copied or moved: a fresh
+        // gesture clears the fields around it rather than replacing the whole
+        // state wholesale.
+        void reset() {
+            preview.cancel();
+            objectId = kNoObject;
+            faces.clear();
+            value = 0.0;
+            requested = 1e30;
+            previewValid = false;
+            axis = DragAxis{};
+            hingePoint = hingeDir = Vec3{};
+            combine = ExtrudeOp::Auto;
+            before = Body();
+            chainBefore.clear();
+            typedValue.clear();
+        }
+    };
+    FaceToolState faceTool_;
+
+    void beginFaceMove(FaceOp op);
+    void updateFaceMove(bool snap, bool follow = true);
+    void commitFaceMove();
+    void abortFaceMove();
+    void drawFacePanel();
+
+    // ---- Dividing a face ---------------------------------------------------
+    //
+    // A loop cut: the plane rides along a chosen edge and splits every face it
+    // crosses, leaving the body whole.
+    struct DivideToolState {
+        bool     active = false;
+        ObjectId objectId = kNoObject;
+        EdgeId   along = kInvalid;       // the edge the cut slides down
+        Vec3     from{}, dir{};          // that edge, in world
+        Real     t = 0.5;                // where along it, 0..1
+        Real     requested = -1.0;
+        bool     previewValid = false;
+        DragAxis axis;
+        Body before;
+        std::vector<Feature> chainBefore;
+        std::string typedValue;
+        AsyncBuild preview;
+
+        void reset() {
+            preview.cancel();
+            objectId = kNoObject;
+            along = kInvalid;
+            from = dir = Vec3{};
+            t = 0.5;
+            requested = -1.0;
+            previewValid = false;
+            axis = DragAxis{};
+            before = Body();
+            chainBefore.clear();
+            typedValue.clear();
+        }
+    };
+    DivideToolState divideTool_;
+
+    void beginDivide();
+    void updateDivide(bool snap, bool follow = true);
+    void commitDivide();
+    void abortDivide();
+    void drawDividePanel();
 
     void beginFillet();
 
@@ -272,6 +372,7 @@ private:
     void stepSnapDemo();
     void stepProfileDemo();
     void stepFilletOpenDemo();
+    void stepFaceDemo();
     void stepFilletFloorSearch();
     void startFilletTrial(Real radius);
     static const Real kFilletFloorLadder[6];

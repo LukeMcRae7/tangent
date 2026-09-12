@@ -197,6 +197,29 @@ BrepRef extrudeFaces(const BrepRef& s, const std::vector<FaceId>& faces, Real di
 // Only a flat face can be inset: on a curved one the offset is not a wire in
 // the same surface and the answer would be an approximation. Refused with a
 // reason rather than approximated.
+// Tilts faces about one of their own edges.
+//
+// The direct-modelling answer to "rotate this face": the face turns and the
+// ones around it stretch to follow, which is a different thing from rotating a
+// body -- the solid stays one solid and only the chosen face moves. OpenCASCADE
+// spells it as a draft angle, and a draft is exactly a face rotated about the
+// line where it meets a neutral plane.
+//
+// `hingePoint` and `hingeDir` name that line; it should be an edge of the face,
+// or the operation has nothing to pivot on.
+BrepRef rotateFaces(const BrepRef& s, const std::vector<FaceId>& faces, Real angleRad,
+                    Vec3 hingePoint, Vec3 hingeDir, ElementId salt, std::string* reason);
+
+// Cuts a line across the body where a plane crosses it, without cutting the
+// body in two.
+//
+// Blender calls it a loop cut and the reason to want one is the same here as
+// there: a face is one face until something divides it, and you cannot push
+// half of a face. The solid comes back whole, with the faces the plane crossed
+// each split along it.
+BrepRef divideBody(const BrepRef& s, Vec3 planePoint, Vec3 planeNormal,
+                   ElementId salt, std::string* reason);
+
 BrepRef insetFaces(const BrepRef& s, const std::vector<FaceId>& faces, Real amount,
                    ElementId salt, std::vector<ElementId>* newFaces, std::string* reason);
 

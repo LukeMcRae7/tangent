@@ -112,6 +112,31 @@ bool insetFaces(Body& body, const std::vector<FaceId>& faces, Real amount,
     return true;
 }
 
+bool rotateFaces(Body& body, const std::vector<FaceId>& faces, Real angleRad,
+                 Vec3 hingePoint, Vec3 hingeDir, ElementId salt, std::string* reason) {
+    if (body.isMesh()) {
+        if (reason) *reason = "rotating a face needs the exact kernel, and this body is a mesh";
+        return false;
+    }
+    BrepRef result = brep::rotateFaces(body.brepRef(), faces, angleRad, hingePoint,
+                                       hingeDir, salt, reason);
+    if (!result) return false;
+    body = Body(std::move(result));
+    return true;
+}
+
+bool divideBody(Body& body, Vec3 planePoint, Vec3 planeNormal, ElementId salt,
+                std::string* reason) {
+    if (body.isMesh()) {
+        if (reason) *reason = "dividing a face needs the exact kernel, and this body is a mesh";
+        return false;
+    }
+    BrepRef result = brep::divideBody(body.brepRef(), planePoint, planeNormal, salt, reason);
+    if (!result) return false;
+    body = Body(std::move(result));
+    return true;
+}
+
 bool filletEdges(Body& body, const FilletSpec& spec, std::string* reason) {
     if (!body.isMesh()) {
         std::vector<EdgeId> edges;
