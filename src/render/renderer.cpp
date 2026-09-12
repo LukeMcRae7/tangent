@@ -119,6 +119,50 @@ void Renderer::addFrontTriangle(Vec3 a, Vec3 b, Vec3 c, Vec4 color) {
     frontVerts_.push_back(makeVert(c, color));
 }
 
+void Renderer::addFrontLine(const Camera& camera, Vec3 a, Vec3 b, Vec4 color,
+                            Real widthPx) {
+    Vec3 along = b - a;
+    const Real len = length(along);
+    if (len < 1e-12) return;
+    along = along / len;
+
+    // Across the line and facing the eye, so the quad keeps its width whichever
+    // way the line runs. Taken at the midpoint: a line long enough for the two
+    // ends to disagree is already far enough away that either answer reads the
+    // same.
+    const Vec3 mid = (a + b) * 0.5;
+    Vec3 across = cross(along, normalize(camera.eye() - mid));
+    if (lengthSq(across) < 1e-12) return;      // end-on: nothing to draw
+    across = normalize(across) * (static_cast<Real>(camera.pixelWorldSize(mid)) * widthPx * 0.5);
+
+    addFrontTriangle(a - across, b - across, b + across, color);
+    addFrontTriangle(a - across, b + across, a + across, color);
+}
+
+void Renderer::addFrontDashes(const Camera& camera, Vec3 a, Vec3 b, Vec4 color,
+                              Real widthPx, Real dashPx, Real gapPx) {
+    const Vec3 span = b - a;
+    const Real len = length(span);
+    if (len < 1e-12) return;
+
+    const Real px = static_cast<Real>(camera.pixelWorldSize((a + b) * 0.5));
+    const Real dash = std::max(dashPx * px, Real(1e-9));
+    const Real gap = std::max(gapPx * px, Real(0));
+    const Real period = dash + gap;
+    if (period <= 0.0) return;
+
+    // Bounded: a reference line can run the length of the model, and at a tight
+    // zoom that is thousands of dashes nobody can tell apart.
+    const int count = std::min(static_cast<int>(len / period) + 1, 256);
+    const Vec3 dir = span / len;
+    for (int i = 0; i < count; ++i) {
+        const Real s0 = static_cast<Real>(i) * period;
+        const Real s1 = std::min(s0 + dash, len);
+        if (s1 <= s0) break;
+        addFrontLine(camera, a + dir * s0, a + dir * s1, color, widthPx);
+    }
+}
+
 void Renderer::addBox(const AABB& box, Vec4 color) {
     if (!box.valid()) return;
     Vec3 c[8];

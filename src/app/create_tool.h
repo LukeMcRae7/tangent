@@ -1,6 +1,7 @@
 #pragma once
 
 #include "app/camera.h"
+#include "app/plane_snap.h"
 #include "app/snap.h"
 #include "app/undo.h"
 #include "core/math.h"
@@ -118,10 +119,13 @@ public:
     void setExtrudeDepth(Real depth) { extrudeDepth_ = depth; }
     void setStage(CreateStage s) { stage_ = s; }
 
-    // What the cursor is currently snapped to, if anything. The overlay marks
-    // it and the HUD names it: a snap that happens invisibly is indistinguish-
-    // able from the tool being imprecise.
-    const SnapHit& activeSnap() const { return activeSnap_; }
+    // What the cursor is currently snapped to, if anything, and why. The
+    // overlay marks it and the HUD names it: a snap that happens invisibly is
+    // indistinguishable from the tool being imprecise.
+    const PlaneSnap& activeSnap() const { return activeSnap_; }
+
+    // The sketch plane, as the snapper wants it.
+    PlaneFrame plane() const { return {planeOrigin_, planeU_, planeV_, planeNormal_}; }
 
     // What is being typed, for the HUD and for tests. Empty when the mouse is
     // in charge, which is the normal state.
@@ -199,7 +203,7 @@ private:
     Vec2 dragStartPt2_{0, 0};
     Real dragStartFillets_[4] = {0.0, 0.0, 0.0, 0.0};
 
-    SnapHit activeSnap_;
+    PlaneSnap activeSnap_;
 
     Vec2 filletRefUV_{0, 0};
     std::vector<int> activeFilletCorners_;

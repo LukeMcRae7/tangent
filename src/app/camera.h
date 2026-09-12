@@ -88,12 +88,10 @@ public:
         return static_cast<float>(niceStep(pixelWorldSize(atPoint) * 10.0f));
     }
 
-    // For placing things rather than sizing them, where landing on a round
-    // number matters more than fine control. Used by the create tool when
-    // there is no geometry to snap to.
-    float coarseSnapStep(Vec3 atPoint) const {
-        return static_cast<float>(niceStep(pixelWorldSize(atPoint) * 45.0f));
-    }
+    // Placing things is not sizing them: a point lands on a line the user can
+    // see, which is the viewport's own grid rather than a step of the camera's
+    // choosing. See gridLevelsAt in app/plane_snap.h, which the sketch grid is
+    // drawn from and the snapper pulls to, so the two cannot disagree.
 
     // ---- Smoothing -------------------------------------------------------
     // Only view *snaps* animate. Orbit, pan and dolly are applied immediately:

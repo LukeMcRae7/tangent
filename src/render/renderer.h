@@ -85,6 +85,21 @@ public:
     // it is gone; and it is the only part of the guide the eye follows.
     void addFrontTriangle(Vec3 a, Vec3 b, Vec3 c, Vec4 color);
 
+    // A line of a fixed width in pixels, in the front layer.
+    //
+    // Not glLineWidth: a core profile is only required to support a width of
+    // one, and several drivers give exactly that. A quad turned to face the eye
+    // holds its width at any angle and any zoom, which is what an overlay
+    // measured in pixels has to do.
+    void addFrontLine(const Camera& camera, Vec3 a, Vec3 b, Vec4 color,
+                      Real widthPx = 2.0);
+
+    // The same, broken into dashes of `dashPx` on and `gapPx` off, measured on
+    // screen so the pattern stays legible however long the line is in world
+    // terms. For lines that report a relationship rather than draw a thing.
+    void addFrontDashes(const Camera& camera, Vec3 a, Vec3 b, Vec4 color,
+                        Real widthPx = 1.6, Real dashPx = 6.0, Real gapPx = 5.0);
+
 private:
     struct CacheEntry {
         GpuMesh  gpu;

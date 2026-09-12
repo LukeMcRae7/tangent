@@ -94,6 +94,12 @@ public:
     // way the crash was reached.
     void setShellFilletDemo(bool on) { shellFilletDemo_ = on; }
 
+    // Drives the create tool to a position that should catch a snap, so the
+    // indicator and the reason can be seen rather than argued about.
+    // `mode`: 0 nothing, 1 in line with the hole, 2 where two lines cross,
+    // 3 on a grid crossing, 4 on the hole's centre.
+    void setSnapDemo(int mode) { snapDemo_ = mode; }
+
     // Rounds one edge of a box and then the edge opposite it, through the same
     // path the keyboard takes, and reports whether the part came out symmetric.
     // Two opposite edges rounded to the same radius can only give a symmetric
@@ -118,6 +124,7 @@ private:
 
     // Set only by the headless demos, which have no pointer of their own.
     Vec2 mouseOverride_{-1.0, -1.0};
+    int  snapDemo_ = 0;
     void beginTransform(TransformMode mode);
     void handleViewportClick(bool shift, bool ctrl);
     void drawSelectionHighlights();
@@ -241,6 +248,7 @@ private:
     // Advances the search for the largest fillet this gesture can make, one
     // trial per frame, without waiting for any of them.
     void stepFilletLimitSearch();
+    void stepSnapDemo();
     void stepFilletFloorSearch();
     void startFilletTrial(Real radius);
     static const Real kFilletFloorLadder[6];

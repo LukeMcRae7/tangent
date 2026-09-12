@@ -1,5 +1,7 @@
 #include "app/create_tool.h"
 
+#include "app/snap_overlay.h"
+
 #include "app/camera.h"
 #include "app/undo.h"
 #include "core/palette.h"
@@ -513,33 +515,37 @@ void CreateTool::choosePlane(PlaneChoice choice, Camera& camera, const Scene& sc
 void CreateTool::update(const Scene& scene, const Camera& camera, Vec2 mousePx, bool snap) {
     if (stage_ == CreateStage::None) return;
 
-    // One increment for the whole tool, sized to the zoom the way every other
-    // gesture in the application is. The fixed 5mm, 1mm and 0.5mm steps this
-    // used to carry were three different answers to the same question, and all
-    // three were wrong at some zoom: 5mm is coarse enough to be unusable on a
-    // 6mm boss and far too fine when laying out a 300mm plate.
-    const Real step = snap ? camera.snapStep(planeOrigin_) : 0.0;
-    auto quantise = [step](Real v) { return step > 0.0 ? std::round(v / step) * step : v; };
+    // Lengths and positions want different ladders, and conflating them is why
+    // this used to carry three fixed steps that were all wrong at some zoom.
+    //
+    //   a position lands on a line you can see -- the decimal grid, handled by
+    //   snapOnPlane, because a point that sits where there is no line leaves the
+    //   user holding a number that disagrees with the screen;
+    //
+    //   a length is a number you would choose -- 0.25, 0.5, 1, 2.5, 5 -- which
+    //   is finer than the decades and is what a depth or a radius is actually
+    //   typed as.
+    //
+    // Ten pixels a step, so a steady hand can reach every value on the ladder.
+    const Real step = snap ? static_cast<Real>(camera.snapStep(planeOrigin_)) : 0.0;
+    auto quantise = [step](Real v) {
+        return step > 0.0 ? std::round(v / step) * step : v;
+    };
 
-    // What the cursor is over, in the geometry's own terms: the centre of a
-    // hole, the middle of an edge, a corner. Only points on or very near the
-    // sketch plane are offered -- snapping a sketch point to something floating
-    // above the plane would move it somewhere the user did not point at.
-    activeSnap_ = SnapHit{};
-    Vec2 snappedUV{0, 0};
-    bool haveSnap = false;
-    if (snap && stage_ != CreateStage::SelectPlane) {
-        const SnapHit hit = findSnap(scene, camera, mousePx);
-        if (hit.valid()) {
-            const Vec3 rel = hit.point - planeOrigin_;
-            const Real offPlane = std::fabs(dot(rel, planeNormal_));
-            if (offPlane < static_cast<Real>(camera.pixelWorldSize(hit.point)) * 4.0) {
-                activeSnap_ = hit;
-                snappedUV = {dot(rel, planeU_), dot(rel, planeV_)};
-                haveSnap = true;
-            }
+    // Where the point goes, and why. Not only what is under the cursor: being
+    // level with a hole on the far side of the part is as much a place as the
+    // hole itself, and is most of what makes a sketch land where it was meant.
+    activeSnap_ = PlaneSnap{};
+    auto placePoint = [&](Vec2 freeUV, bool useStartPoint) {
+        if (!snap) return freeUV;
+        std::vector<SnapPoint> extra;
+        if (useStartPoint) {
+            const Vec3 world = planeOrigin_ + planeU_ * pt1_.x + planeV_ * pt1_.y;
+            extra.push_back({world, pt1_, SnapKind::Vertex, kNoObject, 0.0});
         }
-    }
+        activeSnap_ = snapOnPlane(scene, camera, plane(), mousePx, freeUV, {}, extra);
+        return activeSnap_.valid() ? activeSnap_.uv : freeUV;
+    };
 
     if (stage_ == CreateStage::SelectPlane) {
         // Raycast against scene objects first
@@ -597,7 +603,7 @@ void CreateTool::update(const Scene& scene, const Camera& camera, Vec2 mousePx, 
     if (stage_ == CreateStage::DrawProfile_Pt1) {
         Vec2 uv{0, 0};
         if (unprojectToPlane(camera, mousePx, uv)) {
-            uv = haveSnap ? snappedUV : Vec2{quantise(uv.x), quantise(uv.y)};
+            uv = placePoint(uv, false);
             pt1_ = uv;
             pt2_ = uv;
         }
@@ -608,13 +614,28 @@ void CreateTool::update(const Scene& scene, const Camera& camera, Vec2 mousePx, 
         if (typing()) return;               // the keyboard has the dimension
         Vec2 uv{0, 0};
         if (unprojectToPlane(camera, mousePx, uv)) {
-            // A geometry snap wins over the grid: it is a point the user can
-            // see and name, where the grid is a compromise for when there is
-            // nothing better.
-            uv = haveSnap ? snappedUV : Vec2{quantise(uv.x), quantise(uv.y)};
+            // The point already placed is a reference in its own right: keeping
+            // the second corner level with the first is the commonest thing
+            // anyone does here, and the scene knows nothing about it.
+            uv = placePoint(uv, true);
             pt2_ = uv;
             if (kind_ == PrimitiveKind::Cylinder) {
-                currentRadius_ = std::max(length(pt2_ - pt1_), Real(1.0));
+                // A circle is drawn by its radius, so that is what has to land
+                // on a round number -- snapping the point on the rim leaves the
+                // radius at whatever the diagonal happened to be. When the rim
+                // has caught something real, the point wins: matching a hole
+                // exactly is worth more than a tidy number.
+                const bool onFeature =
+                    activeSnap_.valid() && activeSnap_.kind != SnapKind::GridPoint &&
+                    activeSnap_.kind != SnapKind::GridLine;
+                Real r = std::max(length(pt2_ - pt1_), Real(1.0));
+                if (!onFeature && snap) {
+                    r = std::max(quantise(r), Real(0.1));
+                    const Vec2 dir = pt2_ - pt1_;
+                    const Real len = length(dir);
+                    pt2_ = len > 1e-9 ? pt1_ + dir * (r / len) : pt1_ + Vec2{r, 0};
+                }
+                currentRadius_ = r;
             } else {
                 currentWidth_ = std::max(std::fabs(pt2_.x - pt1_.x), Real(1.0));
                 currentDepth_ = std::max(std::fabs(pt2_.y - pt1_.y), Real(1.0));
@@ -642,16 +663,29 @@ void CreateTool::update(const Scene& scene, const Camera& camera, Vec2 mousePx, 
                 currentRadius_ = std::max(quantise(length(currentUV - pt1_)), Real(0.1));
                 pt2_ = pt1_ + Vec2{currentRadius_, 0};
             } else {
-                // Edge dragging (held mouse button):
-                // pt1_ is always (uMin, vMin) and pt2_ is always (uMax, vMax)
+                // Edge dragging (held mouse button): the edge being moved is a
+                // point as far as snapping is concerned, so it gets the same
+                // treatment -- an edge brought level with a hole on the part
+                // below is the reason any of this exists.
+                //
+                // pt1_ is always (uMin, vMin) and pt2_ is always (uMax, vMax).
+                const Vec2 placed = placePoint(currentUV, false);
+                const bool vertical = activeHandle_ == HandleId::EdgeLeft ||
+                                      activeHandle_ == HandleId::EdgeRight;
+                // An alignment on the axis this handle does not move says
+                // nothing about where the edge went, so it is not shown.
+                if (activeSnap_.kind == SnapKind::Alignment &&
+                    activeSnap_.refs[0].alongU != vertical)
+                    activeSnap_ = PlaneSnap{};
+
                 if (activeHandle_ == HandleId::EdgeLeft) {
-                    pt1_.x = std::min(quantise(currentUV.x), dragStartPt2_.x - 1.0);
+                    pt1_.x = std::min(placed.x, dragStartPt2_.x - 1.0);
                 } else if (activeHandle_ == HandleId::EdgeRight) {
-                    pt2_.x = std::max(quantise(currentUV.x), dragStartPt1_.x + 1.0);
+                    pt2_.x = std::max(placed.x, dragStartPt1_.x + 1.0);
                 } else if (activeHandle_ == HandleId::EdgeBottom) {
-                    pt1_.y = std::min(quantise(currentUV.y), dragStartPt2_.y - 1.0);
+                    pt1_.y = std::min(placed.y, dragStartPt2_.y - 1.0);
                 } else if (activeHandle_ == HandleId::EdgeTop) {
-                    pt2_.y = std::max(quantise(currentUV.y), dragStartPt1_.y + 1.0);
+                    pt2_.y = std::max(placed.y, dragStartPt1_.y + 1.0);
                 }
                 currentWidth_ = pt2_.x - pt1_.x;
                 currentDepth_ = pt2_.y - pt1_.y;
@@ -723,21 +757,19 @@ void CreateTool::handleMouseDown(Vec2 mousePx, Scene& scene, Camera& camera, Und
         return;
     }
 
+    // Both point stages commit what update() placed this frame, which is the
+    // snapped point. Re-unprojecting the cursor here is what the click used to
+    // do, and it threw the snap away at the one moment it mattered: the
+    // indicator said "centre", the dotted line said which centre, and the point
+    // landed a third of a millimetre off it. update() runs before input for
+    // exactly this reason.
     if (stage_ == CreateStage::DrawProfile_Pt1) {
-        Vec2 uv{0, 0};
-        if (unprojectToPlane(camera, mousePx, uv)) {
-            pt1_ = uv;
-            pt2_ = uv;
-        }
+        pt2_ = pt1_;
         stage_ = CreateStage::DrawProfile_Pt2;
         return;
     }
 
     if (stage_ == CreateStage::DrawProfile_Pt2) {
-        Vec2 uv{0, 0};
-        if (unprojectToPlane(camera, mousePx, uv)) {
-            pt2_ = uv;
-        }
         if (kind_ != PrimitiveKind::Cylinder) {
             const Real uMin = std::min(pt1_.x, pt2_.x);
             const Real uMax = std::max(pt1_.x, pt2_.x);
@@ -1250,29 +1282,9 @@ bool CreateTool::finishCreation(Scene& scene, Camera& camera, UndoStack& undo) {
 void CreateTool::drawOverlay(const Scene& scene, const Camera& camera, Renderer& renderer) const {
     if (stage_ == CreateStage::None) return;
 
-    // Mark what the cursor is snapped to. A snap nobody can see is
-    // indistinguishable from the tool being imprecise, and the shape says which
-    // kind it is without needing to be read: a ring for something round, a
-    // cross for a point.
-    if (activeSnap_.valid()) {
-        const Vec3 p = activeSnap_.point;
-        const Real r = static_cast<Real>(camera.pixelWorldSize(p)) * 7.0;
-        const Vec4 col = toVec4(palette::kBrand, 1.0f);
-        const bool round = activeSnap_.kind == SnapKind::CircleCentre ||
-                           activeSnap_.kind == SnapKind::ArcQuadrant;
-        if (round) {
-            Vec3 prev{};
-            for (int i = 0; i <= 16; ++i) {
-                const Real a = kTwoPi * i / 16.0;
-                const Vec3 at = p + planeU_ * (r * std::cos(a)) + planeV_ * (r * std::sin(a));
-                if (i > 0) renderer.addLine(prev, at, col);
-                prev = at;
-            }
-        } else {
-            renderer.addLine(p - planeU_ * r, p + planeU_ * r, col);
-            renderer.addLine(p - planeV_ * r, p + planeV_ * r, col);
-        }
-    }
+    // What the cursor has caught, and what it was inferred from. See
+    // app/snap_overlay.h for the shapes and why they are those shapes.
+    drawSnapIndicator(renderer, camera, activeSnap_);
 
     if (stage_ == CreateStage::SelectPlane) {
         const float sz = std::max(camera.distance * 0.35f, 25.0f);
@@ -1325,15 +1337,40 @@ void CreateTool::drawOverlay(const Scene& scene, const Camera& camera, Renderer&
         return;
     }
 
-    // In 2D Profile & Extrude stages: draw plane grid and profile
-    const float gridSpan = 80.0f;
-    const float step = 10.0f;
-    const Vec4 gridCol(0.4f, 0.5f, 0.6f, 0.12f);
-    for (float i = -gridSpan; i <= gridSpan; i += step) {
-        renderer.addLine(planeOrigin_ + planeU_ * i - planeV_ * gridSpan,
-                         planeOrigin_ + planeU_ * i + planeV_ * gridSpan, gridCol);
-        renderer.addLine(planeOrigin_ - planeU_ * gridSpan + planeV_ * i,
-                         planeOrigin_ + planeU_ * gridSpan + planeV_ * i, gridCol);
+    // The sketch grid, at the levels the snapper pulls to.
+    //
+    // It used to be a fixed 10mm step across a fixed 160mm square, which was
+    // the wrong grid at every zoom but one and -- worse -- was not the grid the
+    // point actually landed on. A line you can see that the cursor passes
+    // straight through teaches the user not to trust the grid at all.
+    const Real gridSpan = std::max<Real>(camera.distance * 1.6, 20.0);
+    const GridLevels levels = gridLevelsAt(camera, planeOrigin_);
+    auto drawLevel = [&](Real stepMm, Vec4 col) {
+        if (stepMm <= 0.0) return false;
+        const int n = static_cast<int>(gridSpan / stepMm);
+        if (n > 240) return false;          // denser than it can be read; leave it out
+        for (int i = -n; i <= n; ++i) {
+            const Real t = static_cast<Real>(i) * stepMm;
+            renderer.addLine(planeOrigin_ + planeU_ * t - planeV_ * gridSpan,
+                             planeOrigin_ + planeU_ * t + planeV_ * gridSpan, col);
+            renderer.addLine(planeOrigin_ - planeU_ * gridSpan + planeV_ * t,
+                             planeOrigin_ + planeU_ * gridSpan + planeV_ * t, col);
+        }
+        return true;
+    };
+    // Exactly the lines the snapper will call a snap, and no others.
+    //
+    // gridLevelsAt picks `main` so its cells stay at least twelve pixels wide,
+    // which is the coarsest thing a person can still land on by hand; anything
+    // finer the snapper steps through without claiming, so drawing it would
+    // promise a line that means nothing. One level to land on and the decade
+    // above it to count by.
+    const Real ladder[3] = {levels.main, levels.major, levels.major * 10.0};
+    for (int i = 0; i < 2; ++i) {
+        if (drawLevel(ladder[i], Vec4{0.45f, 0.55f, 0.65f, 0.13f})) {
+            drawLevel(ladder[i + 1], Vec4{0.50f, 0.60f, 0.70f, 0.28f});
+            break;
+        }
     }
     // Main U/V axes on the plane
     renderer.addLine(planeOrigin_ - planeU_ * gridSpan, planeOrigin_ + planeU_ * gridSpan, Vec4{0.9f, 0.3f, 0.3f, 0.4f});
@@ -1479,8 +1516,21 @@ bool CreateTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& ou
             ImGui::SameLine();
             if (ImGui::Button("Cancel (Esc)")) cancel(camera);
         } else if (stage_ == CreateStage::DrawProfile_Pt1) {
-            ImGui::TextColored(kAccentIm, "Step 1: Click to set %s",
+            ImGui::TextColored(kAccentIm, "Step 1: %s",
                               kind_ == PrimitiveKind::Cylinder ? "Center Point" : "First Corner");
+            ImGui::SameLine();
+            // Where the point actually is, and why it is there. The panel is
+            // where the eye already is, and the starting point is the one the
+            // whole sketch is measured from.
+            ImGui::TextDisabled("%.2f, %.2f", pt1_.x, pt1_.y);
+            if (activeSnap_.valid()) {
+                ImGui::SameLine();
+                ImGui::TextColored(kAccentIm, "%s", describeSnap(activeSnap_).c_str());
+                if (activeSnap_.radius > 0.0) {
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(\u00D8 %.3f mm)", activeSnap_.radius * 2.0);
+                }
+            }
             ImGui::SameLine();
             if (ImGui::Button("Cancel (Esc)")) cancel(camera);
         } else if (stage_ == CreateStage::DrawProfile_Pt2) {
@@ -1498,7 +1548,7 @@ bool CreateTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& ou
                 ImGui::SameLine();
                 ImGui::TextDisabled(kind_ == PrimitiveKind::Cylinder ? "(Enter)" : "(Tab / Enter)");
             } else if (activeSnap_.valid()) {
-                ImGui::TextColored(kAccentIm, " snapped to %s", snapKindName(activeSnap_.kind));
+                ImGui::TextColored(kAccentIm, " %s", describeSnap(activeSnap_).c_str());
                 if (activeSnap_.radius > 0.0) {
                     ImGui::SameLine();
                     ImGui::TextDisabled("(\u00D8 %.3f mm)", activeSnap_.radius * 2.0);

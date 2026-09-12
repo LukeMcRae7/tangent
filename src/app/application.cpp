@@ -348,6 +348,47 @@ bool Application::init() {
         }
     }
 
+    if (snapDemo_ > 0) {
+        // A plate with a hole off to one side: the part every snapping feature
+        // exists for. The hole gives a centre to be level with, the plate gives
+        // corners, and the two together give a crossing.
+        scene_.clear();
+        PrimitiveSpec plate;
+        plate.kind = PrimitiveKind::Box;
+        plate.box = {80, 80, 10};
+        const ObjectId id = scene_.addPrimitive(PrimitiveKind::Box, plate);
+
+        PrimitiveSpec bore;
+        bore.kind = PrimitiveKind::Cylinder;
+        bore.cylinder.radius = 9;
+        bore.cylinder.height = 40;
+        Body tool;
+        if (makePrimitive(bore, tool, scene_.defaultBackend())) {
+            tool.transform(translate({20, 0, 0}));
+            Body out;
+            SceneObject* o = scene_.find(id);
+            if (booleanOp(o->body, tool, BooleanOp::Difference, out, 77, false, nullptr)) {
+                o->body = std::move(out);
+                o->refreshDerived();
+            }
+        }
+
+        camera_.yaw = 0.9f;
+        camera_.pitch = 0.95f;
+        camera_.distance = 190.0f;
+        camera_.target = {0, 0, 0};
+        camera_.snapToGoal();
+
+        createTool_.start(PrimitiveKind::Box);
+        createTool_.setHoveredPlane(PlaneChoice::Face, {0, 0, 5}, {0, 0, 1}, id, 0);
+        createTool_.commitPlaneSelection(camera_);
+        camera_.snapToGoal();
+
+        // The cursor is placed per frame, in stepSnapDemo: the viewport has no
+        // size until the first frame has been laid out, so a pixel worked out
+        // here would point somewhere else by the time anything was drawn.
+    }
+
     if (shellFilletDemo_ && !scene_.objects().empty()) {
         const ObjectId id = scene_.objects().front()->id;
         // The ordinary case first, on solid material: one edge of the untouched
@@ -607,6 +648,7 @@ void Application::handleViewportMouse() {
 
     // Interactive Object Creation & Sketching Tool:
     if (createTool_.active()) {
+        stepSnapDemo();
         createTool_.update(scene_, camera_, mouseInViewport(), !io.KeyCtrl);
         if (!io.WantCaptureMouse) {
             if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
@@ -1629,6 +1671,39 @@ void Application::startFilletTrial(Real radius) {
         for (Index e : edges) spec.edges.push_back({e, radius});
         return filletEdges(test, spec);
     });
+}
+
+// Where the demo stands, in the sketch plane's own coordinates, and how far off
+// the thing it is meant to catch.
+void Application::stepSnapDemo() {
+    if (snapDemo_ <= 0 || !createTool_.active()) return;
+
+    const Vec2 targets[5] = {{0, 0}, {20.6, -31.0}, {20.5, 39.4}, {10.4, 20.3}, {20.0, 0.0}};
+    const Vec2 uv = targets[std::min(snapDemo_, 4)];
+    Vec2 px{};
+    if (!camera_.projectToPixel(Vec3{uv.x, uv.y, 5.0}, px)) return;
+    if (snapDemo_ == 4) px += Vec2{4.0, 3.0};
+    mouseOverride_ = px;
+
+    static int reported = -1;
+    if (reported != snapDemo_) {
+        reported = snapDemo_;
+        createTool_.update(scene_, camera_, px, true);
+        const PlaneSnap& hit = createTool_.activeSnap();
+
+        // What one frame of sketching costs. This runs on every mouse move, so
+        // it has to stay beneath the frame it is drawn in.
+        const auto t0 = std::chrono::steady_clock::now();
+        constexpr int kReps = 50;
+        for (int i = 0; i < kReps; ++i)
+            createTool_.update(scene_, camera_, px + Vec2{i * 0.01, 0.0}, true);
+        const double each = std::chrono::duration<double, std::milli>(
+                                std::chrono::steady_clock::now() - t0).count() / kReps;
+
+        std::fprintf(stderr, "[snap-demo] at %.2f,%.2f -> %s  (%.3f, %.3f)  refs %d  %.3f ms/frame\n",
+                     uv.x, uv.y, hit.valid() ? describeSnap(hit).c_str() : "nothing",
+                     hit.uv.x, hit.uv.y, hit.refCount, each);
+    }
 }
 
 void Application::stepFilletLimitSearch() {
@@ -2805,14 +2880,14 @@ int Application::run() {
             // the more specific thing to say, and a snap nobody is told about
             // is indistinguishable from the tool being imprecise -- or from a
             // snap to the wrong thing.
-            if (const SnapHit& hit = createTool_.activeSnap(); hit.valid()) {
-                char buf[96];
-                if (hit.radius > 0.0)
-                    std::snprintf(buf, sizeof buf, "Snapped to %s  (\u00D8 %.3f mm)",
-                                  snapKindName(hit.kind), hit.radius * 2.0);
-                else
-                    std::snprintf(buf, sizeof buf, "Snapped to %s", snapKindName(hit.kind));
-                ui_.toolStatus = std::string(buf) + "   Ctrl for free placement";
+            if (const PlaneSnap& hit = createTool_.activeSnap(); hit.valid()) {
+                std::string what = describeSnap(hit);
+                if (hit.radius > 0.0) {
+                    char buf[48];
+                    std::snprintf(buf, sizeof buf, "  (\u00D8 %.3f mm)", hit.radius * 2.0);
+                    what += buf;
+                }
+                ui_.toolStatus = what + "   Ctrl for free placement";
             }
         } else if (tool_.active()) {
             ui_.toolStatus = tool_.statusText();

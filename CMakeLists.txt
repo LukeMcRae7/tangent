@@ -137,6 +137,8 @@ add_executable(tangent
   src/app/snap.cpp
   src/app/drag_axis.cpp
   src/app/fillet_preview.cpp
+  src/app/plane_snap.cpp
+  src/app/snap_overlay.cpp
   src/app/undo.cpp
   src/mesh/halfedge.cpp
   src/mesh/primitives.cpp
@@ -273,6 +275,7 @@ add_test(NAME io COMMAND test_io)
 
 add_executable(test_create_tool tests/test_create_tool.cpp
   src/app/create_tool.cpp src/app/camera.cpp src/app/undo.cpp src/app/snap.cpp
+  src/app/plane_snap.cpp src/app/snap_overlay.cpp
   src/scene/scene.cpp src/scene/feature.cpp src/mesh/boolean.cpp
   src/mesh/health.cpp ${TANGENT_GEOM} src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp
   src/render/renderer.cpp src/render/shader.cpp src/render/gpu_mesh.cpp)
@@ -300,7 +303,7 @@ target_compile_options(test_drag PRIVATE ${TANGENT_WARNINGS})
 add_test(NAME drag COMMAND test_drag)
 
 add_executable(test_snap tests/test_snap.cpp
-  src/app/snap.cpp src/app/camera.cpp
+  src/app/snap.cpp src/app/plane_snap.cpp src/app/camera.cpp
   src/scene/scene.cpp src/scene/feature.cpp src/mesh/boolean.cpp src/mesh/health.cpp
   ${TANGENT_GEOM} src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp)
 target_include_directories(test_snap PRIVATE src)

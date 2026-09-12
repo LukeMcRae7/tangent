@@ -1575,7 +1575,7 @@ static void testSection13_SnapToGeometry() {
     check(camera.projectToPixel(Vec3{20, 0, 5}, centrePx), "the hole's centre is on screen");
     tool2.update(scene, camera, centrePx + Vec2{5.0f, 4.0f}, true);
 
-    const SnapHit& hit = tool2.activeSnap();
+    const PlaneSnap& hit = tool2.activeSnap();
     check(hit.valid(), "the cursor snapped to something");
     check(hit.kind == SnapKind::CircleCentre,
           std::string("and it is the hole's centre, not ") + snapKindName(hit.kind));
@@ -1588,6 +1588,74 @@ static void testSection13_SnapToGeometry() {
     // Holding Ctrl -- snapping off -- leaves the cursor where it actually is.
     tool2.update(scene, camera, centrePx + Vec2{5.0f, 4.0f}, false);
     check(!tool2.activeSnap().valid(), "with snapping off, nothing is snapped to");
+
+    // ---- and the click has to keep it -------------------------------------
+    //
+    // It used to throw it away: update() placed the snapped point, and then the
+    // mouse-down unprojected the cursor again and committed that instead. The
+    // indicator said "centre", the dotted line said which centre, and the point
+    // landed a third of a millimetre off -- the one failure that makes a user
+    // stop trusting snapping altogether.
+    std::printf("--- the click commits the snapped point, not the cursor ---\n");
+    {
+        CreateTool t3;
+        t3.start(PrimitiveKind::Cylinder);
+        t3.setHoveredPlane(PlaneChoice::Face, {0, 0, 5}, {0, 0, 1}, id, 0);
+        t3.commitPlaneSelection(camera);
+        camera.snapToGoal();
+
+        const Vec2 aim = centrePx + Vec2{5.0f, 4.0f};
+        t3.update(scene, camera, aim, true);
+        check(t3.activeSnap().kind == SnapKind::CircleCentre, "aimed near the centre");
+
+        t3.handleMouseDown(aim, scene, camera, undo);
+        check(t3.stage() == CreateStage::DrawProfile_Pt2, "moved on to the second point");
+
+        // Build the cylinder and measure it. A circle is drawn about pt1, so a
+        // first point that drifted shows up as a body centred somewhere else --
+        // which is the only evidence that actually matters.
+        Vec2 rimPx{};
+        check(camera.projectToPixel(Vec3{28, 0, 5}, rimPx), "a point out on the plate");
+        t3.update(scene, camera, rimPx, true);
+        t3.handleMouseDown(rimPx, scene, camera, undo);
+        check(t3.stage() == CreateStage::AdjustProfile, "and on to adjusting");
+
+        t3.setOp(CreateOp::NewBody);
+        t3.setStage(CreateStage::ExtrudeDepth);
+        t3.setExtrudeDepth(6.0);
+        const size_t before = scene.objects().size();
+        check(t3.finishCreation(scene, camera, undo), "the cylinder was made");
+        check(scene.objects().size() == before + 1, "as a body of its own");
+
+        const SceneObject* made = scene.objects().back().get();
+        const AABB b = made->worldBounds();
+        const Real cx = (b.min.x + b.max.x) * 0.5;
+        const Real cy = (b.min.y + b.max.y) * 0.5;
+        check(near(cx, 20.0, 1e-6) && near(cy, 0.0, 1e-6),
+              "centred exactly on the hole it snapped to");
+        std::printf("  built about %.6f, %.6f -- the hole is at 20, 0\n", cx, cy);
+    }
+
+    // ---- lined up with the hole from across the plate ----------------------
+    std::printf("--- in line with the hole, from 30mm away ---\n");
+    {
+        CreateTool t4;
+        t4.start(PrimitiveKind::Box);
+        t4.setHoveredPlane(PlaneChoice::Face, {0, 0, 5}, {0, 0, 1}, id, 0);
+        t4.commitPlaneSelection(camera);
+        camera.snapToGoal();
+
+        Vec2 px{};
+        check(camera.projectToPixel(Vec3{20.4, -30.0, 5}, px), "a point level with the hole");
+        t4.update(scene, camera, px, true);
+
+        const PlaneSnap& a4 = t4.activeSnap();
+        check(a4.kind == SnapKind::Alignment || a4.kind == SnapKind::Intersection,
+              std::string("lined up rather than left alone: ") + snapKindName(a4.kind));
+        check(near(a4.point.x, 20.0, 0.05), "and pulled onto the hole's line");
+        check(a4.refCount >= 1, "with a reference to draw a line back to");
+        std::printf("  %s -> x = %.4f\n", describeSnap(a4).c_str(), a4.point.x);
+    }
 }
 
 // ===========================================================================
