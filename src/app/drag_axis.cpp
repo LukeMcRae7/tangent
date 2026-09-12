@@ -74,64 +74,100 @@ void thickLine(Renderer& renderer, const Camera& camera, Vec3 a, Vec3 b, Vec4 co
 
 }  // namespace
 
+Real DragAxis::stepFor(const Camera& camera, Vec3 at, Real reach) {
+    const Real px = static_cast<Real>(camera.pixelWorldSize(at));
+    // Ten pixels is the finest worth offering -- below that the hand cannot
+    // pick one tick over its neighbour. A thirtieth of the travel is the
+    // coarsest -- above that the whole range is a handful of stops. Whichever
+    // is larger, rounded to a number a person would choose.
+    const Real byZoom = px * 10.0;
+    const Real byReach = reach > 0.0 ? reach / 30.0 : 0.0;
+    Real step = niceStep(std::max(byZoom, byReach));
+
+    // And never coarser than a quarter of the travel. Zoomed far enough out,
+    // ten pixels is worth more than the whole gesture, and the step would be
+    // the only stop on the road -- which is a slider with one position.
+    if (reach > 0.0 && step > reach * 0.25) step = niceStepBelow(reach * 0.25);
+    return step;
+}
+
 void DragAxis::drawGuide(Renderer& renderer, const Camera& camera, Real value,
                          Real step, Real limit) const {
     if (!valid) return;
 
-    const Vec4 track = toVec4(palette::kBrand, 0.45f);
-    const Vec4 lit   = toVec4(palette::kBrand, 1.0f);
+    // Three weights. The ticks sit behind everything and are quiet enough that
+    // the arrow covers them; the track is the road; the arrow is the thing
+    // being read, and it is the one the logo is made of.
+    const Vec4 ticks = toVec4(palette::kBrand, 0.22f);
+    const Vec4 track = toVec4(palette::kBrand, 0.40f);
+    const Vec4 arrow = toVec4(palette::kBrand, 1.0f);
 
-    const Real px = static_cast<Real>(camera.pixelWorldSize(origin));
+    const Vec3 anchor = origin + direction * startValue;
+    const Real px = static_cast<Real>(camera.pixelWorldSize(anchor));
 
-    // The track runs to the limit when there is one, so the end of the travel
-    // is a place on screen rather than something discovered by pushing into it.
-    const Real reach = limit > 0.0 ? limit : std::max(px * 170.0, std::fabs(value) * 1.4);
-    const Real behind = px * 26.0;
+    // How much of the travel to draw. Ahead to the limit when the limit is
+    // close enough to show at a readable size, and a fixed length of road when
+    // it is further than that -- so the guide is about the same size on screen
+    // whatever the part is and however far away it is.
+    constexpr Real kShownPx = 180.0;
+    const Real toLimit = limit > 0.0 ? limit - startValue : 0.0;
+    const bool limitInView = limit > 0.0 && toLimit <= px * kShownPx * 1.25;
+    const Real ahead = limitInView ? std::max(toLimit, px * 20.0) : px * kShownPx;
+    const Real behind = std::min(startValue, px * 45.0);   // room to pull back
 
-    Vec3 across = cross(direction, normalize(camera.eye() - origin));
+    Vec3 across = cross(direction, normalize(camera.eye() - anchor));
     if (lengthSq(across) < 1e-12) across = perpendicular(direction);
     across = normalize(across);
 
-    const Vec3 tip = origin + direction * reach;
-    thickLine(renderer, camera, origin - direction * behind, tip, track, 2.0);
-
-    // A cap at the end when the end means something.
-    if (limit > 0.0) {
-        const Real cap = px * 7.0;
-        thickLine(renderer, camera, tip - across * cap, tip + across * cap, track, 2.0);
-    } else {
-        const Real head = px * 9.0;
-        thickLine(renderer, camera, tip, tip - direction * head + across * (head * 0.45), lit, 2.0);
-        thickLine(renderer, camera, tip, tip - direction * head - across * (head * 0.45), lit, 2.0);
-    }
-
-    // Ticks at the snap increment: how far the mouse travels for one step,
-    // shown rather than discovered.
+    // Ticks first, so everything else covers them.
     if (step > 0.0) {
-        const int most = 60;
+        const Real from = startValue - behind;
+        const Real to = startValue + ahead;
+        const Real first = std::ceil(from / step) * step;
         int drawn = 0;
-        for (Real at = step; at <= reach && drawn < most; at += step, ++drawn) {
+        for (Real at = first; at <= to && drawn < 80; at += step, ++drawn) {
+            if (at < 0.0) continue;
             const Vec3 p = origin + direction * at;
-            const Real len = px * ((drawn + 1) % 5 == 0 ? 4.5 : 2.2);
-            renderer.addLine(p - across * len, p + across * len, track);
+            // Every fourth is taller, so counting them is possible without
+            // reading a number.
+            const bool major = std::fabs(std::fmod(at / step, 4.0)) < 1e-6;
+            const Real len = px * (major ? 5.5 : 3.0);
+            renderer.addLine(p - across * len, p + across * len, ticks);
         }
     }
 
-    // The part that moves. Everything above is fixed for the whole gesture, so
-    // this is the only thing the eye has to follow: the travelled length, and a
-    // bar across the track at the value itself.
-    const Real travelled = clampf(value, 0.0, reach);
-    if (travelled > 1e-9) {
-        thickLine(renderer, camera, origin, origin + direction * travelled, lit, 3.0);
+    // The road.
+    const Vec3 tail = anchor - direction * behind;
+    const Vec3 tip = anchor + direction * ahead;
+    thickLine(renderer, camera, tail, tip, track, 2.0);
+
+    // A bar at the end when the end is the limit: past here the shape will not
+    // take it, and that should be a place rather than a surprise.
+    if (limitInView) {
+        const Real cap = px * 8.0;
+        thickLine(renderer, camera, tip - across * cap, tip + across * cap, track, 3.0);
     }
-    const Vec3 at = origin + direction * travelled;
-    const Real mark = px * 11.0;
-    thickLine(renderer, camera, at - across * mark, at + across * mark, lit, 3.0);
-    // A short stem either side of the bar, so it reads as a slider rather than
-    // as another tick.
-    const Real stem = px * 4.0;
-    thickLine(renderer, camera, at + across * mark, at + across * mark - direction * stem, lit, 2.0);
-    thickLine(renderer, camera, at - across * mark, at - across * mark - direction * stem, lit, 2.0);
+
+    // The arrow: from where the gesture began to where it is now. This is the
+    // part that moves, and the only part that moves.
+    const Real travelled = value - startValue;
+    if (std::fabs(travelled) > px * 2.0) {
+        const Vec3 head = origin + direction * value;
+        const Vec3 forward = travelled > 0.0 ? direction : -direction;
+        thickLine(renderer, camera, anchor, head, arrow, 4.0);
+
+        const Real barb = px * 13.0;
+        thickLine(renderer, camera, head, head - forward * barb + across * (barb * 0.42),
+                  arrow, 4.0);
+        thickLine(renderer, camera, head, head - forward * barb - across * (barb * 0.42),
+                  arrow, 4.0);
+    } else {
+        // Too short to be an arrow yet: a bar, so there is still something at
+        // the value.
+        const Vec3 head = origin + direction * value;
+        const Real mark = px * 9.0;
+        thickLine(renderer, camera, head - across * mark, head + across * mark, arrow, 4.0);
+    }
 }
 
 DragAxis filletAxis(const Body& body, const Mat4& model, EdgeId edge, Vec3 nearPoint) {

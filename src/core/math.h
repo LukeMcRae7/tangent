@@ -40,15 +40,35 @@ inline Real clampf(Real v, Real lo, Real hi) { return v < lo ? lo : (v > hi ? hi
 inline Real lerpf(Real a, Real b, Real t) { return a + (b - a) * t; }
 inline Real sign(Real v) { return v < 0.0f ? -1.0f : (v > 0.0f ? 1.0f : 0.0f); }
 
-// Rounds a rough magnitude to the nearest "nice" value: 1, 2 or 5 times a
-// power of ten. Used to turn a desired snap distance in millimetres into one a
-// person would actually choose -- 0.5, 1, 2, 5, 10 -- rather than 0.734.
+// Rounds a rough magnitude to the nearest "nice" value: 1, 2.5 or 5 times a
+// power of ten. Turns a desired snap distance in millimetres into one a person
+// would actually choose -- 0.1, 0.25, 0.5, 1, 2.5, 5, 10 -- rather than 0.734.
+//
+// A quarter rather than a fifth. Halving is how people divide a measurement
+// when they are looking at it: half of ten is five and half of five is 2.5, so
+// the ladder lands where the hand already wants to stop. A 2 in the middle
+// gives 2 and 5, which are not related to each other by anything.
+// The largest nice value that does not exceed `cap`. niceStep rounds to the
+// nearest, which can round *up* past a limit it was meant to respect -- ask it
+// for 1.75 and it gives 2.5.
+inline Real niceStepBelow(Real cap) {
+    if (!(cap > 0.0f)) return 0.0f;
+    Real e = std::floor(std::log10(cap));
+    for (int i = 0; i < 4; ++i) {
+        const Real base = std::pow(10.0f, e);
+        for (const Real mult : {5.0f, 2.5f, 1.0f})
+            if (base * mult <= cap * 1.000001f) return base * mult;
+        e -= 1.0f;
+    }
+    return cap;
+}
+
 inline Real niceStep(Real approx) {
     if (!(approx > 0.0f)) return 0.0f;
     const Real e = std::floor(std::log10(approx));
     const Real base = std::pow(10.0f, e);
     const Real m = approx / base;             // in [1, 10)
-    const Real mult = m < 1.5f ? 1.0f : (m < 3.5f ? 2.0f : (m < 7.5f ? 5.0f : 10.0f));
+    const Real mult = m < 1.75f ? 1.0f : (m < 3.75f ? 2.5f : (m < 7.5f ? 5.0f : 10.0f));
     return base * mult;
 }
 

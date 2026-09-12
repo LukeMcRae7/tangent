@@ -324,16 +324,19 @@ int main() {
         check(near(niceStep(4.0f), 5.0f), "4 -> 5");
         check(near(niceStep(12.0f), 10.0f), "12 -> 10");
         check(near(niceStep(0.06f), 0.05f), "0.06 -> 0.05");
+        check(near(niceStep(0.23f), 0.25f), "0.23 -> 0.25");
+        check(near(niceStep(2.4f), 2.5f), "2.4 -> 2.5");
 
-        // Every step must be a 1, 2 or 5 times a power of ten, and the ladder
-        // must never go backwards as the requested size grows.
+        // Every step is 1, 2.5 or 5 times a power of ten -- halving, which is
+        // how a person divides a measurement they are looking at -- and the
+        // ladder never goes backwards as the requested size grows.
         float prev = 0.0f;
         for (float v = 0.01f; v < 500.0f; v *= 1.05f) {
             const float s = niceStep(v);
             check(s >= prev, "ladder is monotonic");
             prev = s;
             const float m = s / std::pow(10.0f, std::floor(std::log10(s)));
-            check(near(m, 1.0f, 1e-3f) || near(m, 2.0f, 1e-3f) || near(m, 5.0f, 1e-3f),
+            check(near(m, 1.0f, 1e-3f) || near(m, 2.5f, 1e-3f) || near(m, 5.0f, 1e-3f),
                   "step is a round number");
         }
 

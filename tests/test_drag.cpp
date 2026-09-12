@@ -160,6 +160,49 @@ int main() {
         check(near(atEnd.origin.x, 8.0, 1e-6), "the guide follows the cursor along the edge");
     }
 
+    std::printf("--- the step follows the zoom and the travel ---\n");
+    {
+        // Two things decide it. Zoomed in, the step gets finer because a
+        // millimetre is worth more pixels; and a gesture with a long travel
+        // takes a coarser step so the road is not a hundred identical ticks.
+        const Vec3 at{0, 0, 0};
+        const Camera close = lookingDown(40.0f);
+        const Camera far_ = lookingDown(600.0f);
+
+        const Real fine = DragAxis::stepFor(close, at, 2.0);
+        const Real coarse = DragAxis::stepFor(far_, at, 2.0);
+        check(fine < coarse, "closer gives a finer step");
+
+        const Real shortTravel = DragAxis::stepFor(close, at, 2.0);
+        const Real longTravel = DragAxis::stepFor(close, at, 400.0);
+        check(longTravel > shortTravel, "a longer travel gives a coarser one");
+
+        // And every one of them is a number a person would choose.
+        for (Real reach : {1.0, 7.0, 40.0, 250.0}) {
+            for (float d : {30.0f, 120.0f, 800.0f}) {
+                const Real s2 = DragAxis::stepFor(lookingDown(d), at, reach);
+                const Real m = s2 / std::pow(10.0, std::floor(std::log10(s2)));
+                check(near(m, 1.0, 1e-3) || near(m, 2.5, 1e-3) || near(m, 5.0, 1e-3),
+                      "the step is 1, 2.5 or 5 times a power of ten");
+            }
+        }
+
+        // The travel is divided into a readable number of stops rather than
+        // two or two hundred -- at every zoom, including one far enough out
+        // that ten pixels is worth more than the whole gesture.
+        for (Real reach : {1.0, 7.0, 40.0, 250.0}) {
+            for (float d : {20.0f, 120.0f, 2000.0f}) {
+                const Real s2 = DragAxis::stepFor(lookingDown(d), at, reach);
+                const Real stops = reach / s2;
+                check(stops >= 3.0 && stops <= 60.0,
+                      "the travel is a countable number of steps at " +
+                      std::to_string(d) + "mm out: " + std::to_string(stops));
+            }
+        }
+        std::printf("  2mm travel: %.3f close, %.3f far; 400mm travel: %.3f\n",
+                    fine, coarse, longTravel);
+    }
+
     std::printf("\n%s (%d failures)\n", failures ? "FAILED" : "ALL PASS", failures);
     return failures ? 1 : 0;
 }

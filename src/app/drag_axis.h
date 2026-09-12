@@ -23,6 +23,13 @@ namespace tg {
 struct DragAxis {
     Vec3 origin;         // where the value is zero
     Vec3 direction;      // unit; the way that increases it
+
+    // The value the cursor was at when the gesture started, which is where the
+    // guide is drawn from. The measurement still runs from `origin` -- a tick
+    // at 2mm is at 2mm -- but the line appears under the pointer rather than
+    // out on the edge, which may be a hand's width away.
+    Real startValue = 0.0;
+
     bool valid = false;
 
     // Where the cursor sits along the axis, in millimetres from the origin.
@@ -49,6 +56,12 @@ struct DragAxis {
     // rather than felt. Zero means unbounded.
     void drawGuide(Renderer& renderer, const Camera& camera, Real value, Real step,
                    Real limit = 0.0) const;
+
+    // The increment for a gesture that can travel `reach` millimetres, at this
+    // zoom. Tied to both: a step fine enough to be worth having on screen, and
+    // coarse enough that the travel is not a hundred indistinguishable ticks.
+    // Always a number a person would choose -- 0.25, 0.5, 1, 2.5.
+    static Real stepFor(const Camera& camera, Vec3 at, Real reach);
 };
 
 // The axis a fillet grows along: away from the edge, along the bisector of the

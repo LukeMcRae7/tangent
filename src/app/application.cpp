@@ -1391,8 +1391,15 @@ void Application::beginFillet() {
             const Real d = length(at - (aPx + ab * t));
             if (bestPx < 0.0 || d < bestPx) { bestPx = d; bestAt = lerp(aW, bW, t); bestEdge = e; }
         }
-        if (bestEdge != kInvalid)
+        if (bestEdge != kInvalid) {
             filletTool_.axis = filletAxis(filletTool_.meshBefore, model, bestEdge, bestAt);
+            // Drawn from where the pointer is, not from the edge: the edge may
+            // be a hand's width away, and a guide that appears over there is a
+            // thing to go and find rather than a thing to pull on.
+            if (filletTool_.axis.valid && filletTool_.axis.facingCamera(camera_))
+                filletTool_.axis.startValue =
+                    std::max(Real(0), filletTool_.axis.valueAt(camera_, at));
+        }
     }
 
     updateFillet(false);
@@ -1438,6 +1445,8 @@ void Application::updateFillet(bool snap) {
         // nothing, and the line on screen says which way is more -- the whole
         // difference between aiming and discovering.
         if (filletTool_.axis.valid) {
+            const Real step = DragAxis::stepFor(camera_, filletTool_.axis.origin,
+                                                filletTool_.maxRadius);
             if (filletTool_.axis.facingCamera(camera_)) {
                 newR = filletTool_.axis.valueAt(camera_, curMouse);
             } else {
@@ -1450,10 +1459,7 @@ void Application::updateFillet(bool snap) {
                            camera_.pixelWorldSize(filletTool_.axis.origin);
             }
 
-            if (snap) {
-                const Real step = camera_.snapStep(filletTool_.axis.origin);
-                if (step > 0.0) newR = std::round(newR / step) * step;
-            }
+            if (snap && step > 0.0) newR = std::round(newR / step) * step;
         }
         (void)m;
         (void)model;
@@ -2528,7 +2534,9 @@ int Application::run() {
         // it sits on top of the geometry it is about.
         if (filletTool_.active && filletTool_.axis.valid) {
             const SceneObject* o = scene_.find(filletTool_.objectId);
-            const Real step = o ? camera_.snapStep(filletTool_.axis.origin) : 0.0;
+            const Real step = o ? DragAxis::stepFor(camera_, filletTool_.axis.origin,
+                                                   filletTool_.maxRadius)
+                                : 0.0;
             filletTool_.axis.drawGuide(renderer_, camera_, filletTool_.currentRadius, step,
                                        filletTool_.maxRadius);
         }
