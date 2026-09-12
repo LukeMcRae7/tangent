@@ -664,6 +664,7 @@ void Application::handleViewportMouse() {
     stepFilletOpenDemo();
     stepFaceDemo();
     stepFaceStress();
+    stepPreviewCheck();
 
     // Interactive Object Creation & Sketching Tool:
     if (createTool_.active()) {
@@ -2196,6 +2197,92 @@ void Application::abortDivide() {
     }
 }
 
+// Works out what this gesture will build, before it builds any of it.
+//
+// Either the new edges fold into the fillet above -- one operation against the
+// body that one ran on -- or they are a fillet of their own on top of what is
+// there. Deciding here rather than at the click is the whole point: whatever is
+// previewed, searched for a limit, and finally committed is then the same
+// operation, and the preview cannot promise a shape the commit will not make.
+void Application::planFillet(SceneObject& obj) {
+    FilletToolState& t = filletTool_;
+    t.folding = false;
+    t.buildBase = t.meshBefore;
+    t.buildEdges = t.edges;
+    t.fixedRadii.assign(t.edges.size(), -1.0);   // all of them take the drag
+
+    if (obj.features.empty()) return;
+    const size_t last = obj.features.size() - 1;
+    const Feature& fillet = obj.features[last];
+    if (fillet.kind != FeatureKind::Bevel || fillet.edges.empty() || !fillet.enabled)
+        return;
+    if (fillet.edges.kind != ElementRefs::Kind::Explicit) return;
+    if (last == 0 || last > obj.featureCache.size()) return;
+
+    const Body& before = obj.featureCache[last - 1];
+    if (before.empty()) return;
+
+    std::vector<Index> merged;
+    if (!fillet.edges.resolveEdges(before, merged)) return;
+
+    std::vector<Real> radii;
+    radii.reserve(merged.size());
+    for (size_t i = 0; i < merged.size(); ++i) radii.push_back(fillet.radiusFor(i));
+
+    // The new edges were picked on the body as it stands, which is the rounded
+    // one; they have to be found again on the body the fillet above ran on.
+    for (Index e : t.edges) {
+        if (!t.meshBefore.hasEdge(e)) return;
+        Vec3 a, b;
+        t.meshBefore.edgePositions(e, a, b);
+        const EdgeId mapped = edgeAlongSegment(before, a, b);
+        if (mapped == kInvalid) return;
+
+        bool already = false;
+        for (size_t i = 0; i < merged.size(); ++i)
+            if (merged[i] == mapped) {
+                radii[i] = -1.0;          // re-picking one restates its radius
+                already = true;
+            }
+        if (!already) { merged.push_back(mapped); radii.push_back(-1.0); }
+    }
+
+    t.folding = true;
+    t.foldAt = last;
+    t.buildBase = before;
+    t.buildEdges = std::move(merged);
+    t.fixedRadii = std::move(radii);
+}
+
+// The radius each planned edge takes, in the order the edges are planned in.
+std::vector<Real> Application::filletRadiiAt(Real radius) const {
+    const FilletToolState& t = filletTool_;
+    std::vector<Real> out;
+    out.reserve(t.buildEdges.size());
+    for (size_t i = 0; i < t.buildEdges.size(); ++i)
+        out.push_back(i < t.fixedRadii.size() && t.fixedRadii[i] >= 0.0
+                          ? t.fixedRadii[i] : radius);
+    return out;
+}
+
+bool Application::filletUniform(const std::vector<Real>& radii) {
+    for (size_t i = 1; i < radii.size(); ++i)
+        if (std::fabs(radii[i] - radii[0]) > 1e-9) return false;
+    return true;
+}
+
+FilletSpec Application::filletSpecAt(Real radius) const {
+    const FilletToolState& t = filletTool_;
+    FilletSpec spec;
+    spec.edges.reserve(t.buildEdges.size());
+    for (size_t i = 0; i < t.buildEdges.size(); ++i) {
+        const Real r = i < t.fixedRadii.size() && t.fixedRadii[i] >= 0.0
+                           ? t.fixedRadii[i] : radius;
+        spec.edges.push_back({t.buildEdges[i], r});
+    }
+    return spec;
+}
+
 void Application::beginFillet() {
     if (tool_.active() || filletTool_.active || createTool_.active()) return;
 
@@ -2304,6 +2391,7 @@ void Application::beginFillet() {
     filletTool_.meshBefore = obj->body;
     filletTool_.chainBefore = obj->features;
     filletTool_.typedValue.clear();
+    planFillet(*obj);
 
     preEditSolid_ = obj->healthVersion == obj->meshVersion && obj->health.solid();
 
@@ -2397,9 +2485,8 @@ void Application::stepFilletFloorSearch() {
             // only because the guarded trial proved it is not fatal.
             std::string why;
             if (s.trial.result() == Attempt::Refused) {
-                Body test = filletTool_.meshBefore;
-                FilletSpec spec;
-                for (Index e : filletTool_.edges) spec.edges.push_back({e, tried});
+                Body test = filletTool_.buildBase;
+                FilletSpec spec = filletSpecAt(tried);
                 filletEdges(test, spec, &why);
             }
             abortFillet();
@@ -2415,12 +2502,12 @@ void Application::stepFilletFloorSearch() {
 
 // Puts one guarded fillet at `radius` in flight.
 void Application::startFilletTrial(Real radius) {
-    const Body start = filletTool_.meshBefore;
-    const std::vector<Index> edges = filletTool_.edges;
-    filletTool_.search.trial.start([start, edges, radius] {
+    // The same operation the preview and the commit will run, so the largest
+    // radius found is the largest radius of the thing being made.
+    const Body start = filletTool_.buildBase;
+    const FilletSpec spec = filletSpecAt(radius);
+    filletTool_.search.trial.start([start, spec] {
         Body test = start;
-        FilletSpec spec;
-        for (Index e : edges) spec.edges.push_back({e, radius});
         return filletEdges(test, spec);
     });
 }
@@ -2789,6 +2876,120 @@ void Application::stepFaceDemo() {
 // practice needed both -- a preview being built on one thread while the shape
 // it came from was being meshed on the other -- and that only happens frame by
 // frame, most reliably as the drag passes back through its start.
+// What the preview showed against what the chain rebuilt.
+//
+// The preview fillets the body the gesture started from, by edge index. The
+// commit writes a feature that names those edges and lets the chain resolve
+// them again on its own rebuild. Those are two different routes to the same
+// answer, and when they disagree the user sees one shape and gets another.
+void Application::stepPreviewCheck() {
+    if (previewCheck_ <= 0 || previewCheckDone_ || viewRect_.w <= 0) return;
+    if (scene_.objects().empty()) return;
+    previewCheckDone_ = true;
+
+    const ObjectId id = scene_.objects().front()->id;
+    const SceneObject* o = scene_.find(id);
+    scene_.select(id);
+    scene_.clearElementSelection();
+
+    // Mode 3: round two edges first, then come back and round the rest. That
+    // second gesture is the one that folds into the first, and the one where
+    // what was shown and what was built used to be different operations.
+    if (previewCheck_ == 3) {
+        std::vector<EdgeId> es;
+        o->body.allEdges(es);
+        int taken = 0;
+        for (EdgeId e : es) {
+            Vec3 a, b;
+            o->body.edgePositions(e, a, b);
+            if (std::fabs(a.z - 10.0) > 1e-6 || std::fabs(b.z - 10.0) > 1e-6) continue;
+            if (std::fabs((b - a).x) < 1e-6) continue;      // only the two along X
+            scene_.selectElement({id, ElementKind::Edge, e}, true);
+            if (++taken == 2) break;
+        }
+        beginFillet();
+        for (int i = 0; i < 400 && filletTool_.search.active; ++i) {
+            stepFilletLimitSearch();
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        filletTool_.typedValue = "4";
+        updateFillet(false);
+        while (filletTool_.preview.busy()) updateFillet(false);
+        updateFillet(false);
+        commitFillet();
+        const SceneObject* r = scene_.find(id);
+        std::fprintf(stderr, "[preview] first round: %d faces, %.1f mm3\n",
+                     r->body.faceCount(), r->body.health(false).volume);
+
+        // Now the two top edges still sharp -- which existed before that first
+        // fillet ran, so they can be folded into it.
+        scene_.clearElementSelection();
+        const SceneObject* o2 = scene_.find(id);
+        std::vector<EdgeId> es2;
+        o2->body.allEdges(es2);
+        int more = 0;
+        for (EdgeId e : es2) {
+            Vec3 a, b;
+            o2->body.edgePositions(e, a, b);
+            if (std::fabs(a.z - 10.0) > 1e-6 || std::fabs(b.z - 10.0) > 1e-6) continue;
+            if (std::fabs((b - a).y) < 1e-6) continue;      // the ones along Y
+            scene_.selectElement({id, ElementKind::Edge, e}, true);
+            ++more;
+        }
+        std::fprintf(stderr, "[preview] second gesture picks %d edges\n", more);
+    } else if (previewCheck_ == 1) {
+        // The top face, whose boundary edges the fillet takes.
+        std::vector<FaceId> fs;
+        o->body.allFaces(fs);
+        for (FaceId f : fs)
+            if (dot(o->body.faceNormal(f), Vec3{0, 0, 1}) > 0.99)
+                scene_.selectElement({id, ElementKind::Face, f}, true);
+    } else {
+        // Every edge of the body.
+        std::vector<EdgeId> es;
+        o->body.allEdges(es);
+        for (EdgeId e : es) scene_.selectElement({id, ElementKind::Edge, e}, true);
+    }
+
+    beginFillet();
+    if (!filletTool_.active) { std::fprintf(stderr, "[preview] would not start\n"); return; }
+    std::fprintf(stderr, "[preview] %zu edges caught\n", filletTool_.edges.size());
+
+    // The floor and the limit are found in another process a trial at a time,
+    // the way the frame loop does it. Nothing previews until they land.
+    for (int i = 0; i < 400 && filletTool_.search.active; ++i) {
+        stepFilletLimitSearch();
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    std::fprintf(stderr, "[preview] floor %.2f, largest %.2f, %s %zu edges\n",
+                 filletTool_.axis.baseValue, filletTool_.maxRadius,
+                 filletTool_.folding ? "folded into the fillet above:" : "on its own:",
+                 filletTool_.buildEdges.size());
+
+    filletTool_.typedValue = "9";
+    updateFillet(false);
+    while (filletTool_.preview.busy()) updateFillet(false);
+    updateFillet(false);
+    std::fprintf(stderr, "[preview] asked for 9, radius is %.2f\n",
+                 filletTool_.currentRadius);
+
+    const SceneObject* p1 = scene_.find(id);
+    const int previewFaces = p1->body.faceCount();
+    const Real previewVolume = p1->body.health(false).volume;
+    std::fprintf(stderr, "[preview] shown:    %d faces, %.1f mm3\n",
+                 previewFaces, previewVolume);
+
+    commitFillet();
+    const SceneObject* p2 = scene_.find(id);
+    std::fprintf(stderr, "[preview] committed: %d faces, %.1f mm3, %zu features%s\n",
+                 p2->body.faceCount(), p2->body.health(false).volume,
+                 p2->features.size(), notice_.empty() ? "" : ("  notice: " + notice_).c_str());
+    std::fprintf(stderr, "[preview] %s\n",
+                 (p2->body.faceCount() == previewFaces &&
+                  std::fabs(p2->body.health(false).volume - previewVolume) < 1e-3)
+                     ? "SAME" : "DIFFERENT -- the preview lied");
+}
+
 void Application::stepFaceStress() {
     if (!faceStress_ || viewRect_.w <= 0 || scene_.objects().empty()) return;
 
@@ -3003,10 +3204,9 @@ void Application::updateFillet(bool snap, bool follow) {
 
     filletTool_.requestedRadius = newR;
     {
-        const std::vector<Index> edges = filletTool_.edges;
-        filletTool_.preview.request(filletTool_.meshBefore, [edges, newR](Body& b) {
-            FilletSpec spec;
-            for (Index e : edges) spec.edges.push_back({e, newR});
+        // What the commit will build, not something that resembles it.
+        const FilletSpec spec = filletSpecAt(newR);
+        filletTool_.preview.request(filletTool_.buildBase, [spec](Body& b) {
             return filletEdges(b, spec);
         });
     }
@@ -3040,18 +3240,23 @@ void Application::commitFillet() {
 
     if (!obj) return;
 
-    // The handles were picked on the body as it stood before the preview
-    // started rounding it, so that is the body they have to be read against.
-    if (extendLastFillet(*obj, filletTool_.meshBefore, filletTool_.edges,
-                         filletTool_.currentRadius)) {
+    // Exactly what was planned when the gesture began, and exactly what has
+    // been on screen the whole time.
+    if (filletTool_.folding && extendLastFillet(*obj, filletTool_.currentRadius))
         return;
-    }
 
     Feature f;
     f.kind = FeatureKind::Bevel;
-    f.edges = nameEdges(filletTool_.meshBefore, filletTool_.edges);
-    f.radii.assign(f.edges.count(), filletTool_.currentRadius);
+    f.radii = filletRadiiAt(filletTool_.currentRadius);
     f.width = filletTool_.currentRadius;
+
+    // A rim is the sturdier way to name a set of edges, but it comes back in
+    // the body's order rather than the one it went in, so it is only safe when
+    // every edge has the same radius. With one radius there is nothing for the
+    // order to get wrong, and `width` carries it.
+    const bool uniform = filletUniform(f.radii);
+    f.edges = nameEdges(filletTool_.buildBase, filletTool_.buildEdges, uniform);
+    if (uniform) f.radii.clear();
 
     std::vector<Feature> chainBefore = filletTool_.chainBefore;
     obj->features = filletTool_.chainBefore;
@@ -3099,75 +3304,39 @@ void Application::beginAddPrimitivePrompt(PrimitiveKind kind) {
 // cannot be traced back to an edge of the mesh that fillet saw, or if the
 // merged fillet does not evaluate -- in which case the caller adds a new
 // feature and the object is left exactly as it was.
-bool Application::extendLastFillet(SceneObject& obj, const Body& picked,
-                                   const std::vector<Index>& edges, Real radius) {
-    if (obj.features.empty()) return false;
-    const size_t last = obj.features.size() - 1;
-    Feature& fillet = obj.features[last];
-    if (fillet.kind != FeatureKind::Bevel || fillet.edges.empty() || !fillet.enabled)
-        return false;
-    if (fillet.segments != view_.bevelSegments) return false;
+// Writes the planned fillet into the feature above, which is the one it was
+// planned against.
+//
+// The work of deciding -- whether a fold is possible at all, which edges it
+// covers and at what radii -- happened in planFillet before anything was drawn.
+// All that is left here is to record it and rebuild.
+bool Application::extendLastFillet(SceneObject& obj, Real radius) {
+    if (!filletTool_.folding) return false;
+    if (filletTool_.foldAt >= obj.features.size()) return false;
 
-    // The mesh as it stood before that fillet ran, which is what its edge
-    // indices are numbered against.
-    if (last == 0 || last > obj.featureCache.size()) return false;
-    const Body& before = obj.featureCache[last - 1];
-    if (before.empty()) return false;
-
-    // Only a list of edges can have one added to it. A rim selected as a
-    // face's boundary already means "all of them", and adding to it would be
-    // saying something different.
-    if (fillet.edges.kind != ElementRefs::Kind::Explicit) return false;
-
-    std::vector<Index> merged;
-    if (!fillet.edges.resolveEdges(before, merged)) return false;
-
-    std::vector<Real> radii;
-    radii.reserve(merged.size());
-    for (size_t i = 0; i < merged.size(); ++i) radii.push_back(fillet.radiusFor(i));
-
-    for (Index e : edges) {
-        // `picked`, not obj.body. By the time this runs the preview has already
-        // replaced the object's body with a rounded one, where that same handle
-        // is a different edge -- and reading the endpoints from there mapped
-        // the fillet onto whichever edge had inherited the number. The preview
-        // was right and the committed result was not, which is the worst way
-        // for this to be wrong.
-        if (!picked.hasEdge(e)) return false;
-        Vec3 a, b;
-        picked.edgePositions(e, a, b);
-        const EdgeId mapped = edgeAlongSegment(before, a, b);
-        if (mapped == kInvalid) return false;
-
-        // Handles are canonical, so one comparison settles it -- there is no
-        // longer a twin that could name the same edge.
-        bool already = false;
-        for (size_t i = 0; i < merged.size(); ++i)
-            if (merged[i] == mapped) {
-                radii[i] = radius;   // re-picking an edge restates its radius
-                already = true;
-            }
-        if (!already) { merged.push_back(mapped); radii.push_back(radius); }
-    }
+    Feature& fillet = obj.features[filletTool_.foldAt];
+    if (fillet.kind != FeatureKind::Bevel) return false;
 
     std::vector<Feature> chainBefore = obj.features;
     const ElementRefs edgesBefore = fillet.edges;
     const std::vector<Real> radiiBefore = fillet.radii;
 
-    fillet.edges = nameEdges(before, merged);
-    fillet.radii = std::move(radii);
-    if (!scene_.reevaluateFrom(obj.id, last)) {
+    fillet.radii = filletRadiiAt(radius);
+    const bool uniform = filletUniform(fillet.radii);
+    fillet.edges = nameEdges(filletTool_.buildBase, filletTool_.buildEdges, uniform);
+    if (uniform) {
+        fillet.width = radius;
+        fillet.radii.clear();
+    }
+
+    auto putBack = [&] {
         fillet.edges = edgesBefore;
         fillet.radii = radiiBefore;
-        scene_.reevaluateFrom(obj.id, last);
-        return false;
-    }
-    if (obj.features[last].errored) {
-        fillet.edges = edgesBefore;
-        fillet.radii = radiiBefore;
-        scene_.reevaluateFrom(obj.id, last);
-        return false;
-    }
+        scene_.reevaluateFrom(obj.id, filletTool_.foldAt);
+    };
+
+    if (!scene_.reevaluateFrom(obj.id, filletTool_.foldAt)) { putBack(); return false; }
+    if (obj.features[filletTool_.foldAt].errored) { putBack(); return false; }
 
     setNotice("Added to the fillet above");
     undo_.push(std::make_unique<FeatureCommand>(obj.id, std::move(chainBefore),

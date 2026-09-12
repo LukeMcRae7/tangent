@@ -122,6 +122,10 @@ public:
     // picture.
     void setFaceStress() { faceStress_ = true; }
 
+    // Rounds a selection, then compares what the preview showed against what
+    // the chain rebuilt. They are meant to be the same body.
+    void setPreviewCheck(int mode) { previewCheck_ = mode; }
+
     // Parks the interface's pointer somewhere, for screenshots of hover states.
     void setUiMouse(float x, float y, bool down) {
         uiMouse_ = {x, y};
@@ -159,6 +163,8 @@ private:
     bool filletOpenDone_ = false;
     int  faceDemo_ = 0;
     bool faceDemoDone_ = false;
+    int  previewCheck_ = 0;
+    bool previewCheckDone_ = false;
     bool faceStress_ = false;
     bool faceStressDone_ = false;
     int  faceStressFrame_ = 0;
@@ -214,8 +220,7 @@ private:
     // rather than reading obj.body is the whole of the fix for a fillet landing
     // on a different edge than the one previewed: handles do not survive an
     // edit, and the preview is an edit.
-    bool extendLastFillet(SceneObject& obj, const Body& picked,
-                          const std::vector<Index>& edges, Real radius);
+    bool extendLastFillet(SceneObject& obj, Real radius);
 
     // Modal interactive fillet: the radius is pulled out along an axis.
     //
@@ -279,6 +284,27 @@ private:
         // the geometry catches up a build later.
         Real requestedRadius = -1.0;
         AsyncBuild preview;
+
+        // What the gesture will actually build, decided once when it starts.
+        //
+        // Two edges rounded in one operation blend their shared corner against
+        // the original faces; rounded one after the other, the second has to
+        // cut into the first one's surface, which is a harder problem and often
+        // refused. So when the step before this one is a fillet, the new edges
+        // are folded into it and the whole lot is rebuilt from the body that
+        // fillet ran on.
+        //
+        // That is a different operation from rounding on top of what is on
+        // screen -- a different shape, and one that can fail where the other
+        // succeeds. It used to be chosen at the moment of committing, so the
+        // preview showed one thing and the click produced another. Now it is
+        // chosen first and everything -- the preview, the search for the
+        // largest radius, the commit -- builds from it.
+        bool folding = false;
+        size_t foldAt = 0;                   // the feature being extended
+        Body buildBase;                      // what the fillet is applied to
+        std::vector<Index> buildEdges;       // indices into buildBase
+        std::vector<Real> fixedRadii;        // < 0 means "whatever is dragged"
 
         Body meshBefore;
         std::vector<Feature> chainBefore;
@@ -430,6 +456,14 @@ private:
 
     void beginFillet();
 
+    // Works out what the gesture will build, before it builds any of it.
+    void planFillet(SceneObject& obj);
+
+    // The operation as planned, at this radius.
+    FilletSpec filletSpecAt(Real radius) const;
+    std::vector<Real> filletRadiiAt(Real radius) const;
+    static bool filletUniform(const std::vector<Real>& radii);
+
     // Advances the search for the largest fillet this gesture can make, one
     // trial per frame, without waiting for any of them.
     void stepFilletLimitSearch();
@@ -438,6 +472,7 @@ private:
     void stepFilletOpenDemo();
     void stepFaceDemo();
     void stepFaceStress();
+    void stepPreviewCheck();
     void stepFilletFloorSearch();
     void startFilletTrial(Real radius);
     static const Real kFilletFloorLadder[6];

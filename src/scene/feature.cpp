@@ -127,17 +127,27 @@ ElementRefs nameFaces(const Body& body, const std::vector<FaceId>& faces) {
     return r;
 }
 
-ElementRefs nameEdges(const Body& body, const std::vector<EdgeId>& edges) {
+ElementRefs nameEdges(const Body& body, const std::vector<EdgeId>& edges,
+                      bool allowBoundary) {
     ElementRefs r;
     if (edges.empty()) return r;
 
-    // Handles from the Body are already canonical, so this is a plain set.
-    std::unordered_set<EdgeId> chosen(edges.begin(), edges.end());
+    // Order is part of what this list means: `Feature::radii` runs alongside
+    // it, so the third name is the third radius. A set would lose that, and a
+    // sort would scramble it -- which it did, and the radii landed on other
+    // edges. Duplicates go, the order stays.
+    std::vector<EdgeId> chosen;
+    chosen.reserve(edges.size());
+    {
+        std::unordered_set<EdgeId> seen;
+        for (EdgeId e : edges)
+            if (seen.insert(e).second) chosen.push_back(e);
+    }
     if (chosen.empty()) return r;
 
     // Does some face's boundary consist of exactly these edges?
     std::vector<EdgeId> fe;
-    for (EdgeId e : chosen) {
+    if (allowBoundary) for (EdgeId e : chosen) {
         FaceId sides[2] = {kNoFace, kNoFace};
         body.edgeFaces(e, sides[0], sides[1]);
         for (FaceId f : sides) {
@@ -146,7 +156,10 @@ ElementRefs nameEdges(const Body& body, const std::vector<EdgeId>& edges) {
             if (fe.size() != chosen.size()) continue;
             bool all = true;
             for (EdgeId x : fe)
-                if (!chosen.count(x)) { all = false; break; }
+                if (std::find(chosen.begin(), chosen.end(), x) == chosen.end()) {
+                    all = false;
+                    break;
+                }
             if (all) {
                 r.kind = ElementRefs::Kind::FaceBoundary;
                 r.face = body.faceName(f);
@@ -157,7 +170,6 @@ ElementRefs nameEdges(const Body& body, const std::vector<EdgeId>& edges) {
     }
 
     for (EdgeId e : chosen) r.ids.push_back(body.edgeName(e));
-    std::sort(r.ids.begin(), r.ids.end());
     return r;
 }
 

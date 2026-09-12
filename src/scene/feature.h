@@ -90,7 +90,14 @@ ElementRefs nameFaces(const Body& body, const std::vector<FaceId>& faces);
 // one face, that is recorded instead of the list. It is what the user meant --
 // they picked a rim, not sixteen edges that happen to be there today -- and it
 // is the only form that survives the face being retessellated under them.
-ElementRefs nameEdges(const Body& body, const std::vector<EdgeId>& edges);
+// `allowBoundary` lets a set of edges that happens to be exactly some face's
+// rim be stored as that rim instead, which survives an edit that renumbers or
+// re-splits the face. It costs the order: a rim resolves in whatever order the
+// body lists it, and a caller pairing a parallel array -- a radius per edge --
+// then has its radii on other edges. Such a caller passes false, or passes
+// true only when every entry is the same and the pairing cannot matter.
+ElementRefs nameEdges(const Body& body, const std::vector<EdgeId>& edges,
+                      bool allowBoundary = true);
 
 std::vector<ElementId> nameVertices(const Body& body, const std::vector<VertexId>& verts);
 

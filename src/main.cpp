@@ -52,6 +52,8 @@ int main(int argc, char** argv) {
             float mx = 0, my = 0; int down = 0;
             std::sscanf(argv[++i], "%f,%f,%d", &mx, &my, &down);
             app.setUiMouse(mx, my, down != 0);
+        } else if (std::strcmp(argv[i], "--preview-check") == 0 && i + 1 < argc) {
+            app.setPreviewCheck(std::atoi(argv[++i]));
         } else if (std::strcmp(argv[i], "--face-stress") == 0) {
             app.setFaceStress();
         } else if (std::strcmp(argv[i], "--face-demo") == 0 && i + 1 < argc) {

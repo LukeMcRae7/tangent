@@ -635,6 +635,60 @@ int main() {
                     first.size());
     }
 
+    std::printf("--- a list of edges keeps the order it was given in ---\n");
+    {
+        // Feature::radii runs alongside the names: the third name is the third
+        // radius. So the order is not presentation, it is the pairing, and
+        // anything that reorders puts every radius on another edge.
+        Scene s;
+        const ObjectId id = s.addPrimitive(PrimitiveKind::Box);
+        const Body& body = s.find(id)->body;
+
+        std::vector<EdgeId> all;
+        body.allEdges(all);
+        check(all.size() >= 4, "a box has edges");
+
+        // Deliberately not in the body's own order.
+        std::vector<EdgeId> picked{all[3], all[0], all[2], all[1]};
+        const ElementRefs named = nameEdges(body, picked, /*allowBoundary=*/false);
+        check(named.kind == ElementRefs::Kind::Explicit, "kept as a list");
+
+        std::vector<EdgeId> back;
+        check(named.resolveEdges(body, back), "resolved");
+        check(back == picked, "and came back in the order it went in");
+    }
+
+    std::printf("--- a rim is only used where the order cannot matter ---\n");
+    {
+        // A set of edges that happens to be exactly a face's rim is better
+        // stored as that rim: it survives the face being renumbered or
+        // re-split. But a rim resolves in the body's order, not the caller's,
+        // so it is only offered when every radius is the same -- which is what
+        // allowBoundary says.
+        Scene s;
+        const ObjectId id = s.addPrimitive(PrimitiveKind::Box);
+        const Body& body = s.find(id)->body;
+
+        Index top = kInvalid;
+        for (Index f = 0; f < body.faceCount(); ++f)
+            if (dot(body.faceNormal(f), Vec3{0, 0, 1}) > 0.99) top = f;
+        check(top != kInvalid, "found the top");
+
+        std::vector<EdgeId> rim;
+        body.faceEdges(top, rim);
+        std::vector<EdgeId> shuffled{rim[2], rim[0], rim[3], rim[1]};
+
+        check(nameEdges(body, shuffled, true).kind == ElementRefs::Kind::FaceBoundary,
+              "one radius for all of them: the rim is the sturdier name");
+
+        const ElementRefs asList = nameEdges(body, shuffled, false);
+        check(asList.kind == ElementRefs::Kind::Explicit,
+              "radii that differ: a list, so each keeps its own");
+        std::vector<EdgeId> back;
+        check(asList.resolveEdges(body, back) && back == shuffled,
+              "and in the order that pairs them");
+    }
+
     std::printf("\n%s (%d failures)\n", failures ? "FAILED" : "ALL PASS", failures);
     return failures ? 1 : 0;
 }
