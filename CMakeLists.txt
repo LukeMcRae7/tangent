@@ -328,6 +328,14 @@ if(TANGENT_BREP)
   add_test(NAME brep COMMAND test_brep)
 endif()
 
+# Not a test: it bakes the toolbar icons out of the kernel. Run it by hand when
+# the icons change, and commit what it produces.
+add_executable(bake_icons EXCLUDE_FROM_ALL tools/bake_icons.cpp tools/icon_raster.cpp
+  src/mesh/health.cpp src/mesh/boolean.cpp ${TANGENT_GEOM}
+  src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp)
+target_include_directories(bake_icons PRIVATE src tools)
+target_compile_options(bake_icons PRIVATE ${TANGENT_WARNINGS})
+
 # Not a test: a stopwatch for the heavy paths. Run it by hand.
 add_executable(bench EXCLUDE_FROM_ALL tests/bench.cpp
   src/scene/scene.cpp src/scene/feature.cpp src/mesh/health.cpp
