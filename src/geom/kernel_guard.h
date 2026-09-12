@@ -36,6 +36,41 @@ enum class Attempt {
 // to find out *whether* something works, then do it again for real.
 Attempt tryInChild(const std::function<bool()>& work);
 
+// The same isolation, without stopping to wait for it.
+//
+// A search for how far an operation can go is a dozen trials, and a dozen
+// trials done one after another in the frame loop is most of a second with
+// nothing on screen moving. Started and polled instead, the work happens in
+// another process while this one keeps drawing, and the answer is picked up
+// whenever it is ready.
+class AsyncTrial {
+public:
+    AsyncTrial() = default;
+    ~AsyncTrial();
+    AsyncTrial(const AsyncTrial&) = delete;
+    AsyncTrial& operator=(const AsyncTrial&) = delete;
+
+    // Begins `work` elsewhere. Where that is not possible the work runs here
+    // and finishes before this returns, which is correct but not free.
+    void start(const std::function<bool()>& work);
+
+    bool running() const { return pid_ >= 0; }
+    bool finished() const { return done_; }
+
+    // Collects the answer if there is one yet. Never blocks.
+    bool poll();
+
+    Attempt result() const { return result_; }
+
+    // Gives up on a trial still in flight, without waiting for it.
+    void abandon();
+
+private:
+    int     pid_ = -1;
+    bool    done_ = false;
+    Attempt result_ = Attempt::Refused;
+};
+
 // Whether tryInChild actually isolates. False on platforms without fork, where
 // a crash in `work` is still fatal and callers should probe less adventurously.
 bool childIsolationAvailable();

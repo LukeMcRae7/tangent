@@ -13,6 +13,8 @@
 #include "backends/imgui_impl_sdl3.h"
 #include "backends/imgui_impl_opengl3.h"
 
+#include <chrono>
+#include <thread>
 #include <cstdio>
 #include <algorithm>
 #include <cstdlib>
@@ -348,6 +350,32 @@ bool Application::init() {
 
     if (shellFilletDemo_ && !scene_.objects().empty()) {
         const ObjectId id = scene_.objects().front()->id;
+        // The ordinary case first, on solid material: one edge of the untouched
+        // cube, where the bound is half the body and not a wall thickness.
+        {
+            SceneObject* o = scene_.find(id);
+            std::vector<EdgeId> es;
+            o->body.allEdges(es);
+            scene_.clearElementSelection();
+            if (!es.empty()) scene_.selectElement({id, ElementKind::Edge, es.front()}, true);
+            const auto s0 = std::chrono::steady_clock::now();
+            beginFillet();
+            const double beganMs = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - s0).count();
+            int frames = 0;
+            while (filletTool_.active && filletTool_.search.active && frames < 400) {
+                stepFilletLimitSearch();
+                ++frames;
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            std::fprintf(stderr,
+                         "[shell-fillet] solid cube edge: begin %.1f ms  floor %.3f  "
+                         "max %.3f  track %.3f\n",
+                         beganMs, filletTool_.axis.baseValue, filletTool_.maxRadius,
+                         filletTool_.axis.spanValue);
+            abortFillet();
+            scene_.clearElementSelection();
+        }
         {
             SceneObject* o = scene_.find(id);
             std::vector<FaceId> faces;
@@ -373,9 +401,82 @@ bool Application::init() {
                 ++picked;
             }
             std::fprintf(stderr, "[shell-fillet] side faces selected: %d\n", picked);
+            // Where the time actually goes, before anything is changed.
+            {
+                SceneObject* o2 = scene_.find(id);
+                std::vector<EdgeId> es = scene_.selectedEdges(id);
+                if (es.empty()) {
+                    std::set<EdgeId> set;
+                    for (FaceId f : scene_.selectedFaces(id)) {
+                        std::vector<EdgeId> fe;
+                        o2->body.faceEdges(f, fe);
+                        set.insert(fe.begin(), fe.end());
+                    }
+                    es.assign(set.begin(), set.end());
+                }
+                auto once = [&](Real r) {
+                    Body test = o2->body;
+                    FilletSpec spec;
+                    spec.segments = 4;
+                    for (EdgeId e : es) spec.edges.push_back({e, r});
+                    return filletEdges(test, spec);
+                };
+                const auto a1 = std::chrono::steady_clock::now();
+                once(0.5);
+                const double direct = std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - a1).count();
+                const auto a2 = std::chrono::steady_clock::now();
+                tryInChild([&] { return once(0.5); });
+                const double guarded = std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - a2).count();
+                const auto a3 = std::chrono::steady_clock::now();
+                tryInChild([] { return true; });
+                const double bare = std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - a3).count();
+                std::fprintf(stderr,
+                             "[shell-fillet] %zu edges: one fillet %.1f ms, guarded %.1f ms, "
+                             "fork alone %.1f ms\n", es.size(), direct, guarded, bare);
+            }
+
+            const auto t0 = std::chrono::steady_clock::now();
             beginFillet();
-            std::fprintf(stderr, "[shell-fillet] began: %d  max %.3f  notice: %s\n",
-                         (int)filletTool_.active, filletTool_.maxRadius, notice_.c_str());
+            const double beginMs =
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+            // A drag, not twenty frames of standing still: the cursor moves a
+            // few pixels each frame, which is what decides how often the value
+            // actually changes and therefore how often the body is rebuilt.
+            double worstUpdate = 0.0, totalUpdate = 0.0;
+            int rebuilt = 0, settledOn = -1;
+            const int kFrames = 60;
+            Real lastR = filletTool_.currentRadius;
+            for (int i = 0; i < kFrames && filletTool_.active; ++i) {
+                const auto frameStart = std::chrono::steady_clock::now();
+                mouseOverride_ = Vec2{700.0 + i * 6.0, 460.0 - i * 4.0};
+                updateFillet(true);
+                stepFilletLimitSearch();
+                const double ms = std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - frameStart).count();
+                if (settledOn < 0 && !filletTool_.search.active) settledOn = i + 1;
+                if (std::fabs(filletTool_.currentRadius - lastR) > 1e-9) ++rebuilt;
+                lastR = filletTool_.currentRadius;
+                worstUpdate = std::max(worstUpdate, ms);
+                totalUpdate += ms;
+                // The rest of a 60 Hz frame. Without it the loop spins far
+                // faster than the display and no forked trial can ever finish,
+                // which made the limit look like it never moved.
+                const double left = 16.6 - ms;
+                if (left > 0.0)
+                    std::this_thread::sleep_for(std::chrono::duration<double, std::milli>(left));
+            }
+            mouseOverride_ = Vec2{-1, -1};
+            std::fprintf(stderr,
+                         "[shell-fillet] begin %.1f ms; %d drag frames: %.2f ms each, "
+                         "worst %.2f, %d rebuilt, limit settled on frame %d\n",
+                         beginMs, kFrames, totalUpdate / kFrames, worstUpdate, rebuilt, settledOn);
+            std::fprintf(stderr,
+                         "[shell-fillet] began: %d  floor %.3f  max %.3f  track %.3f  notice: %s\n",
+                         (int)filletTool_.active, filletTool_.axis.baseValue,
+                         filletTool_.maxRadius, filletTool_.axis.spanValue, notice_.c_str());
             if (filletTool_.active) {
                 for (int step = 1; step <= 5; ++step)
                     updateFillet(true);
@@ -460,6 +561,9 @@ void Application::handleEvent(const SDL_Event& e) {
 }
 
 Vec2 Application::mouseInViewport() const {
+    // The demos drive gestures with no mouse attached, and a gesture that
+    // measures nothing measures nothing useful. Only ever set by them.
+    if (mouseOverride_.x >= 0.0) return mouseOverride_;
     const ImVec2 m = ImGui::GetIO().MousePos;
     return {m.x - viewRect_.x, m.y - viewRect_.y};
 }
@@ -1246,6 +1350,54 @@ void Application::filletSelectedEdges() {
     beginFillet();
 }
 
+// How much material lies behind the faces a fillet would run along.
+//
+// This is the bound that actually decides how big a round can be, and nothing
+// cheaper finds it: a shelled box is twenty millimetres across and two thick,
+// its faces are twenty on a side, and every edge length in the neighbourhood
+// says twenty. The wall only shows up as a distance between two faces. So the
+// question is asked directly -- stand on the face, look straight into it, and
+// see how far it is to the other side.
+//
+// Rays go against the tessellation rather than the exact shape: it is already
+// built, it is what the pointer is picking against anyway, and a chord
+// tolerance of a few microns is far below the precision this bound needs.
+static Real materialBehindEdges(const SceneObject& obj,
+                                const std::vector<Index>& edges, Real fallback) {
+    const RenderMesh& rm = obj.render;
+    if (rm.triangles.empty()) return fallback;
+
+    Real thinnest = fallback;
+    for (Index e : edges) {
+        FaceId fa = kInvalid, fb = kInvalid;
+        obj.body.edgeFaces(e, fa, fb);
+        const Vec3 mid = obj.body.edgeMidpoint(e);
+        for (FaceId f : {fa, fb}) {
+            if (f == kInvalid) continue;
+            const Vec3 n = obj.body.faceNormal(f);
+            if (length(n) < 1e-9) continue;
+
+            // Started a hair inside so the face the ray leaves from is not the
+            // face it hits, and biased towards the face's own middle so an edge
+            // shared with a neighbour does not sight along the seam.
+            const Vec3 into = normalize(n) * Real(-1.0);
+            const Ray r{mid + into * Real(1e-3), into};
+
+            Real nearest = fallback;
+            for (size_t i = 0; i + 2 < rm.triangles.size(); i += 3) {
+                Real t = 0.0;
+                if (!rayTriangle(r, rm.positions[rm.triangles[i + 0]],
+                                 rm.positions[rm.triangles[i + 1]],
+                                 rm.positions[rm.triangles[i + 2]], t))
+                    continue;
+                if (t > 1e-3 && t < nearest) nearest = t;
+            }
+            thinnest = std::min(thinnest, nearest);
+        }
+    }
+    return std::max(thinnest, Real(0.05));
+}
+
 void Application::beginFillet() {
     if (tool_.active() || filletTool_.active || createTool_.active()) return;
 
@@ -1283,74 +1435,44 @@ void Application::beginFillet() {
     // extend selection to remaining sections and seamlessly act in unison.
     edges = extendTangentChain(obj->body, edges);
 
-    // Test if any possible fillet would be accepted before presenting the interaction
-    bool anyAccepted = false;
-    // The reason from the last, smallest attempt. At 0.05 mm "too large" is
-    // ruled out, so whatever is left is the real obstruction -- which is what
-    // the user needs to hear, rather than "no room".
-    std::string why;
-    // Every trial runs where a crash is survivable. OpenCASCADE does not
-    // always refuse -- a fillet whose radius is exactly the wall thickness it
-    // is rounding takes the process with it -- and a modelling tool may decline
-    // an operation but may not lose the model. See geom/kernel_guard.h.
-    auto builds = [&](Real r) {
-        return tryInChild([&] {
-            Body test = obj->body;
-            FilletSpec spec;
-            spec.segments = std::max(1, view_.bevelSegments);
-            for (Index e : edges) spec.edges.push_back({e, r});
-            return filletEdges(test, spec);
-        }) == Attempt::Ok;
-    };
+    // Nothing about the geometry is decided here. Every trial -- the floor the
+    // gesture starts from and the limit it can reach -- runs in another
+    // process, a frame at a time, because OpenCASCADE does not always refuse:
+    // a fillet whose radius is exactly the wall thickness it is rounding takes
+    // the process with it, and a modelling tool may decline an operation but
+    // may not lose the model. See geom/kernel_guard.h.
+    //
+    // Running the first of those trials on the click cost fifty milliseconds of
+    // dead frames before the guide appeared. Now the guide appears at once and
+    // the floor arrives three frames later, which is the difference between a
+    // tool that opens and one that hesitates.
+    const Real minRadius = kFilletFloorLadder[0];
+    const Real initialWidth = minRadius;
 
-    // The smallest fillet this selection will take, searched upward from
-    // nothing. Not the first of a list starting at the width last used: that
-    // made the last fillet you did the smallest one you could ask for next
-    // time, so a 2mm fillet left 2mm as the floor and the arrow had nowhere to
-    // go but out. The floor belongs to the shape, not to the session.
-    Real minRadius = 0.0;
-    const Real minCandidates[] = {0.05, 0.1, 0.25, 0.5, 1.0, 2.5};
-    for (Real r : minCandidates) {
-        if (builds(r)) {
-            anyAccepted = true;
-            minRadius = r;
-            break;
-        }
-        // Only for the phrasing: the radius that failed is re-run in process
-        // to collect its reason, and only once it is known not to be fatal.
-        Body testMesh = obj->body;
-        FilletSpec testSpec;
-        testSpec.segments = std::max(1, view_.bevelSegments);
-        for (Index e : edges) testSpec.edges.push_back({e, r});
-        filletEdges(testMesh, testSpec, &why);
-    }
+    // How far this gesture can go is bracketed rather than hunted for. No
+    // fillet can be larger than half the smallest dimension of the body it is
+    // cut into -- there is not the material -- so the answer is between the
+    // smallest radius that builds and that. Doubling upward from 0.05 to find
+    // the same bracket cost six trials before the bisection even started.
+    //
+    // The bisection itself runs a trial per frame in another process, so the
+    // gesture begins immediately and the limit narrows over the next few
+    // frames. Until it lands, the limit is the largest radius actually
+    // verified, so the track never offers travel that has not been checked.
+    // How far this can possibly go, bounded twice and tightly.
+    //
+    // Half the smallest dimension of the whole body is a true bound but a very
+    // loose one: on a shelled box it says ten millimetres where the wall gives
+    // out at two, and a track scaled to ten puts the entire usable range in the
+    // first forty pixels of travel. The shortest edge of any face the fillet
+    // runs into is the local bound, and it is the one that bites -- it is the
+    // wall thickness, the width of the rib, the flat the round has to fit on.
+    const Vec3 extent = obj->body.bounds().size();
+    const Real smallest = std::max(std::min({extent.x, extent.y, extent.z}), Real(0.1));
 
-    if (!anyAccepted) {
-        setNotice(why.empty() ? "No room for a fillet on selected edges"
-                              : "Cannot fillet these edges: " + why);
-        return;
-    }
-    Real initialWidth = minRadius;
-
-    // How far this gesture can go, settled now rather than rediscovered under
-    // the cursor. Doubling until it fails, then bisecting: about a dozen builds
-    // once, against one or more on every frame near the limit.
-    Real maxRadius = initialWidth;
-    {
-        Real lo = initialWidth, hi = initialWidth;
-        for (int i = 0; i < 7; ++i) {
-            const Real next = hi * 2.0;
-            if (!builds(next)) break;
-            lo = next;
-            hi = next;
-        }
-        Real fail = hi * 2.0;
-        for (int i = 0; i < 7; ++i) {
-            const Real mid = 0.5 * (lo + fail);
-            if (builds(mid)) lo = mid; else fail = mid;
-        }
-        maxRadius = lo;
-    }
+    const Real nearby = materialBehindEdges(*obj, edges, smallest);
+    const Real ceiling = std::max(std::min(smallest * 0.5, nearby), Real(0.05));
+    const Real maxRadius = 0.0;   // nothing verified yet
 
     // Select all extended edges in the scene so the highlight displays them
     scene_.clearElementSelection();
@@ -1367,6 +1489,20 @@ void Application::beginFillet() {
     filletTool_.baseRadius = initialWidth;
     filletTool_.currentRadius = initialWidth;
     filletTool_.maxRadius = maxRadius;
+    filletTool_.search.active = true;
+    filletTool_.search.floorPhase = true;
+    filletTool_.search.floorIndex = 0;
+    filletTool_.search.ceiling = ceiling;
+    filletTool_.search.hardCeiling = std::max(smallest * 0.5, ceiling);
+    filletTool_.search.good = minRadius;
+    filletTool_.search.bad = std::max(ceiling, minRadius * 4.0);
+    filletTool_.search.stepsLeft = 8;
+    filletTool_.search.pending = 0.0;
+    filletTool_.search.testedTop = false;
+    filletTool_.previewValid = false;
+    filletTool_.previewSegments = -1;
+    filletTool_.requestedRadius = -1.0;
+    filletTool_.requestedSegments = -1;
     filletTool_.currentSegments = std::max(1, view_.bevelSegments);
     filletTool_.meshBefore = obj->body;
     filletTool_.chainBefore = obj->features;
@@ -1401,31 +1537,172 @@ void Application::beginFillet() {
 
         filletTool_.axis = filletAxis(filletTool_.meshBefore, model, edges, nearest);
         if (filletTool_.axis.valid) {
-            // Slide the origin out to sit under the pointer. The gesture is
-            // then "how far have I pulled from where I started", which cannot
-            // invert and does not depend on where on the edge the click landed.
             // Slide the origin out to sit under the pointer, so the track
-            // starts in the hand. Measured in pixels and converted, because
-            // the track itself is a screen-space length.
+            // starts in the hand and the gesture is "how far have I pulled
+            // from where I started" -- which cannot invert, and does not depend
+            // on where along the edge the click landed. Measured in pixels and
+            // converted, because the track itself is a screen-space length.
             const Real outPx = std::max(Real(0), filletTool_.axis.offsetPx(camera_, at));
             const Real px = camera_.pixelWorldSize(filletTool_.axis.origin);
             filletTool_.axis.origin =
                 filletTool_.axis.origin + filletTool_.axis.direction * (outPx * px);
 
-            // The whole usable range, laid along one track: from the smallest
-            // fillet this selection will take to the largest.
+            // The track's range is fixed for the whole gesture, from the
+            // smallest fillet this selection will take to the most the body
+            // could possibly hold. It must not move while the search narrows:
+            // a track that grew under the cursor would inflate the radius
+            // while the hand was still.
+            //
+            // What the search changes is how far along that track the gesture
+            // may go -- the arrow stops at the largest radius actually
+            // verified, and the cap marks where the shape gives up.
             filletTool_.axis.baseValue = minRadius;
-            filletTool_.axis.spanValue = maxRadius;
+            filletTool_.axis.spanValue = std::max(ceiling, minRadius * 4.0);
         }
     }
 
     updateFillet(false);
 }
 
+// The smallest fillets worth offering, in the order they are tried. The floor
+// belongs to the shape, not to the session: starting from the width last used
+// made a 2mm fillet the smallest you could ask for next time, and the arrow had
+// nowhere to go but out.
+const Real Application::kFilletFloorLadder[6] = {0.05, 0.1, 0.25, 0.5, 1.0, 2.5};
+
+// Runs one trial of the floor ladder. Returns once a trial is in flight.
+void Application::stepFilletFloorSearch() {
+    FilletToolState::LimitSearch& s = filletTool_.search;
+
+    if (s.trial.running() || s.trial.finished()) {
+        if (!s.trial.poll()) return;                 // still working
+        const Real tried = kFilletFloorLadder[s.floorIndex];
+        if (s.trial.result() == Attempt::Ok) {
+            // The gesture has a floor. The track starts there, and the arrow
+            // may go exactly that far until the limit search says otherwise.
+            s.floorPhase = false;
+            filletTool_.baseRadius = tried;
+            filletTool_.maxRadius = tried;
+            filletTool_.axis.baseValue = tried;
+            filletTool_.axis.spanValue = std::max(s.ceiling, tried * 4.0);
+            filletTool_.currentRadius = std::max(filletTool_.currentRadius, tried);
+            s.good = tried;
+            s.bad = std::max(s.ceiling, tried * 4.0);
+            s.testedTop = false;
+            s.stepsLeft = 8;
+            return;
+        }
+
+        ++s.floorIndex;
+        if (s.floorIndex >= static_cast<int>(std::size(kFilletFloorLadder))) {
+            // Nothing on the ladder builds. Only now is it worth paying for a
+            // reason: the radius is re-run in this process to collect one, and
+            // only because the guarded trial proved it is not fatal.
+            std::string why;
+            if (s.trial.result() == Attempt::Refused) {
+                Body test = filletTool_.meshBefore;
+                FilletSpec spec;
+                spec.segments = filletTool_.currentSegments;
+                for (Index e : filletTool_.edges) spec.edges.push_back({e, tried});
+                filletEdges(test, spec, &why);
+            }
+            abortFillet();
+            setNotice(why.empty() ? "No room for a fillet on selected edges"
+                                  : "Cannot fillet these edges: " + why);
+            return;
+        }
+    }
+
+    s.pending = kFilletFloorLadder[s.floorIndex];
+    startFilletTrial(s.pending);
+}
+
+// Puts one guarded fillet at `radius` in flight.
+void Application::startFilletTrial(Real radius) {
+    const Body start = filletTool_.meshBefore;
+    const std::vector<Index> edges = filletTool_.edges;
+    const int segments = filletTool_.currentSegments;
+    filletTool_.search.trial.start([start, edges, segments, radius] {
+        Body test = start;
+        FilletSpec spec;
+        spec.segments = segments;
+        for (Index e : edges) spec.edges.push_back({e, radius});
+        return filletEdges(test, spec);
+    });
+}
+
+void Application::stepFilletLimitSearch() {
+    FilletToolState::LimitSearch& s = filletTool_.search;
+    if (!filletTool_.active || !s.active) return;
+
+    if (s.floorPhase) {
+        stepFilletFloorSearch();
+        return;
+    }
+
+    // Collect whatever the last trial concluded. A crash counts as a refusal:
+    // OpenCASCADE does not always decline politely, and a radius that ends its
+    // process is one this gesture must not offer.
+    if (s.trial.running() || s.trial.finished()) {
+        if (!s.trial.poll()) return;                 // still working; not our turn
+        if (s.trial.result() == Attempt::Ok) {
+            s.good = s.pending;
+            filletTool_.maxRadius = s.good;          // how far the arrow may go
+            if (s.pending >= s.bad * 0.999) {
+                // The top of the bracket built, so the estimate was low. The
+                // shortest nearby edge is the bound that usually bites, but a
+                // face can carry a small edge far from anything being rounded,
+                // and that must not become the limit. Double upward instead,
+                // as far as the one bound that is always true.
+                if (s.bad < s.hardCeiling * 0.999) {
+                    s.good = s.bad;
+                    s.bad = std::min(s.bad * 2.0, s.hardCeiling);
+                    s.testedTop = false;
+                } else {
+                    s.active = false;
+                    return;
+                }
+            }
+        } else {
+            s.bad = s.pending;
+        }
+        --s.stepsLeft;
+    }
+
+    if (s.stepsLeft <= 0 || s.bad <= s.good * 1.001) {
+        s.active = false;
+        return;
+    }
+
+    // The top of the bracket first. On an ordinary part it builds -- half the
+    // smallest dimension really is available -- and the whole search is one
+    // trial rather than eight converging on a number already known.
+    if (!s.testedTop) {
+        s.testedTop = true;
+        s.pending = s.bad;
+    } else {
+        s.pending = 0.5 * (s.good + s.bad);
+    }
+    startFilletTrial(s.pending);
+}
+
 void Application::updateFillet(bool snap) {
     if (!filletTool_.active) return;
     SceneObject* obj = scene_.find(filletTool_.objectId);
     if (!obj) { abortFillet(); return; }
+
+    // Whatever the kernel finished while the last few frames were drawn.
+    {
+        Body built;
+        Real builtR = 0.0;
+        int builtSegs = 0;
+        if (filletTool_.preview.take(built, builtR, builtSegs)) {
+            obj->body = std::move(built);
+            obj->refreshDerived();
+            filletTool_.previewSegments = builtSegs;
+            filletTool_.previewValid = true;
+        }
+    }
 
     ImGuiIO& io = ImGui::GetIO();
     if (io.MouseWheel != 0.0f) {
@@ -1491,16 +1768,31 @@ void Application::updateFillet(bool snap) {
     // with it. The limit belongs to the geometry, not to the pointer.
     if (filletTool_.maxRadius > 0.0) newR = std::min(newR, filletTool_.maxRadius);
 
-    Body scratch = filletTool_.meshBefore;
-    FilletSpec spec;
-    spec.segments = filletTool_.currentSegments;
-    for (Index e : filletTool_.edges) spec.edges.push_back({e, newR});
-    if (filletEdges(scratch, spec)) {
-        obj->body = std::move(scratch);
-        obj->refreshDerived();
-        filletTool_.currentRadius = newR;
-        view_.bevelWidth = newR;
+    // The number and the guide are the pointer's own, so they move now. The
+    // geometry is the kernel's and arrives when it arrives.
+    filletTool_.currentRadius = newR;
+    view_.bevelWidth = newR;
+
+    // Nothing has been verified yet -- the floor trial is still in flight -- so
+    // there is no radius it would be safe to hand a worker thread. A preview
+    // built past the limit is the one that takes the process with it.
+    if (filletTool_.maxRadius <= 0.0) return;
+
+    // A drag that has not changed the answer has no work to ask for. With
+    // snapping on the radius only moves when the cursor crosses a tick, so most
+    // frames of a drag land here -- and the ones that do not now cost the price
+    // of handing a request to another thread rather than a full rebuild of the
+    // body, which on an eight-edge fillet is twenty to fifty milliseconds.
+    if (std::fabs(newR - filletTool_.requestedRadius) < 1e-9 &&
+        filletTool_.currentSegments == filletTool_.requestedSegments &&
+        filletTool_.previewValid) {
+        return;
     }
+
+    filletTool_.requestedRadius = newR;
+    filletTool_.requestedSegments = filletTool_.currentSegments;
+    filletTool_.preview.request(filletTool_.meshBefore, filletTool_.edges, newR,
+                                filletTool_.currentSegments);
     // A refusal inside the travel means the segment count changed under the
     // limit that was measured for it. The last good preview stands rather than
     // the tool hunting for a new one mid-gesture.
@@ -1508,6 +1800,22 @@ void Application::updateFillet(bool snap) {
 
 void Application::commitFillet() {
     if (!filletTool_.active) return;
+
+    // A click rather than a drag can land here before the floor trial has come
+    // back, and there is nothing to apply until it has. This is the one moment
+    // in the gesture where waiting is right: it is a few tens of milliseconds,
+    // once, on a deliberate action, against committing a radius nothing has
+    // checked.
+    while (filletTool_.active && filletTool_.search.active &&
+           filletTool_.search.floorPhase) {
+        stepFilletFloorSearch();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    if (!filletTool_.active) return;   // the ladder ran out and aborted for us
+
+    filletTool_.search.active = false;
+    filletTool_.search.trial.abandon();
+    filletTool_.preview.cancel();
     const ObjectId id = filletTool_.objectId;
     SceneObject* obj = scene_.find(id);
     justFinishedModal_ = true;
@@ -1548,6 +1856,11 @@ void Application::commitFillet() {
 
 void Application::abortFillet() {
     if (!filletTool_.active) return;
+    // Whatever was being checked is no longer wanted, and the process doing it
+    // must not outlive the gesture.
+    filletTool_.search.active = false;
+    filletTool_.search.trial.abandon();
+    filletTool_.preview.cancel();
     const ObjectId id = filletTool_.objectId;
     justFinishedModal_ = true;
     filletTool_.active = false;
@@ -2561,6 +2874,10 @@ int Application::run() {
         }
 
         camera_.update(dt);
+
+        // One trial of the fillet limit search, if one is due. It runs in
+        // another process, so this is a poll and a fork rather than a wait.
+        stepFilletLimitSearch();
 
         // Bring a body or two up to the tolerance this view wants. Bounded per
         // frame on purpose: re-tessellating is tens of milliseconds on a heavy

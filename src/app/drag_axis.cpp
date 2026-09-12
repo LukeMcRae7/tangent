@@ -158,9 +158,14 @@ void DragAxis::drawGuide(Renderer& renderer, const Camera& camera, Real value,
     // than something found by pushing into it.
     const Vec3 tip = origin + direction * trackWorld;
     thickLine(renderer, camera, origin, tip, track, 2.0);
-    if (bounded) {
+
+    // The cap marks where the shape gives up, which is not always the end of
+    // the track: the track carries everything the body could hold, and the
+    // limit is what it will actually take.
+    if (bounded && limit > baseValue) {
+        const Vec3 at = origin + direction * place(limit);
         const Real cap = px * 8.0;
-        thickLine(renderer, camera, tip - across * cap, tip + across * cap, track, 3.0);
+        thickLine(renderer, camera, at - across * cap, at + across * cap, track, 3.0);
     }
 
     // The arrow: filled, in the front layer, from the start to the value.

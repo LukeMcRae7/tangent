@@ -136,6 +136,7 @@ add_executable(tangent
   src/app/measure.cpp
   src/app/snap.cpp
   src/app/drag_axis.cpp
+  src/app/fillet_preview.cpp
   src/app/undo.cpp
   src/mesh/halfedge.cpp
   src/mesh/primitives.cpp

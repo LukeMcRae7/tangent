@@ -3,6 +3,8 @@
 
 #include "app/camera.h"
 #include "app/drag_axis.h"
+#include "app/fillet_preview.h"
+#include "geom/kernel_guard.h"
 #include "app/create_tool.h"
 #include "app/measure.h"
 #include "mesh/export_stl.h"
@@ -113,6 +115,9 @@ private:
     void handleShortcuts();
     void handleTransformKeys();
     Vec2 mouseInViewport() const;
+
+    // Set only by the headless demos, which have no pointer of their own.
+    Vec2 mouseOverride_{-1.0, -1.0};
     void beginTransform(TransformMode mode);
     void handleViewportClick(bool shift, bool ctrl);
     void drawSelectionHighlights();
@@ -185,6 +190,46 @@ private:
         // limit is a property of the geometry, not of where the pointer is:
         // finding it once costs a dozen builds at the start and nothing after.
         Real maxRadius = 0.0;
+
+        // The search for that limit, running in another process while this one
+        // keeps drawing. Until it finishes, maxRadius is the largest radius
+        // that has actually been verified, so the track only ever offers travel
+        // that is known to work -- it grows as the answer narrows rather than
+        // being guessed at and taken back.
+        struct LimitSearch {
+            bool active = false;
+
+            // The floor comes first: the smallest radius this selection will
+            // take at all, walked up a ladder. Until it lands there is nothing
+            // verified to preview, so the gesture draws its guide and waits --
+            // three frames, against the fifty milliseconds the same trial cost
+            // when it ran on the click.
+            bool floorPhase = false;
+            int  floorIndex = 0;
+
+            Real good = 0.0;      // verified to build
+            Real bad = 0.0;       // verified not to, or assumed so
+            Real ceiling = 0.0;   // the shortest edge the fillet runs into
+            Real hardCeiling = 0.0;  // half the body's smallest dimension
+            int  stepsLeft = 0;
+            Real pending = 0.0;
+            bool testedTop = false;
+            AsyncTrial trial;
+        };
+        LimitSearch search;
+
+        // What the preview currently shows, so a frame that asks for the same
+        // thing again can be skipped rather than rebuilt.
+        bool previewValid = false;
+        int  previewSegments = 0;
+
+        // What the kernel has been asked for, which runs ahead of what it has
+        // finished: the number and the guide follow the cursor every frame and
+        // the geometry catches up a build later.
+        Real requestedRadius = -1.0;
+        int  requestedSegments = 0;
+        FilletPreview preview;
+
         Body meshBefore;
         std::vector<Feature> chainBefore;
         std::string typedValue;
@@ -192,6 +237,13 @@ private:
     FilletToolState filletTool_;
 
     void beginFillet();
+
+    // Advances the search for the largest fillet this gesture can make, one
+    // trial per frame, without waiting for any of them.
+    void stepFilletLimitSearch();
+    void stepFilletFloorSearch();
+    void startFilletTrial(Real radius);
+    static const Real kFilletFloorLadder[6];
     void updateFillet(bool snap);
     void commitFillet();
     void abortFillet();
