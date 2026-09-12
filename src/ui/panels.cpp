@@ -280,7 +280,9 @@ void drawMenuBar(UiContext& ctx) {
         if (ImGui::MenuItem("Top",    "Numpad 7"))       ctx.camera->setStandardView(StandardView::Top);
         if (ImGui::MenuItem("Bottom", "Ctrl+Numpad 7"))  ctx.camera->setStandardView(StandardView::Bottom);
         ImGui::Separator();
-        ImGui::MenuItem("Orthographic", "Numpad 5", &ctx.camera->orthographic);
+        bool ortho = ctx.camera->orthographic;
+        if (ImGui::MenuItem("Orthographic", "Numpad 5", &ortho))
+            ctx.camera->setOrthographic(ortho);
         ImGui::Separator();
         ImGui::MenuItem("Invert Orbit X", nullptr, &ctx.camera->invertOrbitX);
         ImGui::MenuItem("Invert Orbit Y", nullptr, &ctx.camera->invertOrbitY);
@@ -736,41 +738,6 @@ void drawStatusBar(UiContext& ctx) {
     }
     ImGui::End();
     ImGui::PopStyleVar(2);
-}
-
-// ---------------------------------------------------------------------------
-void drawViewportOverlay(UiContext& ctx, float x, float y, float w, float h) {
-    (void)w;
-    ImGui::SetNextWindowPos(ImVec2(x + 12.0f, y + 10.0f));
-    ImGui::SetNextWindowBgAlpha(0.0f);
-    const ImGuiWindowFlags flags =
-        ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
-        ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoDocking |
-        ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_AlwaysAutoResize |
-        ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoInputs;
-
-    if (ImGui::Begin("##vpoverlay", nullptr, flags)) {
-        const Camera& cam = *ctx.camera;
-
-        // Name the view only when it is squarely on axis; otherwise "User".
-        const float p = degrees(cam.pitch);
-        const float yw = degrees(cam.yaw);
-        auto near = [](float a, float b) { return std::fabs(a - b) < 0.5f; };
-        const char* name = "User";
-        if (near(p, 90.0f))       name = "Top";
-        else if (near(p, -90.0f)) name = "Bottom";
-        else if (near(p, 0.0f)) {
-            const float ny = std::fmod(std::fmod(yw, 360.0f) + 360.0f, 360.0f);
-            if      (near(ny, 0.0f))   name = "Front";
-            else if (near(ny, 180.0f)) name = "Back";
-            else if (near(ny, 90.0f))  name = "Right";
-            else if (near(ny, 270.0f)) name = "Left";
-        }
-        ImGui::TextColored(ImVec4(0.78f, 0.80f, 0.83f, 0.9f), "%s %s",
-                           name, cam.orthographic ? "Ortho" : "Persp");
-    }
-    ImGui::End();
-    (void)h;
 }
 
 } // namespace tg

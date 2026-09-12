@@ -100,6 +100,12 @@ public:
     // 3 on a grid crossing, 4 on the hole's centre.
     void setSnapDemo(int mode) { snapDemo_ = mode; }
 
+    // Parks the interface's pointer somewhere, for screenshots of hover states.
+    void setUiMouse(float x, float y, bool down) {
+        uiMouse_ = {x, y};
+        uiMouseDown_ = down;
+    }
+
     // Rounds one edge of a box and then the edge opposite it, through the same
     // path the keyboard takes, and reports whether the part came out symmetric.
     // Two opposite edges rounded to the same radius can only give a symmetric
@@ -125,6 +131,8 @@ private:
     // Set only by the headless demos, which have no pointer of their own.
     Vec2 mouseOverride_{-1.0, -1.0};
     int  snapDemo_ = 0;
+    Vec2 uiMouse_{-1.0f, -1.0f};
+    bool uiMouseDown_ = false;
     void beginTransform(TransformMode mode);
     void handleViewportClick(bool shift, bool ctrl);
     void drawSelectionHighlights();

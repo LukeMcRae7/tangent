@@ -22,7 +22,16 @@ public:
     float distance = 90.0f;      // mm from target
     float yaw   = radians(-35.0f);
     float pitch = radians( 28.0f);
-    bool  orthographic = false;
+
+    // Orthographic is the working state and perspective is the exception.
+    //
+    // A part is designed against dimensions, and in perspective no two edges
+    // of the same length are the same length on screen. Perspective is for
+    // looking at the thing, so it is what an orbit gives you -- and `preferOrtho`
+    // remembers that this is a detour, so snapping back to a named view comes
+    // home to square again. The toggle is what changes the preference itself.
+    bool  orthographic = true;
+    bool  preferOrtho  = true;
 
     // Orbit direction. The default drags the scene with the cursor: moving the
     // mouse left swings the view to the right. Flip either axis to taste.
@@ -55,6 +64,33 @@ public:
     void pan(float dxPixels, float dyPixels);
     void dolly(float steps);                 // wheel notches; positive = closer
     void setStandardView(StandardView v);
+
+    // Look at the model from `dir`, which points from the target out to where
+    // the eye should go. The view cube has twenty-six of these and only six of
+    // them have names.
+    //
+    // Animates, like the standard views do: a view that jumps leaves the user
+    // to work out for themselves what happened to their model.
+    void setViewDirection(Vec3 dir);
+
+    // The whole framing at once, over the same short animation, with the
+    // projection left alone. For a tool that takes the view somewhere on
+    // purpose and has to give it back afterwards.
+    void animateTo(Vec3 at, float dist, float yawRad, float pitchRad);
+
+    // The turntable angles that look from `dir`. Pitch stops just short of the
+    // pole, where the basis gives out.
+    static void anglesFor(Vec3 dir, float& yawRad, float& pitchRad);
+
+    // The projection the user asked for, after an orbit has taken it away.
+    void restorePreferredProjection() { orthographic = preferOrtho; }
+
+    // Asking for a projection is also saying which one you want to come back
+    // to. Toggling is asking for the other of what is on screen -- not the
+    // other of the preference, which after an orbit is not the same thing and
+    // would leave the menu item doing nothing.
+    void setOrthographic(bool on) { preferOrtho = on; orthographic = on; }
+    void toggleProjection() { setOrthographic(!orthographic); }
     void frame(const AABB& box);             // fit a box, leaving a margin
 
     // Eye ray through a pixel, for picking. Origin is on the near plane.

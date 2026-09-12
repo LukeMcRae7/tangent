@@ -96,7 +96,5 @@ void drawMeasurePanel(UiContext& ctx);
 // Body of the add-object menu, shared by the menu bar and the Shift+A popup.
 void drawAddMenuItems(UiContext& ctx);
 
-// Compact viewport corner readout: view name, projection, navigation hints.
-void drawViewportOverlay(UiContext& ctx, float x, float y, float w, float h);
 
 } // namespace tg

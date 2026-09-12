@@ -434,12 +434,7 @@ void CreateTool::start(PrimitiveKind kind) {
 void CreateTool::cancel(Camera& camera) {
     if (stage_ == CreateStage::DrawProfile_Pt1 || stage_ == CreateStage::DrawProfile_Pt2) {
         // Restore perspective camera if canceling from orthographic
-        camera.target = savedCamera_.target;
-        camera.distance = savedCamera_.distance;
-        camera.yaw = savedCamera_.yaw;
-        camera.pitch = savedCamera_.pitch;
-        camera.orthographic = savedCamera_.orthographic;
-        camera.snapToGoal();
+        restoreCamera(camera);
     }
     stage_ = CreateStage::None;
     activeHandle_ = HandleId::None;
@@ -463,6 +458,17 @@ void CreateTool::setHoveredPlane(PlaneChoice choice, Vec3 point, Vec3 normal,
     faceIndex_ = faceIdx;
 }
 
+// Puts the view back where the tool found it.
+//
+// Over the animation rather than in one frame, the same as going in: the view
+// is being handed back to the user, and a camera that teleports leaves them to
+// work out for themselves where their model went.
+void CreateTool::restoreCamera(Camera& camera) {
+    camera.animateTo(savedCamera_.target, savedCamera_.distance,
+                     savedCamera_.yaw, savedCamera_.pitch);
+    camera.orthographic = savedCamera_.orthographic;
+}
+
 void CreateTool::commitPlaneSelection(Camera& camera) {
     if (stage_ != CreateStage::SelectPlane) return;
     selectedPlane_ = hoveredPlane_;
@@ -474,14 +480,13 @@ void CreateTool::commitPlaneSelection(Camera& camera) {
     savedCamera_.pitch = camera.pitch;
     savedCamera_.orthographic = camera.orthographic;
 
-    // Set camera target to plane center and face strictly head-on perpendicular
-    camera.target = planeOrigin_;
-    const float p = std::asin(clampf(planeNormal_.z, -0.9999f, 0.9999f));
-    const float y = std::atan2(planeNormal_.x, -planeNormal_.y);
-    camera.pitch = p;
-    camera.yaw = y;
+    // Square up to the plane: the pivot on it, the eye straight out along its
+    // normal, and orthographic, because a profile drawn in perspective is drawn
+    // against a picture of itself rather than against its dimensions.
+    float y = 0.0f, p = 0.0f;
+    Camera::anglesFor(planeNormal_, y, p);
+    camera.animateTo(planeOrigin_, camera.distance, y, p);
     camera.orthographic = true;
-    camera.snapToGoal();
 
     stage_ = CreateStage::DrawProfile_Pt1;
     pt1_ = Vec2{0, 0};
@@ -780,12 +785,7 @@ void CreateTool::handleMouseDown(Vec2 mousePx, Scene& scene, Camera& camera, Und
         }
 
         // Restore perspective camera
-        camera.target = savedCamera_.target;
-        camera.distance = savedCamera_.distance;
-        camera.yaw = savedCamera_.yaw;
-        camera.pitch = savedCamera_.pitch;
-        camera.orthographic = savedCamera_.orthographic;
-        camera.snapToGoal();
+        restoreCamera(camera);
 
         stage_ = CreateStage::AdjustProfile;
         return;
@@ -985,12 +985,7 @@ bool CreateTool::handleKey(int key, bool shift, bool ctrl, Camera& camera, Scene
                 pt1_ = {uMin, vMin};
                 pt2_ = {uMax, vMax};
             }
-            camera.target = savedCamera_.target;
-            camera.distance = savedCamera_.distance;
-            camera.yaw = savedCamera_.yaw;
-            camera.pitch = savedCamera_.pitch;
-            camera.orthographic = savedCamera_.orthographic;
-            camera.snapToGoal();
+            restoreCamera(camera);
             stage_ = CreateStage::AdjustProfile;
             return true;
         }

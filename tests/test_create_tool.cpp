@@ -1636,6 +1636,59 @@ static void testSection13_SnapToGeometry() {
         std::printf("  built about %.6f, %.6f -- the hole is at 20, 0\n", cx, cy);
     }
 
+    // ---- the view squares up to the plane, and is given back --------------
+    std::printf("--- the view squares up to the plane and is handed back ---\n");
+    {
+        Camera c;
+        c.viewportW = 1600;
+        c.viewportH = 900;
+        c.distance = 200.0f;
+        c.target = {5, 5, 5};
+        c.yaw = 0.7f;
+        c.pitch = 0.4f;
+        c.setOrthographic(false);          // deliberately in perspective
+        c.snapToGoal();
+
+        const Vec3 wasTarget = c.target;
+        const float wasYaw = c.yaw, wasPitch = c.pitch;
+
+        CreateTool t5;
+        t5.start(PrimitiveKind::Box);
+        t5.setHoveredPlane(PlaneChoice::Face, {0, 0, 5}, {0, 0, 1}, id, 0);
+        t5.commitPlaneSelection(c);
+
+        // It animates rather than jumping, so nothing has moved yet.
+        check(c.animating(), "the turn is animated, not a teleport");
+        check(near(c.yaw, wasYaw) && near(c.pitch, wasPitch), "and has not happened yet");
+        c.snapToGoal();
+
+        check(c.orthographic, "a sketch is drawn square-on");
+        check(!c.preferOrtho, "without changing what the user asked for");
+        check(near(std::fabs(c.pitch), kHalfPi, 1e-3),
+              "looking straight down at a plane whose normal is +Z");
+        check(near(c.target.z, 5.0) && near(c.target.x, 0.0),
+              "pivoting on the plane rather than wherever it was");
+
+        // Place both points; the boundary is defined at the second click, and
+        // that is where the view is supposed to come back.
+        Vec2 px{};
+        check(c.projectToPixel(Vec3{-10, -10, 5}, px), "first corner on screen");
+        t5.update(scene, c, px, true);
+        t5.handleMouseDown(px, scene, c, undo);
+        check(c.orthographic, "still square-on while the profile is drawn");
+
+        check(c.projectToPixel(Vec3{10, 10, 5}, px), "second corner on screen");
+        t5.update(scene, c, px, true);
+        t5.handleMouseDown(px, scene, c, undo);
+        check(t5.stage() == CreateStage::AdjustProfile, "the boundary is defined");
+
+        c.snapToGoal();
+        check(!c.orthographic, "and the perspective the user had is given back");
+        check(near(c.yaw, wasYaw) && near(c.pitch, wasPitch), "pointing where it was");
+        check(lengthSq(c.target - wasTarget) < 1e-6, "pivoting where it was");
+        t5.cancel(c);
+    }
+
     // ---- lined up with the hole from across the plate ----------------------
     std::printf("--- in line with the hole, from 30mm away ---\n");
     {

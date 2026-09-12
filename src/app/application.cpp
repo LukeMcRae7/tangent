@@ -1,6 +1,7 @@
 #include "app/application.h"
 #include "geom/kernel_guard.h"
 #include "render/lod.h"
+#include "ui/view_cube.h"
 #include "ui/theme.h"
 
 #include "core/palette.h"
@@ -1095,7 +1096,7 @@ void Application::handleShortcuts() {
     if (ImGui::IsKeyPressed(ImGuiKey_Keypad7, false))
         camera_.setStandardView(ctrl ? StandardView::Bottom : StandardView::Top);
     if (ImGui::IsKeyPressed(ImGuiKey_Keypad5, false))
-        camera_.orthographic = !camera_.orthographic;
+        camera_.toggleProjection();
     if (ImGui::IsKeyPressed(ImGuiKey_KeypadDecimal, false))
         ui_.actions.frameSelected = true;
     if (ImGui::IsKeyPressed(ImGuiKey_Home, false))
@@ -2638,7 +2639,11 @@ void Application::buildUi() {
     drawInspector(ui_);
     drawHistory(ui_);
     drawStatusBar(ui_);
-    drawViewportOverlay(ui_, viewRect_.x, viewRect_.y, viewRect_.w, viewRect_.h);
+    // The cube carries the view's name and its projection, so the corner
+    // readout that used to say both is gone: two places telling you the same
+    // thing is one place too many, and the cube is where the eye already goes
+    // to find out which way it is looking.
+    drawViewCube(ui_, viewRect_.x, viewRect_.y, viewRect_.w, viewRect_.h);
     drawFilePrompt();
     drawUnsavedPrompt();
     drawMeasurePanel(ui_);
@@ -2826,6 +2831,14 @@ int Application::run() {
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplSDL3_NewFrame();
         ImGui::NewFrame();
+
+        // A cursor for a machine with nobody at it. Hover states are half of
+        // what a widget is, and a screenshot of one taken with the pointer
+        // parked at the origin shows the other half.
+        if (uiMouse_.x >= 0.0f) {
+            ImGui::GetIO().MousePos = ImVec2(uiMouse_.x, uiMouse_.y);
+            ImGui::GetIO().MouseDown[0] = uiMouseDown_;
+        }
 
         // Stats are gathered before the panels that display them.
         ui_.stats = UiStats{};

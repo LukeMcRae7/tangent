@@ -49,6 +49,13 @@ void Camera::orbit(float dxPixels, float dyPixels) {
     // drag has put it, this frame.
     yaw   -= dx * kOrbitRadiansPerPixel;
     pitch = clampf(pitch + dy * kOrbitRadiansPerPixel, -kPitchLimit, kPitchLimit);
+
+    // Off-axis, so perspective. An orbit is the gesture of looking at the thing
+    // rather than measuring it, and a three-quarter view in orthographic is the
+    // one that reads as a rendering mistake. The preference is untouched: this
+    // is a detour, and clicking the cube comes back from it.
+    orthographic = false;
+
     animating_ = false;
     syncGoal();
 }
@@ -72,6 +79,7 @@ void Camera::dolly(float steps) {
 void Camera::setStandardView(StandardView v) {
     syncGoal();
     animating_ = true;
+    restorePreferredProjection();
     switch (v) {
         case StandardView::Front:  goal_.yaw = 0.0f;          goal_.pitch = 0.0f; break;
         case StandardView::Back:   goal_.yaw = kPi;           goal_.pitch = 0.0f; break;
@@ -80,6 +88,36 @@ void Camera::setStandardView(StandardView v) {
         case StandardView::Top:    goal_.pitch =  kPitchLimit; break;
         case StandardView::Bottom: goal_.pitch = -kPitchLimit; break;
     }
+}
+
+void Camera::anglesFor(Vec3 dir, float& yawRad, float& pitchRad) {
+    const Real len = length(dir);
+    if (len < 1e-6) return;
+    const Vec3 d = dir / len;
+
+    // The turntable's own parameterisation, inverted. Pitch is clamped just
+    // short of the pole for the same reason orbit is: the basis is built by
+    // hand and stays valid there, but going past would tumble the view.
+    pitchRad = clampf(std::asin(clampf(static_cast<float>(d.z), -1.0f, 1.0f)),
+                      -kPitchLimit, kPitchLimit);
+    yawRad = std::atan2(static_cast<float>(d.x), static_cast<float>(-d.y));
+}
+
+void Camera::setViewDirection(Vec3 dir) {
+    if (length(dir) < 1e-6) return;
+    syncGoal();
+    animating_ = true;
+    restorePreferredProjection();
+    anglesFor(dir, goal_.yaw, goal_.pitch);
+}
+
+void Camera::animateTo(Vec3 at, float dist, float yawRad, float pitchRad) {
+    syncGoal();
+    animating_ = true;
+    goal_.target = at;
+    goal_.distance = dist;
+    goal_.yaw = yawRad;
+    goal_.pitch = clampf(pitchRad, -kPitchLimit, kPitchLimit);
 }
 
 void Camera::frame(const AABB& box) {

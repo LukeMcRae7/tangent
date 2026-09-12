@@ -239,6 +239,7 @@ private:
     // dimension alone -- a half-typed "12." must not become 12.
     bool applyTypedValue();
 
+    void restoreCamera(Camera& camera);
     void computePlaneBasis(Vec3 normal);
     bool unprojectToPlane(const Camera& camera, Vec2 mousePx, Vec2& outUV) const;
     Real rayPlaneExtrudeDepth(const Camera& camera, Vec2 mousePx) const;

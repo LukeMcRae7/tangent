@@ -155,6 +155,7 @@ add_executable(tangent
   src/render/lod.cpp
   src/ui/theme.cpp
   src/ui/panels.cpp
+  src/ui/view_cube.cpp
 )
 target_include_directories(tangent PRIVATE src)
 target_link_libraries(tangent PRIVATE imgui SDL3::SDL3 tangent_epoxy)
@@ -301,6 +302,16 @@ target_include_directories(test_drag PRIVATE src)
 target_link_libraries(test_drag PRIVATE tangent_epoxy)
 target_compile_options(test_drag PRIVATE ${TANGENT_WARNINGS})
 add_test(NAME drag COMMAND test_drag)
+
+add_executable(test_view_cube tests/test_view_cube.cpp
+  src/ui/view_cube.cpp src/ui/panels.cpp src/ui/theme.cpp src/app/camera.cpp src/app/measure.cpp
+  src/scene/scene.cpp src/scene/feature.cpp src/mesh/boolean.cpp src/mesh/health.cpp
+  ${TANGENT_GEOM} src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp
+  src/render/renderer.cpp src/render/shader.cpp src/render/gpu_mesh.cpp)
+target_include_directories(test_view_cube PRIVATE src ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/backends)
+target_link_libraries(test_view_cube PRIVATE imgui tangent_epoxy)
+target_compile_options(test_view_cube PRIVATE ${TANGENT_WARNINGS})
+add_test(NAME view_cube COMMAND test_view_cube)
 
 add_executable(test_snap tests/test_snap.cpp
   src/app/snap.cpp src/app/plane_snap.cpp src/app/camera.cpp

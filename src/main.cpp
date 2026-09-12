@@ -44,6 +44,10 @@ int main(int argc, char** argv) {
             app.setHeadlessExport(argv[++i]);
         } else if (std::strcmp(argv[i], "--fillet-pair-demo") == 0 && i + 1 < argc) {
             app.setFilletDemo(static_cast<float>(std::atof(argv[++i])));
+        } else if (std::strcmp(argv[i], "--ui-mouse") == 0 && i + 1 < argc) {
+            float mx = 0, my = 0; int down = 0;
+            std::sscanf(argv[++i], "%f,%f,%d", &mx, &my, &down);
+            app.setUiMouse(mx, my, down != 0);
         } else if (std::strcmp(argv[i], "--snap-demo") == 0 && i + 1 < argc) {
             app.setSnapDemo(std::atoi(argv[++i]));
         } else if (std::strcmp(argv[i], "--shell-fillet-demo") == 0) {
