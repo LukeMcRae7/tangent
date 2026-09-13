@@ -58,6 +58,8 @@ int main(int argc, char** argv) {
             app.setPrintDemo(std::atoi(argv[++i]));
         } else if (std::strcmp(argv[i], "--face-stress") == 0) {
             app.setFaceStress();
+        } else if (std::strcmp(argv[i], "--dialog-demo") == 0 && i + 1 < argc) {
+            app.setDialogDemo(std::atoi(argv[++i]));
         } else if (std::strcmp(argv[i], "--step-demo") == 0 && i + 1 < argc) {
             app.setStepDemo(argv[++i]);
         } else if (std::strcmp(argv[i], "--pattern-demo") == 0 && i + 1 < argc) {

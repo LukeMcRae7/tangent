@@ -6,6 +6,7 @@
 #include "app/async_build.h"
 #include "geom/kernel_guard.h"
 #include "app/create_tool.h"
+#include "app/file_dialog.h"
 #include "app/measure.h"
 #include "mesh/export_stl.h"
 #include "scene/serialize.h"
@@ -118,6 +119,7 @@ public:
     void setFaceDemo(int mode) { faceDemo_ = mode; }
     void setPatternDemo(int mode) { patternDemo_ = mode; }
     void setStepDemo(const std::string& path) { stepDemo_ = path; }
+    void setDialogDemo(int mode) { dialogDemo_ = mode; }
 
     // Throws a fast, wandering drag at the extrude, including the places a
     // hand actually goes: the corners of the window, and straight through the
@@ -172,6 +174,9 @@ private:
     int  patternDemo_ = 0;
     std::string stepDemo_;
     bool stepDemoDone_ = false;
+    int  dialogDemo_ = 0;
+    bool dialogDemoDone_ = false;
+    void stepDialogDemo();
     void stepStepDemo();
     bool patternDemoDone_ = false;
     void stepPatternDemo();
@@ -224,6 +229,24 @@ private:
     bool          dirty() const { return undo_.revision() != savedRevision_; }
 
     FileMode    fileMode_ = FileMode::None;
+
+    // The operating system's chooser, and what is needed to fall back to a
+    // typed path when there is not one. SDL gives no way to ask in advance
+    // whether a chooser can be shown -- the failure comes back through the
+    // same callback as a chosen file -- so the first refusal is what tells us,
+    // and after it the typed prompt is used for the rest of the session.
+    FileDialog  fileDialog_;
+    bool        typePathInstead_ = false;
+
+    // Set while the STL options popup is up. Export has choices a native
+    // chooser cannot carry -- binary or ASCII, the tolerance -- so they are
+    // asked first and the chooser follows.
+    bool        stlOptionsOpen_ = false;
+
+    // Starts the OS chooser for `mode`. Returns having asked; the answer is
+    // collected by pollFileDialog on a later frame.
+    void showFileChooser(FileMode mode);
+    void pollFileDialog();
     std::string projectPath_;
     char        pathField_[512] = {};
     bool        exportBinaryStl_ = true;

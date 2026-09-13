@@ -147,7 +147,7 @@ add_executable(tangent
   src/app/printability.cpp
   src/app/undo.cpp
   src/mesh/halfedge.cpp
-  src/mesh/primitives.cpp src/mesh/import_mesh.cpp
+  src/mesh/primitives.cpp src/mesh/import_mesh.cpp src/app/file_dialog.cpp
   ${TANGENT_GEOM} src/mesh/operations.cpp
   src/mesh/health.cpp
   src/mesh/boolean.cpp

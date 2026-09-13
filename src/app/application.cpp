@@ -673,6 +673,7 @@ void Application::handleViewportMouse() {
     stepFaceDemo();
     stepPatternDemo();
     stepStepDemo();
+    stepDialogDemo();
     stepFaceStress();
     stepPrintDemo();
     stepPreviewCheck();
@@ -3440,6 +3441,55 @@ void Application::stepFilletOpenDemo() {
     mouseOverride_ = px + Vec2{40.0, -40.0};
 }
 
+// 1 drives the typed-path fallback, which is what a system with no chooser
+// gets and is the half of this that can be tested without a person to click.
+// 2 asks for a real chooser and reports whether one opened -- it puts a window
+// on screen, so it is not in the sweep.
+void Application::stepDialogDemo() {
+    if (dialogDemo_ <= 0 || dialogDemoDone_ || viewRect_.w <= 0) return;
+    dialogDemoDone_ = true;
+
+    if (dialogDemo_ == 1) {
+        typePathInstead_ = true;          // as if no chooser could be shown
+
+        scene_.clear();
+        PrimitiveSpec s;
+        s.kind = PrimitiveKind::Box;
+        s.box = {12, 14, 16};
+        scene_.addPrimitive(PrimitiveKind::Box, s);
+
+        beginFilePrompt(FileMode::ExportStep);
+        std::fprintf(stderr, "[dialog-demo] fallback: popup=%d, chooser waiting=%d, "
+                             "seeded path \"%s\"\n",
+                     (int)(fileMode_ != FileMode::None), (int)fileDialog_.waiting(),
+                     pathField_);
+
+        // What the popup's OK button does, without needing the popup drawn.
+        const std::string out = std::string(stepDemo_.empty() ? "/tmp/tg_dialog_demo.step"
+                                                              : stepDemo_);
+        const FileMode mode = fileMode_;
+        fileMode_ = FileMode::None;
+        runFileOperation(mode, out);
+        std::fprintf(stderr, "[dialog-demo] typed path ran: %s\n", notice_.c_str());
+        std::remove(out.c_str());
+        return;
+    }
+
+    // A real chooser. Asked for, then given a moment to answer; nobody is here
+    // to click it, so None after the wait means it opened and is sitting there.
+    beginFilePrompt(FileMode::ImportMesh);
+    std::fprintf(stderr, "[dialog-demo] asked for a chooser, waiting=%d\n",
+                 (int)fileDialog_.waiting());
+    for (int i = 0; i < 120 && fileDialog_.waiting(); ++i) {
+        SDL_PumpEvents();               // the portal needs an event loop
+        pollFileDialog();
+        SDL_Delay(25);
+    }
+    std::fprintf(stderr, "[dialog-demo] after 3s: waiting=%d, fell back=%d%s%s\n",
+                 (int)fileDialog_.waiting(), (int)typePathInstead_,
+                 notice_.empty() ? "" : ", notice: ", notice_.c_str());
+}
+
 // Exports the scene to STEP and reads it straight back in, through the same
 // menu path a person uses. The round trip is checked in test_step; what this
 // checks is everything around it -- the object transforms folded into the
@@ -4776,6 +4826,73 @@ void Application::newProject() {
     setNotice("New project");
 }
 
+// What the chooser should offer, and what it should be called. The filters are
+// a courtesy on platforms that honour them and ignored on those that do not,
+// which is why every list ends with everything.
+namespace {
+struct ChooserSpec {
+    FileDialog::Kind kind;
+    const char* title;
+    std::vector<FileDialog::Filter> filters;
+};
+
+ChooserSpec chooserFor(int mode) {
+    using K = FileDialog::Kind;
+    switch (mode) {
+        case 0: return {K::Open, "Open Project",
+                        {{"Tangent project", "tangent"}, {"All files", "*"}}};
+        case 1: return {K::Save, "Save Project",
+                        {{"Tangent project", "tangent"}, {"All files", "*"}}};
+        case 2: return {K::Save, "Export STL",
+                        {{"STL mesh", "stl"}, {"All files", "*"}}};
+        case 3: return {K::Save, "Export STEP",
+                        {{"STEP file", "step;stp"}, {"All files", "*"}}};
+        case 4: return {K::Open, "Import STEP",
+                        {{"STEP file", "step;stp"}, {"All files", "*"}}};
+        default: return {K::Open, "Import Mesh",
+                         {{"Mesh", "stl;obj"}, {"STL", "stl"}, {"OBJ", "obj"},
+                          {"All files", "*"}}};
+    }
+}
+} // namespace
+
+void Application::showFileChooser(FileMode mode) {
+    fileMode_ = mode;
+    const ChooserSpec spec = chooserFor(static_cast<int>(mode) - 1);
+
+    // Somewhere sensible to start: beside the current project if there is one,
+    // and with the suggested name already filled in for a save. beginFilePrompt
+    // has worked that out and left it in pathField_.
+    fileDialog_.show(spec.kind, window_, spec.filters, pathField_);
+}
+
+void Application::pollFileDialog() {
+    if (!fileDialog_.waiting()) return;
+
+    std::string answer;
+    switch (fileDialog_.take(answer)) {
+        case FileDialog::Result::None:
+            return;
+        case FileDialog::Result::Cancelled:
+            fileMode_ = FileMode::None;
+            return;
+        case FileDialog::Result::Chosen: {
+            const FileMode mode = fileMode_;
+            fileMode_ = FileMode::None;
+            runFileOperation(mode, answer);
+            return;
+        }
+        case FileDialog::Result::Failed:
+            // No chooser on this system. Say so once, fall back to typing the
+            // path, and do not try again this session -- a dialog that failed
+            // for want of a portal will fail the same way every time.
+            typePathInstead_ = true;
+            setNotice("No file chooser is available here (" + answer +
+                      "), so paths are typed instead");
+            return;                      // fileMode_ stays set: the popup opens
+    }
+}
+
 void Application::beginFilePrompt(FileMode mode) {
     fileMode_ = mode;
 
@@ -4797,6 +4914,11 @@ void Application::beginFilePrompt(FileMode mode) {
         seed = "untitled.tangent";
     }
     std::snprintf(pathField_, sizeof(pathField_), "%s", seed.c_str());
+
+    // STL export has choices a native chooser cannot carry, so they are asked
+    // first and the chooser comes after. Everything else goes straight to it.
+    if (mode == FileMode::ExportStl) { stlOptionsOpen_ = true; return; }
+    if (!typePathInstead_) showFileChooser(mode);
 }
 
 namespace {
@@ -4961,11 +5083,25 @@ void Application::runFileOperation(FileMode mode, const std::string& path) {
 }
 
 void Application::drawFilePrompt() {
-    if (fileMode_ == FileMode::None) return;
+    // Two jobs, and which one depends on why we are here.
+    //
+    //   The STL options, always: binary or ASCII, selection or everything, and
+    //   the tolerance. A native chooser has nowhere to put these, so they are
+    //   asked first and the chooser follows the button.
+    //
+    //   A typed path, only where there is no chooser to be had. That is the
+    //   whole of this dialog's former job and is now the fallback for a system
+    //   with no XDG portal, no zenity and no kdialog.
+    const bool typing = typePathInstead_ && fileMode_ != FileMode::None;
+    if (!stlOptionsOpen_ && !typing) return;
 
-    const char* title = fileMode_ == FileMode::Open   ? "Open Project"
-                      : fileMode_ == FileMode::Save   ? "Save Project"
-                                                      : "Export STL";
+    const char* title = stlOptionsOpen_ ? "Export STL"
+                      : fileMode_ == FileMode::Open       ? "Open Project"
+                      : fileMode_ == FileMode::Save       ? "Save Project"
+                      : fileMode_ == FileMode::ExportStep ? "Export STEP"
+                      : fileMode_ == FileMode::ImportStep ? "Import STEP"
+                      : fileMode_ == FileMode::ImportMesh ? "Import Mesh"
+                                                          : "Export STL";
     ImGui::OpenPopup(title);
 
     ImGuiViewport* vp = ImGui::GetMainViewport();
@@ -4973,45 +5109,60 @@ void Application::drawFilePrompt() {
                             ImGuiCond_Always, ImVec2(0.5f, 0.5f));
     ImGui::SetNextWindowSize(ImVec2(460.0f, 0.0f));
 
-    if (ImGui::BeginPopupModal(title, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+    if (!ImGui::BeginPopupModal(title, nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+        return;
+
+    bool entered = false;
+    if (typing) {
         ImGui::TextUnformatted("Path");
         ImGui::SetNextItemWidth(-1.0f);
         // Focused on open, and Enter confirms, so the whole thing is keyboard
         // driven without reaching for the mouse.
         if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
-        const bool entered = ImGui::InputText("##path", pathField_, sizeof(pathField_),
-                                              ImGuiInputTextFlags_EnterReturnsTrue);
-
-        if (fileMode_ == FileMode::ExportStl) {
-            ImGui::Spacing();
-            ImGui::Checkbox("Binary", &exportBinaryStl_);
-            ImGui::SameLine();
-            ImGui::Checkbox("Selection only", &exportSelectionOnly_);
-
-            ImGui::SetNextItemWidth(140.0f);
-            ImGui::DragFloat("Tolerance", &exportDeviationMm_, 0.001f, 0.001f, 0.5f,
-                             "%.3f mm");
-            ImGui::SameLine();
-            ImGui::TextDisabled("how far a triangle may sit from the surface");
-        }
-
-        ImGui::Spacing();
-        const bool confirm = ImGui::Button("OK", ImVec2(90, 0)) || entered;
-        ImGui::SameLine();
-        const bool cancel = ImGui::Button("Cancel", ImVec2(90, 0)) ||
-                            ImGui::IsKeyPressed(ImGuiKey_Escape, false);
-
-        if (confirm) {
-            const FileMode mode = fileMode_;
-            fileMode_ = FileMode::None;
-            ImGui::CloseCurrentPopup();
-            runFileOperation(mode, pathField_);
-        } else if (cancel) {
-            fileMode_ = FileMode::None;
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::EndPopup();
+        entered = ImGui::InputText("##path", pathField_, sizeof(pathField_),
+                                   ImGuiInputTextFlags_EnterReturnsTrue);
     }
+
+    if (stlOptionsOpen_) {
+        ImGui::Checkbox("Binary", &exportBinaryStl_);
+        ImGui::SameLine();
+        ImGui::Checkbox("Selection only", &exportSelectionOnly_);
+
+        ImGui::SetNextItemWidth(140.0f);
+        ImGui::DragFloat("Tolerance", &exportDeviationMm_, 0.001f, 0.001f, 0.5f,
+                         "%.3f mm");
+        ImGui::SameLine();
+        ImGui::TextDisabled("how far a triangle may sit from the surface");
+        ImGui::Spacing();
+    }
+
+    ImGui::Spacing();
+    // The chooser is the way out when there is one; typing is the way out when
+    // there is not. Only ever one of them, so the button says which.
+    const bool chooseInstead = stlOptionsOpen_ && !typePathInstead_;
+    const bool confirm =
+        ImGui::Button(chooseInstead ? "Choose File..." : "OK", ImVec2(130, 0)) || entered;
+    ImGui::SameLine();
+    const bool cancel = ImGui::Button("Cancel", ImVec2(90, 0)) ||
+                        ImGui::IsKeyPressed(ImGuiKey_Escape, false);
+
+    if (confirm) {
+        const FileMode mode = fileMode_;
+        const bool toChooser = chooseInstead;
+        stlOptionsOpen_ = false;
+        ImGui::CloseCurrentPopup();
+        if (toChooser) {
+            showFileChooser(mode);       // the options are set; now pick a file
+        } else {
+            fileMode_ = FileMode::None;
+            runFileOperation(mode, pathField_);
+        }
+    } else if (cancel) {
+        stlOptionsOpen_ = false;
+        fileMode_ = FileMode::None;
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
 }
 
 void Application::applyActions() {
@@ -5243,6 +5394,7 @@ void Application::buildUi() {
     // thing is one place too many, and the cube is where the eye already goes
     // to find out which way it is looking.
     drawViewCube(ui_, viewRect_.x, viewRect_.y, viewRect_.w, viewRect_.h);
+    pollFileDialog();
     drawFilePrompt();
     drawUnsavedPrompt();
     drawMeasurePanel(ui_);
