@@ -46,6 +46,9 @@ struct ViewOptions {
     // The wall a shell leaves. 2mm is a few perimeters at a common nozzle
     // width, which is the thinnest wall most printers make well.
     Real  shellThickness = 2.0;
+
+    // How far an inset pulls a face in from its own boundary.
+    Real  insetAmount   = 2.0;
 };
 
 // Sub-rectangle of the framebuffer to draw into, in physical pixels and in

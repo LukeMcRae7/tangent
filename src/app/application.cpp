@@ -1918,6 +1918,31 @@ void Application::bevelActiveObject() {
                                                 obj->features, "Bevel"));
 }
 
+void Application::insetSelectedFaces() {
+    dismissSettled();
+    const ObjectId target = scene_.contextObject();
+    SceneObject* obj = scene_.find(target);
+    if (!obj) { setNotice("Select an object first"); return; }
+
+    const std::vector<FaceId> faces = scene_.selectedFaces(target);
+    if (faces.empty()) { setNotice("Select a face to inset"); return; }
+
+    Feature f;
+    f.kind = FeatureKind::Inset;
+    f.amount = view_.insetAmount;
+    f.faces = nameFaces(obj->body, faces);
+
+    std::vector<Feature> chainBefore = obj->features;
+    std::string why;
+    if (!scene_.addFeature(target, f, &why)) {
+        setNotice(why.empty() ? "the inset could not be built" : "Inset: " + why);
+        return;
+    }
+    scene_.clearElementSelection();
+    undo_.push(std::make_unique<FeatureCommand>(target, std::move(chainBefore),
+                                                obj->features, "Inset"));
+}
+
 void Application::shellActiveObject() {
     const ObjectId target = scene_.contextObject();
     SceneObject* obj = scene_.find(target);
@@ -4722,7 +4747,7 @@ void Application::applyActions() {
     // the next thing. The gestures put their own panel away in begin*; this
     // catches the commands that are not gestures.
     if (a.addRequested || a.deleteSelected || a.duplicateSelected || a.mergeFaces ||
-        a.booleanRequested || a.split || a.shell || a.undo || a.redo ||
+        a.booleanRequested || a.split || a.shell || a.inset || a.undo || a.redo ||
         a.newProject || a.openProject || a.rebuildObject != kNoObject ||
         a.transformEdited != kNoObject || a.featuresEdited != kNoObject)
         dismissSettled();
@@ -4822,6 +4847,7 @@ void Application::applyActions() {
     if (a.split)   splitActiveObject();
     if (a.fillet)  beginFillet();
     if (a.shell)   shellActiveObject();
+    if (a.inset)   insetSelectedFaces();
     if (a.booleanRequested) applyBoolean(a.booleanOp);
 
     if (a.rebuildObject != kNoObject) {

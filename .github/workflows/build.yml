@@ -1,0 +1,84 @@
+# Two configurations, because the project supports two and a change that breaks
+# one of them currently gets found by hand or not at all.
+#
+#   kernel   -- the real thing: OpenCASCADE linked, 27 tests, every demo mode
+#   no-kernel -- brep_stub.cpp instead, 26 tests; proves the seam still holds
+#
+# The demo sweep runs headless. Every --*-demo flag drives a real gesture through
+# the real code and reports the geometry it produced, so a sweep that renders
+# cleanly is a wider check than the unit tests alone.
+name: build
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  linux:
+    name: linux / ${{ matrix.kernel && 'kernel' || 'no-kernel' }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        kernel: [true, false]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build g++ pkg-config \
+            libsdl3-dev libepoxy-dev \
+            libgl1-mesa-dev libglu1-mesa-dev \
+            xvfb imagemagick
+
+      - name: Install OpenCASCADE
+        if: matrix.kernel
+        run: sudo apt-get install -y --no-install-recommends libocct-*-dev occt-misc
+
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DTANGENT_BREP=${{ matrix.kernel && 'ON' || 'OFF' }}
+
+      - name: Build
+        run: cmake --build build -j$(nproc)
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+      # A gesture that segfaults or draws nothing still passes the unit tests.
+      # These drive the application itself.
+      - name: Demo sweep
+        if: matrix.kernel
+        run: xvfb-run -a ./.github/sweep.sh
+
+  windows:
+    name: windows / kernel
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgGitCommitId: '120deac3062162151622ca4860575a33844ba10b'
+
+      - name: Configure
+        shell: bash
+        run: >
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
+
+      - name: Build
+        run: cmake --build build --config Release -j
+
+      # Windows has no fork isolation, so a kernel fault that Linux survives is
+      # fatal here. Running the tests is how that stops being a surprise.
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure

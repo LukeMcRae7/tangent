@@ -225,6 +225,11 @@ private:
     void bevelActiveObject();
     void shellActiveObject();
 
+    // Insets the selected faces: a smaller copy of the face in its own plane,
+    // with a ring of new faces around it. Implemented on both backends since
+    // the first milestone and, until now, callable from nowhere.
+    void insetSelectedFaces();
+
     // Rounds the selected edges only, the way F does in Fusion.
     void filletSelectedEdges();
     // `picked` is the body the edge handles were taken from, which during a

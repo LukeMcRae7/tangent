@@ -41,6 +41,9 @@ Icon iconFor(const Feature& f) {
         case FeatureKind::FaceRotate: return Icon::Chamfer;
         case FeatureKind::FaceScale:  return Icon::Cone;
         case FeatureKind::Divide:     return Icon::Inset;
+        case FeatureKind::Pattern:
+            return f.patternMode == PatternMode::Mirror ? Icon::Difference
+                                                        : Icon::Intersection;
         case FeatureKind::Inset:     return Icon::Inset;
         case FeatureKind::Boolean:
             return f.booleanOp == BooleanOp::Union        ? Icon::Union
@@ -231,9 +234,38 @@ void drawMenuBar(UiContext& ctx) {
 
     if (ImGui::BeginMenu("Modify")) {
         const bool hasFaces = !ctx.scene->elementSelection().empty();
+        const size_t selFaces = ctx.scene->selectedFaces(ctx.scene->contextObject()).size();
+        const size_t selEdges = ctx.scene->selectedEdges(ctx.scene->contextObject()).size();
+        const bool hasObject = ctx.scene->contextObject() != kNoObject;
+
+        // Everything that acts on a face. These had a key and a toolbar button
+        // and no menu entry, which meant the only way to find out they existed
+        // was to read the source.
+        if (ImGui::MenuItem("Move Face (Push / Pull)", "G", false, selFaces > 0))
+            ctx.actions.pushPull = true;
         if (ImGui::MenuItem("Extrude Faces", "E", false, hasFaces))
             ctx.actions.extrude = true;
         ImGui::TextColored(kDim, "  Shift+E cuts inward");
+        if (ImGui::MenuItem("Rotate Face", "R", false, selFaces > 0))
+            ctx.actions.rotateFace = true;
+        if (ImGui::MenuItem("Scale Face", "S", false, selFaces > 0))
+            ctx.actions.scaleFace = true;
+        ImGui::SetNextItemWidth(140.0f);
+        ImGui::DragScalarN("Inset", ImGuiDataType_Double, &ctx.view->insetAmount, 1,
+                           0.05f, nullptr, nullptr, "%.2f mm");
+        if (ImGui::MenuItem("Inset Face", nullptr, false, selFaces > 0))
+            ctx.actions.inset = true;
+        ImGui::TextColored(kDim, "  a smaller face inside the one selected");
+        ImGui::Separator();
+        if (ImGui::MenuItem("Divide Across an Edge", "K", false, selEdges > 0))
+            ctx.actions.divide = true;
+        if (ImGui::MenuItem("Merge Faces", nullptr, false, hasObject))
+            ctx.actions.mergeFaces = true;
+        ImGui::Separator();
+        if (ImGui::MenuItem("Pattern...", "P", false, hasObject))
+            ctx.actions.pattern = true;
+        if (ImGui::MenuItem("Mirror...", "M", false, hasObject))
+            ctx.actions.mirror = true;
         ImGui::Separator();
         ImGui::SetNextItemWidth(140.0f);
         ImGui::DragScalarN("Width", ImGuiDataType_Double, &ctx.view->bevelWidth, 1,
@@ -292,12 +324,6 @@ void drawMenuBar(UiContext& ctx) {
             ImGui::TextColored(kDim, "  Select two objects (%zu selected)", n);
         else
             ImGui::TextColored(kDim, "  First selected is kept, second is the tool");
-
-        ImGui::Separator();
-        if (ImGui::MenuItem("Merge Faces", nullptr, false,
-                            ctx.scene->contextObject() != kNoObject))
-            ctx.actions.mergeFaces = true;
-        ImGui::TextColored(kDim, "  drops divisions that do not define the shape");
 
         ImGui::Separator();
         if (ImGui::MenuItem("Split Body", nullptr, false,
@@ -760,6 +786,71 @@ void drawHistory(UiContext& ctx) {
                 }
                 ImGui::TextColored(kDim, "about %.2f, %.2f, %.2f",
                                    f.axisPoint.x, f.axisPoint.y, f.axisPoint.z);
+                break;
+            }
+            case FeatureKind::Pattern: {
+                // Everything the pattern panel offers, offered again -- a
+                // pattern made three steps ago is still a count and a spacing,
+                // and the panel that made it is long gone.
+                const char* const layouts[] = {"Row", "Ring", "Mirror"};
+                int layout = static_cast<int>(f.patternMode);
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextUnformatted("Layout");
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(-1.0f);
+                if (ImGui::Combo("##playout", &layout, layouts, 3)) {
+                    f.patternMode = static_cast<PatternMode>(layout);
+                    changed = true;
+                }
+
+                if (f.patternMode != PatternMode::Mirror) {
+                    int n = f.patternCount;
+                    ImGui::AlignTextToFramePadding();
+                    ImGui::TextUnformatted("Copies");
+                    ImGui::SameLine();
+                    ImGui::SetNextItemWidth(-1.0f);
+                    if (ImGui::DragInt("##pcount", &n, 0.1f, 2, 256)) {
+                        f.patternCount = n < 2 ? 2 : (n > 256 ? 256 : n);
+                        changed = true;
+                    }
+                    if (f.patternMode == PatternMode::Linear) {
+                        changed |= labeledDrag("Spacing", f.distance, 0.1f, 0.05f,
+                                               10000.0f, "%.2f mm");
+                    } else {
+                        Real deg = degrees(f.angle);
+                        if (labeledDrag("Turn", deg, 0.25f, -360.0f, 360.0f, "%.1f deg")) {
+                            f.angle = radians(deg);
+                            changed = true;
+                        }
+                        ImGui::SameLine();
+                        if (ImGui::SmallButton("Full turn")) {
+                            f.angle = radians(360.0 / (f.patternCount < 2 ? 2 : f.patternCount));
+                            changed = true;
+                        }
+                    }
+                }
+
+                // Which way it goes, as the axis it was built on rather than as
+                // three numbers: a pattern is nearly always along one of them.
+                const char* const axes[] = {"X", "Y", "Z"};
+                int axis = std::fabs(f.axisDir.x) >= std::fabs(f.axisDir.y) &&
+                                   std::fabs(f.axisDir.x) >= std::fabs(f.axisDir.z) ? 0
+                         : std::fabs(f.axisDir.y) >= std::fabs(f.axisDir.z)         ? 1
+                                                                                    : 2;
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextUnformatted(f.patternMode == PatternMode::Mirror ? "Plane"
+                                                                            : "Axis");
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(-1.0f);
+                if (ImGui::Combo("##paxis", &axis, axes, 3)) {
+                    f.axisDir = Vec3{axis == 0 ? 1.0 : 0.0, axis == 1 ? 1.0 : 0.0,
+                                     axis == 2 ? 1.0 : 0.0};
+                    changed = true;
+                }
+
+                ImGui::TextColored(kDim, "%s",
+                                   f.bakedBody.empty() ? "Repeats the body."
+                                                       : "Repeats the cut it replaced.");
                 break;
             }
             case FeatureKind::Divide:

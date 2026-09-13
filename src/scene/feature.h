@@ -4,16 +4,20 @@
 // followed by an ordered list of operations. Editing any parameter re-runs the
 // chain, which is what makes the model parametric rather than a frozen result.
 //
-// Known limitation, stated plainly because it will bite: operations name the
-// faces they act on by index. Face numbering is stable while the features
-// before them are unchanged, so editing a primitive's dimensions re-applies
-// later operations correctly. But inserting, removing or reordering a feature
-// renumbers everything downstream, and an index-based reference cannot follow
-// that. This is the topological naming problem, and solving it properly needs
-// persistent identifiers that survive a remesh -- not attempted here. What is
-// implemented instead is honest failure: a feature whose references no longer
-// resolve is marked errored and skipped, the chain continues, and the timeline
-// shows which step gave up rather than silently producing wrong geometry.
+// Operations name what they act on by ElementId rather than by index -- see
+// element_id.h and ElementRefs below. A name is derived from what made the
+// element and carries across an edit: the kernel is asked what each face became
+// and the names follow, so editing a dimension near the root re-applies
+// everything after it against the right geometry.
+//
+// What that does not yet buy is inserting or reordering a step. The names
+// would survive it; nothing offers to do it. When that arrives it is the real
+// test of this machinery, because a feature inserted at step four hands every
+// later step geometry it has never seen.
+//
+// Where a name does not resolve, the answer is honest failure: the feature is
+// marked errored and skipped, the chain continues, and the timeline says which
+// step gave up rather than silently producing wrong geometry.
 #pragma once
 
 #include "geom/body.h"

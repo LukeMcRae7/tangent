@@ -541,6 +541,47 @@ int main() {
           turn("a face next to a round", b, {0, 1, 0}, 0); }
     }
 
+    // --- inset ---------------------------------------------------------
+    // Never exercised before: the operation has existed on both backends since
+    // the first milestone with nothing that could call it, so putting it in the
+    // menu means finding out now whether it works.
+    std::printf("\n--- an inset leaves a smaller face inside the one chosen ---\n");
+    {
+        Body b = makeBox(20, 20, 20);
+        const FaceId top = facing(b, {0, 0, 1});
+        const Real before = b.health(false).volume;
+        const int faces = b.faceCount();
+
+        std::vector<FaceId> made;
+        std::string why;
+        const bool ok = insetFaces(b, {top}, 4.0, &made, 99, &why);
+        check(ok, "the inset builds: " + why);
+        if (ok) {
+            std::printf("  %d faces -> %d, %.1f -> %.1f mm3, %zu named\n",
+                        faces, b.faceCount(), before, b.health(false).volume, made.size());
+            // One face, not four. The ring left around the inset is a single
+            // planar face with a square hole in it -- an outer wire and an
+            // inner one -- which is a thing an exact face can be and a mesh
+            // face cannot. So the top face becomes two: the smaller face and
+            // the ring around it.
+            check(b.faceCount() == faces + 1, "the ring around it is one face, not four");
+            check(b.validate(), "and it is still a valid solid");
+            // The face steps in within its own plane, so nothing is added and
+            // nothing is taken away.
+            check(near(b.health(false).volume, before, 1e-3),
+                  "an inset in the face's own plane changes no volume");
+        }
+
+        // One that cannot fit: half the face is 10mm, so 12mm has nowhere to go
+        // and the refusal must leave the body alone.
+        Body c = makeBox(20, 20, 20);
+        const Real was = c.health(false).volume;
+        std::string why2;
+        check(!insetFaces(c, {facing(c, {0, 0, 1})}, 12.0, nullptr, 98, &why2),
+              "an inset larger than the face is refused");
+        check(near(c.health(false).volume, was, 1e-6), "and the body is untouched");
+    }
+
     std::printf("\n%s (%d failures)\n", failures ? "FAILED" : "ALL PASS", failures);
     return failures ? 1 : 0;
 }
