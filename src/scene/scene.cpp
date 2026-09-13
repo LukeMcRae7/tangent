@@ -50,6 +50,35 @@ std::string Scene::uniqueName(const std::string& base) const {
     return base;
 }
 
+ObjectId Scene::addImportedBody(Body body, const std::string& name) {
+    if (body.empty()) return kNoObject;
+
+    auto obj = std::make_unique<SceneObject>();
+    obj->spec.kind = PrimitiveKind::Custom;
+
+    // BaseMesh is the chain root for geometry that has no parameters behind it.
+    // The name is historical -- it predates the exact kernel -- but the meaning
+    // is right for an import either way: this is where the chain starts, and
+    // nothing upstream of it can be edited because there is no upstream.
+    Feature base;
+    base.kind = FeatureKind::BaseMesh;
+    base.backend = body.isMesh() ? Backend::Mesh : Backend::Brep;
+    base.uid = nextFeatureUid_++;
+    base.bakedBody = std::move(body);
+    obj->features.push_back(std::move(base));
+
+    if (!evaluateFeatures(obj->features, obj->body)) return kNoObject;
+
+    obj->id = nextId_++;
+    obj->name = uniqueName(name.empty() ? "Imported" : name);
+    obj->body.tessellate(obj->render);
+    obj->localBounds = obj->body.bounds();
+
+    const ObjectId id = obj->id;
+    objects_.push_back(std::move(obj));
+    return id;
+}
+
 ObjectId Scene::addPrimitive(PrimitiveKind kind, const PrimitiveSpec& spec, Vec3 position) {
     auto obj = std::make_unique<SceneObject>();
     obj->spec = spec;

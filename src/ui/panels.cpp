@@ -209,7 +209,13 @@ void drawMenuBar(UiContext& ctx) {
         if (ImGui::MenuItem("Save", "Ctrl+S"))         ctx.actions.saveProject = true;
         if (ImGui::MenuItem("Save As..."))             ctx.actions.saveProjectAs = true;
         ImGui::Separator();
+        if (ImGui::MenuItem("Import STEP...")) ctx.actions.importStep = true;
+        ImGui::TextColored(kDim, "  brings in the surfaces, not a mesh of them");
+        ImGui::Separator();
+        if (ImGui::MenuItem("Export STEP...")) ctx.actions.exportStep = true;
+        ImGui::TextColored(kDim, "  exact; what another CAD package wants");
         if (ImGui::MenuItem("Export STL...", "Ctrl+E")) ctx.actions.exportStl = true;
+        ImGui::TextColored(kDim, "  triangles; what a slicer wants");
         ImGui::Separator();
         if (ImGui::MenuItem("Quit", "Ctrl+Q")) ctx.actions.quit = true;
         ImGui::EndMenu();

@@ -15,6 +15,16 @@
 // elements a boolean invents.
 #include "geom/brep.h"
 
+// STEP. Kept together and commented because these are the only headers here
+// that are not modelling -- they come from the DataExchange module.
+#include <STEPControl_Reader.hxx>
+#include <STEPControl_Writer.hxx>
+#include <Interface_Static.hxx>
+#include <IFSelect_ReturnStatus.hxx>
+#include <Message.hxx>
+#include <Message_Messenger.hxx>
+#include <Message_Printer.hxx>
+
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepBndLib.hxx>
@@ -2135,6 +2145,145 @@ BrepRef transformed(const BrepShape& s, const Mat4& m) {
         return makeBrep(xf.Shape(), s.faceNames);
     } catch (const Standard_Failure&) {
         return {};
+    }
+}
+
+// ---------------------------------------------------------------------------
+// STEP.
+
+namespace {
+
+// A face's name on the way in from a file.
+//
+// There is nothing to inherit -- STEP carries geometry, not whatever Tangent
+// called things -- so the name has to come from the face itself. Surface type
+// and outward normal are the only stable properties available, and they are
+// enough to keep two faces of an imported body distinct and to keep the same
+// file importing to the same names twice.
+//
+// It is deliberately not a promise that the names survive re-importing an
+// edited file. They will not, and nothing here pretends otherwise.
+// DataExchange narrates. Reading one file prints a banner, a transfer mode, an
+// entity count and a "Write Done" to stdout, which in a GUI program goes
+// nowhere useful and in a CI log buries the thing you were reading it for.
+// Failures are reported by return value here and always have been, so the
+// printers are turned down to alarms once and left there.
+void hushTheKernel() {
+    static bool done = false;
+    if (done) return;
+    done = true;
+    const Handle(Message_Messenger) m = Message::DefaultMessenger();
+    if (m.IsNull()) return;
+    for (Message_SequenceOfPrinters::Iterator it(m->Printers()); it.More(); it.Next())
+        if (!it.Value().IsNull()) it.Value()->SetTraceLevel(Message_Alarm);
+}
+
+std::vector<ElementId> nameImportedFaces(const TopoDS_Shape& shape, ElementId salt) {
+    TopTools_IndexedMapOfShape faces;
+    TopExp::MapShapes(shape, TopAbs_FACE, faces);
+    std::vector<ElementId> names(static_cast<size_t>(faces.Extent()), kNoId);
+
+    for (int i = 1; i <= faces.Extent(); ++i) {
+        const TopoDS_Face& face = TopoDS::Face(faces(i));
+        const Vec3 n = outwardNormal(face);
+        const auto type = static_cast<uint64_t>(BRepAdaptor_Surface(face).GetType());
+
+        // Quantised, so that a normal which differs in the last bit between one
+        // read and the next does not become a different face.
+        auto q = [](Real v) { return static_cast<uint64_t>(std::llround(v * 4096.0)); };
+        const uint64_t shape_ = mix64(type * 1000003ull + q(n.x)) ^
+                                mix64(q(n.y) * 31ull) ^ mix64(q(n.z) * 131ull);
+
+        names[static_cast<size_t>(i - 1)] =
+            nameId(salt, IdRole::Patch, shape_, static_cast<ElementId>(i));
+    }
+    return names;
+}
+
+} // namespace
+
+bool writeStep(const std::vector<const BrepShape*>& shapes, const std::string& path,
+               std::string* reason) {
+    if (shapes.empty()) {
+        if (reason) *reason = "there is nothing to export";
+        return false;
+    }
+    hushTheKernel();
+    try {
+        // AP214 is the interchange schema every CAD package reads. Units are
+        // set explicitly: STEP has no default, and a file that does not say is
+        // a file the other end has to guess at.
+        STEPControl_Writer writer;
+        Interface_Static::SetCVal("write.step.unit", "MM");
+        Interface_Static::SetCVal("write.step.schema", "AP214IS");
+        // Whole solids rather than shells: the receiving package should get a
+        // thing with an inside, not a bag of surfaces.
+        Interface_Static::SetIVal("write.step.nonmanifold", 0);
+
+        for (const BrepShape* s : shapes) {
+            if (!s || s->shape.IsNull()) continue;
+            if (writer.Transfer(s->shape, STEPControl_AsIs) != IFSelect_RetDone) {
+                if (reason) *reason = "the kernel would not convert one of the bodies";
+                return false;
+            }
+        }
+        if (writer.Write(path.c_str()) != IFSelect_RetDone) {
+            if (reason) *reason = "the file could not be written";
+            return false;
+        }
+        return true;
+    } catch (const Standard_Failure& e) {
+        if (reason) *reason = kernelReason(e, "the STEP file could not be written");
+        return false;
+    }
+}
+
+bool readStep(const std::string& path, ElementId salt, std::vector<BrepRef>& out,
+              std::string* reason) {
+    out.clear();
+    hushTheKernel();
+    try {
+        STEPControl_Reader reader;
+        Interface_Static::SetIVal("read.step.ideas", 1);
+        Interface_Static::SetIVal("read.step.nonmanifold", 1);
+
+        if (reader.ReadFile(path.c_str()) != IFSelect_RetDone) {
+            if (reason) *reason = "the file could not be read as STEP";
+            return false;
+        }
+        const int roots = reader.NbRootsForTransfer();
+        if (roots <= 0) {
+            if (reason) *reason = "the file has no geometry in it";
+            return false;
+        }
+        reader.TransferRoots();
+
+        // Every solid in the file becomes its own body, however the file chose
+        // to nest them. A STEP assembly arrives as its parts, which is what a
+        // program with no assembly structure of its own can honestly do with it.
+        ElementId nth = 0;
+        for (int i = 1; i <= reader.NbShapes(); ++i) {
+            const TopoDS_Shape root = reader.Shape(i);
+            if (root.IsNull()) continue;
+            for (TopExp_Explorer ex(root, TopAbs_SOLID); ex.More(); ex.Next()) {
+                const TopoDS_Shape solid = ex.Current();
+                const ElementId mine = nameId(salt, IdRole::Split, ++nth);
+                BrepRef r = makeBrep(solid, nameImportedFaces(solid, mine));
+                if (r) out.push_back(std::move(r));
+            }
+        }
+
+        if (out.empty()) {
+            // Surfaces without a closed volume. Readable, but not something
+            // this program can model on, and saying which it is beats "failed".
+            if (reason)
+                *reason = "the file has surfaces but no closed solid in it";
+            return false;
+        }
+        return true;
+    } catch (const Standard_Failure& e) {
+        if (reason) *reason = kernelReason(e, "the STEP file could not be read");
+        return false;
     }
 }
 

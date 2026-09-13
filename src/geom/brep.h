@@ -323,5 +323,31 @@ BrepRef transformed(const BrepShape& s, const Mat4& m);
 // that from a mirror transform; it cannot know it from a matrix.
 BrepRef mirrored(const BrepShape& s, Vec3 point, Vec3 normal);
 
+// ---------------------------------------------------------------------------
+// STEP.
+//
+// The one format in this program that carries the model rather than a picture
+// of it. An STL is triangles and loses everything that made the body exact; a
+// STEP file holds the surfaces themselves, so a cylinder that goes out comes
+// back a cylinder and not a sixty-four-sided prism.
+//
+// What it does not carry is the feature chain. A body written here and read
+// back is a body, not a history -- which is why this is import and export
+// rather than save and open.
+
+// Writes `shapes` as one STEP file. Units are millimetres, matching the rest
+// of the program. Returns false and sets `reason` on failure.
+bool writeStep(const std::vector<const BrepShape*>& shapes, const std::string& path,
+               std::string* reason);
+
+// Reads every solid in a STEP file. Each becomes one BrepRef with freshly
+// minted names -- the file has no idea what Tangent called anything, and
+// pretending otherwise would attach operations to the wrong faces.
+//
+// `salt` distinguishes one import from another so two imports of the same file
+// do not name their faces identically.
+bool readStep(const std::string& path, ElementId salt, std::vector<BrepRef>& out,
+              std::string* reason);
+
 } // namespace brep
 } // namespace tg

@@ -121,6 +121,17 @@ struct RayHit {
 class Scene {
 public:
     // ---- Contents --------------------------------------------------------
+    // Adds a body that came from outside -- a STEP import, or a mesh read from
+    // a file. Its chain root is BaseMesh: geometry with no parameters behind
+    // it, because the file does not carry how it was made. Everything after
+    // that root behaves like any other feature.
+    ObjectId addImportedBody(Body body, const std::string& name);
+
+    // A salt for the next import, so two imports of the same file do not name
+    // their faces identically and a feature written against one does not
+    // silently attach to the other.
+    ElementId nextImportSalt() { return nextFeatureUid_++; }
+
     ObjectId addPrimitive(PrimitiveKind kind, const PrimitiveSpec& spec = {},
                           Vec3 position = {});
 

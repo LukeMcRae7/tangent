@@ -46,6 +46,8 @@ struct UiActions {
     bool saveProject = false;
     bool saveProjectAs = false;
     bool exportStl = false;
+    bool exportStep = false;
+    bool importStep = false;
     bool pushPull = false;
     bool extrude = false;
     bool rotateFace = false;

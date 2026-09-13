@@ -670,6 +670,7 @@ void Application::handleViewportMouse() {
     stepFilletOpenDemo();
     stepFaceDemo();
     stepPatternDemo();
+    stepStepDemo();
     stepFaceStress();
     stepPrintDemo();
     stepPreviewCheck();
@@ -3389,6 +3390,86 @@ void Application::stepFilletOpenDemo() {
     mouseOverride_ = px + Vec2{40.0, -40.0};
 }
 
+// Exports the scene to STEP and reads it straight back in, through the same
+// menu path a person uses. The round trip is checked in test_step; what this
+// checks is everything around it -- the object transforms folded into the
+// geometry, the objects that come back, and whether what returns can still be
+// modelled on.
+void Application::stepStepDemo() {
+    if (stepDemo_.empty() || stepDemoDone_ || viewRect_.w <= 0) return;
+    stepDemoDone_ = true;
+
+    // Something with a curved face and a modelling operation on it, so that a
+    // tessellated round trip would be obvious.
+    scene_.clear();
+    PrimitiveSpec base;
+    base.kind = PrimitiveKind::Cylinder;
+    base.cylinder = {15, 30, 64};
+    const ObjectId id = scene_.addPrimitive(PrimitiveKind::Cylinder, base);
+    SceneObject* o = scene_.find(id);
+    o->transform.position = {12, 5, 0};        // off the origin, to prove it travels
+
+    {
+        PrimitiveSpec ts;
+        ts.kind = PrimitiveKind::Cylinder;
+        ts.cylinder = {5, 50, 48};
+        Body tool;
+        makePrimitive(ts, tool, Backend::Brep);
+        Feature cut;
+        cut.kind = FeatureKind::Boolean;
+        cut.booleanOp = BooleanOp::Difference;
+        cut.bakedBody = std::move(tool);
+        std::string why;
+        scene_.addFeature(id, std::move(cut), &why);
+    }
+    o = scene_.find(id);
+    const Real before = o->body.health(false).volume;
+    const int facesBefore = o->body.faceCount();
+    std::fprintf(stderr, "[step-demo] made: %d faces, %.1f mm3, at %.1f,%.1f,%.1f\n",
+                 facesBefore, before, o->transform.position.x,
+                 o->transform.position.y, o->transform.position.z);
+
+    runFileOperation(FileMode::ExportStep, stepDemo_);
+    std::fprintf(stderr, "[step-demo] export: %s\n", notice_.c_str());
+
+    scene_.clear();
+    runFileOperation(FileMode::ImportStep, stepDemo_);
+    std::fprintf(stderr, "[step-demo] import: %s\n", notice_.c_str());
+
+    if (scene_.objects().empty()) {
+        std::fprintf(stderr, "[step-demo] nothing came back\n");
+        return;
+    }
+    SceneObject* back = scene_.objects().front().get();
+    const AABB b = back->localBounds;
+    std::fprintf(stderr,
+                 "[step-demo] back: \"%s\", %d faces, %.1f mm3, valid=%d, "
+                 "%zu features, centred at %.1f,%.1f,%.1f\n",
+                 back->name.c_str(), back->body.faceCount(),
+                 back->body.health(false).volume, (int)back->body.validate(),
+                 back->features.size(), b.center().x, b.center().y, b.center().z);
+    std::fprintf(stderr, "[step-demo] faces %s, volume %s\n",
+                 back->body.faceCount() == facesBefore ? "SAME" : "DIFFERENT",
+                 std::fabs(back->body.health(false).volume - before) < 0.5
+                     ? "SAME" : "DIFFERENT");
+
+    // And the real question: can it still be modelled on? A fillet needs the
+    // edges to be edges of real surfaces, which a tessellated import would not
+    // have given us.
+    std::vector<EdgeId> edges;
+    back->body.allEdges(edges);
+    if (!edges.empty()) {
+        FilletSpec sp;
+        sp.edges.push_back({edges.front(), 1.0});
+        sp.salt = 5150;
+        Body copy = back->body;
+        std::string why;
+        const bool ok = filletEdges(copy, sp, &why);
+        std::fprintf(stderr, "[step-demo] filleting an imported edge: %s%s\n",
+                     ok ? "built" : "REFUSED ", ok ? "" : why.c_str());
+    }
+}
+
 // Drives the pattern tool the way a person does: begin the gesture, set the
 // numbers, let the preview land, commit. 1 a row of holes, 2 a bolt circle,
 // 3 a mirrored body, 4 a mirrored cut, 5 the panel left open to be looked at.
@@ -4620,17 +4701,36 @@ void Application::beginFilePrompt(FileMode mode) {
     // Seed with something sensible: the current project, or a default name
     // beside it, so the common case is one keystroke.
     std::string seed = projectPath_;
+    auto withSuffix = [&](const char* fallback, const char* ext) {
+        if (seed.empty()) { seed = fallback; return; }
+        const size_t dot = seed.find_last_of('.');
+        seed = (dot == std::string::npos ? seed : seed.substr(0, dot)) + ext;
+    };
     if (mode == FileMode::ExportStl) {
-        if (seed.empty()) seed = "model.stl";
-        else {
-            const size_t dot = seed.find_last_of('.');
-            seed = (dot == std::string::npos ? seed : seed.substr(0, dot)) + ".stl";
-        }
+        withSuffix("model.stl", ".stl");
+    } else if (mode == FileMode::ExportStep) {
+        withSuffix("model.step", ".step");
+    } else if (mode == FileMode::ImportStep) {
+        seed = "";                       // there is no sensible guess at a name
     } else if (seed.empty()) {
         seed = "untitled.tangent";
     }
     std::snprintf(pathField_, sizeof(pathField_), "%s", seed.c_str());
 }
+
+namespace {
+// "parts/bracket.step" -> "bracket". What an imported body gets called, which
+// beats "Object 4" when three files are open at once.
+std::string fileStem(const std::string& path) {
+    size_t a = path.find_last_of("/\\");
+    a = (a == std::string::npos) ? 0 : a + 1;
+    const size_t b = path.find_last_of('.');
+    const std::string name = (b == std::string::npos || b <= a)
+                                 ? path.substr(a)
+                                 : path.substr(a, b - a);
+    return name.empty() ? std::string("Imported") : name;
+}
+} // namespace
 
 void Application::runFileOperation(FileMode mode, const std::string& path) {
     if (path.empty()) return;
@@ -4658,6 +4758,76 @@ void Application::runFileOperation(FileMode mode, const std::string& path) {
         } else {
             setNotice("Open failed: " + r.error);
         }
+        break;
+    }
+    case FileMode::ExportStep: {
+        // What goes out is every visible body, each in its own place: the
+        // shapes are moved into world space first, because a STEP file has no
+        // notion of an object transform sitting outside the geometry.
+        std::vector<Body> placed;
+        std::vector<const BrepShape*> shapes;
+        for (const auto& o : scene_.objects()) {
+            if (!o->visible || o->body.empty() || o->body.isMesh()) continue;
+            Body b = o->body;
+            b.transform(o->modelMatrix());
+            if (!b.empty()) placed.push_back(std::move(b));
+        }
+        for (const Body& b : placed) shapes.push_back(&b.brep());
+
+        const size_t meshes = std::count_if(
+            scene_.objects().begin(), scene_.objects().end(),
+            [](const std::unique_ptr<SceneObject>& o) {
+                return o->visible && !o->body.empty() && o->body.isMesh();
+            });
+
+        std::string why;
+        if (shapes.empty()) {
+            setNotice(meshes > 0 ? "STEP holds surfaces, and every visible body is a mesh"
+                                 : "Nothing to export");
+        } else if (brep::writeStep(shapes, path, &why)) {
+            std::string note = "Exported " + std::to_string(shapes.size()) +
+                               (shapes.size() == 1 ? " body to " : " bodies to ") + path;
+            // Said rather than silently dropped: a mesh has no surfaces to
+            // write, and a file that is quietly missing a part is worse than
+            // one that is missing a part you were told about.
+            if (meshes > 0)
+                note += "  (" + std::to_string(meshes) + " mesh " +
+                        (meshes == 1 ? "body" : "bodies") + " left out)";
+            setNotice(note);
+        } else {
+            setNotice(why.empty() ? "STEP export failed" : "STEP export failed: " + why);
+        }
+        break;
+    }
+    case FileMode::ImportStep: {
+        std::vector<BrepRef> solids;
+        std::string why;
+        if (!brep::readStep(path, scene_.nextImportSalt(), solids, &why)) {
+            setNotice(why.empty() ? "STEP import failed" : "Import failed: " + why);
+            break;
+        }
+
+        // Each solid arrives as its own object with a BaseMesh root -- the
+        // chain root for geometry that has no parameters behind it. It can be
+        // modelled on from here like anything else; what it cannot do is tell
+        // you how it was made, because the file does not know.
+        std::vector<ObjectId> added;
+        const std::string stem = fileStem(path);
+        for (size_t i = 0; i < solids.size(); ++i) {
+            Body b(std::move(solids[i]));
+            std::string name = stem;
+            if (solids.size() > 1) name += " " + std::to_string(i + 1);
+            const ObjectId id = scene_.addImportedBody(std::move(b), name);
+            if (id != kNoObject) added.push_back(id);
+        }
+        if (added.empty()) { setNotice("Nothing in that file could be brought in"); break; }
+
+        undo_.push(ExistenceCommand::forCreate(scene_, added));
+        scene_.clearSelection();
+        for (ObjectId id : added) scene_.select(id, /*additive=*/true);
+        camera_.frame(scene_.bounds());
+        setNotice("Imported " + std::to_string(added.size()) +
+                  (added.size() == 1 ? " body from " : " bodies from ") + path);
         break;
     }
     case FileMode::ExportStl: {
@@ -4758,6 +4928,8 @@ void Application::applyActions() {
     if (a.openProject && confirmDiscard(PendingAction::Open)) beginFilePrompt(FileMode::Open);
     if (a.saveProjectAs) beginFilePrompt(FileMode::Save);
     if (a.exportStl)     beginFilePrompt(FileMode::ExportStl);
+    if (a.exportStep)    beginFilePrompt(FileMode::ExportStep);
+    if (a.importStep)    beginFilePrompt(FileMode::ImportStep);
     if (a.saveProject) {
         // Save straight over the current file; prompt only the first time.
         if (projectPath_.empty()) beginFilePrompt(FileMode::Save);

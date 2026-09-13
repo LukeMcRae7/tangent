@@ -117,6 +117,7 @@ public:
     // that runs into another body, and 10 divide, move, then merge.
     void setFaceDemo(int mode) { faceDemo_ = mode; }
     void setPatternDemo(int mode) { patternDemo_ = mode; }
+    void setStepDemo(const std::string& path) { stepDemo_ = path; }
 
     // Throws a fast, wandering drag at the extrude, including the places a
     // hand actually goes: the corners of the window, and straight through the
@@ -169,6 +170,9 @@ private:
     bool filletOpenDone_ = false;
     int  faceDemo_ = 0;
     int  patternDemo_ = 0;
+    std::string stepDemo_;
+    bool stepDemoDone_ = false;
+    void stepStepDemo();
     bool patternDemoDone_ = false;
     void stepPatternDemo();
     bool faceDemoDone_ = false;
@@ -197,7 +201,7 @@ private:
 
     // File handling. There is no native dialog to call on Wayland without
     // taking a dependency, so the prompt is an in-app path field.
-    enum class FileMode { None, Open, Save, ExportStl };
+    enum class FileMode { None, Open, Save, ExportStl, ExportStep, ImportStep };
     void drawFilePrompt();
     void beginFilePrompt(FileMode mode);
     void runFileOperation(FileMode mode, const std::string& path);

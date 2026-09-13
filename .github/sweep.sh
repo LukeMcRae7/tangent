@@ -13,6 +13,7 @@ modes=(
   "--preview-check 4" "--preview-check 5" "--preview-check 6"
   "--pattern-demo 1" "--pattern-demo 2" "--pattern-demo 3" "--pattern-demo 4"
   "--pattern-demo 5" "--pattern-demo 6" "--pattern-demo 7"
+  "--step-demo /tmp/tg_sweep.step"
 )
 
 fail=0

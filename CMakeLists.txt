@@ -121,7 +121,11 @@ if(TANGENT_BREP)
   link_libraries(
     ${OpenCASCADE_FoundationClasses_LIBRARIES}
     ${OpenCASCADE_ModelingData_LIBRARIES}
-    ${OpenCASCADE_ModelingAlgorithms_LIBRARIES})
+    ${OpenCASCADE_ModelingAlgorithms_LIBRARIES}
+    # STEP in and out. The bodies here are genuinely exact, so this is a real
+    # exchange of surfaces rather than a tessellation that happens to be
+    # written into a CAD file -- which is the whole reason it is worth having.
+    ${OpenCASCADE_DataExchange_LIBRARIES})
 endif()
 
 set(TANGENT_GEOM src/geom/body.cpp src/geom/operations.cpp
@@ -326,6 +330,13 @@ add_executable(test_chain tests/test_chain.cpp
 target_include_directories(test_chain PRIVATE src)
 target_compile_options(test_chain PRIVATE ${TANGENT_WARNINGS})
 add_test(NAME chain COMMAND test_chain)
+
+add_executable(test_step tests/test_step.cpp
+  ${TANGENT_GEOM} src/mesh/boolean.cpp src/mesh/health.cpp src/mesh/operations.cpp
+  src/mesh/halfedge.cpp src/mesh/primitives.cpp)
+target_include_directories(test_step PRIVATE src)
+target_compile_options(test_step PRIVATE ${TANGENT_WARNINGS})
+add_test(NAME step COMMAND test_step)
 
 add_executable(test_pattern tests/test_pattern.cpp
   src/scene/scene.cpp src/scene/feature.cpp src/scene/serialize.cpp
