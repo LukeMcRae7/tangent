@@ -123,6 +123,10 @@ public:
     // picture.
     void setFaceStress() { faceStress_ = true; }
 
+    // A part with something wrong with it, printing-wise: 1 a wall too thin,
+    // 2 a face leaning too far, 3 both.
+    void setPrintDemo(int mode) { printDemo_ = mode; }
+
     // Rounds a selection, then compares what the preview showed against what
     // the chain rebuilt. They are meant to be the same body.
     void setPreviewCheck(int mode) { previewCheck_ = mode; }
@@ -164,6 +168,8 @@ private:
     bool filletOpenDone_ = false;
     int  faceDemo_ = 0;
     bool faceDemoDone_ = false;
+    int  printDemo_ = 0;
+    bool printDemoDone_ = false;
     int  previewCheck_ = 0;
     bool previewCheckDone_ = false;
     bool faceStress_ = false;
@@ -176,6 +182,7 @@ private:
     bool uiMouseDown_ = false;
     void beginTransform(TransformMode mode);
     void handleViewportClick(bool shift, bool ctrl);
+    void drawPrintIssues();
     void drawSelectionHighlights();
     // A small value box drawn in the foreground, at a position given in
     // window pixels. Both the transform readout and the measure label use it,
@@ -479,6 +486,7 @@ private:
     void stepFilletOpenDemo();
     void stepFaceDemo();
     void stepFaceStress();
+    void stepPrintDemo();
     void stepPreviewCheck();
     void stepFilletFloorSearch();
     void startFilletTrial(Real radius);

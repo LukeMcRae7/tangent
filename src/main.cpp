@@ -54,6 +54,8 @@ int main(int argc, char** argv) {
             app.setUiMouse(mx, my, down != 0);
         } else if (std::strcmp(argv[i], "--preview-check") == 0 && i + 1 < argc) {
             app.setPreviewCheck(std::atoi(argv[++i]));
+        } else if (std::strcmp(argv[i], "--print-demo") == 0 && i + 1 < argc) {
+            app.setPrintDemo(std::atoi(argv[++i]));
         } else if (std::strcmp(argv[i], "--face-stress") == 0) {
             app.setFaceStress();
         } else if (std::strcmp(argv[i], "--face-demo") == 0 && i + 1 < argc) {

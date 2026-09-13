@@ -352,6 +352,9 @@ void drawMenuBar(UiContext& ctx) {
         ImGui::MenuItem("Grid",           nullptr, &ctx.view->showGrid);
         ImGui::MenuItem("Wireframe",      "Z",     &ctx.view->showWireframe);
         ImGui::MenuItem("Selection Box",  nullptr, &ctx.view->showSelectionBox);
+        ImGui::MenuItem("Print Problems", nullptr, &ctx.view->showPrintIssues);
+        ImGui::TextColored(kDim, "  red: thinner than the nozzle can lay");
+        ImGui::TextColored(kDim, "  amber: leans too far to hold itself up");
         ImGui::MenuItem("Backface Cull",  nullptr, &ctx.view->backfaceCulling);
         ImGui::EndMenu();
     }
@@ -654,65 +657,19 @@ void drawInspector(UiContext& ctx) {
         ctx.actions.transformBefore = transformBefore;
     }
 
-    sectionLabel("REPRESENTATION");
-    {
-        // Which kernel this body is made of. Not a detail: the two refuse
-        // different things and round different edges, so "why did that fillet
-        // work here and not there" has a different answer for each, and the
-        // answer should be visible rather than inferred.
-        const bool exact = !obj->body.isMesh();
-        ImGui::TextColored(exact ? im(palette::kValid) : kDim,
-                           exact ? "Exact  (B-rep)" : "Mesh");
-        ImGui::SameLine();
-        ImGui::TextColored(kDim, "%d face%s", obj->body.faceCount(),
-                           obj->body.faceCount() == 1 ? "" : "s");
-        // Wrapped: the panel is a fifth of the window and these sentences are
-        // not, so unwrapped they were simply cut off mid-word.
-        ImGui::PushStyleColor(ImGuiCol_Text, kDim);
-        ImGui::TextWrapped("%s", exact
-            ? "Curves are held as curves; a hole is round, not a polygon."
-            : "Facets: a curve is as smooth as the segment count that made it.");
-        ImGui::PopStyleColor();
-    }
-
-    sectionLabel("PRINTABILITY");
-    {
-        const MeshHealth& h = obj->health;
-        if (obj->healthVersion != obj->meshVersion) {
-            // Stale: the geometry moved and the check has not caught up. Show
-            // nothing but that, rather than last edit's numbers dressed up as
-            // this one's.
-            ImGui::TextColored(kDim, "Checking...");
-        } else {
-            if (h.solid()) ImGui::TextColored(im(palette::kValid), "Solid - ready to print");
-            else           ImGui::TextColored(kAccent, "Not a printable solid");
-
-            if (!h.watertight)
-                ImGui::TextColored(kDim, "  %d open edge%s", h.boundaryEdges,
-                                   h.boundaryEdges == 1 ? "" : "s");
-            if (h.degenerateFaces > 0)
-                ImGui::TextColored(kDim, "  %d zero-area face%s", h.degenerateFaces,
-                                   h.degenerateFaces == 1 ? "" : "s");
-            if (h.selfIntersections > 0)
-                ImGui::TextColored(kDim, "  %d self-intersection%s", h.selfIntersections,
-                                   h.selfIntersections == 1 ? "" : "s");
-            else if (h.selfIntersections < 0 && !obj->body.isMesh())
-                // -1 means the check did not run. On an exact body the kernel's
-                // own validity check has already passed, which is a stronger
-                // statement -- but it is not the same statement, and saying
-                // nothing here would let the user read it as the same one.
-                ImGui::TextColored(kDim, "  checked by the kernel, not by triangle sampling");
-            if (h.volume < 0.0) ImGui::TextColored(kDim, "  inside out");
-
-            ImGui::TextColored(kDim, "Volume  %.2f cm3", h.volume / 1000.0);
-            if (h.shells > 1) ImGui::TextColored(kDim, "Bodies  %d", h.shells);
-        }
-    }
-
     sectionLabel("STATISTICS");
     const AABB b = obj->localBounds;
     const Vec3 size = b.valid() ? b.size() : Vec3{};
     ImGui::TextColored(kDim, "Size    %.2f x %.2f x %.2f mm", size.x, size.y, size.z);
+
+    // Volume lived under a PRINTABILITY heading that reported whether the body
+    // was a watertight solid. On an exact body it always is -- the kernel
+    // guarantees it and an edit that would break it is refused before it lands
+    // -- so the heading spent its time saying "ready to print" about a part
+    // with nothing checked against a printer. What a printer will actually
+    // struggle with is drawn on the model instead; see app/printability.h.
+    if (obj->healthVersion == obj->meshVersion)
+        ImGui::TextColored(kDim, "Volume  %.2f cm3", obj->health.volume / 1000.0);
     ImGui::TextColored(kDim, "Verts   %d", obj->body.vertexCount());
     ImGui::TextColored(kDim, "Faces   %d", obj->body.faceCount());
     ImGui::TextColored(kDim, "Tris    %zu", obj->render.triangles.size() / 3);

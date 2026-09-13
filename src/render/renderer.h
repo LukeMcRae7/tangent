@@ -19,6 +19,11 @@ struct ViewOptions {
     bool  showGrid       = true;
     bool  showWireframe  = true;
     bool  showSelectionBox = false;
+
+    // Faces a printer will struggle with, tinted on the model. On by default:
+    // this is what the tool is for, and a check nobody turns on is a check
+    // nobody runs.
+    bool  showPrintIssues = true;
     bool  backfaceCulling = true;
     Real  creaseAngleDeg = 35.0;
 

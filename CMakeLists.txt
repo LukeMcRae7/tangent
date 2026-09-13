@@ -140,6 +140,7 @@ add_executable(tangent
   src/app/plane_snap.cpp
   src/app/snap_overlay.cpp
   src/app/overlay_shapes.cpp
+  src/app/printability.cpp
   src/app/undo.cpp
   src/mesh/halfedge.cpp
   src/mesh/primitives.cpp
@@ -309,6 +310,14 @@ target_include_directories(test_drag PRIVATE src)
 target_link_libraries(test_drag PRIVATE tangent_epoxy)
 target_compile_options(test_drag PRIVATE ${TANGENT_WARNINGS})
 add_test(NAME drag COMMAND test_drag)
+
+add_executable(test_printability tests/test_printability.cpp
+  src/app/printability.cpp
+  ${TANGENT_GEOM} src/mesh/boolean.cpp src/mesh/health.cpp src/mesh/operations.cpp
+  src/mesh/halfedge.cpp src/mesh/primitives.cpp)
+target_include_directories(test_printability PRIVATE src)
+target_compile_options(test_printability PRIVATE ${TANGENT_WARNINGS})
+add_test(NAME printability COMMAND test_printability)
 
 add_executable(test_chain tests/test_chain.cpp
   src/scene/scene.cpp src/scene/feature.cpp src/scene/serialize.cpp

@@ -6,6 +6,7 @@
 // tells the renderer its cached buffers went stale.
 #pragma once
 
+#include "app/printability.h"
 #include "mesh/health.h"
 #include "scene/feature.h"
 
@@ -60,6 +61,13 @@ struct SceneObject {
     // repeat every frame, so it is refreshed only when the geometry changes.
     MeshHealth health;
     uint32_t   healthVersion = 0;
+
+    // What a printer would make of it, worked out when the geometry moves and
+    // kept until it moves again. A ray per face against the triangles is a few
+    // milliseconds on a small part and tens on a large one -- affordable once
+    // per edit, not once per frame.
+    PrintReport printCheck;
+    uint32_t    printVersion = 0;
 
     Mat4 modelMatrix() const { return transform.matrix(); }
 

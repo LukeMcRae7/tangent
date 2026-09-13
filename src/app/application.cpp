@@ -2,6 +2,7 @@
 #include "geom/kernel_guard.h"
 #include "render/lod.h"
 #include "ui/command_panel.h"
+#include "app/printability.h"
 #include "ui/icons.h"
 #include "ui/view_cube.h"
 #include "ui/theme.h"
@@ -664,6 +665,7 @@ void Application::handleViewportMouse() {
     stepFilletOpenDemo();
     stepFaceDemo();
     stepFaceStress();
+    stepPrintDemo();
     stepPreviewCheck();
 
     // Interactive Object Creation & Sketching Tool:
@@ -1059,6 +1061,51 @@ void Application::drawMeasureLabel() {
     drawReadout(measureResult_.summary,
                 static_cast<float>(px.x) + viewRect_.x + 14.0f,
                 static_cast<float>(px.y) + viewRect_.y - 12.0f, /*emphasise=*/true);
+}
+
+// Tints the faces a printer will struggle with.
+//
+// Under the model rather than over it, and quiet: this is a standing report on
+// the whole part, not a thing the user is doing right now, and it must not
+// compete with a selection or a preview. A thin wall is the loud one -- a
+// slicer drops it and the part comes off the bed with a hole in it -- where an
+// overhang is a decision about supports rather than a fault.
+void Application::drawPrintIssues() {
+    if (!view_.showPrintIssues) return;
+    if (filletTool_.active || faceTool_.active || divideTool_.active ||
+        createTool_.active() || tool_.active())
+        return;                       // a gesture owns the model while it runs
+
+    const Vec4 thin{0.95f, 0.30f, 0.22f, 0.34f};
+    const Vec4 steep{0.95f, 0.72f, 0.20f, 0.26f};
+
+    for (const auto& obj : scene_.objects()) {
+        SceneObject* o = obj.get();
+        if (!o->visible || o->body.empty()) continue;
+
+        // Worked out once per change of geometry and kept: it costs a ray per
+        // face, which is a few milliseconds on a small part.
+        if (o->printVersion != o->meshVersion) {
+            o->printCheck = checkPrintability(o->body, o->render);
+            o->printVersion = o->meshVersion;
+        }
+        if (o->printCheck.findings.empty()) continue;
+
+        const Mat4 model = o->modelMatrix();
+        const RenderMesh& rm = o->render;
+        for (const PrintFinding& bad : o->printCheck.findings) {
+            if (bad.face == kInvalid) continue;
+            const Vec4 col = bad.issue == PrintIssue::ThinWall ? thin : steep;
+            for (size_t i = 0; i < rm.triangleFace.size(); ++i) {
+                if (rm.triangleFace[i] != bad.face) continue;
+                renderer_.addTriangle(
+                    transformPoint(model, rm.positions[rm.triangles[i * 3 + 0]]),
+                    transformPoint(model, rm.positions[rm.triangles[i * 3 + 1]]),
+                    transformPoint(model, rm.positions[rm.triangles[i * 3 + 2]]),
+                    col);
+            }
+        }
+    }
 }
 
 void Application::drawSelectionHighlights() {
@@ -3049,6 +3096,59 @@ void Application::stepPreviewCheck() {
                      ? "SAME" : "DIFFERENT -- the preview lied");
 }
 
+void Application::stepPrintDemo() {
+    if (printDemo_ <= 0 || printDemoDone_ || viewRect_.w <= 0) return;
+    if (scene_.objects().empty()) return;
+    printDemoDone_ = true;
+
+    const ObjectId id = scene_.objects().front()->id;
+    SceneObject* o = scene_.find(id);
+    std::string why;
+    auto topFace = [&] {
+        std::vector<FaceId> fs;
+        o->body.allFaces(fs);
+        FaceId best = fs.front();
+        Real bd = -1e30;
+        for (FaceId f : fs) {
+            const Real d = dot(o->body.faceNormal(f), Vec3{0, 0, 1});
+            if (d > bd) { bd = d; best = f; }
+        }
+        return best;
+    };
+
+    if (printDemo_ == 1 || printDemo_ == 3) {
+        Body b = o->body;
+        if (shellBody(b, {topFace()}, 0.35, 600, &why)) {
+            o->body = std::move(b);
+            o->refreshDerived();
+        } else {
+            std::fprintf(stderr, "[print-demo] shell refused: %s\n", why.c_str());
+        }
+    }
+    if (printDemo_ == 2 || printDemo_ == 3) {
+        Body b = o->body;
+        if (scaleFaces(b, {topFace()}, 4.5, 601, &why)) {
+            o->body = std::move(b);
+            o->refreshDerived();
+        } else {
+            std::fprintf(stderr, "[print-demo] taper refused: %s\n", why.c_str());
+        }
+    }
+
+    // Framed after the shape is final, so the whole of it is in view.
+    camera_.yaw = 0.7f;
+    camera_.pitch = printDemo_ == 2 ? 0.16f : 0.42f;
+    camera_.frame(o->worldBounds());
+    camera_.snapToGoal();
+
+    o->printCheck = checkPrintability(o->body, o->render);
+    o->printVersion = o->meshVersion;
+    std::fprintf(stderr, "[print-demo] %d thin, %d overhang: %s\n",
+                 o->printCheck.thinWalls, o->printCheck.overhangs,
+                 summarise(o->printCheck).empty() ? "nothing to report"
+                                                  : summarise(o->printCheck).c_str());
+}
+
 void Application::stepFaceStress() {
     if (!faceStress_ || viewRect_.w <= 0 || scene_.objects().empty()) return;
 
@@ -4313,6 +4413,15 @@ int Application::run() {
             ui_.toolStatus.clear();
         }
 
+        // What a printer would make of the part, when nothing else is being
+        // said. Only the object in hand: a report on everything at once is a
+        // report nobody reads.
+        if (ui_.toolStatus.empty() && view_.showPrintIssues) {
+            if (const SceneObject* o = scene_.find(scene_.contextObject()))
+                if (o->printVersion == o->meshVersion)
+                    ui_.toolStatus = summarise(o->printCheck);
+        }
+
         if (measure_.active() && ui_.toolStatus.empty()) {
             const size_t n = measure_.picks().size();
             ui_.toolStatus = n == 0 ? "Measure: click a vertex, edge or face"
@@ -4348,6 +4457,7 @@ int Application::run() {
 
         // Queued before the frame is drawn; the renderer flushes overlay lines
         // at the end of its pass.
+        drawPrintIssues();
         drawSelectionHighlights();
         if (createTool_.active()) createTool_.drawOverlay(scene_, camera_, renderer_);
         measureResult_ = measure_.active() ? measure_.compute(scene_) : MeasureResult{};
