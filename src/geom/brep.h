@@ -316,5 +316,12 @@ MeshHealth health(const BrepShape& s, bool checkIntersections);
 // kernel, so a refused edit cannot half-apply.
 BrepRef transformed(const BrepShape& s, const Mat4& m);
 
+// Reflects across the plane through `point` with `normal`. Separate from
+// transformed() because a reflection is not a rigid placement: it turns the
+// shape inside out, and every face's orientation has to be flipped back or the
+// result is a solid describing the void around itself. OCCT knows how to do
+// that from a mirror transform; it cannot know it from a matrix.
+BrepRef mirrored(const BrepShape& s, Vec3 point, Vec3 normal);
+
 } // namespace brep
 } // namespace tg

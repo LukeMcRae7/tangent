@@ -24,8 +24,21 @@ const char* featureKindName(FeatureKind k) {
         case FeatureKind::FaceScale:  return "Scale Face";
         case FeatureKind::Divide:     return "Divide";
         case FeatureKind::Merge:      return "Merge Faces";
+        case FeatureKind::Pattern:    return "Pattern";
     }
     return "Feature";
+}
+
+PatternSpec Feature::pattern() const {
+    PatternSpec s;
+    s.mode = patternMode;
+    s.count = patternCount;
+    s.origin = axisPoint;
+    s.dir = axisDir;
+    s.step = distance;
+    s.stepAngle = angle;
+    s.op = booleanOp;
+    return s;
 }
 
 const char* Feature::displayKind() const {
@@ -36,6 +49,8 @@ const char* Feature::displayKind() const {
     // Two operations share the kind: the one that moved a face and the one that
     // grew a boss off it. What a person calls them is the difference.
     if (kind == FeatureKind::Extrude) return mergeFlush ? "Push / Pull" : "Extrude";
+    // A mirror is a pattern of two, but nobody calls it that.
+    if (kind == FeatureKind::Pattern && patternMode == PatternMode::Mirror) return "Mirror";
     return featureKindName(kind);
 }
 
@@ -111,6 +126,22 @@ std::string Feature::summary() const {
             break;
         case FeatureKind::Merge:
             std::snprintf(buf, sizeof(buf), "Merge faces");
+            break;
+        case FeatureKind::Pattern:
+            switch (patternMode) {
+                case PatternMode::Mirror:
+                    std::snprintf(buf, sizeof(buf), "Mirror  (%s)",
+                                  bakedBody.empty() ? "the body" : "the cut");
+                    break;
+                case PatternMode::Linear:
+                    std::snprintf(buf, sizeof(buf), "Pattern  %d x  %.2f mm apart",
+                                  patternCount, static_cast<double>(distance));
+                    break;
+                case PatternMode::Circular:
+                    std::snprintf(buf, sizeof(buf), "Pattern  %d x  %.1f deg apart",
+                                  patternCount, static_cast<double>(degrees(angle)));
+                    break;
+            }
             break;
         case FeatureKind::Divide:
             std::snprintf(buf, sizeof(buf), "Divide  at %.2f, %.2f, %.2f",
@@ -377,6 +408,14 @@ bool evaluateFrom(std::vector<Feature>& features, size_t from,
             std::string why;
             if (!mergeDivisions(body, f.uid, &why))
                 fail(why.empty() ? "the merge could not be built" : why.c_str());
+            break;
+        }
+
+        case FeatureKind::Pattern: {
+            if (body.empty()) { fail("nothing to pattern"); break; }
+            std::string why;
+            if (!patternBody(body, f.bakedBody, f.pattern(), f.uid, &why))
+                fail(why.empty() ? "the pattern could not be built" : why.c_str());
             break;
         }
 

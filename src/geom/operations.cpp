@@ -1,5 +1,7 @@
 #include "geom/operations.h"
 
+#include <cstdio>
+
 namespace tg {
 
 // Every function here is a forwarder while there is one backend. They are not
@@ -181,6 +183,94 @@ bool filletEdges(Body& body, const FilletSpec& spec, std::string* reason) {
         return true;
     }
     return filletEdges(body.mesh(), spec, reason);
+}
+
+const char* patternModeName(PatternMode m) {
+    switch (m) {
+        case PatternMode::Linear:   return "Linear";
+        case PatternMode::Circular: return "Circular";
+        case PatternMode::Mirror:   return "Mirror";
+    }
+    return "Pattern";
+}
+
+Mat4 patternPlacement(const PatternSpec& spec, int i) {
+    if (i == 0) return Mat4{};                  // the original, where it is
+    switch (spec.mode) {
+        case PatternMode::Linear:
+            return translate(normalize(spec.dir) * (spec.step * i));
+        case PatternMode::Circular: {
+            const Vec3 a = normalize(spec.dir);
+            return translate(spec.origin) * rotateAxis(a, spec.stepAngle * i) *
+                   translate(spec.origin * -1.0);
+        }
+        case PatternMode::Mirror:
+            break;                              // not a matrix; see below
+    }
+    return Mat4{};
+}
+
+bool patternBody(Body& body, const Body& tool, const PatternSpec& spec,
+                 ElementId salt, std::string* reason) {
+    const bool usingTool = !tool.empty();
+    const Body& seed = usingTool ? tool : body;
+    if (body.empty()) {
+        if (reason) *reason = "there is nothing to pattern";
+        return false;
+    }
+    if (body.isMesh() || seed.isMesh()) {
+        if (reason) *reason = "patterning needs the exact kernel, and this body is a mesh";
+        return false;
+    }
+    const int n = spec.mode == PatternMode::Mirror ? 2 : spec.count;
+    if (n < 2) {
+        if (reason) *reason = "a pattern of one copy is the thing it started from";
+        return false;
+    }
+    if (!(length(spec.dir) > 1e-9)) {
+        if (reason) *reason = "the pattern has no direction to follow";
+        return false;
+    }
+
+    // Built into a scratch body so that a copy that will not combine leaves the
+    // model as it was rather than half-patterned.
+    Body out = body;
+
+    // A tool pattern has to place its first copy too: the boolean that made the
+    // original is gone, replaced by this feature. A body pattern already has
+    // its first copy -- it is the body.
+    for (int i = usingTool ? 0 : 1; i < n; ++i) {
+        Body copy = seed;
+        if (spec.mode == PatternMode::Mirror) {
+            if (i > 0 && !copy.mirror(spec.origin, spec.dir)) {
+                if (reason) *reason = "the reflection could not be built";
+                return false;
+            }
+        } else if (i > 0) {
+            copy.transform(patternPlacement(spec, i));
+            if (copy.empty()) {
+                if (reason) *reason = "a copy could not be placed";
+                return false;
+            }
+        }
+
+        Body combined;
+        std::string why;
+        if (!booleanOp(out, copy, spec.op, combined,
+                       nameId(salt, IdRole::Copy, static_cast<ElementId>(i)), false, &why)) {
+            if (reason) {
+                char buf[160];
+                std::snprintf(buf, sizeof(buf), "copy %d %s", i + 1,
+                              why.empty() ? "produced no valid solid" : why.c_str());
+                *reason = buf;
+            }
+            return false;
+        }
+        out = std::move(combined);
+    }
+
+    body = std::move(out);
+    return true;
 }
 
 bool booleanOp(const Body& a, const Body& b, BooleanOp op, Body& out,

@@ -222,6 +222,10 @@ public:
     // it belongs here rather than being done by walking vertices.
     void transform(const Mat4& m);
 
+    // Reflects across a plane. Not transform(reflectionMatrix) -- see
+    // brep::mirrored for why that is not the same thing.
+    bool mirror(Vec3 planePoint, Vec3 planeNormal);
+
     // ---- Backend access ----------------------------------------------------
     // The operations in src/geom/operations.h reach through here. Nothing else
     // should: this is the one place the seam is deliberately open, and it is

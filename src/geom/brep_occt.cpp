@@ -2138,5 +2138,22 @@ BrepRef transformed(const BrepShape& s, const Mat4& m) {
     }
 }
 
+BrepRef mirrored(const BrepShape& s, Vec3 point, Vec3 normal) {
+    const Vec3 n = normalize(normal);
+    if (!(length(n) > 0.5)) return {};
+    gp_Trsf t;
+    // gp_Ax2's main direction is the plane's normal, so this is the mirror in
+    // that plane. Building it this way rather than from a matrix is what lets
+    // BRepBuilderAPI_Transform reverse the orientations for us.
+    t.SetMirror(gp_Ax2(gp_Pnt(point.x, point.y, point.z), gp_Dir(n.x, n.y, n.z)));
+    try {
+        BRepBuilderAPI_Transform xf(s.shape, t, Standard_True);
+        if (!xf.IsDone()) return {};
+        return makeBrep(xf.Shape(), s.faceNames);
+    } catch (const Standard_Failure&) {
+        return {};
+    }
+}
+
 } // namespace brep
 } // namespace tg

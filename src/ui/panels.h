@@ -52,6 +52,8 @@ struct UiActions {
     bool scaleFace = false;
     bool divide = false;
     bool mergeFaces = false;
+    bool pattern = false;
+    bool mirror = false;
     bool bevel = false;
     bool split = false;
     bool fillet = false;

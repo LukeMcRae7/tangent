@@ -37,6 +37,7 @@ enum class FeatureKind {
     Divide,      // cut a line across the body without cutting it in two
     Merge,       // drop every division that does not define the shape
     FaceScale,   // grow or shrink a face in its own plane
+    Pattern,     // repeat a tool, or the body, in a row, around an axis, or mirrored
 
     // New kinds go on the end and nowhere else. The value is what is written
     // to a file, so inserting one in the middle renumbers every kind after it
@@ -193,8 +194,23 @@ struct Feature {
     // graph rather than a list, which is a bigger change than this milestone.
     BooleanOp booleanOp = BooleanOp::Difference;
 
-    // Boolean's tool body, or BaseMesh's geometry.
+    // Boolean's tool body, BaseMesh's geometry, or Pattern's tool.
     Body bakedBody;
+
+    // Pattern: how the copies are laid out and how many there are. The rest of
+    // the layout reuses fields that already mean the same thing -- `axisPoint`
+    // and `axisDir` for the axis or the mirror plane, `distance` for the gap
+    // between copies, `angle` for the turn between them, and `booleanOp` for
+    // whether each copy adds or takes away.
+    //
+    // With `bakedBody` set the pattern repeats that tool, which is how a hole
+    // becomes a bolt circle. Empty, it repeats the body itself, which is how
+    // half a symmetric part becomes the whole of it.
+    PatternMode patternMode = PatternMode::Linear;
+    int         patternCount = 2;
+
+    // The pattern this feature describes, assembled from the fields above.
+    PatternSpec pattern() const;
 
     // VertexEdit: a free-form drag, recorded as explicit offsets. Not
     // parametric in any meaningful sense, but it has to live in the chain so

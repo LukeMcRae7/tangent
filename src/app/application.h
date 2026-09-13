@@ -116,6 +116,7 @@ public:
     // 7 a move along a world axis, 8 a rotation the other way, 9 an extrude
     // that runs into another body, and 10 divide, move, then merge.
     void setFaceDemo(int mode) { faceDemo_ = mode; }
+    void setPatternDemo(int mode) { patternDemo_ = mode; }
 
     // Throws a fast, wandering drag at the extrude, including the places a
     // hand actually goes: the corners of the window, and straight through the
@@ -167,6 +168,9 @@ private:
     bool filletOpen_ = false;
     bool filletOpenDone_ = false;
     int  faceDemo_ = 0;
+    int  patternDemo_ = 0;
+    bool patternDemoDone_ = false;
+    void stepPatternDemo();
     bool faceDemoDone_ = false;
     int  printDemo_ = 0;
     bool printDemoDone_ = false;
@@ -466,6 +470,105 @@ private:
         }
     };
     DivideToolState divideTool_;
+
+    // Repeating something. Two things wear this one tool: a pattern of the cut
+    // or boss the last feature made -- which is how one hole becomes a bolt
+    // circle -- and a pattern of the body itself, which is what a mirror
+    // usually is. Which one it is, is decided when the gesture starts by
+    // looking at what the chain ends with, and can be changed in the panel.
+    struct PatternToolState {
+        bool        active = false;
+        ObjectId    objectId = kNoObject;
+        PatternMode mode = PatternMode::Linear;
+        int         count = 4;
+        int         axisIndex = 0;            // 0 x, 1 y, 2 z, in the body's own space
+        Vec3        origin{};                 // local: the axis, or the mirror plane
+        Real        step = 10.0;              // mm between copies, Linear
+        Real        stepAngle = 0.0;          // radians between copies, Circular
+        Real        offset = 0.0;             // Mirror: the plane, along its normal
+
+        // The tool the pattern repeats, and the feature it came from. Empty
+        // means the pattern repeats the body.
+        Body     tool;
+        BooleanOp op = BooleanOp::Union;
+        bool     toolAvailable = false;
+        bool     useTool = false;
+        size_t   replacing = 0;               // features kept, when repeating a tool
+
+        Real     requested = 1e30;
+        bool     previewValid = false;
+        DragAxis axis;
+        Body     before;
+        std::vector<Feature> chainBefore;
+        std::string typedValue;
+        AsyncBuild preview;
+
+        void reset() {
+            preview.cancel();
+            objectId = kNoObject;
+            mode = PatternMode::Linear;
+            count = 4;
+            axisIndex = 0;
+            origin = Vec3{};
+            step = 10.0;
+            stepAngle = 0.0;
+            offset = 0.0;
+            tool = Body();
+            op = BooleanOp::Union;
+            toolAvailable = useTool = false;
+            replacing = 0;
+            requested = 1e30;
+            previewValid = false;
+            axis = DragAxis{};
+            before = Body();
+            chainBefore.clear();
+            typedValue.clear();
+        }
+
+        // The value the drag and the number field both mean, which is a
+        // different quantity in each mode.
+        Real dragged() const {
+            return mode == PatternMode::Linear   ? step
+                 : mode == PatternMode::Circular ? degrees(stepAngle)
+                                                 : offset;
+        }
+        void setDragged(Real v) {
+            if (mode == PatternMode::Linear)        step = v;
+            else if (mode == PatternMode::Circular) stepAngle = radians(v);
+            else                                    offset = v;
+        }
+
+        PatternSpec spec() const {
+            PatternSpec s;
+            s.mode = mode;
+            s.count = count;
+            s.dir = Vec3{axisIndex == 0 ? 1.0 : 0.0, axisIndex == 1 ? 1.0 : 0.0,
+                         axisIndex == 2 ? 1.0 : 0.0};
+            s.origin = mode == PatternMode::Mirror ? s.dir * offset : origin;
+            s.step = step;
+            s.stepAngle = stepAngle;
+            s.op = op;
+            return s;
+        }
+    };
+    PatternToolState patternTool_;
+
+    // Whether the pointer is somewhere a gesture can read a value from.
+    //
+    // ImGui reports -FLT_MAX for the mouse position when it does not have one --
+    // the pointer left the window, or there never was one. Fed to a drag track
+    // that reports a number a thousand million million million million million
+    // times larger than anything a person could mean, and a gesture that was
+    // waiting to be confirmed would commit it. A gesture whose pointer has gone
+    // holds the value it had instead.
+    bool pointerDrives() const;
+
+    void beginPattern(PatternMode mode);
+    void updatePattern(bool snap, bool follow = true);
+    void setPatternMode(PatternMode mode);
+    void commitPattern();
+    void abortPattern();
+    void drawPatternPanel();
 
     void mergeSelected();
     void beginDivide();

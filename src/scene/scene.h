@@ -162,6 +162,14 @@ public:
     // tell the user beyond "refused".
     bool addFeature(ObjectId id, Feature feature, std::string* error = nullptr);
 
+    // Swaps an object's whole chain for another. For an edit that is not an
+    // append: a pattern of the last boolean stands *where that boolean stood*
+    // rather than after it, because the pattern's first copy is that boolean
+    // and keeping both would cut the same hole twice. All or nothing -- a chain
+    // that will not evaluate leaves the object as it was.
+    bool setFeatures(ObjectId id, std::vector<Feature> features,
+                     std::string* error = nullptr);
+
     // For serialisation, which has to preserve the counter alongside the
     // features it has already handed numbers to.
     uint64_t nextFeatureUid() const { return nextFeatureUid_; }

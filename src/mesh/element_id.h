@@ -57,6 +57,7 @@ enum class IdRole : uint32_t {
     Strip,
     Patch,
     Split,
+    Copy,       // the i'th repeat of a pattern
 };
 
 inline ElementId mix64(ElementId x) {

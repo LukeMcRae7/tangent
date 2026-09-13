@@ -327,6 +327,14 @@ target_include_directories(test_chain PRIVATE src)
 target_compile_options(test_chain PRIVATE ${TANGENT_WARNINGS})
 add_test(NAME chain COMMAND test_chain)
 
+add_executable(test_pattern tests/test_pattern.cpp
+  src/scene/scene.cpp src/scene/feature.cpp src/scene/serialize.cpp
+  src/mesh/boolean.cpp src/mesh/health.cpp ${TANGENT_GEOM} src/mesh/operations.cpp
+  src/mesh/halfedge.cpp src/mesh/primitives.cpp src/app/camera.cpp)
+target_include_directories(test_pattern PRIVATE src)
+target_compile_options(test_pattern PRIVATE ${TANGENT_WARNINGS})
+add_test(NAME pattern COMMAND test_pattern)
+
 add_executable(test_robust tests/test_robust.cpp
   src/geom/kernel_guard.cpp
   ${TANGENT_GEOM} src/mesh/boolean.cpp src/mesh/health.cpp src/mesh/operations.cpp

@@ -238,6 +238,9 @@ void writeFeature(Writer& w, const Feature& f) {
     // Version 9: whether a bevel cuts flat, and where its radius ends up.
     w.u32(f.chamfer ? 1u : 0u);
     w.f64(f.endWidth);
+    // v10.
+    w.u32(static_cast<uint32_t>(f.patternMode));
+    w.i32(f.patternCount);
 }
 
 // `version` is the file's, not this build's: a project written before bodies
@@ -248,7 +251,7 @@ bool readFeature(Reader& r, Feature& f, uint32_t version) {
     const uint32_t kind = r.u32();
     // The last of the enum, not a name from the middle of it: a kind added
     // later would otherwise be rejected by a build that has it.
-    if (kind > static_cast<uint32_t>(FeatureKind::FaceScale)) return false;
+    if (kind > static_cast<uint32_t>(FeatureKind::Pattern)) return false;
     f.kind = static_cast<FeatureKind>(kind);
     f.enabled = r.u8() != 0;
     if (!readSpec(r, f.primitive)) return false;
@@ -322,6 +325,13 @@ bool readFeature(Reader& r, Feature& f, uint32_t version) {
     if (version >= 9) {
         f.chamfer = r.u32() != 0;
         f.endWidth = r.f64();
+    }
+    if (version >= 10) {
+        const uint32_t mode = r.u32();
+        if (mode > static_cast<uint32_t>(PatternMode::Mirror)) return false;
+        f.patternMode = static_cast<PatternMode>(mode);
+        f.patternCount = r.i32();
+        if (f.patternCount < 1 || f.patternCount > 4096) return false;
     }
     return !r.bad;
 }

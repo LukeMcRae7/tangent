@@ -100,6 +100,48 @@ bool filletEdges(Body& body, const FilletSpec& spec, std::string* reason = nullp
 // is refused with a reason rather than approximated: the result would be a mesh
 // and the user should be told that before it happens, not after. Stage 6 of the
 // migration is where that becomes an offer instead of a refusal.
+// How a pattern lays its copies out.
+enum class PatternMode : uint32_t {
+    Linear,     // `step` mm along `dir`, `count` times
+    Circular,   // `stepAngle` radians about the axis, `count` times
+    Mirror,     // one reflection across the plane through `origin` with `dir`
+};
+
+const char* patternModeName(PatternMode m);
+
+// Repeating something, either a tool or the body itself.
+//
+// With a tool, this is a boolean applied `count` times at `count` placements:
+// cut one hole and pattern it into a bolt circle, or raise one boss and pattern
+// it into a row. The first placement is the identity, so the original is the
+// pattern's own first copy rather than something the pattern sits on top of.
+//
+// Without a tool, the body is combined with moved copies of itself -- which is
+// what mirror usually means: model the half that is interesting, reflect it,
+// and let the two halves fuse where they meet.
+struct PatternSpec {
+    PatternMode mode = PatternMode::Linear;
+    int   count = 2;            // including the original; 2 for a mirror
+    Vec3  origin{0, 0, 0};      // a point on the axis, or on the mirror plane
+    Vec3  dir{1, 0, 0};         // the direction, the axis, or the plane normal
+    Real  step = 10.0;          // mm between copies, Linear
+    Real  stepAngle = 0.0;      // radians between copies, Circular
+
+    // How each copy joins what is already there. Union adds, Difference takes
+    // away, and which one is wanted is a property of what is being repeated,
+    // not of the layout.
+    BooleanOp op = BooleanOp::Union;
+};
+
+// Applies `spec` to `body`, repeating `tool` if it is not empty and the body
+// itself if it is. All or nothing: on a refusal `body` is untouched.
+bool patternBody(Body& body, const Body& tool, const PatternSpec& spec,
+                 ElementId salt, std::string* reason);
+
+// The placement of the i'th copy, exposed so the editor can draw where the
+// copies are going to land before committing to building them.
+Mat4 patternPlacement(const PatternSpec& spec, int i);
+
 bool booleanOp(const Body& a, const Body& b, BooleanOp op, Body& out,
                ElementId salt = 0, bool trustBNames = false,
                std::string* reason = nullptr);

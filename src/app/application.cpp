@@ -616,6 +616,10 @@ void Application::handleEvent(const SDL_Event& e) {
     }
 }
 
+bool Application::pointerDrives() const {
+    return mouseOverride_.x >= 0.0 || ImGui::IsMousePosValid();
+}
+
 Vec2 Application::mouseInViewport() const {
     // The demos drive gestures with no mouse attached, and a gesture that
     // measures nothing measures nothing useful. Only ever set by them.
@@ -664,6 +668,7 @@ void Application::handleViewportMouse() {
     stepProfileDemo();
     stepFilletOpenDemo();
     stepFaceDemo();
+    stepPatternDemo();
     stepFaceStress();
     stepPrintDemo();
     stepPreviewCheck();
@@ -704,6 +709,14 @@ void Application::handleViewportMouse() {
         if (!io.WantCaptureMouse) {
             if (ImGui::IsMouseClicked(ImGuiMouseButton_Left))       commitFaceMove();
             else if (ImGui::IsMouseClicked(ImGuiMouseButton_Right))  abortFaceMove();
+        }
+        return;
+    }
+    if (patternTool_.active) {
+        updatePattern(!io.KeyCtrl, /*follow=*/!io.WantCaptureMouse);
+        if (!io.WantCaptureMouse) {
+            if (ImGui::IsMouseClicked(ImGuiMouseButton_Left))       commitPattern();
+            else if (ImGui::IsMouseClicked(ImGuiMouseButton_Right))  abortPattern();
         }
         return;
     }
@@ -1034,6 +1047,127 @@ void Application::drawFacePanel() {
     else if (footer < 0) abortFaceMove();
 }
 
+void Application::drawPatternPanel() {
+    if (!patternTool_.active) return;
+
+    const bool mirror = patternTool_.mode == PatternMode::Mirror;
+    if (!ui::beginCommand("##pattern", mirror ? "Mirror" : "Pattern",
+                          mirror ? Icon::Difference : Icon::Intersection,
+                          viewRect_.x + 16.0f, viewRect_.y + 16.0f))
+        return;
+
+    // How the copies are laid out. Three answers to one question, so three
+    // buttons rather than a dropdown.
+    ui::commandRow("Layout");
+    {
+        // Words rather than icons: none of the baked pictures depicts a row or
+        // a ring, and a picture that has to be explained by its tooltip is a
+        // worse label than the word it was standing in for.
+        struct Choice { const char* label; PatternMode mode; const char* tip; };
+        static const Choice kChoices[3] = {
+            {"Row",    PatternMode::Linear,   "Along a direction  (L)"},
+            {"Ring",   PatternMode::Circular, "Around an axis  (C)"},
+            {"Mirror", PatternMode::Mirror,   "Reflected across a plane  (M)"},
+        };
+        const float w = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x * 2.0f) / 3.0f;
+        for (int i = 0; i < 3; ++i) {
+            if (i) ImGui::SameLine();
+            const bool on = patternTool_.mode == kChoices[i].mode;
+            if (on) ImGui::PushStyleColor(ImGuiCol_Button,
+                                          ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+            if (ImGui::Button(kChoices[i].label, ImVec2(w, 0)) && !on) {
+                if (kChoices[i].mode == PatternMode::Circular) patternTool_.axisIndex = 2;
+                setPatternMode(kChoices[i].mode);
+            }
+            if (on) ImGui::PopStyleColor();
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", kChoices[i].tip);
+        }
+    }
+
+    // The axis, or the plane's normal. Same three keys the transform tools use.
+    ui::commandRow(mirror ? "Plane" : "Axis");
+    {
+        static const char* kAxis[3] = {"X", "Y", "Z"};
+        for (int i = 0; i < 3; ++i) {
+            if (i) ImGui::SameLine();
+            const bool on = patternTool_.axisIndex == i;
+            if (on) ImGui::PushStyleColor(ImGuiCol_Button,
+                                          ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+            if (ImGui::Button(kAxis[i], ImVec2(ImGui::GetTextLineHeight() * 1.8f, 0)) && !on) {
+                patternTool_.axisIndex = i;
+                setPatternMode(patternTool_.mode);
+            }
+            if (on) ImGui::PopStyleColor();
+        }
+    }
+
+    if (mirror) {
+        if (ui::commandNumber("Plane at", patternTool_.offset, "mm",
+                              !patternTool_.typedValue.empty(),
+                              !patternTool_.typedValue.empty(),
+                              patternTool_.typedValue.c_str()))
+            patternTool_.typedValue.clear();
+    } else {
+        if (ui::commandNumber(patternTool_.mode == PatternMode::Circular ? "Turn" : "Spacing",
+                              patternTool_.dragged(),
+                              patternTool_.mode == PatternMode::Circular ? "deg" : "mm",
+                              !patternTool_.typedValue.empty(),
+                              !patternTool_.typedValue.empty(),
+                              patternTool_.typedValue.c_str()))
+            patternTool_.typedValue.clear();
+
+        ui::commandRow("Copies");
+        // A full turn is what a ring pattern is nearly always for, and working
+        // out 360 over the count by hand is not modelling. It shares the row,
+        // so the count field leaves room for it.
+        const bool ring = patternTool_.mode == PatternMode::Circular;
+        const float turnW = ring ? ImGui::CalcTextSize("Full turn").x +
+                                       ImGui::GetStyle().FramePadding.x * 2.0f +
+                                       ImGui::GetStyle().ItemSpacing.x
+                                 : 0.0f;
+        ImGui::SetNextItemWidth(-1.0f - turnW);
+        int n = patternTool_.count;
+        if (ImGui::DragInt("##count", &n, 0.1f, 2, 256, "%d")) {
+            patternTool_.count = n < 2 ? 2 : (n > 256 ? 256 : n);
+            patternTool_.previewValid = false;
+        }
+        if (ring) {
+            ImGui::SameLine();
+            if (ImGui::Button("Full turn")) {
+                patternTool_.stepAngle = radians(360.0 / std::max(2, patternTool_.count));
+                patternTool_.typedValue.clear();
+                patternTool_.previewValid = false;   // the next frame rebuilds
+            }
+        }
+    }
+
+    // What is being repeated. A boolean at the end of the chain leaves a tool
+    // behind that can be repeated instead of the whole body, and repeating that
+    // is what a person means by "pattern this hole".
+    if (patternTool_.toolAvailable) {
+        ui::commandRow("Repeat");
+        if (ImGui::Button(patternTool_.useTool ? "The cut" : "The body")) {
+            patternTool_.useTool = !patternTool_.useTool;
+            patternTool_.previewValid = false;
+            // A plane that was right for one of these is a no-op for the other.
+            if (mirror) setPatternMode(PatternMode::Mirror);
+        }
+    }
+
+    ui::commandHint(mirror
+        ? (patternTool_.useTool
+               ? "The last cut is reflected across the plane and made again."
+               : "The body is reflected across the plane, and the two halves fuse.")
+        : (patternTool_.useTool
+               ? "The last cut is repeated. Its first copy is where it already is."
+               : "The body is repeated, and the copies fuse where they meet."));
+
+    const int footer = ui::commandFooter("OK  (Click)");
+    ui::endCommand();
+    if (footer > 0)      commitPattern();
+    else if (footer < 0) abortPattern();
+}
+
 void Application::drawDividePanel() {
     if (!divideTool_.active) return;
 
@@ -1118,7 +1252,7 @@ void Application::drawMeasureLabel() {
 void Application::drawPrintIssues() {
     if (!view_.showPrintIssues) return;
     if (filletTool_.active || faceTool_.active || divideTool_.active ||
-        createTool_.active() || tool_.active())
+        patternTool_.active || createTool_.active() || tool_.active())
         return;                       // a gesture owns the model while it runs
 
     const Vec4 thin{0.95f, 0.30f, 0.22f, 0.34f};
@@ -1314,6 +1448,37 @@ void Application::handleShortcuts() {
         return;
     }
 
+    if (patternTool_.active) {
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) { abortPattern(); return; }
+        if (ImGui::IsKeyPressed(ImGuiKey_Enter, false) ||
+            ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false)) { commitPattern(); return; }
+        // The axis, and the mode, without reaching for the panel.
+        int wantAxis = -1;
+        if (ImGui::IsKeyPressed(ImGuiKey_X, false)) wantAxis = 0;
+        if (ImGui::IsKeyPressed(ImGuiKey_Y, false)) wantAxis = 1;
+        if (ImGui::IsKeyPressed(ImGuiKey_Z, false)) wantAxis = 2;
+        if (wantAxis >= 0 && wantAxis != patternTool_.axisIndex) {
+            patternTool_.axisIndex = wantAxis;
+            setPatternMode(patternTool_.mode);
+            return;
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_L, false) &&
+            patternTool_.mode != PatternMode::Linear) {
+            setPatternMode(PatternMode::Linear); return;
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_C, false) &&
+            patternTool_.mode != PatternMode::Circular) {
+            patternTool_.axisIndex = 2;
+            setPatternMode(PatternMode::Circular); return;
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_M, false) &&
+            patternTool_.mode != PatternMode::Mirror) {
+            setPatternMode(PatternMode::Mirror); return;
+        }
+        typedInto(patternTool_.typedValue, [&] { updatePattern(true); });
+        return;
+    }
+
     if (divideTool_.active) {
         if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) { abortDivide(); return; }
         if (ImGui::IsKeyPressed(ImGuiKey_Enter, false) ||
@@ -1462,6 +1627,10 @@ void Application::handleShortcuts() {
     // Mesh edits act on the selected faces. Shift+E cuts inward.
     if (!ctrl && !alt && ImGui::IsKeyPressed(ImGuiKey_E, false)) ui_.actions.extrude = true;
     if (!ctrl && !alt && ImGui::IsKeyPressed(ImGuiKey_K, false)) ui_.actions.divide = true;
+    if (!ctrl && !alt && !shift && ImGui::IsKeyPressed(ImGuiKey_P, false))
+        ui_.actions.pattern = true;
+    if (!ctrl && !alt && !shift && ImGui::IsKeyPressed(ImGuiKey_M, false))
+        ui_.actions.mirror = true;
     if (ctrl && !shift && ImGui::IsKeyPressed(ImGuiKey_B, false)) ui_.actions.bevel = true;
 
     // Fillet the selected edges. F, as in Fusion, and reachable by the left
@@ -1788,7 +1957,7 @@ static Real materialBehindEdges(const SceneObject& obj,
 
 void Application::beginFaceMove(FaceOp op) {
     if (tool_.active() || filletTool_.active || createTool_.active() ||
-        faceTool_.active || divideTool_.active)
+        faceTool_.active || divideTool_.active || patternTool_.active)
         return;
 
     const ObjectId id = scene_.contextObject();
@@ -2043,7 +2212,7 @@ void Application::updateFaceMove(bool snap, bool follow) {
         try { want = std::stod(faceTool_.typedValue); } catch (...) {}
     } else if (faceTool_.axis.valid) {
         const Vec2 cur = mouseInViewport();
-        if (faceTool_.axis.facingCamera(camera_)) {
+        if (pointerDrives() && faceTool_.axis.facingCamera(camera_)) {
             want = faceTool_.axis.valueAt(camera_, cur);
         }
         if (snap) {
@@ -2226,9 +2395,250 @@ void Application::mergeSelected() {
     setNotice(msg);
 }
 
+// ---------------------------------------------------------------------------
+// Pattern and mirror.
+
+void Application::beginPattern(PatternMode mode) {
+    if (tool_.active() || filletTool_.active || createTool_.active() ||
+        faceTool_.active || divideTool_.active || patternTool_.active)
+        return;
+
+    const ObjectId id = scene_.contextObject();
+    SceneObject* obj = scene_.find(id);
+    if (!obj) { setNotice("Select an object first"); return; }
+    if (obj->body.isMesh()) { setNotice("Patterning needs the exact kernel"); return; }
+
+    patternTool_.reset();
+    patternTool_.active = true;
+    patternTool_.objectId = id;
+    patternTool_.mode = mode;
+    patternTool_.before = obj->body;
+    patternTool_.chainBefore = obj->features;
+    preEditSolid_ = obj->healthVersion == obj->meshVersion && obj->health.solid();
+
+    // What the chain ends with decides what there is to repeat. A boolean left
+    // a tool behind -- the cylinder that made the hole, the block that made the
+    // boss -- and repeating that is what turns one hole into a bolt circle.
+    // Anything else, and the only thing there is to repeat is the body.
+    for (size_t i = obj->features.size(); i-- > 0;) {
+        const Feature& f = obj->features[i];
+        if (!f.enabled) continue;
+        if (f.kind == FeatureKind::Boolean && !f.bakedBody.empty() && !f.errored) {
+            patternTool_.tool = f.bakedBody;
+            patternTool_.op = f.booleanOp;
+            patternTool_.toolAvailable = true;
+            patternTool_.useTool = true;
+            patternTool_.replacing = i;     // the pattern stands where it stood
+        }
+        break;                              // only the last step, not a search
+    }
+
+    // Where the copies go from. A pattern of the body walks off its own
+    // bounding box; a pattern of a tool turns about the body's centre, which is
+    // where a bolt circle's axis nearly always is.
+    const AABB b = obj->localBounds;
+    patternTool_.origin = b.valid() ? b.center() : Vec3{};
+    patternTool_.count = 4;
+    patternTool_.axisIndex = mode == PatternMode::Circular ? 2 : 0;
+    patternTool_.step = b.valid() ? std::max<Real>(1.0, b.size().x) : 10.0;
+    patternTool_.stepAngle = radians(360.0 / 4.0);
+    patternTool_.offset = 0.0;
+    setPatternMode(mode);
+}
+
+// Switching mode rebuilds the drag track, because the three modes do not drag
+// the same quantity: a distance, an angle, and where a plane sits.
+void Application::setPatternMode(PatternMode mode) {
+    SceneObject* obj = scene_.find(patternTool_.objectId);
+    if (!obj) return;
+    patternTool_.mode = mode;
+    patternTool_.previewValid = false;
+    patternTool_.requested = 1e30;
+    patternTool_.typedValue.clear();
+    if (mode == PatternMode::Circular && patternTool_.stepAngle == 0.0)
+        patternTool_.stepAngle = radians(360.0 / std::max(2, patternTool_.count));
+
+    const Mat4 model = obj->modelMatrix();
+    const Vec3 dir{patternTool_.axisIndex == 0 ? 1.0 : 0.0,
+                   patternTool_.axisIndex == 1 ? 1.0 : 0.0,
+                   patternTool_.axisIndex == 2 ? 1.0 : 0.0};
+    const AABB b = obj->localBounds;
+
+    // Where a mirror's plane starts. Repeating a tool, the body's own centre is
+    // right: the cut is off to one side of it and the reflection lands on the
+    // other. Repeating the body, that same plane is the body's symmetry plane
+    // and reflecting across it gives back exactly what was there -- so the
+    // plane starts at the near face instead, where a mirror doubles the part.
+    // Which is what someone who modelled half of something is asking for.
+    if (mode == PatternMode::Mirror) {
+        const Vec3 lo = b.valid() ? b.min : Vec3{};
+        patternTool_.offset = patternTool_.useTool
+                                  ? 0.0
+                                  : (patternTool_.axisIndex == 0 ? lo.x
+                                     : patternTool_.axisIndex == 1 ? lo.y : lo.z);
+    }
+    const Vec3 from = mode == PatternMode::Mirror ? dir * patternTool_.offset
+                                                  : patternTool_.origin;
+
+    patternTool_.axis.origin = transformPoint(model, from);
+    patternTool_.axis.direction = normalize(transformVector(model, dir));
+    patternTool_.axis.valid = true;
+    patternTool_.axis.baseValue = mode == PatternMode::Mirror ? patternTool_.offset : 0.0;
+    // An angle drags on a track scaled so a body-width of travel is a full
+    // turn; a distance and a plane offset drag in millimetres, either way.
+    const Real span = b.valid() ? std::max<Real>(1.0, length(b.size())) : 20.0;
+    patternTool_.axis.spanValue = mode == PatternMode::Circular ? 360.0 : span;
+    patternTool_.axis.signedRange = mode != PatternMode::Linear;
+}
+
+void Application::updatePattern(bool snap, bool follow) {
+    if (!patternTool_.active) return;
+    SceneObject* obj = scene_.find(patternTool_.objectId);
+    if (!obj) { abortPattern(); return; }
+
+    {
+        Body built;
+        if (patternTool_.preview.take(built)) {
+            obj->body = std::move(built);
+            obj->refreshDerived();
+            patternTool_.previewValid = true;
+        }
+    }
+    // Reaching for the panel is not a change of mind about the spacing -- the
+    // way to a button is across the screen, and without this the copies would
+    // spread out to wherever the pointer passed through on the way to OK.
+    //
+    // But the panel's own controls change what gets built: the count, the
+    // layout, the axis, whether it is the cut or the body being repeated. So
+    // only the reading of the pointer stops here. The rebuild below still runs,
+    // and a button pressed with the pointer sitting on the panel is seen in the
+    // viewport straight away rather than when the pointer wanders off it.
+    Real v = patternTool_.dragged();
+    if (follow) {
+        if (!patternTool_.typedValue.empty()) {
+            try { v = std::stod(patternTool_.typedValue); } catch (...) {}
+        } else if (patternTool_.axis.valid && pointerDrives() &&
+                   patternTool_.axis.facingCamera(camera_)) {
+            v = patternTool_.axis.valueAt(camera_, mouseInViewport());
+        }
+    }
+    if (follow && snap) {
+        if (patternTool_.mode == PatternMode::Circular) {
+            v = std::round(v / 5.0) * 5.0;
+        } else {
+            const Real step = static_cast<Real>(camera_.snapStep(patternTool_.axis.origin));
+            if (step > 0.0) v = std::round(v / step) * step;
+        }
+    }
+    // Copies on top of each other are not a pattern, and a turn of nothing is
+    // not one either.
+    if (patternTool_.mode == PatternMode::Linear) v = std::max<Real>(v, 0.05);
+    if (patternTool_.mode == PatternMode::Circular) {
+        // Past a full turn the copies land back on top of each other, so there
+        // is nothing beyond it to ask for -- and an unbounded track pointed
+        // nearly at the camera can otherwise report an absurd number.
+        if (std::fabs(v) < 0.5) v = v < 0.0 ? -0.5 : 0.5;
+        v = clampf(v, -360.0, 360.0);
+    }
+    patternTool_.setDragged(v);
+
+    // The count is part of what is being previewed, so a changed count has to
+    // invalidate the same way a changed distance does.
+    const Real key = v + patternTool_.count * 1e6 +
+                     (patternTool_.useTool ? 1e5 : 0.0);
+    if (std::fabs(key - patternTool_.requested) < 1e-9 && patternTool_.previewValid) return;
+    patternTool_.requested = key;
+    patternTool_.previewValid = false;
+
+    const PatternSpec spec = patternTool_.spec();
+    Body tool = patternTool_.useTool ? patternTool_.tool : Body();
+    Body base = patternTool_.before;
+    // A tool pattern stands where the boolean stood, so the preview builds on
+    // the body as it was *before* that boolean rather than on top of its result.
+    if (patternTool_.useTool) {
+        std::vector<Feature> upto(patternTool_.chainBefore.begin(),
+                                  patternTool_.chainBefore.begin() +
+                                      static_cast<long>(patternTool_.replacing));
+        Body partial;
+        if (evaluateFeatures(upto, partial)) base = std::move(partial);
+    }
+    patternTool_.preview.request(base, [spec, tool](Body& b) {
+        return patternBody(b, tool, spec, 7101, nullptr);
+    });
+}
+
+void Application::commitPattern() {
+    if (!patternTool_.active) return;
+    const ObjectId id = patternTool_.objectId;
+    justFinishedModal_ = true;
+    patternTool_.active = false;
+    patternTool_.preview.cancel();
+
+    SceneObject* obj = scene_.find(id);
+    if (!obj) return;
+
+    std::vector<Feature> chainBefore = patternTool_.chainBefore;
+    obj->features = patternTool_.chainBefore;
+    obj->body = patternTool_.before;
+
+    Feature f;
+    f.kind = FeatureKind::Pattern;
+    const PatternSpec spec = patternTool_.spec();
+    f.patternMode = spec.mode;
+    f.patternCount = spec.count;
+    f.axisPoint = spec.origin;
+    f.axisDir = spec.dir;
+    f.distance = spec.step;
+    f.angle = spec.stepAngle;
+    f.booleanOp = patternTool_.useTool ? patternTool_.op : BooleanOp::Union;
+    if (patternTool_.useTool) f.bakedBody = patternTool_.tool;
+
+    const char* label = spec.mode == PatternMode::Mirror ? "Mirror" : "Pattern";
+    std::string why;
+    bool ok = false;
+    if (patternTool_.useTool) {
+        // The boolean is not kept and then patterned on top of: it is replaced,
+        // because the pattern's first copy is that boolean. Keeping both would
+        // cut the first hole twice.
+        std::vector<Feature> next(patternTool_.chainBefore.begin(),
+                                  patternTool_.chainBefore.begin() +
+                                      static_cast<long>(patternTool_.replacing));
+        next.push_back(std::move(f));
+        for (size_t i = patternTool_.replacing + 1; i < patternTool_.chainBefore.size(); ++i)
+            next.push_back(patternTool_.chainBefore[i]);
+        ok = scene_.setFeatures(id, std::move(next), &why);
+    } else {
+        ok = scene_.addFeature(id, std::move(f), &why);
+    }
+
+    if (ok && editKeepsSolid(id)) {
+        undo_.push(std::make_unique<FeatureCommand>(id, std::move(chainBefore),
+                                                    obj->features, label));
+        scene_.clearElementSelection();
+    } else {
+        obj->features = std::move(chainBefore);
+        obj->body = std::move(patternTool_.before);
+        obj->refreshDerived();
+        setNotice(why.empty() ? std::string("The ") + label + " could not be made"
+                              : "Refused: " + why);
+    }
+}
+
+void Application::abortPattern() {
+    if (!patternTool_.active) return;
+    justFinishedModal_ = true;
+    patternTool_.active = false;
+    patternTool_.preview.cancel();
+    if (SceneObject* obj = scene_.find(patternTool_.objectId)) {
+        obj->features = std::move(patternTool_.chainBefore);
+        obj->body = std::move(patternTool_.before);
+        obj->refreshDerived();
+    }
+}
+
 void Application::beginDivide() {
     if (tool_.active() || filletTool_.active || createTool_.active() ||
-        faceTool_.active || divideTool_.active)
+        faceTool_.active || divideTool_.active || patternTool_.active)
         return;
 
     const ObjectId id = scene_.contextObject();
@@ -2286,7 +2696,8 @@ void Application::updateDivide(bool snap, bool follow) {
     Real along = divideTool_.t * len;
     if (!divideTool_.typedValue.empty()) {
         try { along = std::stod(divideTool_.typedValue); } catch (...) {}
-    } else if (divideTool_.axis.valid && divideTool_.axis.facingCamera(camera_)) {
+    } else if (divideTool_.axis.valid && pointerDrives() &&
+               divideTool_.axis.facingCamera(camera_)) {
         along = divideTool_.axis.valueAt(camera_, mouseInViewport());
     }
     if (snap) {
@@ -2797,6 +3208,101 @@ void Application::stepFilletOpenDemo() {
     mouseOverride_ = px;
     beginFillet();
     mouseOverride_ = px + Vec2{40.0, -40.0};
+}
+
+// Drives the pattern tool the way a person does: begin the gesture, set the
+// numbers, let the preview land, commit. 1 a row of holes, 2 a bolt circle,
+// 3 a mirrored body, 4 a mirrored cut, 5 the panel left open to be looked at.
+void Application::stepPatternDemo() {
+    if (patternDemo_ <= 0 || patternDemoDone_ || viewRect_.w <= 0) return;
+    if (scene_.objects().empty()) return;
+    patternDemoDone_ = true;
+
+    const int mode = patternDemo_;
+    camera_.yaw = 0.7f;
+    camera_.pitch = 0.75f;
+    camera_.distance = 150.0f;
+    camera_.snapToGoal();
+
+    // The starting body, and for the tool cases the cut that will be repeated.
+    scene_.clear();
+    PrimitiveSpec base;
+    ObjectId id = kNoObject;
+    if (mode == 1 || mode == 4) {
+        base.kind = PrimitiveKind::Box;
+        base.box = {100, 20, 10};
+        id = scene_.addPrimitive(PrimitiveKind::Box, base);
+    } else if (mode == 2 || mode == 5) {
+        base.kind = PrimitiveKind::Cylinder;
+        base.cylinder = {30, 6, 64};
+        id = scene_.addPrimitive(PrimitiveKind::Cylinder, base);
+    } else {
+        base.kind = PrimitiveKind::Box;
+        base.box = {20, 30, 12};
+        id = scene_.addPrimitive(PrimitiveKind::Box, base, Vec3{10, 0, 0});
+    }
+    scene_.select(id);
+
+    auto report = [&](const char* what) {
+        const SceneObject* o = scene_.find(id);
+        std::fprintf(stderr, "[pattern-demo] %s: %d faces, %.1f mm3, valid=%d, "
+                             "%zu features, last=%s\n",
+                     what, o->body.faceCount(), o->body.health(false).volume,
+                     (int)o->body.validate(), o->features.size(),
+                     o->features.back().summary().c_str());
+    };
+
+    // A boolean first, where the pattern is meant to repeat one.
+    if (mode == 1 || mode == 2 || mode == 4 || mode == 5) {
+        PrimitiveSpec ts;
+        ts.kind = PrimitiveKind::Cylinder;
+        ts.cylinder = {mode == 4 ? Real(4) : Real(3), 40, 48};
+        Body tool;
+        makePrimitive(ts, tool, Backend::Brep);
+        tool.transform(translate(mode == 1 ? Vec3{-30, 0, 0}
+                               : mode == 4 ? Vec3{20, 0, 0}
+                                           : Vec3{20, 0, 0}));
+        Feature cut;
+        cut.kind = FeatureKind::Boolean;
+        cut.booleanOp = BooleanOp::Difference;
+        cut.bakedBody = std::move(tool);
+        std::string why;
+        if (!scene_.addFeature(id, std::move(cut), &why))
+            std::fprintf(stderr, "[pattern-demo] the first cut failed: %s\n", why.c_str());
+        report("one cut");
+    }
+
+    beginPattern(mode == 3 || mode == 4 ? PatternMode::Mirror : PatternMode::Linear);
+    if (!patternTool_.active) {
+        std::fprintf(stderr, "[pattern-demo] the tool would not start\n");
+        return;
+    }
+
+    if (mode == 1) {
+        patternTool_.typedValue = "15";
+        patternTool_.count = 5;
+    } else if (mode == 2 || mode == 5) {
+        patternTool_.axisIndex = 2;
+        setPatternMode(PatternMode::Circular);
+        patternTool_.count = 8;
+        patternTool_.typedValue = "45";
+    } else {
+        patternTool_.axisIndex = 0;
+        setPatternMode(PatternMode::Mirror);
+    }
+
+    updatePattern(false);
+    while (patternTool_.preview.busy()) updatePattern(false, /*follow=*/false);
+    updatePattern(false, /*follow=*/false);
+    report("previewed");
+
+    if (mode == 5) return;          // left open, so the panel can be seen
+    std::fprintf(stderr, "[pattern-demo] plane/axis %d at %.2f, useTool=%d\n",
+                 patternTool_.axisIndex, patternTool_.offset, (int)patternTool_.useTool);
+    commitPattern();
+    report("committed");
+    if (!ui_.notice.empty())
+        std::fprintf(stderr, "[pattern-demo] notice: %s\n", ui_.notice.c_str());
 }
 
 void Application::stepFaceDemo() {
@@ -3385,7 +3891,7 @@ void Application::updateFillet(bool snap, bool follow) {
         if (filletTool_.axis.valid) {
             const Real step = DragAxis::stepFor(camera_, filletTool_.axis.origin,
                                                 filletTool_.maxRadius);
-            if (filletTool_.axis.facingCamera(camera_)) {
+            if (pointerDrives() && filletTool_.axis.facingCamera(camera_)) {
                 newR = filletTool_.axis.valueAt(camera_, curMouse);
             } else {
                 // The axis points near the eye, where a pixel of movement is
@@ -4073,6 +4579,8 @@ void Application::applyActions() {
     if (a.rotateFace) beginFaceMove(FaceOp::Rotate);
     if (a.scaleFace)  beginFaceMove(FaceOp::Scale);
     if (a.divide) beginDivide();
+    if (a.pattern) beginPattern(PatternMode::Linear);
+    if (a.mirror) beginPattern(PatternMode::Mirror);
     if (a.mergeFaces) mergeSelected();
     if (a.bevel)   bevelActiveObject();
     if (a.split)   splitActiveObject();
@@ -4202,6 +4710,7 @@ void Application::buildUi() {
     drawFilletPanel();
     drawFacePanel();
     drawDividePanel();
+    drawPatternPanel();
     if (createTool_.active()) {
         // Under the toolbar, in the corner of the viewport opposite the view
         // cube: a dialog over the middle of the model is a dialog in the way of
@@ -4441,6 +4950,19 @@ int Application::run() {
                               : "Push / pull  %.2f mm   A auto  J join  D cut   type a number   Click confirm   Esc cancel",
                           faceTool_.value);
             ui_.toolStatus = buf;
+        } else if (patternTool_.active) {
+            char buf[160];
+            if (patternTool_.mode == PatternMode::Mirror)
+                std::snprintf(buf, sizeof buf,
+                              "Mirror  plane at %.2f mm   X Y Z plane   Click confirm   Esc cancel",
+                              patternTool_.offset);
+            else
+                std::snprintf(buf, sizeof buf,
+                              "%s  %d x  %.2f %s apart   Click confirm   Esc cancel",
+                              patternModeName(patternTool_.mode), patternTool_.count,
+                              patternTool_.dragged(),
+                              patternTool_.mode == PatternMode::Circular ? "deg" : "mm");
+            ui_.toolStatus = buf;
         } else if (divideTool_.active) {
             char buf[128];
             std::snprintf(buf, sizeof buf,
@@ -4558,6 +5080,12 @@ int Application::run() {
                                   : DragAxis::stepFor(camera_, faceTool_.axis.origin,
                                                       faceTool_.axis.spanValue);
             faceTool_.axis.drawGuide(renderer_, camera_, faceTool_.value, step, 0.0);
+        }
+        if (patternTool_.active && patternTool_.axis.valid) {
+            const Real step = DragAxis::stepFor(camera_, patternTool_.axis.origin,
+                                                patternTool_.axis.spanValue);
+            patternTool_.axis.drawGuide(renderer_, camera_, patternTool_.dragged(), step,
+                                        patternTool_.axis.spanValue);
         }
         if (divideTool_.active && divideTool_.axis.valid) {
             const Real step = DragAxis::stepFor(camera_, divideTool_.axis.origin,

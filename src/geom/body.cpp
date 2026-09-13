@@ -130,6 +130,20 @@ void Body::transform(const Mat4& m) {
     for (MeshVertex& v : mesh_.verts) v.position = transformPoint(m, v.position);
 }
 
+bool Body::mirror(Vec3 planePoint, Vec3 planeNormal) {
+    if (brep_) {
+        BrepRef m = brep::mirrored(*brep_, planePoint, planeNormal);
+        if (!m) return false;
+        brep_ = std::move(m);
+        return true;
+    }
+    // A mesh could be mirrored by reflecting its vertices, but every triangle
+    // would then be wound the other way and the body would describe the void
+    // around itself. Rewinding is a mesh job and the mesh backend is not where
+    // the work is; refusing is the honest answer until it is.
+    return false;
+}
+
 Real Body::edgeLength(EdgeId e) const {
     if (brep_) return brep::edgeLength(*brep_, e);
     Vec3 a{}, b{};

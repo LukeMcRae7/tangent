@@ -542,6 +542,22 @@ float drawToolbar(UiContext& ctx) {
 
     // The opposite of divide, and the reason it is its own button: an
     // operation that tidied up after itself would take these with it.
+    // A pattern of the last cut, or of the body. Which one it will be is
+    // decided when the gesture starts, and said in its panel.
+    if (iconButton(Icon::Intersection, "Pattern", icon,
+                   hasObject ? "Pattern: repeat in a row or around an axis  (P)"
+                             : "Pattern - select an object first",
+                   false, hasObject))
+        ctx.actions.pattern = true;
+    ImGui::SameLine();
+
+    if (iconButton(Icon::Difference, "Mirror", icon,
+                   hasObject ? "Mirror: reflect across a plane  (M)"
+                             : "Mirror - select an object first",
+                   false, hasObject))
+        ctx.actions.mirror = true;
+    ImGui::SameLine();
+
     if (iconButton(Icon::Union, "MergeFaces", icon,
                    hasObject ? "Merge faces: drop every division that does not "
                                "define the shape"

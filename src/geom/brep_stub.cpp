@@ -129,6 +129,7 @@ bool validate(const BrepShape&, std::string* err) {
 MeshHealth health(const BrepShape&, bool) { return {}; }
 
 BrepRef transformed(const BrepShape&, const Mat4&) { return {}; }
+BrepRef mirrored(const BrepShape&, Vec3, Vec3) { return {}; }
 
 } // namespace brep
 } // namespace tg

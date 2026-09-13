@@ -269,6 +269,40 @@ bool Scene::addFeature(ObjectId id, Feature feature, std::string* error) {
     return true;
 }
 
+bool Scene::setFeatures(ObjectId id, std::vector<Feature> features, std::string* error) {
+    if (error) error->clear();
+    SceneObject* obj = find(id);
+    if (!obj) return false;
+
+    for (Feature& f : features)
+        if (f.uid == 0) f.uid = nextFeatureUid_++;
+
+    std::vector<Feature> previous = std::move(obj->features);
+    std::vector<Body>    cache = std::move(obj->featureCache);
+    obj->features = std::move(features);
+    obj->featureCache.clear();
+
+    Body next;
+    const bool built = evaluateFeatures(obj->features, next);
+    size_t bad = obj->features.size();
+    for (size_t i = 0; i < obj->features.size(); ++i)
+        if (obj->features[i].errored) { bad = i; break; }
+
+    if (!built || bad < obj->features.size()) {
+        if (error)
+            *error = bad < obj->features.size() ? obj->features[bad].error
+                                                : "the chain produced nothing";
+        obj->features = std::move(previous);
+        obj->featureCache = std::move(cache);
+        return false;
+    }
+
+    obj->body = std::move(next);
+    obj->refreshDerived();
+    pruneElementSelection();
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 bool Scene::isSelected(ObjectId id) const {
     return std::find(selection_.begin(), selection_.end(), id) != selection_.end();
