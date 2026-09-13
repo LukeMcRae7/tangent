@@ -17,6 +17,7 @@
 #include "core/math.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <vector>
 
@@ -91,7 +92,127 @@ public:
         return best;
     }
 
+    // The nearest point of any triangle to `p`, searching no further than
+    // `maxDist`. Returns the distance, or `maxDist` if nothing is that close;
+    // `triangle` receives the index of the one found, or stays untouched.
+    //
+    // Nearer children are walked first so the bound tightens early, and a box
+    // further away than the best so far is never opened -- which is what makes
+    // this cheap when the answer is small, as it is for a surface being checked
+    // against itself to within a tenth of a millimetre.
+    //
+    // `hint`, when given, is a triangle to measure first -- the answer for a
+    // nearby point, typically -- which starts the search with a tight bound
+    // instead of `maxDist` and lets it prune most of the tree at once. It never
+    // changes the answer, only how quickly it is found.
+    Real nearestPoint(Vec3 p, Real maxDist, uint32_t* triangle = nullptr,
+                      uint32_t hint = 0xffffffffu) const {
+        if (nodes_.empty()) return maxDist;
+        Real best2 = maxDist * maxDist;
+        if (hint < tris_->size() / 3) {
+            const Real d2 = pointTriangleDistance2(p, (*pos_)[(*tris_)[hint * 3 + 0]],
+                                                   (*pos_)[(*tris_)[hint * 3 + 1]],
+                                                   (*pos_)[(*tris_)[hint * 3 + 2]]);
+            if (d2 < best2) {
+                best2 = d2;
+                if (triangle) *triangle = hint;
+            }
+        }
+        uint32_t stack[64];
+        int top = 0;
+        stack[top++] = 0;
+
+        while (top > 0) {
+            const uint32_t at = stack[--top];
+            const Node& n = nodes_[at];
+            if (boxDistance2(n.min, n.max, p) >= best2) continue;
+
+            if (n.count > 0) {
+                for (uint32_t i = 0; i < n.count; ++i) {
+                    const uint32_t t = order_[n.first + i];
+                    const Real d2 = pointTriangleDistance2(p, (*pos_)[(*tris_)[t * 3 + 0]],
+                                                           (*pos_)[(*tris_)[t * 3 + 1]],
+                                                           (*pos_)[(*tris_)[t * 3 + 2]]);
+                    if (d2 < best2) {
+                        best2 = d2;
+                        if (triangle) *triangle = t;
+                    }
+                }
+            } else {
+                // Push the further child first so the nearer one is walked next.
+                const uint32_t left = at + 1, right = n.first;
+                const Real dl = boxDistance2(nodes_[left].min, nodes_[left].max, p);
+                const Real dr = boxDistance2(nodes_[right].min, nodes_[right].max, p);
+                if (dl <= dr) {
+                    if (dr < best2) stack[top++] = right;
+                    if (dl < best2) stack[top++] = left;
+                } else {
+                    if (dl < best2) stack[top++] = left;
+                    if (dr < best2) stack[top++] = right;
+                }
+            }
+        }
+        return best2 < maxDist * maxDist ? std::sqrt(best2) : maxDist;
+    }
+
+    // Squared distance from `p` to the triangle (a, b, c), by the region of the
+    // triangle's plane the point projects into. Ericson, Real-Time Collision
+    // Detection, 5.1.5 -- public because the simplifier measures the same thing
+    // against a handful of triangles where a tree would be overhead.
+    static Real pointTriangleDistance2(Vec3 p, Vec3 a, Vec3 b, Vec3 c) {
+        const Vec3 ab = b - a, ac = c - a, ap = p - a;
+        const Real d1 = dot(ab, ap), d2 = dot(ac, ap);
+        if (d1 <= 0 && d2 <= 0) return lengthSq(ap);
+
+        const Vec3 bp = p - b;
+        const Real d3 = dot(ab, bp), d4 = dot(ac, bp);
+        if (d3 >= 0 && d4 <= d3) return lengthSq(bp);
+
+        const Real vc = d1 * d4 - d3 * d2;
+        if (vc <= 0 && d1 >= 0 && d3 <= 0) {
+            const Real v = d1 / (d1 - d3);
+            return lengthSq(p - (a + ab * v));
+        }
+
+        const Vec3 cp = p - c;
+        const Real d5 = dot(ab, cp), d6 = dot(ac, cp);
+        if (d6 >= 0 && d5 <= d6) return lengthSq(cp);
+
+        const Real vb = d5 * d2 - d1 * d6;
+        if (vb <= 0 && d2 >= 0 && d6 <= 0) {
+            const Real w = d2 / (d2 - d6);
+            return lengthSq(p - (a + ac * w));
+        }
+
+        const Real va = d3 * d6 - d5 * d4;
+        if (va <= 0 && (d4 - d3) >= 0 && (d5 - d6) >= 0) {
+            const Real w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+            return lengthSq(p - (b + (c - b) * w));
+        }
+
+        // Inside the face. A degenerate triangle has denom zero; the edge and
+        // vertex regions above have already caught every point near one, and
+        // what reaches here is measured against the plane of what is left.
+        const Real sum = va + vb + vc;
+        if (std::fabs(sum) < 1e-300) return std::min({lengthSq(ap), lengthSq(bp), lengthSq(cp)});
+        const Real denom = Real(1) / sum;
+        const Real v = vb * denom, w = vc * denom;
+        return lengthSq(p - (a + ab * v + ac * w));
+    }
+
 private:
+    static Real boxDistance2(Vec3 lo, Vec3 hi, Vec3 p) {
+        Real d = 0;
+        auto axis = [&](Real v, Real l, Real h) {
+            if (v < l) d += (l - v) * (l - v);
+            else if (v > h) d += (v - h) * (v - h);
+        };
+        axis(p.x, lo.x, hi.x);
+        axis(p.y, lo.y, hi.y);
+        axis(p.z, lo.z, hi.z);
+        return d;
+    }
+
     struct Node {
         Vec3 min, max;
         uint32_t first = 0;   // leaf: first index into order_; inner: right child

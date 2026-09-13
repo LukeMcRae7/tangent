@@ -43,14 +43,11 @@ PrintReport checkPrintability(const Body& body, const RenderMesh& render,
     out.solid = h.watertight && h.volume > 0.0;
     if (!out.solid) out.findings.push_back({kInvalid, PrintIssue::NotSolid, 0.0});
 
-    const Vec3 up = normalize(profile.up);
-
     std::vector<FaceId> faces;
     body.allFaces(faces);
     const AABB bounds = body.bounds();
     const Vec3 extent = bounds.size();
     const Real reach = std::max({extent.x, extent.y, extent.z, Real(1)}) * 1.5;
-    const Real bedHeight = dot(bounds.min, up);
 
     TriangleBvh bvh;
     bvh.build(render.positions, render.triangles);

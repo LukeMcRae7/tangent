@@ -129,7 +129,7 @@ if(TANGENT_BREP)
 endif()
 
 set(TANGENT_GEOM src/geom/body.cpp src/geom/operations.cpp
-                 src/geom/kernel_guard.cpp ${TANGENT_BREP_SRC})
+                 src/geom/kernel_guard.cpp src/mesh/decimate.cpp ${TANGENT_BREP_SRC})
 
 add_executable(tangent
   src/main.cpp
@@ -337,6 +337,13 @@ add_executable(test_validity tests/test_validity.cpp ${TANGENT_GEOM}
 target_include_directories(test_validity PRIVATE src)
 target_compile_options(test_validity PRIVATE ${TANGENT_WARNINGS})
 add_test(NAME validity COMMAND test_validity)
+
+add_executable(test_decimate tests/test_decimate.cpp ${TANGENT_GEOM}
+  src/mesh/boolean.cpp src/mesh/health.cpp src/mesh/operations.cpp
+  src/mesh/halfedge.cpp src/mesh/primitives.cpp src/mesh/import_mesh.cpp)
+target_include_directories(test_decimate PRIVATE src)
+target_compile_options(test_decimate PRIVATE ${TANGENT_WARNINGS})
+add_test(NAME decimate COMMAND test_decimate)
 
 add_executable(test_bvh tests/test_bvh.cpp)
 target_include_directories(test_bvh PRIVATE src)

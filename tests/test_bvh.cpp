@@ -98,6 +98,63 @@ int main() {
         check(got > 8.0 && got < 12.0, "an axis-aligned ray from the centre hits the shell");
     }
 
+    // --- nearest point ----------------------------------------------------
+    // Same standard: against every triangle, including points far outside the
+    // shell, deep inside it, and right on it, and with a search radius small
+    // enough that some queries must come back with nothing.
+    {
+        // The reference is deliberately a different method from the tree's:
+        // the nearest point on each triangle by projecting onto the plane and
+        // clamping into the triangle through its edges and vertices.
+        auto refNearest2 = [&](Vec3 p) {
+            Real best = 1e300;
+            auto seg2 = [](Vec3 q, Vec3 a, Vec3 b) {
+                const Vec3 ab = b - a;
+                const Real L = lengthSq(ab);
+                Real t = L > 0 ? dot(q - a, ab) / L : 0;
+                t = t < 0 ? 0 : (t > 1 ? 1 : t);
+                return lengthSq(q - (a + ab * t));
+            };
+            for (size_t t = 0; t + 2 < tris.size(); t += 3) {
+                const Vec3 a = pos[tris[t]], b = pos[tris[t + 1]], c = pos[tris[t + 2]];
+                const Vec3 n = cross(b - a, c - a);
+                const Real nn = lengthSq(n);
+                Real d = std::min({seg2(p, a, b), seg2(p, b, c), seg2(p, c, a)});
+                if (nn > 0) {
+                    const Vec3 q = p - n * (dot(p - a, n) / nn);
+                    const bool in = dot(cross(b - a, q - a), n) >= 0 &&
+                                    dot(cross(c - b, q - b), n) >= 0 &&
+                                    dot(cross(a - c, q - c), n) >= 0;
+                    if (in) d = std::min(d, lengthSq(p - q));
+                }
+                best = std::min(best, d);
+            }
+            return best;
+        };
+
+        int wrong = 0, capped = 0;
+        const int queries = 1500;
+        for (int q = 0; q < queries; ++q) {
+            const Real scale = q % 3 == 0 ? 25.0 : (q % 3 == 1 ? 11.5 : 6.0);
+            Vec3 p{u(rng) * scale, u(rng) * scale, u(rng) * scale};
+            const Real want = std::sqrt(refNearest2(p));
+            const Real radius = q % 5 == 0 ? 0.5 : 100.0;
+            uint32_t tri = 0xffffffffu;
+            const Real got = bvh.nearestPoint(p, radius, &tri);
+            if (want >= radius) {
+                ++capped;
+                if (got != radius) ++wrong;
+            } else {
+                if (std::fabs(got - want) > 1e-9 * (1 + want)) ++wrong;
+                if (tri == 0xffffffffu) ++wrong;
+            }
+        }
+        std::printf("  %d nearest-point queries, %d beyond their radius, %d wrong\n",
+                    queries, capped, wrong);
+        check(capped > 0 && capped < queries, "some queries fall outside their radius and some do not");
+        check(wrong == 0, "the nearest point agrees with checking every triangle");
+    }
+
     std::printf("%s\n", failures ? "FAILED" : "ok");
     return failures ? 1 : 0;
 }

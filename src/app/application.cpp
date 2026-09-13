@@ -3619,12 +3619,12 @@ void Application::stepMeshBench() {
 
         // With the real limit, which is what a user gets.
         const SolidifyResult sc = toSolid(copy, 4242);
-        if (!sc.ok && predicted < 20000) {
+        if (!sc.ok && predicted < 100000) {
             // And what it would have cost had it been let through, so the limit
             // is a measured choice rather than a guess.
             Body forced = body;
             auto tx0 = Clock::now();
-            const SolidifyResult fx = toSolid(forced, 4243, 20000);
+            const SolidifyResult fx = toSolid(forced, 4243, 200000);
             auto tx1 = Clock::now();
             say("toSolid, limit lifted", ms(tx0, tx1));
             auto th0 = Clock::now();
