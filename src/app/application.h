@@ -614,6 +614,49 @@ private:
 
     bool justFinishedModal_ = false;
 
+    // The panel of an operation that has been applied and not yet dismissed.
+    //
+    // A gesture is confirmed with a click in the viewport, which meant its
+    // panel vanished at the moment the pointer was free to reach it -- so every
+    // control on it was only reachable by first dragging the value across the
+    // whole viewport to get there, which is to say not reachable at all. The
+    // panel now stays up after the click. The operation is applied, the pointer
+    // no longer drives anything, and the controls adjust what was just made.
+    //
+    // Blender calls this Adjust Last Operation and Plasticity leaves the same
+    // panel floating; Fusion and Onshape sidestep it by never confirming on a
+    // viewport click in the first place. This is the first of those, because
+    // this app does confirm on a click.
+    enum class Settled { None, Fillet, Divide, Face, Pattern };
+    Settled  settled_ = Settled::None;
+    ObjectId settledObject_ = kNoObject;
+
+    // The chain as the panel left it. An adjustment that will not build puts
+    // this back, so the model and the undo entry never disagree.
+    std::vector<Feature> settledAfter_;
+
+    // Set while an adjustment is being applied, so the commit folds into the
+    // undo entry it is adjusting rather than stacking a new one per keystroke.
+    bool recommitting_ = false;
+
+    // Bumped every time an operation is successfully applied. A refusal is not
+    // visible any other way from out here: a commit that fails puts the chain
+    // back to before the operation, and for a pattern that replaced a boolean
+    // that chain is the same length as the one that succeeded.
+    size_t settleSerial_ = 0;
+
+    // Applies the panel's current values again, over the top of the last
+    // application rather than after it.
+    void recommitSettled();
+
+    // Records that an operation has been applied and its panel should stay.
+    void settleCommand(Settled kind, ObjectId id);
+
+    // Puts the panel away, keeping what it made.
+    void dismissSettled();
+
+    bool settledIs(Settled k) const { return settled_ == k; }
+
     // Combines the two selected objects. The first selected is kept and
     // becomes the result; the second is consumed as the tool.
     void applyBoolean(BooleanOp op);

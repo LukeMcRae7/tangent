@@ -53,9 +53,15 @@ bool commandNumber(const char* label, double value, const char* unit,
 // One dim line of guidance, at the foot of the rows.
 void commandHint(const char* text);
 
+// Says the operation has already been applied and the panel is now adjusting
+// it rather than building it. In the accent colour, because it is a change of
+// what the panel means and not another piece of guidance.
+void commandApplied(const char* what);
+
 // The commit and the cancel. Returns 1 for commit, -1 for cancel, 0 for
 // neither. The commit is drawn in the brand colour, since it is the one thing
-// on the panel that finishes the operation.
+// on the panel that finishes the operation. A null `cancelLabel` leaves the
+// cancel out, for a panel whose operation has already been applied.
 int commandFooter(const char* commitLabel, bool commitEnabled = true,
                   const char* cancelLabel = "Cancel  (Esc)");
 

@@ -117,6 +117,15 @@ void commandHint(const char* text) {
     ImGui::PopStyleColor();
 }
 
+void commandApplied(const char* what) {
+    ImGui::Spacing();
+    ImGui::PushStyleColor(ImGuiCol_Text, im(palette::kBrand));
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::Text("%s applied. Change anything here to adjust it.", what);
+    ImGui::PopTextWrapPos();
+    ImGui::PopStyleColor();
+}
+
 int commandFooter(const char* commitLabel, bool commitEnabled, const char* cancelLabel) {
     ImGui::Spacing();
     ImGui::Separator();
@@ -124,7 +133,11 @@ int commandFooter(const char* commitLabel, bool commitEnabled, const char* cance
 
     int result = 0;
     const float avail = ImGui::GetContentRegionAvail().x;
-    const float cancelW = ImGui::CalcTextSize(cancelLabel).x + ImGui::GetStyle().FramePadding.x * 2.0f;
+    // No cancel at all: an operation that has already been applied has nothing
+    // to cancel, and a button that says otherwise is a lie about what it does.
+    const float cancelW = cancelLabel
+        ? ImGui::CalcTextSize(cancelLabel).x + ImGui::GetStyle().FramePadding.x * 2.0f
+        : -ImGui::GetStyle().ItemSpacing.x;
 
     ImGui::PushStyleColor(ImGuiCol_Button, im(palette::kBrand, 0.85f));
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, im(palette::kBrand, 1.0f));
@@ -133,13 +146,15 @@ int commandFooter(const char* commitLabel, bool commitEnabled, const char* cance
     if (commitLabel) {
         if (ImGui::Button(commitLabel, ImVec2(avail - cancelW - ImGui::GetStyle().ItemSpacing.x, 0.0f)))
             result = 1;
-        ImGui::SameLine();
+        if (cancelLabel) ImGui::SameLine();
     }
     ImGui::EndDisabled();
     ImGui::PopStyleColor(3);
 
-    if (!commitLabel) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + avail - cancelW);
-    if (ImGui::Button(cancelLabel, ImVec2(commitLabel ? cancelW : cancelW, 0.0f))) result = -1;
+    if (cancelLabel) {
+        if (!commitLabel) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + avail - cancelW);
+        if (ImGui::Button(cancelLabel, ImVec2(cancelW, 0.0f))) result = -1;
+    }
     return result;
 }
 

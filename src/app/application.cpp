@@ -629,6 +629,7 @@ Vec2 Application::mouseInViewport() const {
 }
 
 void Application::beginTransform(TransformMode mode) {
+    dismissSettled();
     measure_.end();
 
     if (const SceneObject* o = scene_.find(scene_.contextObject()))
@@ -772,6 +773,10 @@ void Application::handleViewportMouse() {
 // a CAD tool does. Ctrl+click takes the whole object instead, matching what
 // clicking its row in the outliner does. Shift extends either.
 void Application::handleViewportClick(bool shift, bool ctrl) {
+    // Clicking in the viewport is the start of the next thing, whatever it
+    // turns out to be. The panel of the last operation has had its chance.
+    dismissSettled();
+
     const Vec2 cursor = mouseInViewport();
     const Ray ray = camera_.rayThroughPixel(cursor.x, cursor.y);
 
@@ -840,7 +845,16 @@ void Application::drawReadout(const std::string& text, float px, float py,
 // with parameters gets a panel; that is the rule the create tool follows and
 // there is no reason for this one to be different.
 void Application::drawFilletPanel() {
-    if (!filletTool_.active) return;
+    const bool settled = settledIs(Settled::Fillet);
+    if (!filletTool_.active && !settled) return;
+
+    auto signature = [&] {
+        char b[96];
+        std::snprintf(b, sizeof b, "%d|%.9g|%.9g", (int)filletTool_.chamfer,
+                      filletTool_.currentRadius, filletTool_.endRadius);
+        return std::string(b);
+    };
+    const std::string was = settled ? signature() : std::string();
 
     if (!ui::beginCommand("##fillet", filletTool_.chamfer ? "Chamfer" : "Fillet",
                           filletTool_.chamfer ? Icon::Chamfer : Icon::Fillet,
@@ -910,19 +924,37 @@ void Application::drawFilletPanel() {
         }
     }
 
+    if (settled) ui::commandApplied(filletTool_.chamfer ? "Chamfer" : "Fillet");
     ui::commandHint(filletTool_.chamfer
         ? "Pull along the arrow, or type a distance. The cut is the same from both faces."
         : "Pull along the arrow, or type a radius.");
 
-    const int footer = ui::commandFooter("OK  (Click)");
+    const int footer = settled ? ui::commandFooter("Done", true, nullptr)
+                               : ui::commandFooter("OK  (Click)");
     ui::endCommand();
 
+    if (settled) {
+        if (footer > 0)             dismissSettled();
+        else if (signature() != was) recommitSettled();
+        return;
+    }
     if (footer > 0)      commitFillet();
     else if (footer < 0) abortFillet();
 }
 
 void Application::drawFacePanel() {
-    if (!faceTool_.active) return;
+    const bool settled = settledIs(Settled::Face);
+    if (!faceTool_.active && !settled) return;
+
+    auto signature = [&] {
+        char b[96];
+        std::snprintf(b, sizeof b, "%d|%.9g|%.9g|%.9g|%.9g", (int)faceTool_.op,
+                      faceTool_.value, faceTool_.direction.x,
+                      faceTool_.direction.y, faceTool_.direction.z);
+        return std::string(b);
+    };
+    const std::string was = settled ? signature() : std::string();
+
     const bool rotate  = faceTool_.op == FaceOp::Rotate;
     const bool scale   = faceTool_.op == FaceOp::Scale;
     const bool extrude = faceTool_.op == FaceOp::Extrude;
@@ -1041,14 +1073,38 @@ void Application::drawFacePanel() {
         : "Moves the face; the body follows. X / Y / Z move it along a world "
           "axis instead of its own.");
 
-    const int footer = ui::commandFooter("OK  (Click)");
+    if (settled)
+        ui::commandApplied(rotate ? "Rotation" : scale ? "Scale"
+                                  : extrude ? "Extrude" : "Move");
+
+    const int footer = settled ? ui::commandFooter("Done", true, nullptr)
+                               : ui::commandFooter("OK  (Click)");
     ui::endCommand();
+    if (settled) {
+        if (footer > 0)             dismissSettled();
+        else if (signature() != was) recommitSettled();
+        return;
+    }
     if (footer > 0)      commitFaceMove();
     else if (footer < 0) abortFaceMove();
 }
 
 void Application::drawPatternPanel() {
-    if (!patternTool_.active) return;
+    const bool settled = settledIs(Settled::Pattern);
+    if (!patternTool_.active && !settled) return;
+
+    // What the panel is showing, so that a control moved while the operation is
+    // already applied re-applies it. Comparing one signature across the frame
+    // beats hanging a call off every widget: a control added later is covered
+    // by having been drawn, not by being remembered.
+    auto signature = [&] {
+        char b[96];
+        std::snprintf(b, sizeof b, "%d|%d|%d|%d|%.9g", (int)patternTool_.mode,
+                      patternTool_.count, patternTool_.axisIndex,
+                      (int)patternTool_.useTool, patternTool_.dragged());
+        return std::string(b);
+    };
+    const std::string was = settled ? signature() : std::string();
 
     const bool mirror = patternTool_.mode == PatternMode::Mirror;
     if (!ui::beginCommand("##pattern", mirror ? "Mirror" : "Pattern",
@@ -1154,6 +1210,7 @@ void Application::drawPatternPanel() {
         }
     }
 
+    if (settled) ui::commandApplied(mirror ? "Mirror" : "Pattern");
     ui::commandHint(mirror
         ? (patternTool_.useTool
                ? "The last cut is reflected across the plane and made again."
@@ -1162,14 +1219,21 @@ void Application::drawPatternPanel() {
                ? "The last cut is repeated. Its first copy is where it already is."
                : "The body is repeated, and the copies fuse where they meet."));
 
-    const int footer = ui::commandFooter("OK  (Click)");
+    const int footer = settled ? ui::commandFooter("Done", true, nullptr)
+                               : ui::commandFooter("OK  (Click)");
     ui::endCommand();
+    if (settled) {
+        if (footer > 0)            dismissSettled();
+        else if (signature() != was) recommitSettled();
+        return;
+    }
     if (footer > 0)      commitPattern();
     else if (footer < 0) abortPattern();
 }
 
 void Application::drawDividePanel() {
-    if (!divideTool_.active) return;
+    const bool settled = settledIs(Settled::Divide);
+    if (!divideTool_.active && !settled) return;
 
     if (!ui::beginCommand("##divide", "Divide", Icon::Inset,
                           viewRect_.x + 16.0f, viewRect_.y + 16.0f))
@@ -1186,11 +1250,17 @@ void Application::drawDividePanel() {
     std::snprintf(of, sizeof of, "%.2f mm", len);
     ui::commandValue("Edge", of);
 
+    if (settled) ui::commandApplied("Divide");
     ui::commandHint("The cut runs square across the edge you chose and slides "
                     "along it. The body stays whole.");
 
-    const int footer = ui::commandFooter("OK  (Click)");
+    const int footer = settled ? ui::commandFooter("Done", true, nullptr)
+                               : ui::commandFooter("OK  (Click)");
     ui::endCommand();
+    if (settled) {
+        if (footer > 0) dismissSettled();
+        return;
+    }
     if (footer > 0)      commitDivide();
     else if (footer < 0) abortDivide();
 }
@@ -1436,6 +1506,19 @@ void Application::handleShortcuts() {
             refresh();
         }
     };
+
+    // A panel that is only waiting to be dismissed. Escape and Enter both put
+    // it away and keep what it made: there is nothing left to cancel here, and
+    // an Escape that quietly undid a finished operation would be a trap.
+    // Ctrl+Z is still the way to take it back, and it dismisses too.
+    if (settled_ != Settled::None) {
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape, false) ||
+            ImGui::IsKeyPressed(ImGuiKey_Enter, false) ||
+            ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false)) {
+            dismissSettled();
+            return;
+        }
+    }
 
     if (faceTool_.active) {
         if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) { abortFaceMove(); return; }
@@ -1956,6 +2039,7 @@ static Real materialBehindEdges(const SceneObject& obj,
 // ---------------------------------------------------------------------------
 
 void Application::beginFaceMove(FaceOp op) {
+    dismissSettled();
     if (tool_.active() || filletTool_.active || createTool_.active() ||
         faceTool_.active || divideTool_.active || patternTool_.active)
         return;
@@ -2333,8 +2417,15 @@ void Application::commitFaceMove() {
             }
         }
 
-        if (parts.size() == 1) undo_.push(std::move(parts.front()));
-        else undo_.push(std::make_unique<CompositeCommand>(std::move(parts), label));
+        if (parts.size() == 1) {
+            undo_.push(std::move(parts.front()), /*merge=*/recommitting_);
+            settleCommand(Settled::Face, id);
+        } else {
+            // The move ran into another body and absorbed it. That other body
+            // is gone, so there is nothing left to adjust this against and the
+            // panel does not stay.
+            undo_.push(std::make_unique<CompositeCommand>(std::move(parts), label));
+        }
     } else {
         obj->features = std::move(chainBefore);
         obj->body = std::move(faceTool_.before);
@@ -2395,10 +2486,67 @@ void Application::mergeSelected() {
     setNotice(msg);
 }
 
+// A panel that has been applied and is waiting to be dismissed.
+//
+// The tool's own state is left exactly as it was, which is what lets the panel
+// keep drawing its values and lets an adjustment re-run the same commit from
+// the same starting chain.
+void Application::settleCommand(Settled kind, ObjectId id) {
+    ++settleSerial_;
+    if (!recommitting_) {                   // a fresh operation, not a redo of one
+        settled_ = kind;
+        settledObject_ = id;
+    }
+    if (const SceneObject* o = scene_.find(id)) settledAfter_ = o->features;
+}
+
+void Application::dismissSettled() {
+    if (settled_ == Settled::None) return;
+    settled_ = Settled::None;
+    settledObject_ = kNoObject;
+    settledAfter_.clear();
+    // The next edit is its own undo step, not more of this one.
+    undo_.breakMergeChain();
+    filletTool_.preview.cancel();
+    divideTool_.preview.cancel();
+    faceTool_.preview.cancel();
+    patternTool_.preview.cancel();
+}
+
+void Application::recommitSettled() {
+    if (settled_ == Settled::None) return;
+    const Settled kind = settled_;
+    const ObjectId id = settledObject_;
+
+    const size_t applied = settleSerial_;
+    recommitting_ = true;
+    switch (kind) {
+        case Settled::Fillet:  filletTool_.active = true;  commitFillet();   break;
+        case Settled::Divide:  divideTool_.active = true;  commitDivide();   break;
+        case Settled::Face:    faceTool_.active = true;    commitFaceMove(); break;
+        case Settled::Pattern: patternTool_.active = true; commitPattern();  break;
+        case Settled::None:    break;
+    }
+    recommitting_ = false;
+
+    SceneObject* obj = scene_.find(id);
+    if (!obj) { dismissSettled(); return; }
+
+    // An adjustment the kernel refused leaves the chain where the commit put it
+    // back -- before the operation entirely. The undo entry still says the
+    // operation happened, so the model goes back to agreeing with it, and the
+    // notice the commit already set says why the new value was not taken.
+    if (settleSerial_ == applied) {
+        obj->features = settledAfter_;
+        scene_.reevaluate(id);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Pattern and mirror.
 
 void Application::beginPattern(PatternMode mode) {
+    dismissSettled();
     if (tool_.active() || filletTool_.active || createTool_.active() ||
         faceTool_.active || divideTool_.active || patternTool_.active)
         return;
@@ -2613,7 +2761,9 @@ void Application::commitPattern() {
 
     if (ok && editKeepsSolid(id)) {
         undo_.push(std::make_unique<FeatureCommand>(id, std::move(chainBefore),
-                                                    obj->features, label));
+                                                    obj->features, label),
+                   /*merge=*/recommitting_);
+        settleCommand(Settled::Pattern, id);
         scene_.clearElementSelection();
     } else {
         obj->features = std::move(chainBefore);
@@ -2637,6 +2787,7 @@ void Application::abortPattern() {
 }
 
 void Application::beginDivide() {
+    dismissSettled();
     if (tool_.active() || filletTool_.active || createTool_.active() ||
         faceTool_.active || divideTool_.active || patternTool_.active)
         return;
@@ -2743,7 +2894,9 @@ void Application::commitDivide() {
     std::string why;
     if (scene_.addFeature(id, std::move(f), &why) && editKeepsSolid(id)) {
         undo_.push(std::make_unique<FeatureCommand>(id, std::move(chainBefore),
-                                                    obj->features, "Divide"));
+                                                    obj->features, "Divide"),
+                   /*merge=*/recommitting_);
+        settleCommand(Settled::Divide, id);
         scene_.clearElementSelection();
     } else {
         obj->features = std::move(chainBefore);
@@ -2856,6 +3009,7 @@ FilletSpec Application::filletSpecAt(Real radius) const {
 }
 
 void Application::beginFillet() {
+    dismissSettled();
     if (tool_.active() || filletTool_.active || createTool_.active()) return;
 
     const ObjectId id = scene_.contextObject();
@@ -3232,7 +3386,7 @@ void Application::stepPatternDemo() {
         base.kind = PrimitiveKind::Box;
         base.box = {100, 20, 10};
         id = scene_.addPrimitive(PrimitiveKind::Box, base);
-    } else if (mode == 2 || mode == 5) {
+    } else if (mode == 2 || mode == 5 || mode == 6 || mode == 7) {
         base.kind = PrimitiveKind::Cylinder;
         base.cylinder = {30, 6, 64};
         id = scene_.addPrimitive(PrimitiveKind::Cylinder, base);
@@ -3253,7 +3407,7 @@ void Application::stepPatternDemo() {
     };
 
     // A boolean first, where the pattern is meant to repeat one.
-    if (mode == 1 || mode == 2 || mode == 4 || mode == 5) {
+    if (mode != 3) {
         PrimitiveSpec ts;
         ts.kind = PrimitiveKind::Cylinder;
         ts.cylinder = {mode == 4 ? Real(4) : Real(3), 40, 48};
@@ -3281,7 +3435,7 @@ void Application::stepPatternDemo() {
     if (mode == 1) {
         patternTool_.typedValue = "15";
         patternTool_.count = 5;
-    } else if (mode == 2 || mode == 5) {
+    } else if (mode == 2 || mode == 5 || mode == 6 || mode == 7) {
         patternTool_.axisIndex = 2;
         setPatternMode(PatternMode::Circular);
         patternTool_.count = 8;
@@ -3296,13 +3450,47 @@ void Application::stepPatternDemo() {
     updatePattern(false, /*follow=*/false);
     report("previewed");
 
-    if (mode == 5) return;          // left open, so the panel can be seen
+    if (mode == 5) return;          // left open mid-gesture, to be seen
     std::fprintf(stderr, "[pattern-demo] plane/axis %d at %.2f, useTool=%d\n",
                  patternTool_.axisIndex, patternTool_.offset, (int)patternTool_.useTool);
     commitPattern();
     report("committed");
     if (!ui_.notice.empty())
         std::fprintf(stderr, "[pattern-demo] notice: %s\n", ui_.notice.c_str());
+
+    // 6 goes on to do what the panel is there for: the operation is applied,
+    // the pointer is free, and the count is changed from a control that used to
+    // be unreachable without dragging the whole gesture across the viewport.
+    if (mode == 6) {
+        std::fprintf(stderr, "[pattern-demo] settled=%d  undo=\"%s\"\n",
+                     (int)(settled_ == Settled::Pattern), undo_.undoLabel().c_str());
+        for (int n : {6, 12, 3}) {
+            patternTool_.count = n;
+            patternTool_.stepAngle = radians(360.0 / n);
+            recommitSettled();
+            const SceneObject* o = scene_.find(id);
+            std::fprintf(stderr, "[pattern-demo] adjusted to %d: %d faces, %.1f mm3, "
+                                 "%zu features, undo depth %zu\n",
+                         n, o->body.faceCount(), o->body.health(false).volume,
+                         o->features.size(), undo_.depth());
+        }
+        // And one the kernel will not take, to see the model and the undo entry
+        // stay in step rather than drifting apart. A count of one is refused
+        // outright; the panel cannot ask for it, but a refusal from any cause
+        // comes back through here the same way.
+        patternTool_.count = 1;
+        recommitSettled();
+        const SceneObject* o = scene_.find(id);
+        std::fprintf(stderr, "[pattern-demo] after a refused adjustment: %d faces, "
+                             "%.1f mm3, %zu features, undo depth %zu\n",
+                     o->body.faceCount(), o->body.health(false).volume,
+                     o->features.size(), undo_.depth());
+        dismissSettled();
+        std::fprintf(stderr, "[pattern-demo] dismissed: settled=%d\n",
+                     (int)(settled_ == Settled::Pattern));
+    }
+    // 7 stops with the panel settled, which is the state this is all for: the
+    // ring is cut, the pointer is free, and the count is still there to change.
 }
 
 void Application::stepFaceDemo() {
@@ -3670,6 +3858,41 @@ void Application::stepPreviewCheck() {
                  (p2->body.faceCount() == previewFaces &&
                   std::fabs(p2->body.health(false).volume - previewVolume) < 1e-3)
                      ? "SAME" : "DIFFERENT -- the preview lied");
+
+    // 6 carries on into the panel that is still up: the fillet is cut and the
+    // pointer is free, so Round/Flat and the taper are finally reachable
+    // without dragging the radius across the viewport to get to them.
+    if (previewCheck_ == 6) {
+        std::fprintf(stderr, "[preview] settled=%d  undo=\"%s\"  depth %zu\n",
+                     (int)(settled_ == Settled::Fillet), undo_.undoLabel().c_str(),
+                     undo_.depth());
+        auto say = [&](const char* what) {
+            const SceneObject* o = scene_.find(id);
+            std::fprintf(stderr, "[preview] %s: %d faces, %.1f mm3, %zu features, "
+                                 "last=%s, undo depth %zu\n",
+                         what, o->body.faceCount(), o->body.health(false).volume,
+                         o->features.size(), o->features.back().summary().c_str(),
+                         undo_.depth());
+        };
+        filletTool_.chamfer = true;
+        recommitSettled();
+        say("switched to a flat cut");
+
+        filletTool_.chamfer = false;
+        filletTool_.endRadius = 2.0;
+        recommitSettled();
+        say("switched to a taper");
+
+        // Something the kernel will not take, to see the last good result stand.
+        filletTool_.endRadius = -1.0;
+        filletTool_.currentRadius = 1e6;
+        recommitSettled();
+        say("after a refused adjustment");
+
+        dismissSettled();
+        std::fprintf(stderr, "[preview] dismissed: settled=%d\n",
+                     (int)(settled_ == Settled::Fillet));
+    }
 }
 
 void Application::stepPrintDemo() {
@@ -4000,7 +4223,9 @@ void Application::commitFillet() {
     std::string why;
     if (scene_.addFeature(id, std::move(f), &why) && editKeepsSolid(id)) {
         undo_.push(std::make_unique<FeatureCommand>(id, std::move(chainBefore),
-                                                    obj->features, "Fillet"));
+                                                    obj->features, "Fillet"),
+                   /*merge=*/recommitting_);
+        settleCommand(Settled::Fillet, id);
     } else {
         obj->features = std::move(chainBefore);
         obj->body = std::move(filletTool_.meshBefore);
@@ -4079,7 +4304,9 @@ bool Application::extendLastFillet(SceneObject& obj, Real radius) {
 
     setNotice("Added to the fillet above");
     undo_.push(std::make_unique<FeatureCommand>(obj.id, std::move(chainBefore),
-                                                obj.features, "Fillet"));
+                                                obj.features, "Fillet"),
+               /*merge=*/recommitting_);
+    settleCommand(Settled::Fillet, obj.id);
     return true;
 }
 
@@ -4491,6 +4718,15 @@ void Application::drawFilePrompt() {
 void Application::applyActions() {
     UiActions& a = ui_.actions;
 
+    // Anything that changes the model, or what the model is, is the start of
+    // the next thing. The gestures put their own panel away in begin*; this
+    // catches the commands that are not gestures.
+    if (a.addRequested || a.deleteSelected || a.duplicateSelected || a.mergeFaces ||
+        a.booleanRequested || a.split || a.shell || a.undo || a.redo ||
+        a.newProject || a.openProject || a.rebuildObject != kNoObject ||
+        a.transformEdited != kNoObject || a.featuresEdited != kNoObject)
+        dismissSettled();
+
     if (a.quit && confirmDiscard(PendingAction::Quit)) running_ = false;
 
     if (a.newProject && confirmDiscard(PendingAction::New))   newProject();
@@ -4503,8 +4739,8 @@ void Application::applyActions() {
         else                      runFileOperation(FileMode::Save, projectPath_);
     }
 
-    if (a.undo) undo_.undo(scene_);
-    if (a.redo) undo_.redo(scene_);
+    if (a.undo) { dismissSettled(); undo_.undo(scene_); }
+    if (a.redo) { dismissSettled(); undo_.redo(scene_); }
 
     if (a.addRequested) {
         beginAddPrimitivePrompt(a.addKind);

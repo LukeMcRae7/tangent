@@ -212,6 +212,10 @@ public:
     // every edit path.
     size_t revision() const { return revision_; }
 
+    // How many steps are on the stack. For a test that wants to know an
+    // adjustment folded into the step it was adjusting rather than stacking.
+    size_t depth() const { return done_.size(); }
+
     bool canUndo() const { return !done_.empty(); }
     bool canRedo() const { return !undone_.empty(); }
     std::string undoLabel() const { return done_.empty() ? "" : done_.back()->label(); }
