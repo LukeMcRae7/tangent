@@ -142,5 +142,13 @@ bool readStep(const std::string&, ElementId, std::vector<BrepRef>&, std::string*
     return false;
 }
 
+BrepRef solidFromTriangles(const std::vector<Vec3>&, const std::vector<uint32_t>&,
+                           ElementId, std::string* reason) {
+    if (reason)
+        *reason = "converting a mesh to a solid needs the exact kernel, "
+                  "which this build does not have";
+    return {};
+}
+
 } // namespace brep
 } // namespace tg

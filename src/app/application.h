@@ -201,7 +201,14 @@ private:
 
     // File handling. There is no native dialog to call on Wayland without
     // taking a dependency, so the prompt is an in-app path field.
-    enum class FileMode { None, Open, Save, ExportStl, ExportStep, ImportStep };
+    enum class FileMode { None, Open, Save, ExportStl, ExportStep, ImportStep,
+                          ImportMesh };
+
+    // Turns the selected mesh body into an exact one. Its own command rather
+    // than something the import does on its own: a mesh that will not convert
+    // is still worth having on screen, and a mesh that converts badly is worth
+    // seeing before it replaces what you had.
+    void convertSelectedToSolid();
     void drawFilePrompt();
     void beginFilePrompt(FileMode mode);
     void runFileOperation(FileMode mode, const std::string& path);

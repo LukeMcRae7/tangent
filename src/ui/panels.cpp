@@ -211,6 +211,8 @@ void drawMenuBar(UiContext& ctx) {
         ImGui::Separator();
         if (ImGui::MenuItem("Import STEP...")) ctx.actions.importStep = true;
         ImGui::TextColored(kDim, "  brings in the surfaces, not a mesh of them");
+        if (ImGui::MenuItem("Import Mesh...")) ctx.actions.importMesh = true;
+        ImGui::TextColored(kDim, "  .stl or .obj, as triangles");
         ImGui::Separator();
         if (ImGui::MenuItem("Export STEP...")) ctx.actions.exportStep = true;
         ImGui::TextColored(kDim, "  exact; what another CAD package wants");
@@ -267,6 +269,22 @@ void drawMenuBar(UiContext& ctx) {
             ctx.actions.divide = true;
         if (ImGui::MenuItem("Merge Faces", nullptr, false, hasObject))
             ctx.actions.mergeFaces = true;
+        ImGui::Separator();
+        {
+            // Only offered where it would do something. A body that is already
+            // exact has nothing to convert, and a menu item that greys out with
+            // no explanation is a worse answer than one that says why.
+            const SceneObject* o = ctx.scene->find(ctx.scene->contextObject());
+            const bool isMesh = o && !o->body.empty() && o->body.isMesh();
+            if (ImGui::MenuItem("Convert to Solid", nullptr, false, isMesh))
+                ctx.actions.convertToSolid = true;
+            if (isMesh)
+                ImGui::TextColored(kDim, "  sews the triangles and merges flat ones");
+            else if (o)
+                ImGui::TextColored(kDim, "  this body is already exact");
+            else
+                ImGui::TextColored(kDim, "  for an imported mesh");
+        }
         ImGui::Separator();
         if (ImGui::MenuItem("Pattern...", "P", false, hasObject))
             ctx.actions.pattern = true;

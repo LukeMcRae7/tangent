@@ -1,4 +1,6 @@
 #include "app/application.h"
+
+#include "mesh/import_mesh.h"
 #include "geom/kernel_guard.h"
 #include "render/lod.h"
 #include "ui/command_panel.h"
@@ -1919,6 +1921,54 @@ void Application::bevelActiveObject() {
                                                 obj->features, "Bevel"));
 }
 
+void Application::convertSelectedToSolid() {
+    dismissSettled();
+    const ObjectId id = scene_.contextObject();
+    SceneObject* obj = scene_.find(id);
+    if (!obj) { setNotice("Select a mesh to convert"); return; }
+    if (!obj->body.isMesh()) { setNotice("That body is already exact"); return; }
+
+    Body converted = obj->body;
+    const SolidifyResult r = toSolid(converted, scene_.nextImportSalt());
+    if (!r.ok) {
+        setNotice(r.error.empty() ? "It could not be made solid" : "Not converted: " + r.error);
+        return;
+    }
+
+    // The whole chain is replaced rather than appended to. The root was a
+    // BaseMesh holding triangles; it now holds a solid, and every step after it
+    // re-runs against that. In practice an imported mesh has no later steps,
+    // but a user who modelled on it before converting should not lose the work.
+    std::vector<Feature> chainBefore = obj->features;
+    std::vector<Feature> next = obj->features;
+    bool replaced = false;
+    for (Feature& f : next) {
+        if (f.kind != FeatureKind::BaseMesh) continue;
+        f.bakedBody = converted;
+        f.backend = Backend::Brep;
+        replaced = true;
+        break;
+    }
+    if (!replaced) { setNotice("That body did not come from an import"); return; }
+
+    std::string why;
+    if (!scene_.setFeatures(id, std::move(next), &why)) {
+        setNotice(why.empty() ? "It could not be made solid"
+                              : "Not converted: " + why);
+        return;
+    }
+    undo_.push(std::make_unique<FeatureCommand>(id, std::move(chainBefore),
+                                                obj->features, "Convert to Solid"));
+
+    char buf[192];
+    std::snprintf(buf, sizeof buf,
+                  "Converted: %d triangles became %d faces%s", r.facesBefore,
+                  r.facesAfter,
+                  r.facesAfter < r.facesBefore / 2
+                      ? "" : "  (little merged: the mesh may not have been CAD)");
+    setNotice(buf);
+}
+
 void Application::insetSelectedFaces() {
     dismissSettled();
     const ObjectId target = scene_.contextObject();
@@ -3429,6 +3479,37 @@ void Application::stepStepDemo() {
                  facesBefore, before, o->transform.position.x,
                  o->transform.position.y, o->transform.position.z);
 
+    // Out as STL and back in as triangles, then converted -- the other half of
+    // the exchange story, and the one the mesh backend now exists for.
+    {
+        const std::string stl = stepDemo_ + ".stl";
+        StlOptions opt;
+        opt.binary = true;
+        opt.deviationMm = 0.05;
+        const StlResult sr = exportStl(scene_, stl, opt);
+        std::fprintf(stderr, "[step-demo] stl out: ok=%d, %zu triangles\n",
+                     (int)sr.ok, sr.triangles);
+
+        Body mesh;
+        const MeshImport mi = readMesh(stl, mesh);
+        std::fprintf(stderr, "[step-demo] stl in: ok=%d, %zu triangles, closed=%d%s\n",
+                     (int)mi.ok, mi.triangles, (int)mi.closed, mi.error.c_str());
+        if (mi.ok) {
+            std::fprintf(stderr, "[step-demo] as a mesh: %.1f mm3\n",
+                         mesh.health(false).volume);
+            const SolidifyResult sc = toSolid(mesh, 777);
+            std::fprintf(stderr, "[step-demo] convert: ok=%d, %d tris -> %d faces%s\n",
+                         (int)sc.ok, sc.facesBefore, sc.facesAfter, sc.error.c_str());
+            if (sc.ok) {
+                // Flat faces come back; the curved wall does not, and the
+                // volume says by how much.
+                std::fprintf(stderr, "[step-demo] converted: %.1f mm3, valid=%d\n",
+                             mesh.health(false).volume, (int)mesh.validate());
+            }
+        }
+        std::remove(stl.c_str());
+    }
+
     runFileOperation(FileMode::ExportStep, stepDemo_);
     std::fprintf(stderr, "[step-demo] export: %s\n", notice_.c_str());
 
@@ -4710,7 +4791,7 @@ void Application::beginFilePrompt(FileMode mode) {
         withSuffix("model.stl", ".stl");
     } else if (mode == FileMode::ExportStep) {
         withSuffix("model.step", ".step");
-    } else if (mode == FileMode::ImportStep) {
+    } else if (mode == FileMode::ImportStep || mode == FileMode::ImportMesh) {
         seed = "";                       // there is no sensible guess at a name
     } else if (seed.empty()) {
         seed = "untitled.tangent";
@@ -4758,6 +4839,29 @@ void Application::runFileOperation(FileMode mode, const std::string& path) {
         } else {
             setNotice("Open failed: " + r.error);
         }
+        break;
+    }
+    case FileMode::ImportMesh: {
+        Body body;
+        const MeshImport r = readMesh(path, body);
+        if (!r.ok) {
+            setNotice(r.error.empty() ? "Import failed" : "Import failed: " + r.error);
+            break;
+        }
+        const ObjectId id = scene_.addImportedBody(std::move(body), fileStem(path));
+        if (id == kNoObject) { setNotice("That mesh could not be brought in"); break; }
+
+        undo_.push(ExistenceCommand::forCreate(scene_, {id}));
+        scene_.clearSelection();
+        scene_.select(id);
+        camera_.frame(scene_.bounds());
+
+        // Whether it is closed decides whether it can become a solid, and
+        // saying so now saves the user finding out by trying.
+        std::string note = "Imported " + std::to_string(r.triangles) + " triangles from " + path;
+        note += r.closed ? "  (closed: Modify > Convert to Solid will work)"
+                         : "  (open surface: it cannot become a solid)";
+        setNotice(note);
         break;
     }
     case FileMode::ExportStep: {
@@ -4918,6 +5022,7 @@ void Application::applyActions() {
     // catches the commands that are not gestures.
     if (a.addRequested || a.deleteSelected || a.duplicateSelected || a.mergeFaces ||
         a.booleanRequested || a.split || a.shell || a.inset || a.undo || a.redo ||
+        a.importStep || a.importMesh || a.convertToSolid ||
         a.newProject || a.openProject || a.rebuildObject != kNoObject ||
         a.transformEdited != kNoObject || a.featuresEdited != kNoObject)
         dismissSettled();
@@ -4930,6 +5035,8 @@ void Application::applyActions() {
     if (a.exportStl)     beginFilePrompt(FileMode::ExportStl);
     if (a.exportStep)    beginFilePrompt(FileMode::ExportStep);
     if (a.importStep)    beginFilePrompt(FileMode::ImportStep);
+    if (a.importMesh)    beginFilePrompt(FileMode::ImportMesh);
+    if (a.convertToSolid) convertSelectedToSolid();
     if (a.saveProject) {
         // Save straight over the current file; prompt only the first time.
         if (projectPath_.empty()) beginFilePrompt(FileMode::Save);

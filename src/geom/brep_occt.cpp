@@ -37,6 +37,10 @@
 #include <BRepBuilderAPI_Copy.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
+#include <BRepBuilderAPI_MakePolygon.hxx>
+#include <BRepBuilderAPI_MakeSolid.hxx>
+#include <BRepBuilderAPI_Sewing.hxx>
+#include <ShapeFix_Solid.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
 #include <BRepAlgoAPI_Section.hxx>
 #include <BRepTools_History.hxx>
@@ -2284,6 +2288,81 @@ bool readStep(const std::string& path, ElementId salt, std::vector<BrepRef>& out
     } catch (const Standard_Failure& e) {
         if (reason) *reason = kernelReason(e, "the STEP file could not be read");
         return false;
+    }
+}
+
+BrepRef solidFromTriangles(const std::vector<Vec3>& points,
+                           const std::vector<uint32_t>& tris,
+                           ElementId salt, std::string* reason) {
+    if (tris.size() < 9 || tris.size() % 3 != 0) {
+        if (reason) *reason = "there are not enough triangles to make a solid";
+        return {};
+    }
+    hushTheKernel();
+    try {
+        // One planar face per triangle, sewn. The sewing tolerance is what
+        // decides whether two triangles that share an edge are understood to
+        // share it; the importer has already welded the vertices, so this only
+        // has to cover the kernel's own arithmetic.
+        BRepBuilderAPI_Sewing sew(1e-6, Standard_True, Standard_True, Standard_True);
+        int added = 0;
+        for (size_t i = 0; i + 2 < tris.size(); i += 3) {
+            const Vec3& a = points[tris[i]];
+            const Vec3& b = points[tris[i + 1]];
+            const Vec3& c = points[tris[i + 2]];
+
+            BRepBuilderAPI_MakePolygon poly(gp_Pnt(a.x, a.y, a.z), gp_Pnt(b.x, b.y, b.z),
+                                            gp_Pnt(c.x, c.y, c.z), Standard_True);
+            if (!poly.IsDone()) continue;
+            BRepBuilderAPI_MakeFace face(poly.Wire(), Standard_True);
+            if (!face.IsDone()) continue;       // a sliver with no plane through it
+            sew.Add(face.Face());
+            ++added;
+        }
+        if (added < 4) {
+            if (reason) *reason = "too few of the triangles could be made into faces";
+            return {};
+        }
+
+        sew.Perform();
+        const TopoDS_Shape sewn = sew.SewedShape();
+        if (sewn.IsNull()) {
+            if (reason) *reason = "the triangles would not sew together";
+            return {};
+        }
+
+        // A sewn shell is a surface. Closing it into a solid is what gives it
+        // an inside, and it is also the check that the surface really was
+        // closed -- ShapeFix refuses an open one rather than inventing a lid.
+        TopoDS_Shape solid;
+        for (TopExp_Explorer ex(sewn, TopAbs_SHELL); ex.More(); ex.Next()) {
+            BRepBuilderAPI_MakeSolid mk(TopoDS::Shell(ex.Current()));
+            if (!mk.IsDone()) continue;
+            ShapeFix_Solid fix(mk.Solid());
+            fix.Perform();
+            if (!fix.Solid().IsNull()) { solid = fix.Solid(); break; }
+        }
+        if (solid.IsNull()) {
+            if (reason)
+                *reason = "the surface closed up but would not become a solid";
+            return {};
+        }
+
+        // The step that makes the whole thing worth doing: every pair of
+        // coplanar neighbours becomes one face. A box that arrived as twelve
+        // triangles leaves as six faces with four edges each.
+        ShapeUpgrade_UnifySameDomain unify(solid, Standard_True, Standard_True,
+                                           Standard_True);
+        unify.Build();
+        const TopoDS_Shape merged = unify.Shape();
+        const TopoDS_Shape result = merged.IsNull() ? solid : merged;
+
+        // Names minted from the faces, as an import's always are -- see
+        // nameImportedFaces. There is nothing upstream to inherit from.
+        return makeBrep(result, nameImportedFaces(result, salt));
+    } catch (const Standard_Failure& e) {
+        if (reason) *reason = kernelReason(e, "the mesh could not be made solid");
+        return {};
     }
 }
 

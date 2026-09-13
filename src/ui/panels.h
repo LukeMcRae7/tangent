@@ -48,6 +48,8 @@ struct UiActions {
     bool exportStl = false;
     bool exportStep = false;
     bool importStep = false;
+    bool importMesh = false;
+    bool convertToSolid = false;
     bool pushPull = false;
     bool extrude = false;
     bool rotateFace = false;

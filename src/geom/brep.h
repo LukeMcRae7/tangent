@@ -349,5 +349,16 @@ bool writeStep(const std::vector<const BrepShape*>& shapes, const std::string& p
 bool readStep(const std::string& path, ElementId salt, std::vector<BrepRef>& out,
               std::string* reason);
 
+// Sews a triangle soup into a solid, then merges the coplanar faces.
+//
+// `tris` is three indices into `points` per triangle, wound outward. The merge
+// is the point: twelve triangles that were a box come back as six faces, so a
+// part that was CAD before somebody exported it to STL gets its flat surfaces
+// returned. Curvature does not come back -- the file threw that away -- so a
+// cylinder returns as however many narrow planar strips it left as.
+BrepRef solidFromTriangles(const std::vector<Vec3>& points,
+                           const std::vector<uint32_t>& tris,
+                           ElementId salt, std::string* reason);
+
 } // namespace brep
 } // namespace tg

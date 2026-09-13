@@ -147,7 +147,7 @@ add_executable(tangent
   src/app/printability.cpp
   src/app/undo.cpp
   src/mesh/halfedge.cpp
-  src/mesh/primitives.cpp
+  src/mesh/primitives.cpp src/mesh/import_mesh.cpp
   ${TANGENT_GEOM} src/mesh/operations.cpp
   src/mesh/health.cpp
   src/mesh/boolean.cpp
@@ -330,6 +330,14 @@ add_executable(test_chain tests/test_chain.cpp
 target_include_directories(test_chain PRIVATE src)
 target_compile_options(test_chain PRIVATE ${TANGENT_WARNINGS})
 add_test(NAME chain COMMAND test_chain)
+
+add_executable(test_import tests/test_import.cpp src/mesh/import_mesh.cpp
+  ${TANGENT_GEOM} src/mesh/boolean.cpp src/mesh/health.cpp src/mesh/operations.cpp
+  src/mesh/halfedge.cpp src/mesh/primitives.cpp src/mesh/export_stl.cpp
+  src/scene/scene.cpp src/scene/feature.cpp src/app/camera.cpp)
+target_include_directories(test_import PRIVATE src)
+target_compile_options(test_import PRIVATE ${TANGENT_WARNINGS})
+add_test(NAME import COMMAND test_import)
 
 add_executable(test_step tests/test_step.cpp
   ${TANGENT_GEOM} src/mesh/boolean.cpp src/mesh/health.cpp src/mesh/operations.cpp
