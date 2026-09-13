@@ -32,6 +32,7 @@
 #include <BRepTools_History.hxx>
 #include <BRepFeat_SplitShape.hxx>
 #include <BRepOffsetAPI_DraftAngle.hxx>
+#include <BRepFilletAPI_MakeChamfer.hxx>
 #include <BRepFilletAPI_MakeFillet.hxx>
 #include <BRepOffsetAPI_MakeOffset.hxx>
 #include <BRepOffsetAPI_MakeOffsetShape.hxx>
@@ -1068,14 +1069,19 @@ BrepRef booleanOp(const BrepShape& a, const BrepShape& b, BooleanOp op,
 }
 
 BrepRef filletEdges(const BrepShape& s, const std::vector<EdgeId>& edges,
-                    const std::vector<Real>& radii, ElementId salt, std::string* reason) {
+                    const std::vector<Real>& radii, ElementId salt, std::string* reason,
+                    const std::vector<Real>* endRadii, bool chamfer) {
     if (reason) reason->clear();
     if (edges.empty()) {
-        if (reason) *reason = "no edges to round";
+        if (reason) *reason = chamfer ? "no edges to cut" : "no edges to round";
         return {};
     }
     try {
+        // The two live in different classes but answer the same question, and
+        // everything around them -- what is added, how a failure is explained,
+        // how the names come out -- is the same either way.
         BRepFilletAPI_MakeFillet fil(s.shape);
+        BRepFilletAPI_MakeChamfer cha(s.shape);
         int added = 0;
         for (size_t i = 0; i < edges.size(); ++i) {
             if (!validEdge(s, edges[i])) continue;
@@ -1083,12 +1089,34 @@ BrepRef filletEdges(const BrepShape& s, const std::vector<EdgeId>& edges,
             if (r <= 0.0) continue;
             const TopoDS_Edge& e = edgeAt(s, edges[i]);
             if (BRep_Tool::Degenerated(e)) continue;
-            fil.Add(r, e);
+
+            if (chamfer) {
+                // Symmetric: the same distance from both faces, which is what
+                // a chamfer means unless someone asks for otherwise.
+                cha.Add(r, e);
+            } else {
+                const Real r2 = endRadii && i < endRadii->size() ? (*endRadii)[i] : Real(-1);
+                if (r2 > 0.0 && std::fabs(r2 - r) > 1e-9) fil.Add(r, r2, e);
+                else                                      fil.Add(r, e);
+            }
             ++added;
         }
         if (added == 0) {
-            if (reason) *reason = "none of those edges can be rounded";
+            if (reason)
+                *reason = chamfer ? "none of those edges can be cut"
+                                  : "none of those edges can be rounded";
             return {};
+        }
+
+        if (chamfer) {
+            cha.Build();
+            if (!cha.IsDone()) {
+                if (reason) *reason = "the chamfer could not be built";
+                return {};
+            }
+            const TopoDS_Shape result = cha.Shape();
+            if (!acceptable(result, reason)) return {};
+            return makeBrep(result, propagateNames(cha, {{&s}}, result, salt));
         }
 
         fil.Build();

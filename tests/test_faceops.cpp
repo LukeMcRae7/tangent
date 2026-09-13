@@ -222,6 +222,66 @@ int main() {
         std::printf("  +12 deg %.1f mm3, -12 deg %.1f\n", up, down);
     }
 
+    std::printf("--- a chamfer cuts a flat where a fillet rounds ---\n");
+    {
+        // Cutting a 3mm chamfer off one 20mm edge removes a triangular prism:
+        // half of 3 x 3 x 20 = 90. Rounding the same edge removes the same
+        // corner less the quarter circle: (1 - pi/4) x 9 x 20 = 38.6.
+        Body cut = makeBox(20, 20, 20);
+        Body round = makeBox(20, 20, 20);
+        std::vector<EdgeId> es;
+        cut.allEdges(es);
+        const EdgeId one = es.front();
+
+        std::string why;
+        FilletSpec flat;
+        flat.chamfer = true;
+        flat.edges.push_back({one, 3.0});
+        check(filletEdges(cut, flat, &why), "chamfered: " + why);
+        check(cut.validate(), "and it is a solid");
+        check(near(cut.health(false).volume, 8000.0 - 90.0, 1e-3),
+              "90 mm3 gone, got " + std::to_string(8000.0 - cut.health(false).volume));
+
+        FilletSpec curved;
+        curved.edges.push_back({one, 3.0});
+        check(filletEdges(round, curved, &why), "rounded: " + why);
+        check(near(round.health(false).volume, 8000.0 - 38.65, 0.1),
+              "38.65 mm3 gone, got " + std::to_string(8000.0 - round.health(false).volume));
+
+        check(cut.health(false).volume < round.health(false).volume,
+              "a flat cut takes more than a round of the same size");
+        std::printf("  chamfer %.2f mm3, fillet %.2f mm3\n",
+                    8000.0 - cut.health(false).volume,
+                    8000.0 - round.health(false).volume);
+    }
+
+    std::printf("--- a round can taper along its edge ---\n");
+    {
+        // From 1mm at one end to 5mm at the other. The material it removes has
+        // to land between what a 1mm round takes and what a 5mm one does.
+        auto taken = [&](Real r1, Real r2) {
+            Body b = makeBox(20, 20, 20);
+            std::vector<EdgeId> es;
+            b.allEdges(es);
+            FilletSpec spec;
+            spec.edges.push_back({es.front(), r1, r2});
+            std::string why;
+            if (!filletEdges(b, spec, &why)) {
+                std::printf("  (refused %.1f-%.1f: %s)\n", r1, r2, why.c_str());
+                return -1.0;
+            }
+            return 8000.0 - b.health(false).volume;
+        };
+        const Real thin = taken(1.0, -1.0);
+        const Real fat = taken(5.0, -1.0);
+        const Real tapered = taken(1.0, 5.0);
+        check(thin > 0.0 && fat > 0.0 && tapered > 0.0, "all three built");
+        check(tapered > thin && tapered < fat,
+              "the tapered one is between them: " + std::to_string(tapered));
+        std::printf("  1mm takes %.2f, 5mm takes %.2f, 1->5 takes %.2f\n",
+                    thin, fat, tapered);
+    }
+
     std::printf("--- scaling a face makes a frustum of a known size ---\n");
     {
         // A 40 x 30 x 20 box with its top grown by half is a prismatoid, and a

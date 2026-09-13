@@ -829,7 +829,8 @@ void Application::drawReadout(const std::string& text, float px, float py,
 void Application::drawFilletPanel() {
     if (!filletTool_.active) return;
 
-    if (!ui::beginCommand("##fillet", "Fillet", Icon::Fillet,
+    if (!ui::beginCommand("##fillet", filletTool_.chamfer ? "Chamfer" : "Fillet",
+                          filletTool_.chamfer ? Icon::Chamfer : Icon::Fillet,
                           viewRect_.x + 16.0f, viewRect_.y + 16.0f))
         return;
 
@@ -854,7 +855,51 @@ void Application::drawFilletPanel() {
         ui::commandValue("Largest", limit);
     }
 
-    ui::commandHint("Pull along the arrow, or type a radius.  Wheel changes the segments.");
+    // A flat cut or a round, and whether the round holds its size along the
+    // edge. Both change what gets built, so both re-plan and re-preview.
+    ui::commandRow("Cut");
+    {
+        const float ic = ImGui::GetTextLineHeight() * 1.4f;
+        if (iconButton(Icon::Fillet, "asround", ic, "Round  (R)", !filletTool_.chamfer) &&
+            filletTool_.chamfer) {
+            filletTool_.chamfer = false;
+            filletTool_.requestedRadius = -1.0;
+            filletTool_.previewValid = false;
+        }
+        ImGui::SameLine();
+        if (iconButton(Icon::Chamfer, "asflat", ic, "Flat  (C)", filletTool_.chamfer) &&
+            !filletTool_.chamfer) {
+            filletTool_.chamfer = true;
+            filletTool_.endRadius = -1.0;         // a flat cut does not taper
+            filletTool_.requestedRadius = -1.0;
+            filletTool_.previewValid = false;
+        }
+    }
+
+    if (!filletTool_.chamfer) {
+        const bool tapering = filletTool_.endRadius > 0.0;
+        ui::commandRow("Taper");
+        if (ImGui::Button(tapering ? "Even" : "Taper to...")) {
+            filletTool_.endRadius = tapering ? -1.0
+                                             : std::max(filletTool_.currentRadius * 0.25, 0.1);
+            filletTool_.requestedRadius = -1.0;
+            filletTool_.previewValid = false;
+        }
+        if (tapering) {
+            ui::commandRow("Ends at");
+            ImGui::SetNextItemWidth(-1.0f);
+            if (ImGui::DragScalar("##end", ImGuiDataType_Double, &filletTool_.endRadius,
+                                  0.05f, nullptr, nullptr, "%.2f mm")) {
+                filletTool_.endRadius = std::max(filletTool_.endRadius, Real(0.05));
+                filletTool_.requestedRadius = -1.0;
+                filletTool_.previewValid = false;
+            }
+        }
+    }
+
+    ui::commandHint(filletTool_.chamfer
+        ? "Pull along the arrow, or type a distance. The cut is the same from both faces."
+        : "Pull along the arrow, or type a radius.");
 
     const int footer = ui::commandFooter("OK  (Click)");
     ui::endCommand();
@@ -1279,6 +1324,25 @@ void Application::handleShortcuts() {
 
     if (filletTool_.active) {
         if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) { abortFillet(); return; }
+        // Round or flat, without reaching for the panel.
+        if (ImGui::IsKeyPressed(ImGuiKey_C, false) || ImGui::IsKeyPressed(ImGuiKey_R, false)) {
+            const bool wantFlat = ImGui::IsKeyPressed(ImGuiKey_C, false);
+            if (filletTool_.chamfer != wantFlat) {
+                filletTool_.chamfer = wantFlat;
+                if (wantFlat) filletTool_.endRadius = -1.0;
+                filletTool_.requestedRadius = -1.0;
+                filletTool_.previewValid = false;
+                // The largest that will build is a different number for a flat
+                // cut than for a round, so it is found again.
+                filletTool_.search.active = true;
+                filletTool_.search.floorPhase = true;
+                filletTool_.search.floorIndex = 0;
+                filletTool_.search.testedTop = false;
+                filletTool_.search.trial.abandon();
+                filletTool_.maxRadius = 0.0;
+            }
+            return;
+        }
         if (ImGui::IsKeyPressed(ImGuiKey_Enter, false) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false)) {
             commitFillet();
             return;
@@ -2367,11 +2431,15 @@ bool Application::filletUniform(const std::vector<Real>& radii) {
 FilletSpec Application::filletSpecAt(Real radius) const {
     const FilletToolState& t = filletTool_;
     FilletSpec spec;
+    spec.chamfer = t.chamfer;
     spec.edges.reserve(t.buildEdges.size());
     for (size_t i = 0; i < t.buildEdges.size(); ++i) {
         const Real r = i < t.fixedRadii.size() && t.fixedRadii[i] >= 0.0
                            ? t.fixedRadii[i] : radius;
-        spec.edges.push_back({t.buildEdges[i], r});
+        // Only the edges this gesture is setting taper; ones folded in from the
+        // fillet above keep whatever they already had.
+        const bool mine = !(i < t.fixedRadii.size() && t.fixedRadii[i] >= 0.0);
+        spec.edges.push_back({t.buildEdges[i], r, mine ? t.endRadius : Real(-1)});
     }
     return spec;
 }
@@ -3072,6 +3140,8 @@ void Application::stepPreviewCheck() {
                  filletTool_.folding ? "folded into the fillet above:" : "on its own:",
                  filletTool_.buildEdges.size());
 
+    if (previewCheck_ == 4) filletTool_.chamfer = true;
+    if (previewCheck_ == 5) filletTool_.endRadius = 2.0;
     filletTool_.typedValue = "9";
     updateFillet(false);
     while (filletTool_.preview.busy()) updateFillet(false);
@@ -3408,6 +3478,8 @@ void Application::commitFillet() {
     f.kind = FeatureKind::Bevel;
     f.radii = filletRadiiAt(filletTool_.currentRadius);
     f.width = filletTool_.currentRadius;
+    f.chamfer = filletTool_.chamfer;
+    f.endWidth = filletTool_.endRadius;
 
     // A rim is the sturdier way to name a set of edges, but it comes back in
     // the body's order rather than the one it went in, so it is only safe when
@@ -3481,6 +3553,8 @@ bool Application::extendLastFillet(SceneObject& obj, Real radius) {
     const std::vector<Real> radiiBefore = fillet.radii;
 
     fillet.radii = filletRadiiAt(radius);
+    fillet.chamfer = filletTool_.chamfer;
+    fillet.endWidth = filletTool_.endRadius;
     const bool uniform = filletUniform(fillet.radii);
     fillet.edges = nameEdges(filletTool_.buildBase, filletTool_.buildEdges, uniform);
     if (uniform) {

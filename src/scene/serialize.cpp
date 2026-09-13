@@ -234,6 +234,10 @@ void writeFeature(Writer& w, const Feature& f) {
 
     // Version 8: how much a face was grown or shrunk.
     w.f64(f.scale);
+
+    // Version 9: whether a bevel cuts flat, and where its radius ends up.
+    w.u32(f.chamfer ? 1u : 0u);
+    w.f64(f.endWidth);
 }
 
 // `version` is the file's, not this build's: a project written before bodies
@@ -313,6 +317,12 @@ bool readFeature(Reader& r, Feature& f, uint32_t version) {
     // A file older than this has no scaled faces in it, so the multiple that
     // changes nothing is the right one to leave standing.
     if (version >= 8) f.scale = r.f64();
+    // Older files have no chamfers and no tapers: every bevel in them is a
+    // round of one radius, which is what these defaults say.
+    if (version >= 9) {
+        f.chamfer = r.u32() != 0;
+        f.endWidth = r.f64();
+    }
     return !r.bad;
 }
 

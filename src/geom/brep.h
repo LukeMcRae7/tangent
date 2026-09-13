@@ -188,8 +188,13 @@ BrepRef booleanOp(const BrepShape& a, const BrepShape& b, BooleanOp op,
 // One radius per edge, parallel to `edges`. Rounding two edges to different
 // radii in one operation is a different solid from rounding them in sequence,
 // which is why they go together.
+//
+// `endRadii`, when given, runs alongside `radii` and makes each round taper
+// from one to the other along its edge. `chamfer` cuts a flat instead, at the
+// same distance -- the same edges and the same number, a different surface.
 BrepRef filletEdges(const BrepShape& s, const std::vector<EdgeId>& edges,
-                    const std::vector<Real>& radii, ElementId salt, std::string* reason);
+                    const std::vector<Real>& radii, ElementId salt, std::string* reason,
+                    const std::vector<Real>* endRadii = nullptr, bool chamfer = false);
 
 // Pushes faces along their own normals and joins the result to the body, or
 // cuts it out when the distance is negative. Built as a prism and combined

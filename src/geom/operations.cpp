@@ -171,7 +171,11 @@ bool filletEdges(Body& body, const FilletSpec& spec, std::string* reason) {
             edges.push_back(e.edge);
             radii.push_back(e.radius);
         }
-        BrepRef result = brep::filletEdges(body.brep(), edges, radii, spec.salt, reason);
+        std::vector<Real> ends;
+        ends.reserve(spec.edges.size());
+        for (const FilletEdge& e : spec.edges) ends.push_back(e.endRadius);
+        BrepRef result = brep::filletEdges(body.brep(), edges, radii, spec.salt, reason,
+                                           &ends, spec.chamfer);
         if (!result) return false;
         body = Body(std::move(result));
         return true;

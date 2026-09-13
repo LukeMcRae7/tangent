@@ -314,6 +314,12 @@ private:
         std::vector<Index> buildEdges;       // indices into buildBase
         std::vector<Real> fixedRadii;        // < 0 means "whatever is dragged"
 
+        // A flat cut instead of a round, and a radius that tapers along the
+        // edge. Both are the same gesture with a different surface at the end
+        // of it, so they belong to the tool rather than to a tool of their own.
+        bool chamfer = false;
+        Real endRadius = -1.0;         // negative: the radius holds all the way
+
         Body meshBefore;
         std::vector<Feature> chainBefore;
         std::string typedValue;

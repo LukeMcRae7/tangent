@@ -170,6 +170,14 @@ struct Feature {
     ElementRefs edges;
     std::vector<Real>  radii;
     Real width    = 1.0;
+
+    // A flat cut rather than a round, at the same distance.
+    bool chamfer = false;
+
+    // Where the radius ends up at the far end of each edge, for a round that
+    // tapers. Negative means it does not.
+    Real endWidth = -1.0;
+
     int  segments = 1;
 
     // Radius for the i'th resolved edge, falling back to the feature-wide

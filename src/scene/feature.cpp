@@ -29,7 +29,10 @@ const char* featureKindName(FeatureKind k) {
 }
 
 const char* Feature::displayKind() const {
-    if (kind == FeatureKind::Bevel) return segments == 1 ? "Chamfer" : "Fillet";
+    // What it is, not how many segments a mesh would have used to approximate
+    // it. An exact round has no segments, and reading the leftover default as
+    // "chamfer" labelled every fillet in the history as one.
+    if (kind == FeatureKind::Bevel) return chamfer ? "Chamfer" : "Fillet";
     // Two operations share the kind: the one that moved a face and the one that
     // grew a boss off it. What a person calls them is the difference.
     if (kind == FeatureKind::Extrude) return mergeFlush ? "Push / Pull" : "Extrude";
@@ -63,7 +66,6 @@ std::string Feature::summary() const {
                           static_cast<double>(amount), faces.describe("face").c_str());
             break;
         case FeatureKind::Bevel: {
-            // A single segment is a flat cut, which is a chamfer, not a fillet.
             const char* what = displayKind();
 
             // Say so when the edges do not all share a radius, rather than
@@ -316,9 +318,10 @@ bool evaluateFrom(std::vector<Feature>& features, size_t from,
             FilletSpec spec;
             spec.segments = f.segments;
             spec.salt = f.uid;
+            spec.chamfer = f.chamfer;
             spec.edges.reserve(scratchEdges.size());
             for (size_t i = 0; i < scratchEdges.size(); ++i)
-                spec.edges.push_back({scratchEdges[i], f.radiusFor(i)});
+                spec.edges.push_back({scratchEdges[i], f.radiusFor(i), f.endWidth});
             // The radius is only one of the two dozen reasons a fillet refuses,
             // and naming it unconditionally was wrong far more often than right.
             std::string reason;

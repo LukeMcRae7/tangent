@@ -25,7 +25,7 @@ BrepRef booleanOp(const BrepShape&, const BrepShape&, BooleanOp, ElementId, std:
     return {};
 }
 BrepRef filletEdges(const BrepShape&, const std::vector<EdgeId>&, const std::vector<Real>&,
-                    ElementId, std::string* reason) {
+                    ElementId, std::string* reason, const std::vector<Real>*, bool) {
     if (reason) *reason = "built without OpenCASCADE";
     return {};
 }

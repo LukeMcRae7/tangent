@@ -52,6 +52,11 @@ bool moveFaces(Mesh& mesh, const std::vector<Index>& faces, Vec3 delta);
 struct FilletEdge {
     Index edge   = kInvalid;   // either half-edge
     Real  radius = 1.0;
+
+    // Where the radius ends up at the far end of the edge, for a round that
+    // tapers along its length. Negative means it does not taper and `radius`
+    // holds all the way. Exact kernel only: a mesh bevel has one width.
+    Real  endRadius = -1.0;
 };
 
 struct FilletSpec {
@@ -61,6 +66,12 @@ struct FilletSpec {
     // fillets in a chain do not hand their new faces the same names. A
     // feature passes its own identity here; see element_id.h.
     ElementId salt = 0;
+
+    // A flat cut rather than a round. The same edges, the same distance, a
+    // different surface -- and a different thing to want: a chamfer on a
+    // bottom edge fights elephant's foot, and one around a hole lets a screw
+    // head sit down into it.
+    bool chamfer = false;
 
     // 1 gives a flat chamfer. Above that the section follows a true circular
     // arc, tangent to both faces, swept in equal angular steps -- so the
