@@ -20,6 +20,8 @@
 #include "backends/imgui_impl_opengl3.h"
 
 #include <chrono>
+#include <filesystem>
+#include <unordered_set>
 #include <thread>
 #include <cstdio>
 #include <algorithm>
@@ -674,6 +676,7 @@ void Application::handleViewportMouse() {
     stepPatternDemo();
     stepStepDemo();
     stepDialogDemo();
+    stepMeshBench();
     stepFaceStress();
     stepPrintDemo();
     stepPreviewCheck();
@@ -1320,44 +1323,103 @@ void Application::drawMeasureLabel() {
 //
 // Under the model rather than over it, and quiet: this is a standing report on
 // the whole part, not a thing the user is doing right now, and it must not
-// compete with a selection or a preview. A thin wall is the loud one -- a
-// slicer drops it and the part comes off the bed with a hole in it -- where an
-// overhang is a decision about supports rather than a fault.
+// compete with a selection or a preview. Only thin walls are drawn: a slicer
+// drops a wall it cannot lay and the part comes off the bed with a hole in it,
+// where supports are the slicer's own decision and it makes them regardless.
+Application::PrintJobResult Application::runPrintCheck(const Body& body, const RenderMesh& rm,
+                                                       const PrintProfile& profile) {
+    PrintJobResult out;
+    out.report = checkPrintability(body, rm, profile);
+
+    std::unordered_set<FaceId> flagged;
+    for (const PrintFinding& bad : out.report.findings)
+        if (bad.face != kInvalid && bad.issue == PrintIssue::ThinWall) flagged.insert(bad.face);
+    if (flagged.empty()) return out;
+
+    // One pass over the triangles, however many faces were flagged.
+    for (size_t i = 0; i < rm.triangleFace.size(); ++i) {
+        if (!flagged.count(rm.triangleFace[i])) continue;
+        for (int k = 0; k < 3; ++k) out.triangles.push_back(rm.positions[rm.triangles[i * 3 + k]]);
+    }
+    return out;
+}
+
+void Application::retirePrintJob(ObjectId id) {
+    auto it = printJobs_.find(id);
+    if (it == printJobs_.end()) return;
+    if (it->second.result.valid()) retiredPrintJobs_.push_back(std::move(it->second.result));
+    printJobs_.erase(it);
+}
+
+void Application::refreshPrintCheck(SceneObject& o, const PrintProfile& profile) {
+    PrintJobResult r = runPrintCheck(o.body, o.render, profile);
+    o.printCheck = std::move(r.report);
+    o.printTriangles = std::move(r.triangles);
+    o.printVersion = o.meshVersion;
+    retirePrintJob(o.id);            // anything still running is now stale
+}
+
 void Application::drawPrintIssues() {
+    // Let go of stale jobs that have finished. Never waits on one that has not.
+    retiredPrintJobs_.erase(
+        std::remove_if(retiredPrintJobs_.begin(), retiredPrintJobs_.end(),
+                       [](std::future<PrintJobResult>& f) {
+                           return f.wait_for(std::chrono::seconds(0)) ==
+                                  std::future_status::ready;
+                       }),
+        retiredPrintJobs_.end());
+
     if (!view_.showPrintIssues) return;
     if (filletTool_.active || faceTool_.active || divideTool_.active ||
         patternTool_.active || createTool_.active() || tool_.active())
         return;                       // a gesture owns the model while it runs
 
     const Vec4 thin{0.95f, 0.30f, 0.22f, 0.34f};
-    const Vec4 steep{0.95f, 0.72f, 0.20f, 0.26f};
 
     for (const auto& obj : scene_.objects()) {
         SceneObject* o = obj.get();
         if (!o->visible || o->body.empty()) continue;
 
-        // Worked out once per change of geometry and kept: it costs a ray per
-        // face, which is a few milliseconds on a small part.
+        // Worked out once per change of geometry and kept, together with the
+        // triangles it flagged -- so a frame costs the flagged triangles and
+        // nothing else, however large the body behind them is.
         if (o->printVersion != o->meshVersion) {
-            o->printCheck = checkPrintability(o->body, o->render);
-            o->printVersion = o->meshVersion;
+            auto it = printJobs_.find(o->id);
+            const bool current = it != printJobs_.end() && it->second.meshVersion == o->meshVersion;
+
+            if (current && it->second.result.wait_for(std::chrono::seconds(0)) ==
+                               std::future_status::ready) {
+                PrintJobResult r = it->second.result.get();
+                o->printCheck = std::move(r.report);
+                o->printTriangles = std::move(r.triangles);
+                o->printVersion = o->meshVersion;
+                printJobs_.erase(it);
+            } else if (!current) {
+                // A snapshot, detached: an exact body's triangulation is written
+                // into the shape it belongs to, so a worker reading the live one
+                // while the frame thread tessellates it is a data race. A stale
+                // job for an older version is simply replaced; its future is
+                // left to finish and be thrown away.
+                if (it != printJobs_.end()) retirePrintJob(o->id);
+                PrintJob job;
+                job.meshVersion = o->meshVersion;
+                job.result = std::async(std::launch::async,
+                                        [body = o->body.detached(), rm = o->render]() {
+                                            return runPrintCheck(body, rm, PrintProfile{});
+                                        });
+                printJobs_.emplace(o->id, std::move(job));
+            }
+            // Until the answer arrives, draw the last one only if it was for this
+            // geometry -- which it was not, or we would not be here.
+            continue;
         }
-        if (o->printCheck.findings.empty()) continue;
+        if (o->printTriangles.empty()) continue;
 
         const Mat4 model = o->modelMatrix();
-        const RenderMesh& rm = o->render;
-        for (const PrintFinding& bad : o->printCheck.findings) {
-            if (bad.face == kInvalid) continue;
-            const Vec4 col = bad.issue == PrintIssue::ThinWall ? thin : steep;
-            for (size_t i = 0; i < rm.triangleFace.size(); ++i) {
-                if (rm.triangleFace[i] != bad.face) continue;
-                renderer_.addTriangle(
-                    transformPoint(model, rm.positions[rm.triangles[i * 3 + 0]]),
-                    transformPoint(model, rm.positions[rm.triangles[i * 3 + 1]]),
-                    transformPoint(model, rm.positions[rm.triangles[i * 3 + 2]]),
-                    col);
-            }
-        }
+        const std::vector<Vec3>& t = o->printTriangles;
+        for (size_t i = 0; i + 2 < t.size(); i += 3)
+            renderer_.addTriangle(transformPoint(model, t[i]), transformPoint(model, t[i + 1]),
+                                  transformPoint(model, t[i + 2]), thin);
     }
 }
 
@@ -3441,6 +3503,228 @@ void Application::stepFilletOpenDemo() {
     mouseOverride_ = px + Vec2{40.0, -40.0};
 }
 
+// Times every stage a mesh goes through between a file and a drawn frame, so
+// that "importing is slow" becomes a number attached to a particular step.
+void Application::stepMeshBench() {
+    if (meshBench_.empty() || meshBenchDone_ || viewRect_.w <= 0) return;
+    meshBenchDone_ = true;
+
+    using Clock = std::chrono::steady_clock;
+    auto ms = [](Clock::time_point a, Clock::time_point b) {
+        return std::chrono::duration<double, std::milli>(b - a).count();
+    };
+    auto say = [&](const char* what, double t) {
+        std::fprintf(stderr, "[mesh-bench] %-26s %8.1f ms\n", what, t);
+    };
+
+    scene_.clear();
+
+    // ":plate" builds the other kind of mesh -- one that was CAD before it was
+    // triangles. A plate drilled with a grid of holes and exported fine, so the
+    // triangle count is large but the faces behind it are few, and conversion
+    // is allowed through. That is the case the prediction does not stop.
+    if (meshBench_.rfind(":plate", 0) == 0) {
+        PrimitiveSpec ps;
+        ps.kind = PrimitiveKind::Box;
+        ps.box = {120, 120, 8};
+        const ObjectId pid = scene_.addPrimitive(PrimitiveKind::Box, ps);
+        PrimitiveSpec hs;
+        hs.kind = PrimitiveKind::Cylinder;
+        hs.cylinder = {2.5, 30, 48};
+        Body holes;
+        makePrimitive(hs, holes, Backend::Brep);
+        for (int ix = 0; ix < 8; ++ix)
+            for (int iy = 0; iy < 8; ++iy) {
+                Body h;
+                makePrimitive(hs, h, Backend::Brep);
+                h.transform(translate({-49.0 + ix * 14.0, -49.0 + iy * 14.0, 0}));
+                if (ix == 0 && iy == 0) { holes = h; continue; }
+                Body u;
+                if (booleanOp(holes, h, BooleanOp::Union, u, 900 + ix * 8 + iy, false, nullptr))
+                    holes = std::move(u);
+            }
+        Feature cut;
+        cut.kind = FeatureKind::Boolean;
+        cut.booleanOp = BooleanOp::Difference;
+        cut.bakedBody = std::move(holes);
+        scene_.addFeature(pid, std::move(cut), nullptr);
+        StlOptions opt;
+        opt.binary = true;
+        opt.deviationMm = 0.002;
+        const std::string out =
+            (std::filesystem::temp_directory_path() / "tangent_plate_bench.stl").string();
+        const StlResult sr = exportStl(scene_, out, opt);
+        std::fprintf(stderr, "[mesh-bench] built a drilled plate: %d faces, %zu triangles out\n",
+                     scene_.objects().front()->body.faceCount(), sr.triangles);
+        meshBench_ = out;
+        scene_.clear();
+    }
+
+    // --- reading ---
+    Body body;
+    auto t0 = Clock::now();
+    const MeshImport r = readMesh(meshBench_, body);
+    auto t1 = Clock::now();
+    if (!r.ok) {
+        std::fprintf(stderr, "[mesh-bench] read failed: %s\n", r.error.c_str());
+        return;
+    }
+    std::fprintf(stderr, "[mesh-bench] %zu triangles, %d verts, closed=%d\n",
+                 r.triangles, (int)body.mesh().verts.size(), (int)r.closed);
+    say("read + weld + build", ms(t0, t1));
+
+    // --- what the import then does ---
+    auto t2 = Clock::now();
+    RenderMesh rm;
+    body.tessellate(rm);
+    auto t3 = Clock::now();
+    say("tessellate for drawing", ms(t2, t3));
+
+    auto t4 = Clock::now();
+    const MeshHealth h = body.health(false);
+    auto t5 = Clock::now();
+    say("health check", ms(t4, t5));
+    std::fprintf(stderr, "[mesh-bench] volume %.1f mm3, watertight=%d\n",
+                 h.volume, (int)h.watertight);
+
+    auto t6 = Clock::now();
+    const ObjectId id = scene_.addImportedBody(body, "bench");
+    auto t7 = Clock::now();
+    say("addImportedBody", ms(t6, t7));
+
+    // --- the per-frame costs ---
+    SceneObject* o = scene_.find(id);
+    if (o) {
+        auto t8 = Clock::now();
+        const PrintReport pr = checkPrintability(o->body, o->render);
+        auto t9 = Clock::now();
+        say("printability check", ms(t8, t9));
+        std::fprintf(stderr, "[mesh-bench] %zu findings\n", pr.findings.size());
+
+        auto ta = Clock::now();
+        o->refreshDerived();
+        auto tb = Clock::now();
+        say("refreshDerived", ms(ta, tb));
+    }
+
+    // --- conversion ---
+    if (brep::available() && r.closed) {
+        Body copy = body;
+        auto tc = Clock::now();
+        auto tp0 = Clock::now();
+        const int predicted = predictSolidFaces(copy);
+        auto tp1 = Clock::now();
+        say("predict face count", ms(tp0, tp1));
+        std::fprintf(stderr, "[mesh-bench] would be %d faces\n", predicted);
+
+        // With the real limit, which is what a user gets.
+        const SolidifyResult sc = toSolid(copy, 4242);
+        if (!sc.ok && predicted < 20000) {
+            // And what it would have cost had it been let through, so the limit
+            // is a measured choice rather than a guess.
+            Body forced = body;
+            auto tx0 = Clock::now();
+            const SolidifyResult fx = toSolid(forced, 4243, 20000);
+            auto tx1 = Clock::now();
+            say("toSolid, limit lifted", ms(tx0, tx1));
+            auto th0 = Clock::now();
+            const MeshHealth fh = forced.health(false);
+            auto th1 = Clock::now();
+            say("health of converted body", ms(th0, th1));
+            std::fprintf(stderr, "[mesh-bench] forced: ok=%d, %d -> %d faces, %s, watertight=%d, %.1f mm3\n",
+                         (int)fx.ok, fx.facesBefore, fx.facesAfter,
+                         fx.viaRegions ? "regions" : "per-triangle fallback",
+                         (int)fh.watertight, fh.volume);
+
+            // And an ordinary edit on it afterwards, which is the cost of having
+            // converted at all: a fillet on one straight outer edge.
+            std::vector<EdgeId> es;
+            forced.allEdges(es);
+            EdgeId longest = kInvalid;
+            Real best = 0;
+            for (EdgeId e : es) { const Real L = forced.edgeLength(e); if (L > best) { best = L; longest = e; } }
+            if (longest != kInvalid) {
+                FilletSpec sp;
+                sp.edges.push_back({longest, 1.0});
+                sp.salt = 31337;
+                Body edited = forced;
+                std::string why;
+                auto te0 = Clock::now();
+                const bool ok = filletEdges(edited, sp, &why);
+                auto te1 = Clock::now();
+                say("fillet on converted body", ms(te0, te1));
+                std::fprintf(stderr, "[mesh-bench] fillet ok=%d %s\n", (int)ok, why.c_str());
+            }
+        }
+        auto td = Clock::now();
+        say("toSolid", ms(tc, td));
+        std::fprintf(stderr, "[mesh-bench] convert ok=%d, %d tris -> %d faces%s\n",
+                     (int)sc.ok, sc.facesBefore, sc.facesAfter, sc.error.c_str());
+    }
+
+    // --- and the whole thing as a user does it: one menu action ---
+    scene_.clear();
+    auto tg0 = Clock::now();
+    runFileOperation(FileMode::ImportMesh, meshBench_);
+    auto tg1 = Clock::now();
+    say("IMPORT, end to end", ms(tg0, tg1));
+    std::fprintf(stderr, "[mesh-bench] %s\n", notice_.c_str());
+
+    // The frames straight after it, which is where the print check used to
+    // land. The worst of them is the stall a user would feel.
+    {
+        double worst = 0.0;
+        int framesUntilReport = -1;
+        for (int i = 0; i < 400; ++i) {
+            auto f0 = Clock::now();
+            drawPrintIssues();
+            auto f1 = Clock::now();
+            worst = std::max(worst, ms(f0, f1));
+            const SceneObject* so = scene_.objects().empty() ? nullptr
+                                                            : scene_.objects().front().get();
+            if (so && so->printVersion == so->meshVersion) { framesUntilReport = i; break; }
+            SDL_Delay(1);
+        }
+        std::fprintf(stderr, "[mesh-bench] %-26s %8.2f ms\n", "worst frame after import", worst);
+        std::fprintf(stderr, "[mesh-bench] print report arrived after %d frames\n",
+                     framesUntilReport);
+    }
+
+    // --- frames ---
+    auto te = Clock::now();
+    const int frames = 30;
+    for (int i = 0; i < frames; ++i) { drawFrame(); }
+    auto tf = Clock::now();
+    std::fprintf(stderr, "[mesh-bench] %-26s %8.1f ms/frame\n", "steady-state frame",
+                 ms(te, tf) / frames);
+
+    // And with the print overlay full. A wall limit far thicker than this model
+    // flags as many faces as the report will keep, which is the worst the
+    // overlay can be asked to draw.
+    if (!scene_.objects().empty()) {
+        SceneObject* obj = scene_.objects().front().get();
+        PrintProfile thick;
+        thick.minWallMm = 50.0;
+        auto tr0 = Clock::now();
+        refreshPrintCheck(*obj, thick);
+        auto tr1 = Clock::now();
+        say("check + gather, overlay full", ms(tr0, tr1));
+        std::fprintf(stderr, "[mesh-bench] %d thin faces counted, %zu kept, %zu triangles drawn\n",
+                     obj->printCheck.thinWalls, obj->printCheck.findings.size(),
+                     obj->printTriangles.size() / 3);
+        // The overlay's own CPU cost per frame, timed directly: a whole frame's
+        // wall clock mostly measures handing work to the GPU, and the thing this
+        // is watching for is the old search through every triangle per flagged
+        // face, which was entirely on this side.
+        view_.showPrintIssues = true;
+        auto tg = Clock::now();
+        for (int i = 0; i < frames; ++i) drawPrintIssues();
+        auto th = Clock::now();
+        std::fprintf(stderr, "[mesh-bench] %-26s %8.3f ms/frame\n", "overlay draw, full",
+                     ms(tg, th) / frames);
+    }
+}
+
 // 1 drives the typed-path fallback, which is what a system with no chooser
 // gets and is the half of this that can be tested without a person to click.
 // 2 asks for a real chooser and reports whether one opened -- it puts a window
@@ -4177,10 +4461,9 @@ void Application::stepPrintDemo() {
     camera_.frame(o->worldBounds());
     camera_.snapToGoal();
 
-    o->printCheck = checkPrintability(o->body, o->render);
-    o->printVersion = o->meshVersion;
-    std::fprintf(stderr, "[print-demo] %d thin, %d overhang: %s\n",
-                 o->printCheck.thinWalls, o->printCheck.overhangs,
+    refreshPrintCheck(*o);
+    std::fprintf(stderr, "[print-demo] %d thin: %s\n",
+                 o->printCheck.thinWalls,
                  summarise(o->printCheck).empty() ? "nothing to report"
                                                   : summarise(o->printCheck).c_str());
 }
@@ -4978,11 +5261,25 @@ void Application::runFileOperation(FileMode mode, const std::string& path) {
         scene_.select(id);
         camera_.frame(scene_.bounds());
 
-        // Whether it is closed decides whether it can become a solid, and
-        // saying so now saves the user finding out by trying.
+        // What Convert to Solid would do, said now rather than left to be found
+        // out by trying it. Being closed is only half the question: a scanned
+        // mesh is closed and still has nothing worth converting, because every
+        // triangle sits on its own plane.
         std::string note = "Imported " + std::to_string(r.triangles) + " triangles from " + path;
-        note += r.closed ? "  (closed: Modify > Convert to Solid will work)"
-                         : "  (open surface: it cannot become a solid)";
+        if (!r.closed) {
+            note += "  (open surface: it cannot become a solid)";
+        } else if (const SceneObject* o = scene_.find(id)) {
+            const int faces = predictSolidFaces(o->body);
+            char tail[120];
+            if (faces > 0 && faces <= kSolidifyFaceLimit)
+                std::snprintf(tail, sizeof tail,
+                              "  (Convert to Solid would give %d faces)", faces);
+            else
+                std::snprintf(tail, sizeof tail,
+                              "  (%d distinct planes: too many to convert usefully)",
+                              faces);
+            note += tail;
+        }
         setNotice(note);
         break;
     }

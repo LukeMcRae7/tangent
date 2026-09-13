@@ -94,6 +94,7 @@ int main() {
             std::printf("  box: %d triangles -> %d faces\n", c.facesBefore, c.facesAfter);
             check(c.facesBefore == 12, "twelve triangles went in");
             check(c.facesAfter == 6, "six faces came out");
+            check(c.viaRegions, "by the fast route, not the per-triangle fallback");
             check(!b.isMesh(), "and the body is exact now");
             check(b.validate(), "and valid");
             check(near1(b.health(false).volume, 24000.0), "and the same size");
@@ -140,6 +141,8 @@ int main() {
             // So the count is read off the result and the volume checked
             // against it, which tests the relationship rather than a number
             // that moves when the tolerance does.
+            check(c.viaRegions, "the cylinder takes the fast route too");
+            check(predictSolidFaces(b) == 0, "and a converted body predicts nothing");
             const int sides = c.facesAfter - 2;
             check(sides > 24, "as many flat strips as the tolerance asked for");
             check(c.facesBefore == sides * 2 + (c.facesBefore - sides * 2),

@@ -67,6 +67,12 @@ struct SceneObject {
     // milliseconds on a small part and tens on a large one -- affordable once
     // per edit, not once per frame.
     PrintReport printCheck;
+    // The flagged triangles themselves, in the body's own space, gathered once
+    // when the check runs. Drawing them used to search every triangle of the
+    // body for every flagged face on every frame -- invisible on a part with a
+    // few hundred triangles and twenty-five million comparisons a frame on an
+    // imported mesh with walls to complain about.
+    std::vector<Vec3> printTriangles;
     uint32_t    printVersion = 0;
 
     Mat4 modelMatrix() const { return transform.matrix(); }

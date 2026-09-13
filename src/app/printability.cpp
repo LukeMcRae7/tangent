@@ -1,5 +1,7 @@
 #include "app/printability.h"
 
+#include "core/bvh.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -15,19 +17,16 @@ namespace {
 // is to the other side. Rays go against the tessellation because it is already
 // built and a chord tolerance of microns is far below what a nozzle cares
 // about.
-Real materialBehind(const RenderMesh& render, Vec3 from, Vec3 inward, Real limit) {
-    Real nearest = limit;
-    const Ray r{from + inward * Real(1e-3), inward};
-    for (size_t i = 0; i + 2 < render.triangles.size(); i += 3) {
-        Real t = 0.0;
-        if (!rayTriangle(r, render.positions[render.triangles[i + 0]],
-                         render.positions[render.triangles[i + 1]],
-                         render.positions[render.triangles[i + 2]], t))
-            continue;
-        if (t > 1e-3 && t < nearest) nearest = t;
-    }
-    return nearest;
+// How far it is to the next surface, going inward.
+//
+// Through a tree, because the honest version of this -- ask every triangle --
+// is O(faces x triangles), and on a 62,000-triangle import that was nearly four
+// billion tests and forty seconds. The tree is built once for the body and
+// walked once per face.
+Real materialBehind(const TriangleBvh& bvh, Vec3 from, Vec3 inward, Real limit) {
+    return bvh.nearestHit(from + inward * Real(1e-3), inward, Real(1e-3), limit);
 }
+
 
 } // namespace
 
@@ -40,7 +39,8 @@ PrintReport checkPrintability(const Body& body, const RenderMesh& render,
     // that outranks every other, and nothing else here is worth saying about
     // one. The panel used to report this and no longer does, so it is said
     // here, where the rest of the print problems are.
-    out.solid = body.validate() && body.health(false).volume > 0.0;
+    const MeshHealth h = body.health(false);
+    out.solid = h.watertight && h.volume > 0.0;
     if (!out.solid) out.findings.push_back({kInvalid, PrintIssue::NotSolid, 0.0});
 
     const Vec3 up = normalize(profile.up);
@@ -52,42 +52,42 @@ PrintReport checkPrintability(const Body& body, const RenderMesh& render,
     const Real reach = std::max({extent.x, extent.y, extent.z, Real(1)}) * 1.5;
     const Real bedHeight = dot(bounds.min, up);
 
+    TriangleBvh bvh;
+    bvh.build(render.positions, render.triangles);
+
     for (FaceId f : faces) {
         const Vec3 n = body.faceNormal(f);
         if (lengthSq(n) < 1e-18) continue;
         const Vec3 normal = normalize(n);
 
-        // How far it leans, the way a slicer counts it: a vertical wall is
-        // zero, a horizontal ceiling is ninety, and anything facing upward is
-        // not an overhang at all.
-        const Real facingDown = dot(normal, up);            // -1 straight down
-        if (facingDown < 0.0) {
-            const Real lean = degrees(std::asin(clampf(-facingDown, Real(0), Real(1))));
-
-            // Unless it is sitting on the bed. The underside of every part ever
-            // made points straight down and is held up by the machine; calling
-            // that a ninety-degree overhang would flag everything and mean
-            // nothing. A face raised above the bed -- a bridge, a ledge -- is
-            // a different matter and is still reported.
-            const Vec3 centre = body.faceCentroid(f);
-            const bool onTheBed = dot(centre, up) - bedHeight < profile.nozzleMm;
-
-            if (lean > profile.maxOverhangDeg && !onTheBed) {
-                out.findings.push_back({f, PrintIssue::Overhang, lean});
-                ++out.overhangs;
-                out.steepestOverhangDeg = std::max(out.steepestOverhangDeg, lean);
-            }
-        }
-
         // Thinner than the nozzle can lay down. A face with nothing behind it
         // within the body is not thin, it is the outside of something solid.
-        const Real thickness = materialBehind(render, body.faceCentroid(f), -normal, reach);
-        if (thickness < profile.minWallMm && thickness < reach) {
-            out.findings.push_back({f, PrintIssue::ThinWall, thickness});
+        //
+        // This is the whole check now. Overhang detection used to sit here too
+        // and has gone: a slicer decides about supports, does it better because
+        // it knows the machine, and does it anyway -- so the only thing a
+        // second opinion here bought was a viewport full of amber.
+        //
+        // Wall thickness is different. A slicer will not warn you: it quietly
+        // drops a wall it cannot lay and the part comes off the bed with a hole
+        // in it, which is the kind of thing worth knowing before printing.
+        // The ray only has to go as far as the limit. Whether a wall is thin is
+        // decided by whether material ends within minWallMm; how far away it
+        // ends past that is never used. Letting the ray run the width of the
+        // part walked most of the tree for an answer nobody reads.
+        const Real limit = std::min(reach, profile.minWallMm);
+        const Real thickness = materialBehind(bvh, body.faceCentroid(f), -normal, limit);
+        if (thickness < limit) {
             ++out.thinWalls;
             out.thinnestWallMm = out.thinnestWallMm > 0.0
                                      ? std::min(out.thinnestWallMm, thickness)
                                      : thickness;
+            // Capped. Every offending face is counted, but only so many are
+            // kept to be drawn: ten thousand red faces on an imported model is
+            // a colour, not information, and holding them all costs memory to
+            // say nothing.
+            if (out.findings.size() < kMaxDrawnFindings)
+                out.findings.push_back({f, PrintIssue::ThinWall, thickness});
         }
     }
     return out;
@@ -98,20 +98,9 @@ std::string summarise(const PrintReport& report) {
     if (report.clean()) return {};
 
     char buf[160];
-    if (report.thinWalls && report.overhangs)
-        std::snprintf(buf, sizeof buf,
-                      "%d thin wall%s (%.2f mm) and %d overhang%s (%.0f deg)",
-                      report.thinWalls, report.thinWalls == 1 ? "" : "s",
-                      report.thinnestWallMm, report.overhangs,
-                      report.overhangs == 1 ? "" : "s", report.steepestOverhangDeg);
-    else if (report.thinWalls)
-        std::snprintf(buf, sizeof buf, "%d wall%s thinner than the nozzle can lay (%.2f mm)",
-                      report.thinWalls, report.thinWalls == 1 ? "" : "s",
-                      report.thinnestWallMm);
-    else
-        std::snprintf(buf, sizeof buf, "%d face%s need support (%.0f deg over)",
-                      report.overhangs, report.overhangs == 1 ? "" : "s",
-                      report.steepestOverhangDeg);
+    std::snprintf(buf, sizeof buf, "%d wall%s thinner than the nozzle can lay (%.2f mm)",
+                  report.thinWalls, report.thinWalls == 1 ? "" : "s",
+                  report.thinnestWallMm);
     return buf;
 }
 

@@ -404,7 +404,6 @@ void drawMenuBar(UiContext& ctx) {
         ImGui::MenuItem("Selection Box",  nullptr, &ctx.view->showSelectionBox);
         ImGui::MenuItem("Print Problems", nullptr, &ctx.view->showPrintIssues);
         ImGui::TextColored(kDim, "  red: thinner than the nozzle can lay");
-        ImGui::TextColored(kDim, "  amber: leans too far to hold itself up");
         ImGui::MenuItem("Backface Cull",  nullptr, &ctx.view->backfaceCulling);
         ImGui::EndMenu();
     }

@@ -99,34 +99,23 @@ int main() {
         check(look(b, coarse).thinWalls > 0, "a coarser one does not");
     }
 
-    std::printf("--- a face leaning too far needs holding up ---\n");
+    std::printf("--- overhangs are the slicer's business, not ours ---\n");
     {
-        // A box with its top grown by half: the sides lean by
-        // atan((30-20)/2 / 20) = 14 degrees, which any printer bridges.
-        Body gentle = makeBox(20, 20, 20);
-        std::string why;
-        check(scaleFaces(gentle, {facing(gentle, {0, 0, 1})}, 1.5, 4, &why),
-              "tapered gently: " + why);
-        check(look(gentle).overhangs == 0, "fourteen degrees needs no support");
-
-        // Grown by four: atan(30/20) = 56 degrees, which does.
+        // A box with its top grown by four leans its sides at
+        // atan(30/20) = 56 degrees, which is well past what any printer
+        // bridges unsupported -- and is deliberately not reported.
+        //
+        // The check used to flag it. It no longer does: a slicer decides about
+        // supports, decides better because it knows the machine, and decides
+        // whether it is asked or not. What that opinion bought here was a
+        // viewport full of amber on every tapered part.
         Body steep = makeBox(20, 20, 20);
+        std::string why;
         check(scaleFaces(steep, {facing(steep, {0, 0, 1})}, 4.0, 5, &why),
               "tapered steeply: " + why);
         const PrintReport r = look(steep);
-        check(r.overhangs > 0, "fifty-six degrees does");
-        check(near(r.steepestOverhangDeg, 56.0, 1.5),
-              "and is measured at 56, got " + std::to_string(r.steepestOverhangDeg));
-        std::printf("  %s\n", summarise(r).c_str());
-    }
-
-    std::printf("--- the underside of a box is not an overhang ---\n");
-    {
-        // It sits on the bed. A face pointing straight down is the one case a
-        // slicer never has to bridge, and calling it an overhang would flag
-        // every part ever made.
-        const PrintReport r = look(makeBox(20, 20, 20));
-        check(r.overhangs == 0, "the bottom face is not reported");
+        check(r.clean(), "a steep taper is not a print problem here");
+        check(summarise(r).empty(), "and nothing is said about it");
     }
 
     std::printf("--- what it costs ---\n");

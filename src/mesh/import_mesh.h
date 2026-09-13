@@ -51,7 +51,27 @@ struct SolidifyResult {
 
     int facesBefore = 0;    // triangles that went in
     int facesAfter = 0;     // faces that came out, after coplanar ones merged
+
+    // Whether the fast route built it -- regions traced from the mesh -- or it
+    // fell back to a face per triangle, sewn and merged by the kernel. Both
+    // give the same solid; one takes a fraction of a second and the other
+    // can take many, so which ran is worth being able to see.
+    bool viaRegions = false;
 };
+
+// How many faces converting `body` would produce, without converting it.
+//
+// Every triangle lying on the same plane becomes one face, so counting the
+// distinct planes counts the answer. It is a linear pass over the triangles
+// and it is what makes the refusal below instant rather than something you
+// find out after a minute of work.
+//
+// The two cases it separates are the whole point. A part that was CAD before
+// somebody exported it has a few dozen planes and thousands of triangles, and
+// converting it gives back the model. A scanned or sculpted mesh has nearly as
+// many planes as triangles, and converting it gives a B-rep with sixty thousand
+// faces that is slower than the mesh in every way and no more editable.
+int predictSolidFaces(const Body& body);
 
 // Turns a mesh body into an exact one.
 //
@@ -69,6 +89,12 @@ struct SolidifyResult {
 //
 // `maxFaces` refuses outright above a triangle count where the result would be
 // unusable rather than grinding for minutes to produce it.
-SolidifyResult toSolid(Body& body, ElementId salt, int maxFaces = 60000);
+// The most faces a conversion is allowed to produce. Not a limit on triangles:
+// a million that are really a bracket should convert, and sixty thousand that
+// are really a sculpture should not. Five thousand faces is already a large
+// B-rep to be working with.
+inline constexpr int kSolidifyFaceLimit = 5000;
+
+SolidifyResult toSolid(Body& body, ElementId salt, int maxFaces = kSolidifyFaceLimit);
 
 } // namespace tg

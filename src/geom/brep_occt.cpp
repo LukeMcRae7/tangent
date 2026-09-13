@@ -14,6 +14,7 @@
 // backend uses (see element_id.h) and which gives the right answer for the
 // elements a boolean invents.
 #include "geom/brep.h"
+#include "geom/brep_valid.h"
 
 // STEP. Kept together and commented because these are the only headers here
 // that are not modelling -- they come from the DataExchange module.
@@ -41,6 +42,17 @@
 #include <BRepBuilderAPI_MakeSolid.hxx>
 #include <BRepBuilderAPI_Sewing.hxx>
 #include <ShapeFix_Solid.hxx>
+#include <BRepBuilderAPI_MakeVertex.hxx>
+#include <BRepBuilderAPI_MakeEdge.hxx>
+#include <BRepBuilderAPI_MakeWire.hxx>
+#include <BRep_Builder.hxx>
+#include <BRep_Tool.hxx>
+#include <TopoDS_Shell.hxx>
+#include <gp_Pln.hxx>
+#include <TopoDS_Compound.hxx>
+#include <TopLoc_Location.hxx>
+#include <Geom_Surface.hxx>
+#include <TopoDS_Iterator.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
 #include <BRepAlgoAPI_Section.hxx>
 #include <BRepTools_History.hxx>
@@ -835,7 +847,7 @@ bool acceptable(const TopoDS_Shape& shape, std::string* reason) {
         return false;
     }
     try {
-        if (!BRepCheck_Analyzer(shape).IsValid()) {
+        if (!shapeIsValid(shape)) {
             if (reason) *reason = "the result is not a valid solid";
             return false;
         }
@@ -1003,14 +1015,170 @@ void tessellate(const BrepShape& s, RenderMesh& out, TessellationQuality q) {
     }
 }
 
+namespace {
+
+struct FaceWeight {
+    int    wires = 0;
+    size_t edges = 0;
+};
+
+FaceWeight weigh(const TopoDS_Shape& face) {
+    FaceWeight w;
+    for (TopoDS_Iterator it(face); it.More(); it.Next()) {
+        if (it.Value().ShapeType() != TopAbs_WIRE) continue;
+        ++w.wires;
+        for (TopoDS_Iterator e(it.Value()); e.More(); e.Next()) ++w.edges;
+    }
+    return w;
+}
+
+bool heavy(const FaceWeight& w, size_t prunedAbove) {
+    return w.wires > 1 && w.edges > prunedAbove;
+}
+
+// One heavy face, in pieces. Every piece is a face on the same surface holding
+// the outer wire and one or two inner ones, and every piece goes through the
+// full analyzer -- so each wire is checked for crossing itself, each hole for
+// sitting inside the boundary and not crossing it, and each pair of holes that
+// could possibly touch for not touching. The pairs that are skipped are the
+// ones whose boxes are apart, which no intersection could join.
+bool heavyFaceValid(const TopoDS_Face& face) {
+    // The wires as they are seen through the face -- its orientation and
+    // location folded in -- because that is what BRep_Builder::Add expects: it
+    // takes a component as seen from outside and un-folds the parent's
+    // orientation and location as it stores it. The pieces are empty copies of
+    // this face, so the round trip lands each wire back exactly as it was.
+    //
+    // Getting that backwards is easy and silent. Taking the wires raw, and
+    // letting Add invert a reversed face's orientation on top, wound every hole
+    // of a perfectly good plate the wrong way and refused it.
+    const TopoDS_Wire outer = BRepTools::OuterWire(face);
+    if (outer.IsNull()) return false;
+
+    std::vector<TopoDS_Wire> inner;
+    for (TopoDS_Iterator it(face); it.More(); it.Next()) {
+        if (it.Value().ShapeType() != TopAbs_WIRE) continue;
+        const TopoDS_Wire w = TopoDS::Wire(it.Value());
+        if (!w.IsSame(outer)) inner.push_back(w);
+    }
+
+    BRep_Builder builder;
+    const Standard_Real tol = BRep_Tool::Tolerance(face);
+    auto piece = [&](const TopoDS_Wire* a, const TopoDS_Wire* b) {
+        TopoDS_Face f = TopoDS::Face(face.EmptyCopied());
+        builder.Add(f, outer);
+        if (a) builder.Add(f, *a);
+        if (b) builder.Add(f, *b);
+        return BRepCheck_Analyzer(f).IsValid();
+    };
+
+    if (inner.empty()) return piece(nullptr, nullptr);
+    for (const TopoDS_Wire& w : inner)
+        if (!piece(&w, nullptr)) return false;
+
+    // Hole against hole, swept along x so that even thousands of holes cost a
+    // sort and a pass rather than every pair.
+    struct Box { Standard_Real x0, x1; Bnd_Box box; size_t wire; };
+    std::vector<Box> boxes;
+    boxes.reserve(inner.size());
+    for (size_t i = 0; i < inner.size(); ++i) {
+        Bnd_Box b;
+        BRepBndLib::Add(inner[i], b);
+        b.Enlarge(tol);
+        Standard_Real x0, y0, z0, x1, y1, z1;
+        b.Get(x0, y0, z0, x1, y1, z1);
+        boxes.push_back({x0, x1, b, i});
+    }
+    std::sort(boxes.begin(), boxes.end(), [](const Box& p, const Box& q) { return p.x0 < q.x0; });
+    for (size_t i = 0; i < boxes.size(); ++i)
+        for (size_t j = i + 1; j < boxes.size() && boxes[j].x0 <= boxes[i].x1; ++j)
+            if (!boxes[i].box.IsOut(boxes[j].box) &&
+                !piece(&inner[boxes[i].wire], &inner[boxes[j].wire]))
+                return false;
+    return true;
+}
+
+// What the whole-shape pass checks across faces: each edge of a solid bounds
+// one face going one way and one face going the other. Linear in the edges.
+bool edgeUsesConsistent(const TopoDS_Shape& shape) {
+    for (TopExp_Explorer solid(shape, TopAbs_SOLID); solid.More(); solid.Next()) {
+        TopTools_IndexedMapOfShape edges;
+        TopExp::MapShapes(solid.Current(), TopAbs_EDGE, edges);
+        std::vector<int> forward(static_cast<size_t>(edges.Extent()) + 1, 0);
+        std::vector<int> reversed(forward.size(), 0);
+        for (TopExp_Explorer f(solid.Current(), TopAbs_FACE); f.More(); f.Next())
+            for (TopExp_Explorer e(f.Current(), TopAbs_EDGE); e.More(); e.Next()) {
+                const TopoDS_Edge& edge = TopoDS::Edge(e.Current());
+                if (BRep_Tool::Degenerated(edge)) continue;
+                const int i = edges.FindIndex(edge);
+                if (i <= 0) return false;
+                if (edge.Orientation() == TopAbs_FORWARD) ++forward[static_cast<size_t>(i)];
+                else if (edge.Orientation() == TopAbs_REVERSED) ++reversed[static_cast<size_t>(i)];
+            }
+        for (int i = 1; i <= edges.Extent(); ++i) {
+            if (BRep_Tool::Degenerated(TopoDS::Edge(edges(i)))) continue;
+            if (forward[static_cast<size_t>(i)] != 1 || reversed[static_cast<size_t>(i)] != 1)
+                return false;
+        }
+    }
+    return true;
+}
+
+} // namespace
+
+bool fullAnalyzerValid(const TopoDS_Shape& shape) {
+    return !shape.IsNull() && BRepCheck_Analyzer(shape).IsValid();
+}
+
+bool shapeIsValid(const TopoDS_Shape& shape, size_t prunedAbove) {
+    if (shape.IsNull()) return false;
+
+    TopTools_IndexedMapOfShape faces;
+    TopExp::MapShapes(shape, TopAbs_FACE, faces);
+    bool anyHeavy = false;
+    for (int i = 1; i <= faces.Extent() && !anyHeavy; ++i)
+        anyHeavy = heavy(weigh(faces(i)), prunedAbove);
+
+    // The ordinary case, untouched.
+    if (!anyHeavy) return BRepCheck_Analyzer(shape).IsValid();
+
+    // The light faces together, in one pass: each of their edges and vertices
+    // is then checked once rather than once per face that touches it, and the
+    // analyzer is set up once rather than thousands of times. A compound has no
+    // closure or orientation of its own to fail, so this asks exactly what
+    // checking them one by one would.
+    TopoDS_Compound light;
+    BRep_Builder builder;
+    builder.MakeCompound(light);
+    for (int i = 1; i <= faces.Extent(); ++i) {
+        const TopoDS_Face& f = TopoDS::Face(faces(i));
+        if (heavy(weigh(f), prunedAbove)) {
+            if (!heavyFaceValid(f)) return false;
+        } else {
+            builder.Add(light, f);
+        }
+    }
+    if (!BRepCheck_Analyzer(light).IsValid()) return false;
+    return edgeUsesConsistent(shape);
+}
+
+bool closedShell(const BrepShape& s) {
+    if (s.shape.IsNull() || s.faces.Extent() == 0) return false;
+    for (int i = 1; i <= s.edgeFaces.Extent(); ++i) {
+        const TopoDS_Edge& e = TopoDS::Edge(s.edgeFaces.FindKey(i));
+        if (BRep_Tool::Degenerated(e)) continue;
+        if (s.edgeFaces(i).Extent() != 2) return false;
+    }
+    return true;
+}
+
 bool validate(const BrepShape& s, std::string* err) {
     if (s.shape.IsNull()) {
         if (err) *err = "null shape";
         return false;
     }
     try {
-        const BRepCheck_Analyzer check(s.shape);
-        if (!check.IsValid()) {
+        if (!shapeIsValid(s.shape)) {
             if (err) *err = "invalid B-rep";
             return false;
         }
@@ -1036,11 +1204,21 @@ MeshHealth health(const BrepShape& s, bool) {
         for (TopExp_Explorer e(s.shape, TopAbs_SOLID); e.More(); e.Next()) ++solids;
         h.shells = solids;
 
-        // A B-rep solid is closed by construction, so the question a mesh has
-        // to answer by counting boundary edges is answered by whether it checks
-        // out at all. Self-intersection is not run: it is the expensive mesh
-        // test, and -1 is how MeshHealth says "not asked".
-        h.watertight = validate(s, nullptr);
+        // Closed means what it means for a mesh: every edge bounds exactly two
+        // faces. A seam counts its one face twice, which is right -- the face
+        // meets itself there -- and a degenerate edge at a pole bounds nothing.
+        //
+        // This used to be answered by running the full validity check, which is
+        // quadratic in the edges of a face. On a normal part that is nothing;
+        // on a converted mesh, where each hole left as a hundred straight
+        // segments, one face carries thousands of edges and the check took
+        // twelve seconds -- every time the Inspector wanted a volume. Whether a
+        // result is *valid* is asked where results are made. Whether a body is
+        // closed is this.
+        //
+        // Self-intersection is not run either: -1 is how MeshHealth says "not
+        // asked".
+        h.watertight = closedShell(s);
         h.boundaryEdges = 0;
         h.degenerateFaces = 0;
         h.selfIntersections = -1;
@@ -2291,32 +2469,203 @@ bool readStep(const std::string& path, ElementId salt, std::vector<BrepRef>& out
     }
 }
 
+BrepRef solidFromPlanarRegions(const PlanarRegions& in, ElementId salt, std::string* reason) {
+    if (in.regions.size() < 4 || in.edgeEnds.size() % 2 != 0) {
+        if (reason) *reason = "there are not enough faces to make a solid";
+        return {};
+    }
+    hushTheKernel();
+    try {
+        std::vector<TopoDS_Vertex> verts(in.points.size());
+        std::vector<char> vertMade(in.points.size(), 0);
+        auto vertexAt = [&](uint32_t i) -> const TopoDS_Vertex& {
+            if (!vertMade[i]) {
+                verts[i] = BRepBuilderAPI_MakeVertex(
+                    gp_Pnt(in.points[i].x, in.points[i].y, in.points[i].z));
+                vertMade[i] = 1;
+            }
+            return verts[i];
+        };
+
+        const size_t edgeCount = in.edgeEnds.size() / 2;
+        std::vector<TopoDS_Edge> edges(edgeCount);
+        std::vector<char> edgeMade(edgeCount, 0);
+        auto edgeAt = [&](uint32_t e) -> const TopoDS_Edge& {
+            if (!edgeMade[e]) {
+                BRepBuilderAPI_MakeEdge mk(vertexAt(in.edgeEnds[e * 2]),
+                                           vertexAt(in.edgeEnds[e * 2 + 1]));
+                if (mk.IsDone()) edges[e] = mk.Edge();
+                edgeMade[e] = 1;
+            }
+            return edges[e];
+        };
+
+        BRep_Builder builder;
+        TopoDS_Shell shell;
+        builder.MakeShell(shell);
+
+        for (const PlanarRegions::Region& region : in.regions) {
+            // One wire per loop, from the shared edges. A shared edge is used
+            // forwards by one region and backwards by the other, which is what
+            // makes the two faces genuinely joined along it.
+            std::vector<TopoDS_Wire> wires;
+            std::vector<Real> areas;
+            for (const PlanarRegions::Loop& loop : region.loops) {
+                BRepBuilderAPI_MakeWire wire;
+                Vec3 twiceArea{};
+                for (size_t k = 0; k < loop.edges.size(); ++k) {
+                    const uint32_t e = loop.edges[k];
+                    if (e >= edgeCount || edgeAt(e).IsNull()) {
+                        if (reason) *reason = "a boundary edge could not be built";
+                        return {};
+                    }
+                    const bool forward = in.edgeEnds[e * 2] == loop.from[k];
+                    wire.Add(forward ? edgeAt(e) : TopoDS::Edge(edgeAt(e).Reversed()));
+                    if (!wire.IsDone()) {
+                        if (reason) *reason = "a face boundary would not close";
+                        return {};
+                    }
+                    const Vec3& p = in.points[loop.from[k]];
+                    const Vec3& q = in.points[loop.from[(k + 1) % loop.from.size()]];
+                    twiceArea = twiceArea + cross(p, q);
+                }
+                wires.push_back(wire.Wire());
+                areas.push_back(dot(twiceArea, region.normal));
+            }
+            if (wires.empty()) continue;
+
+            // The outside is the loop that winds positively about the normal and
+            // encloses the most; everything else is a hole in it.
+            size_t outer = 0;
+            for (size_t i = 1; i < areas.size(); ++i)
+                if (areas[i] > areas[outer]) outer = i;
+
+            const gp_Pln plane(gp_Pnt(region.point.x, region.point.y, region.point.z),
+                               gp_Dir(region.normal.x, region.normal.y, region.normal.z));
+            BRepBuilderAPI_MakeFace face(plane, wires[outer], Standard_True);
+            if (!face.IsDone()) {
+                if (reason) *reason = "a planar face could not be made from its boundary";
+                return {};
+            }
+            for (size_t i = 0; i < wires.size(); ++i)
+                if (i != outer) face.Add(wires[i]);
+            if (!face.IsDone()) {
+                if (reason) *reason = "a hole could not be cut into its face";
+                return {};
+            }
+            builder.Add(shell, face.Face());
+        }
+
+        shell.Closed(Standard_True);
+        BRepBuilderAPI_MakeSolid mk(shell);
+        if (!mk.IsDone()) {
+            if (reason) *reason = "the faces would not close into a solid";
+            return {};
+        }
+        TopoDS_Shape solid = mk.Solid();
+
+        // The mesh was consistently wound and every face was built on a plane
+        // facing its own outward normal, so the orientation is already right
+        // and the shape-fixing pass the triangle route needed -- a third of its
+        // time -- has nothing to do. The volume is the check that this held.
+        GProp_GProps props;
+        BRepGProp::VolumeProperties(solid, props);
+        if (props.Mass() < 0.0) solid.Reverse();
+
+        // The check. Not the kernel's general validity analysis, which asks
+        // every edge of a face whether it crosses every other and so is
+        // quadratic in them -- on a face drilled with 64 holes of a hundred
+        // segments each that was twelve of the conversion's thirteen seconds.
+        //
+        // What can go wrong here is narrower, and two things catch it exactly.
+        // Closed: every edge shared by two faces, or a boundary was traced
+        // wrong. Same volume as the mesh: a face facing the wrong way, a hole
+        // cut into the wrong face or not cut at all, a region missing -- each
+        // changes the enclosed volume, and the mesh's own volume is known to
+        // float precision from the triangles.
+        const Real got = std::fabs(props.Mass());
+        const Real want = std::fabs(in.volume);
+        if (got < 1e-12 || std::fabs(got - want) > std::max<Real>(want * 1e-6, 1e-9)) {
+            if (reason) *reason = "the faces joined but do not enclose what the mesh did";
+            return {};
+        }
+        BrepRef out = makeBrep(solid, nameImportedFaces(solid, salt));
+        if (!out || !closedShell(*out)) {
+            if (reason) *reason = "the faces joined but left a gap";
+            return {};
+        }
+        return out;
+    } catch (const Standard_Failure& e) {
+        if (reason) *reason = kernelReason(e, "the mesh could not be made solid");
+        return {};
+    }
+}
+
 BrepRef solidFromTriangles(const std::vector<Vec3>& points,
                            const std::vector<uint32_t>& tris,
+                           const std::vector<uint32_t>& edgeEnds,
+                           const std::vector<uint32_t>& triEdges,
                            ElementId salt, std::string* reason) {
-    if (tris.size() < 9 || tris.size() % 3 != 0) {
+    if (tris.size() < 9 || tris.size() % 3 != 0 || triEdges.size() != tris.size() ||
+        edgeEnds.size() % 2 != 0) {
         if (reason) *reason = "there are not enough triangles to make a solid";
         return {};
     }
     hushTheKernel();
     try {
-        // One planar face per triangle, sewn. The sewing tolerance is what
-        // decides whether two triangles that share an edge are understood to
-        // share it; the importer has already welded the vertices, so this only
-        // has to cover the kernel's own arithmetic.
-        BRepBuilderAPI_Sewing sew(1e-6, Standard_True, Standard_True, Standard_True);
-        int added = 0;
-        for (size_t i = 0; i + 2 < tris.size(); i += 3) {
-            const Vec3& a = points[tris[i]];
-            const Vec3& b = points[tris[i + 1]];
-            const Vec3& c = points[tris[i + 2]];
+        // Each point once, each edge once, each face once, and the shell built
+        // from them directly. Nothing is searched for: the caller already knows
+        // which triangles meet along which edge, which is what sewing spends
+        // its time finding out.
+        std::vector<TopoDS_Vertex> verts(points.size());
+        std::vector<bool> vertMade(points.size(), false);
+        auto vertexAt = [&](uint32_t i) -> const TopoDS_Vertex& {
+            if (!vertMade[i]) {
+                verts[i] = BRepBuilderAPI_MakeVertex(
+                    gp_Pnt(points[i].x, points[i].y, points[i].z));
+                vertMade[i] = true;
+            }
+            return verts[i];
+        };
 
-            BRepBuilderAPI_MakePolygon poly(gp_Pnt(a.x, a.y, a.z), gp_Pnt(b.x, b.y, b.z),
-                                            gp_Pnt(c.x, c.y, c.z), Standard_True);
-            if (!poly.IsDone()) continue;
-            BRepBuilderAPI_MakeFace face(poly.Wire(), Standard_True);
-            if (!face.IsDone()) continue;       // a sliver with no plane through it
-            sew.Add(face.Face());
+        const size_t edgeCount = edgeEnds.size() / 2;
+        std::vector<TopoDS_Edge> edges(edgeCount);
+        std::vector<bool> edgeMade(edgeCount, false);
+        auto edgeAt = [&](uint32_t e) -> const TopoDS_Edge& {
+            if (!edgeMade[e]) {
+                BRepBuilderAPI_MakeEdge mk(vertexAt(edgeEnds[e * 2]),
+                                           vertexAt(edgeEnds[e * 2 + 1]));
+                if (mk.IsDone()) edges[e] = mk.Edge();
+                edgeMade[e] = true;
+            }
+            return edges[e];
+        };
+
+        BRep_Builder builder;
+        TopoDS_Shell shell;
+        builder.MakeShell(shell);
+        int added = 0;
+
+        for (size_t t = 0; t + 2 < tris.size(); t += 3) {
+            BRepBuilderAPI_MakeWire wire;
+            bool good = true;
+            for (int k = 0; k < 3 && good; ++k) {
+                const uint32_t e = triEdges[t + k];
+                if (e >= edgeCount) { good = false; break; }
+                const TopoDS_Edge& edge = edgeAt(e);
+                if (edge.IsNull()) { good = false; break; }
+                // The shared edge runs one way; this triangle may want the
+                // other. Reversing the *use* rather than making a second edge
+                // is what keeps the two faces genuinely joined along it.
+                const bool forward = edgeEnds[e * 2] == tris[t + k];
+                wire.Add(forward ? edge : TopoDS::Edge(edge.Reversed()));
+                if (!wire.IsDone()) good = false;
+            }
+            if (!good || !wire.IsDone()) continue;
+
+            BRepBuilderAPI_MakeFace face(wire.Wire(), Standard_True);
+            if (!face.IsDone()) continue;       // a sliver with no plane in it
+            builder.Add(shell, face.Face());
             ++added;
         }
         if (added < 4) {
@@ -2324,27 +2673,20 @@ BrepRef solidFromTriangles(const std::vector<Vec3>& points,
             return {};
         }
 
-        sew.Perform();
-        const TopoDS_Shape sewn = sew.SewedShape();
-        if (sewn.IsNull()) {
-            if (reason) *reason = "the triangles would not sew together";
+        // Closing the shell into a solid is what gives it an inside, and it is
+        // also the check that the surface really was closed.
+        shell.Closed(BRep_Tool::IsClosed(shell));
+        BRepBuilderAPI_MakeSolid mk(shell);
+        if (!mk.IsDone()) {
+            if (reason) *reason = "the surface would not close into a solid";
             return {};
         }
-
-        // A sewn shell is a surface. Closing it into a solid is what gives it
-        // an inside, and it is also the check that the surface really was
-        // closed -- ShapeFix refuses an open one rather than inventing a lid.
-        TopoDS_Shape solid;
-        for (TopExp_Explorer ex(sewn, TopAbs_SHELL); ex.More(); ex.Next()) {
-            BRepBuilderAPI_MakeSolid mk(TopoDS::Shell(ex.Current()));
-            if (!mk.IsDone()) continue;
-            ShapeFix_Solid fix(mk.Solid());
-            fix.Perform();
-            if (!fix.Solid().IsNull()) { solid = fix.Solid(); break; }
-        }
+        ShapeFix_Solid fix(mk.Solid());
+        fix.Perform();
+        TopoDS_Shape solid = fix.Solid();
+        if (solid.IsNull()) solid = mk.Solid();
         if (solid.IsNull()) {
-            if (reason)
-                *reason = "the surface closed up but would not become a solid";
+            if (reason) *reason = "the surface closed up but would not become a solid";
             return {};
         }
 

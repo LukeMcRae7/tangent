@@ -38,10 +38,6 @@ struct PrintProfile {
     // is fragile and slicers often drop it.
     Real minWallMm = 0.8;
 
-    // How far from vertical a face may lean before it needs holding up. Forty
-    // five degrees is the number every slicer defaults to.
-    Real maxOverhangDeg = 45.0;
-
     // Which way is up. The bed is the XY plane here, as it is in the viewport.
     Vec3 up{0, 0, 1};
 };
@@ -49,9 +45,14 @@ struct PrintProfile {
 enum class PrintIssue {
     None,
     ThinWall,     // less material behind the face than the nozzle can lay down
-    Overhang,     // leans further than the printer will bridge
     NotSolid,     // the slicer will not know what is inside
 };
+
+// How many offending faces are kept for drawing. Every one is counted; only
+// this many are remembered. Ten thousand red faces on an imported model is a
+// colour rather than information, and holding them all costs memory to say
+// nothing that the count does not say better.
+inline constexpr size_t kMaxDrawnFindings = 400;
 
 // One face, and what is wrong with it.
 struct PrintFinding {
@@ -63,22 +64,30 @@ struct PrintFinding {
 struct PrintReport {
     std::vector<PrintFinding> findings;
 
+    // Every offending face, however many were kept to draw.
     int  thinWalls = 0;
-    int  overhangs = 0;
     bool solid = true;
 
-    // The worst of each, for saying something short about the whole part.
+    // The worst of them, for saying something short about the whole part.
     Real thinnestWallMm = 0.0;
-    Real steepestOverhangDeg = 0.0;
 
-    bool clean() const { return findings.empty() && solid; }
+    bool clean() const { return thinWalls == 0 && solid; }
 };
 
 // Looks over a body and says what a printer would make of it.
 //
-// Costs a ray cast per face against the tessellation, so it is not free and is
-// not meant to run every frame: the caller runs it when the geometry changes
-// and keeps the answer.
+// Two things, and deliberately not three. A wall too thin to lay down, and a
+// body a slicer cannot tell the inside of.
+//
+// Overhangs used to be here and are not. The slicer decides about supports, it
+// decides better because it knows the machine, and it decides whether you ask
+// or not -- so a second opinion here bought nothing but a viewport full of
+// amber. Wall thickness is the opposite case: nothing warns you, the slicer
+// quietly drops the wall, and the part comes off the bed with a hole in it.
+//
+// Costs a ray cast per face against a tree built over the tessellation. Not
+// free, and not meant for every frame: the caller runs it when the geometry
+// changes and keeps the answer.
 PrintReport checkPrintability(const Body& body, const RenderMesh& render,
                               const PrintProfile& profile = {});
 

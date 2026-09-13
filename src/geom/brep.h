@@ -308,6 +308,10 @@ void findFaces(const BrepShape& s, ElementId id, std::vector<FaceId>& out);
 // callers should cache the result and re-tessellate on a geometry change or a
 // large zoom change, not per frame.
 void tessellate(const BrepShape& s, RenderMesh& out, TessellationQuality q);
+// Every edge bounds exactly two faces. Linear in the edges, and the question
+// "is this closed" rather than "is this valid" -- see health().
+bool closedShell(const BrepShape& s);
+
 bool validate(const BrepShape& s, std::string* err);
 MeshHealth health(const BrepShape& s, bool checkIntersections);
 
@@ -356,8 +360,52 @@ bool readStep(const std::string& path, ElementId salt, std::vector<BrepRef>& out
 // part that was CAD before somebody exported it to STL gets its flat surfaces
 // returned. Curvature does not come back -- the file threw that away -- so a
 // cylinder returns as however many narrow planar strips it left as.
+// `edgeEnds` is two point indices per shared edge, and `triEdges` three edge
+// indices per triangle, in the same order as that triangle's own corners.
+//
+// Passing the connectivity rather than letting the kernel find it is not a
+// micro-optimisation. BRepBuilderAPI_Sewing works out which faces touch by
+// searching on position, and on a 62,000-triangle mesh that search took
+// thirty-seven seconds -- to rediscover something the half-edge mesh had known
+// exactly since it was built. Given the edges, each one is made once and shared
+// by the two faces that meet along it, and there is nothing to search for.
+// A closed mesh already cut into the faces it will become.
+//
+// Each region is a connected patch of coplanar triangles, described by its
+// boundary loops -- one outer, any number of holes -- in terms of edges shared
+// with the regions around it. Handing the kernel this rather than the
+// triangles is the difference between it building seven thousand faces and it
+// building thirty thousand and then being asked to merge them back: the merge
+// was most of the time, and the half-edge mesh can do it in one linear pass
+// because it already knows which triangles are neighbours.
+struct PlanarRegions {
+    std::vector<Vec3>     points;
+    std::vector<uint32_t> edgeEnds;          // 2 point indices per shared edge
+
+    struct Loop {
+        std::vector<uint32_t> from;           // the point each step starts at
+        std::vector<uint32_t> edges;          // the edge each step runs along
+    };
+    struct Region {
+        Vec3 normal;                          // outward
+        Vec3 point;                           // any point on the plane
+        std::vector<Loop> loops;              // wound counter-clockwise about
+                                              // `normal` for the outside, and
+                                              // clockwise for each hole
+    };
+    std::vector<Region> regions;
+
+    // What the mesh enclosed. The solid is checked against it rather than
+    // put through the kernel's general validity check -- see the conversion.
+    Real volume = 0.0;
+};
+
+BrepRef solidFromPlanarRegions(const PlanarRegions& in, ElementId salt, std::string* reason);
+
 BrepRef solidFromTriangles(const std::vector<Vec3>& points,
                            const std::vector<uint32_t>& tris,
+                           const std::vector<uint32_t>& edgeEnds,
+                           const std::vector<uint32_t>& triEdges,
                            ElementId salt, std::string* reason);
 
 } // namespace brep

@@ -7,6 +7,7 @@
 #include "geom/kernel_guard.h"
 #include "app/create_tool.h"
 #include "app/file_dialog.h"
+#include "app/printability.h"
 #include "app/measure.h"
 #include "mesh/export_stl.h"
 #include "scene/serialize.h"
@@ -17,7 +18,9 @@
 #include "scene/scene.h"
 #include "ui/panels.h"
 
+#include <future>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 struct SDL_Window;
@@ -120,6 +123,7 @@ public:
     void setPatternDemo(int mode) { patternDemo_ = mode; }
     void setStepDemo(const std::string& path) { stepDemo_ = path; }
     void setDialogDemo(int mode) { dialogDemo_ = mode; }
+    void setMeshBench(const std::string& path) { meshBench_ = path; }
 
     // Throws a fast, wandering drag at the extrude, including the places a
     // hand actually goes: the corners of the window, and straight through the
@@ -176,6 +180,41 @@ private:
     bool stepDemoDone_ = false;
     int  dialogDemo_ = 0;
     bool dialogDemoDone_ = false;
+    std::string meshBench_;
+    bool meshBenchDone_ = false;
+    void stepMeshBench();
+
+    // Runs the print check on one object and gathers the triangles it flagged,
+    // so drawing them later costs those triangles and nothing else. Synchronous;
+    // the demos and the benchmark want the answer before the next line.
+    void refreshPrintCheck(SceneObject& o, const PrintProfile& profile = {});
+
+    // The same work, off the frame thread. On a 62,000-triangle import the check
+    // is most of a tenth of a second, and on the frame thread that is a stall
+    // the moment the model appears. Here the model appears, and the red faces
+    // follow a few frames later -- a report on the part is not something anyone
+    // is waiting on to keep working.
+    struct PrintJobResult {
+        PrintReport       report;
+        std::vector<Vec3> triangles;
+    };
+    struct PrintJob {
+        uint32_t meshVersion = 0;
+        std::future<PrintJobResult> result;
+    };
+    std::unordered_map<ObjectId, PrintJob> printJobs_;
+
+    // Jobs for geometry that has since changed. Not destroyed on the spot: the
+    // future std::async returns blocks in its destructor until its task is
+    // done, so throwing one away would stall the frame thread on exactly the
+    // work that was moved off it. They wait here and are dropped once finished.
+    std::vector<std::future<PrintJobResult>> retiredPrintJobs_;
+    void retirePrintJob(ObjectId id);
+
+    // Pure: everything it reads is passed in, which is what lets it run on a
+    // worker against a snapshot while the scene carries on changing.
+    static PrintJobResult runPrintCheck(const Body& body, const RenderMesh& rm,
+                                        const PrintProfile& profile);
     void stepDialogDemo();
     void stepStepDemo();
     bool patternDemoDone_ = false;

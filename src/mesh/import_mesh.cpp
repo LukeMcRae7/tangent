@@ -2,6 +2,7 @@
 
 #include "mesh/halfedge.h"
 #include "mesh/health.h"
+#include "geom/brep.h"
 
 #include <algorithm>
 #include <cctype>
@@ -223,6 +224,187 @@ MeshImport readMesh(const std::string& path, Body& out) {
     return r;
 }
 
+namespace {
+
+// Connected patches of coplanar triangles: the faces a conversion will produce.
+//
+// Flood filled from a seed triangle, testing every candidate against the
+// *seed's* plane rather than its neighbour's. Against the neighbour, a finely
+// faceted curve would creep from strip to strip a hundredth of a degree at a
+// time and come back as one "flat" face; against the seed, the error cannot
+// accumulate past the tolerance.
+struct Regions {
+    std::vector<int32_t> of;        // per mesh face
+    std::vector<Vec3> normal, point;
+    int count = 0;
+};
+
+Regions findRegions(const Mesh& m) {
+    Regions r;
+    const size_t nf = m.faces.size();
+    r.of.assign(nf, -1);
+    if (nf == 0) return r;
+
+    Vec3 lo{1e30, 1e30, 1e30}, hi{-1e30, -1e30, -1e30};
+    for (const MeshVertex& v : m.verts) {
+        lo = {std::min(lo.x, v.position.x), std::min(lo.y, v.position.y), std::min(lo.z, v.position.z)};
+        hi = {std::max(hi.x, v.position.x), std::max(hi.y, v.position.y), std::max(hi.z, v.position.z)};
+    }
+    // A float32 STL coordinate is good to about seven significant figures, so
+    // a millionth of the part's size is the finest distance that means anything.
+    const Real tol = std::max<Real>(length(hi - lo) * 1e-6, 1e-7);
+    constexpr Real kCos = 1.0 - 1e-6;       // about a twelfth of a degree
+
+    std::vector<Vec3> fn(nf);
+    for (size_t f = 0; f < nf; ++f) {
+        const Vec3 n = m.faceNormal(static_cast<Index>(f));
+        fn[f] = lengthSq(n) > 1e-24 ? normalize(n) : Vec3{};
+    }
+
+    auto onPlane = [&](Index g, Vec3 n, Real d) {
+        const Index h0 = m.faces[g].halfedge;
+        Index h = h0;
+        do {
+            if (std::fabs(dot(n, m.verts[m.halfedges[h].vertex].position) - d) > tol) return false;
+            h = m.halfedges[h].next;
+        } while (h != h0);
+        return true;
+    };
+
+    std::vector<Index> stack;
+    // Two passes: real triangles seed regions; slivers with no normal only ever
+    // join one, since a plane through a sliver is whatever rounding says it is.
+    for (int pass = 0; pass < 2; ++pass) {
+        for (size_t seed = 0; seed < nf; ++seed) {
+            if (r.of[seed] != -1) continue;
+            const bool degenerate = lengthSq(fn[seed]) == 0.0;
+            if (pass == 0 && degenerate) continue;
+
+            const int id = r.count++;
+            const Vec3 n = degenerate ? Vec3{0, 0, 1} : fn[seed];
+            const Vec3 p = m.faceCentroid(static_cast<Index>(seed));
+            const Real d = dot(n, p);
+            r.normal.push_back(n);
+            r.point.push_back(p);
+            r.of[seed] = id;
+            stack.assign(1, static_cast<Index>(seed));
+
+            while (!stack.empty()) {
+                const Index f = stack.back();
+                stack.pop_back();
+                const Index h0 = m.faces[f].halfedge;
+                Index h = h0;
+                do {
+                    const Index t = m.halfedges[h].twin;
+                    const Index g = t >= 0 ? m.halfedges[t].face : kInvalid;
+                    if (g >= 0 && r.of[g] == -1 &&
+                        (lengthSq(fn[g]) == 0.0 || dot(fn[g], n) > kCos) && onPlane(g, n, d)) {
+                        r.of[g] = id;
+                        stack.push_back(g);
+                    }
+                    h = m.halfedges[h].next;
+                } while (h != h0);
+            }
+        }
+    }
+    return r;
+}
+
+// Every region's boundary as loops of shared edges.
+bool traceRegions(const Mesh& m, const Regions& reg, brep::PlanarRegions& out) {
+    out = brep::PlanarRegions{};
+    out.points.reserve(m.verts.size());
+    for (const MeshVertex& v : m.verts) out.points.push_back(v.position);
+    out.regions.resize(static_cast<size_t>(reg.count));
+    {
+        // Divergence theorem over the mesh's own faces, fanned. The solid built
+        // from the regions has to enclose exactly this.
+        Real v = 0.0;
+        std::vector<Index> loop;
+        for (size_t f = 0; f < m.faces.size(); ++f) {
+            m.faceVertices(static_cast<Index>(f), loop);
+            for (size_t i = 1; i + 1 < loop.size(); ++i)
+                v += dot(m.verts[loop[0]].position,
+                         cross(m.verts[loop[i]].position, m.verts[loop[i + 1]].position));
+        }
+        out.volume = v / 6.0;
+    }
+    for (int i = 0; i < reg.count; ++i) {
+        out.regions[static_cast<size_t>(i)].normal = reg.normal[static_cast<size_t>(i)];
+        out.regions[static_cast<size_t>(i)].point = reg.point[static_cast<size_t>(i)];
+    }
+
+    auto regionOf = [&](Index he) -> int32_t {
+        const Index f = m.halfedges[he].face;
+        return f >= 0 ? reg.of[f] : -1;
+    };
+    auto isBoundary = [&](Index he) {
+        const Index t = m.halfedges[he].twin;
+        return t < 0 || regionOf(t) != regionOf(he);
+    };
+    auto source = [&](Index he) { return m.halfedges[m.halfedges[he].prev].vertex; };
+
+    std::unordered_map<uint64_t, uint32_t> edgeIndex;
+    edgeIndex.reserve(m.halfedges.size() / 4);
+    auto edgeFor = [&](uint32_t a, uint32_t b) {
+        const uint64_t lo = std::min(a, b), hi = std::max(a, b);
+        const uint64_t key = (lo << 32) | hi;
+        auto it = edgeIndex.find(key);
+        if (it != edgeIndex.end()) return it->second;
+        const auto id = static_cast<uint32_t>(out.edgeEnds.size() / 2);
+        out.edgeEnds.push_back(a);
+        out.edgeEnds.push_back(b);
+        edgeIndex.emplace(key, id);
+        return id;
+    };
+
+    std::vector<char> used(m.halfedges.size(), 0);
+    for (size_t start = 0; start < m.halfedges.size(); ++start) {
+        const Index s0 = static_cast<Index>(start);
+        if (used[start] || m.halfedges[s0].face < 0 || !isBoundary(s0)) continue;
+        const int32_t R = regionOf(s0);
+
+        brep::PlanarRegions::Loop loop;
+        Index h = s0;
+        // Bounded, so a boundary that does not close -- a pinched or broken
+        // region -- fails rather than spins.
+        for (size_t guard = 0; guard <= m.halfedges.size(); ++guard) {
+            used[static_cast<size_t>(h)] = 1;
+            const auto a = static_cast<uint32_t>(source(h));
+            const auto b = static_cast<uint32_t>(m.halfedges[h].vertex);
+            loop.from.push_back(a);
+            loop.edges.push_back(edgeFor(a, b));
+
+            // The next boundary half-edge leaving where this one arrived: turn
+            // about that vertex, inside the region, until the region ends.
+            Index n = m.halfedges[h].next;
+            size_t turns = 0;
+            while (!isBoundary(n)) {
+                n = m.halfedges[m.halfedges[n].twin].next;
+                if (++turns > m.halfedges.size()) return false;
+            }
+            h = n;
+            if (h == s0) break;
+            if (used[static_cast<size_t>(h)] || regionOf(h) != R) return false;
+        }
+        if (h != s0 || loop.from.size() < 3) return false;
+        out.regions[static_cast<size_t>(R)].loops.push_back(std::move(loop));
+    }
+
+    for (const brep::PlanarRegions::Region& region : out.regions)
+        if (region.loops.empty()) return false;
+    return true;
+}
+
+} // namespace
+
+int predictSolidFaces(const Body& body) {
+    if (!body.isMesh() || body.empty()) return 0;
+    // The same partition the conversion uses, so the number said up front is
+    // the number that comes out rather than an estimate of it.
+    return findRegions(body.mesh()).count;
+}
+
 SolidifyResult toSolid(Body& body, ElementId salt, int maxFaces) {
     SolidifyResult r;
     if (!body.isMesh()) { r.error = "that body is already exact"; return r; }
@@ -230,18 +412,59 @@ SolidifyResult toSolid(Body& body, ElementId salt, int maxFaces) {
 
     const Mesh& m = body.mesh();
     r.facesBefore = static_cast<int>(m.faces.size());
-    if (r.facesBefore > maxFaces) {
-        char buf[160];
-        std::snprintf(buf, sizeof buf,
-                      "%d triangles is too many to convert; the limit is %d and the "
-                      "result would not be workable anyway",
-                      r.facesBefore, maxFaces);
+
+    // The limit is on what comes out, not on what goes in, and it is checked
+    // before any work is done. A million triangles that are really a bracket
+    // should convert; sixty thousand that are really a sculpture should not,
+    // and the difference is not the triangle count.
+    const int predicted = predictSolidFaces(body);
+    if (predicted > maxFaces) {
+        // Two different reasons to be over, and they want different words. A
+        // scan or a sculpt has a plane per triangle and nothing to merge. A part
+        // that was CAD merges well and is still over because its curved faces
+        // left as hundreds of flat strips each -- which do not come back as
+        // curves, so the result would be a solid you still could not fillet a
+        // hole edge on.
+        char buf[320];
+        if (predicted * 2 > r.facesBefore)
+            std::snprintf(buf, sizeof buf,
+                          "this would give %d faces, over the limit of %d: its %d triangles "
+                          "lie on %d different planes, so it looks scanned or sculpted and "
+                          "there is almost nothing to merge",
+                          predicted, maxFaces, r.facesBefore, predicted);
+        else
+            std::snprintf(buf, sizeof buf,
+                          "this would give %d faces, over the limit of %d: the flat faces "
+                          "merge, but its curved surfaces were exported as many thin strips "
+                          "and would come back as flat strips rather than curves",
+                          predicted, maxFaces);
         r.error = buf;
         return r;
     }
     if (!checkHealth(m, false).watertight) {
         r.error = "the surface has holes in it, and only a closed one can be a solid";
         return r;
+    }
+
+    // The fast route: the regions, traced from the mesh, handed over whole.
+    {
+        const Regions reg = findRegions(m);
+        brep::PlanarRegions planar;
+        if (traceRegions(m, reg, planar)) {
+            std::string why;
+            BrepRef solid = brep::solidFromPlanarRegions(planar, salt, &why);
+            if (solid) {
+                Body converted(std::move(solid));
+                r.facesAfter = converted.faceCount();
+                body = std::move(converted);
+                r.ok = true;
+                r.viaRegions = true;
+                return r;
+            }
+        }
+        // Falls through to building a face per triangle and letting the kernel
+        // sew and merge. Slow, and tolerant of the meshes the tracing refuses --
+        // a region pinched at a vertex, a sliver that fits no plane cleanly.
     }
 
     std::vector<Vec3> pts;
@@ -260,8 +483,38 @@ SolidifyResult toSolid(Body& body, ElementId salt, int maxFaces) {
         }
     }
 
+    // Which triangles share which edge. The kernel would otherwise work this
+    // out by searching on position, which is where the time went; here it is a
+    // hash of each vertex pair and one pass.
+    std::vector<uint32_t> edgeEnds, triEdges;
+    triEdges.resize(tris.size());
+    {
+        std::unordered_map<uint64_t, uint32_t> seen;
+        seen.reserve(tris.size());
+        for (size_t t = 0; t + 2 < tris.size(); t += 3) {
+            for (int k = 0; k < 3; ++k) {
+                const uint32_t a = tris[t + k];
+                const uint32_t b = tris[t + (k + 1) % 3];
+                const uint64_t lo = a < b ? a : b;
+                const uint64_t hi = a < b ? b : a;
+                const uint64_t key = (lo << 32) | hi;
+
+                auto it = seen.find(key);
+                if (it == seen.end()) {
+                    const auto id = static_cast<uint32_t>(edgeEnds.size() / 2);
+                    edgeEnds.push_back(a);      // stored the way it first ran
+                    edgeEnds.push_back(b);
+                    seen.emplace(key, id);
+                    triEdges[t + k] = id;
+                } else {
+                    triEdges[t + k] = it->second;
+                }
+            }
+        }
+    }
+
     std::string why;
-    BrepRef solid = brep::solidFromTriangles(pts, tris, salt, &why);
+    BrepRef solid = brep::solidFromTriangles(pts, tris, edgeEnds, triEdges, salt, &why);
     if (!solid) {
         r.error = why.empty() ? "the triangles would not sew into a solid" : why;
         return r;

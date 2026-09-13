@@ -331,6 +331,18 @@ target_include_directories(test_chain PRIVATE src)
 target_compile_options(test_chain PRIVATE ${TANGENT_WARNINGS})
 add_test(NAME chain COMMAND test_chain)
 
+add_executable(test_validity tests/test_validity.cpp ${TANGENT_GEOM}
+  src/mesh/boolean.cpp src/mesh/health.cpp src/mesh/operations.cpp
+  src/mesh/halfedge.cpp src/mesh/primitives.cpp)
+target_include_directories(test_validity PRIVATE src)
+target_compile_options(test_validity PRIVATE ${TANGENT_WARNINGS})
+add_test(NAME validity COMMAND test_validity)
+
+add_executable(test_bvh tests/test_bvh.cpp)
+target_include_directories(test_bvh PRIVATE src)
+target_compile_options(test_bvh PRIVATE ${TANGENT_WARNINGS})
+add_test(NAME bvh COMMAND test_bvh)
+
 add_executable(test_import tests/test_import.cpp src/mesh/import_mesh.cpp
   ${TANGENT_GEOM} src/mesh/boolean.cpp src/mesh/health.cpp src/mesh/operations.cpp
   src/mesh/halfedge.cpp src/mesh/primitives.cpp src/mesh/export_stl.cpp
