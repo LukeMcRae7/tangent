@@ -2,6 +2,7 @@
 
 #include "mesh/halfedge.h"
 #include "mesh/health.h"
+#include "mesh/weld.h"
 #include "geom/brep.h"
 
 #include <algorithm>
@@ -27,31 +28,6 @@ namespace {
 // A hundredth of a micron. Far below any tolerance a printer or a CAD package
 // works to, and far above the noise in a float32 coordinate.
 constexpr Real kWeld = 1e-5;
-
-struct Welder {
-    std::vector<Vec3> positions;
-    std::unordered_map<uint64_t, std::vector<uint32_t>> grid;
-
-    static uint64_t cell(Vec3 p) {
-        auto q = [](Real v) { return static_cast<int64_t>(std::llround(v / kWeld)); };
-        const uint64_t a = static_cast<uint64_t>(q(p.x));
-        const uint64_t b = static_cast<uint64_t>(q(p.y));
-        const uint64_t c = static_cast<uint64_t>(q(p.z));
-        return a * 0x9E3779B97F4A7C15ull ^ (b * 0xC2B2AE3D27D4EB4Full) ^
-               (c * 0x165667B19E3779F9ull);
-    }
-
-    uint32_t add(Vec3 p) {
-        const uint64_t key = cell(p);
-        auto& bucket = grid[key];
-        for (uint32_t i : bucket)
-            if (lengthSq(positions[i] - p) <= kWeld * kWeld) return i;
-        positions.push_back(p);
-        const auto idx = static_cast<uint32_t>(positions.size() - 1);
-        bucket.push_back(idx);
-        return idx;
-    }
-};
 
 bool endsWith(const std::string& s, const char* suffix) {
     const size_t n = std::strlen(suffix);
@@ -196,7 +172,7 @@ MeshImport readMesh(const std::string& path, Body& out) {
     std::ifstream f(path, std::ios::binary);
     if (!f) { r.error = "the file could not be opened"; return r; }
 
-    Welder w;
+    Welder w(kWeld);
     std::vector<uint32_t> sizes, idx;
     bool read = false;
     if (fmt == MeshFormat::Stl) {

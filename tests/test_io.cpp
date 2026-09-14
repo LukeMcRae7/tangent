@@ -1,6 +1,12 @@
-// STL export and project round-trips.
+// STL and 3MF export, and project round-trips.
+#include "mesh/export_3mf.h"
 #include "mesh/export_stl.h"
 #include "scene/serialize.h"
+
+#include <zlib.h>
+
+#include <map>
+#include <unordered_map>
 
 #include <cmath>
 #include <filesystem>
@@ -224,9 +230,283 @@ static void testOlderFileOpens() {
     std::printf("[project] version 4 opens, version %u refused\n", kProjectVersion + 1);
 }
 
+// ---- 3MF ------------------------------------------------------------------
+//
+// Read back independently of the writer: the archive's central directory is
+// walked, every part inflated and its CRC checked, and the model parsed for
+// its vertices and triangles. What is checked is what a slicer relies on --
+// millimetres, every object separate and named, each mesh closed and wound
+// outward, and the volume it encloses the volume of the part.
+
+static uint32_t rd32(const std::string& b, size_t at) {
+    uint32_t v = 0;
+    std::memcpy(&v, b.data() + at, 4);
+    return v;
+}
+static uint16_t rd16(const std::string& b, size_t at) {
+    uint16_t v = 0;
+    std::memcpy(&v, b.data() + at, 2);
+    return v;
+}
+
+static bool readZip(const std::string& path, std::map<std::string, std::string>& parts,
+                    std::string& why) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) { why = "cannot open"; return false; }
+    const std::string b((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    if (b.size() < 22) { why = "too short"; return false; }
+    const size_t end = b.size() - 22;               // no archive comment is written
+    if (rd32(b, end) != 0x06054b50) { why = "no end of central directory"; return false; }
+    const uint16_t count = rd16(b, end + 10);
+    size_t at = rd32(b, end + 16);
+    for (uint16_t i = 0; i < count; ++i) {
+        if (at + 46 > b.size() || rd32(b, at) != 0x02014b50) { why = "bad directory entry"; return false; }
+        const uint16_t method = rd16(b, at + 10);
+        const uint32_t crc = rd32(b, at + 16);
+        const uint32_t packed = rd32(b, at + 20), size = rd32(b, at + 24);
+        const uint16_t nameLen = rd16(b, at + 28), extra = rd16(b, at + 30), comment = rd16(b, at + 32);
+        const uint32_t local = rd32(b, at + 42);
+        const std::string name = b.substr(at + 46, nameLen);
+        at += 46 + nameLen + extra + comment;
+
+        if (rd32(b, local) != 0x04034b50) { why = "bad local header for " + name; return false; }
+        if (rd32(b, local + 14) != crc || rd32(b, local + 18) != packed || rd32(b, local + 22) != size) {
+            why = "local header disagrees with the directory for " + name;
+            return false;
+        }
+        const size_t data = local + 30 + rd16(b, local + 26) + rd16(b, local + 28);
+        std::string out(size, '\0');
+        if (method == 0) {
+            out = b.substr(data, size);
+        } else if (method == 8) {
+            z_stream zs{};
+            inflateInit2(&zs, -15);
+            zs.next_in = reinterpret_cast<Bytef*>(const_cast<char*>(b.data() + data));
+            zs.avail_in = packed;
+            zs.next_out = reinterpret_cast<Bytef*>(out.data());
+            zs.avail_out = size;
+            const int rc = inflate(&zs, Z_FINISH);
+            inflateEnd(&zs);
+            if (rc != Z_STREAM_END || zs.avail_out != 0) { why = "inflate failed for " + name; return false; }
+        } else {
+            why = "unknown method for " + name;
+            return false;
+        }
+        const uLong got = crc32(crc32(0L, Z_NULL, 0), reinterpret_cast<const Bytef*>(out.data()),
+                                static_cast<uInt>(out.size()));
+        if (got != crc) { why = "CRC mismatch for " + name; return false; }
+        parts[name] = std::move(out);
+    }
+    return true;
+}
+
+struct ReadObject {
+    std::string name;
+    std::vector<Vec3> vertices;
+    std::vector<uint32_t> triangles;
+};
+
+static std::string attr(const std::string& tag, const char* key) {
+    const std::string k = std::string(" ") + key + "=\"";
+    const size_t a = tag.find(k);
+    if (a == std::string::npos) return {};
+    const size_t v = a + k.size();
+    return tag.substr(v, tag.find('"', v) - v);
+}
+
+static std::vector<ReadObject> parseModel(const std::string& xml) {
+    std::vector<ReadObject> objects;
+    size_t at = 0;
+    while ((at = xml.find('<', at)) != std::string::npos) {
+        const size_t close = xml.find('>', at);
+        const std::string tag = xml.substr(at, close - at + 1);
+        at = close;
+        if (tag.rfind("<object ", 0) == 0) {
+            objects.push_back({attr(tag, "name"), {}, {}});
+        } else if (tag.rfind("<vertex ", 0) == 0 && !objects.empty()) {
+            objects.back().vertices.push_back({std::stod(attr(tag, "x")), std::stod(attr(tag, "y")),
+                                               std::stod(attr(tag, "z"))});
+        } else if (tag.rfind("<triangle ", 0) == 0 && !objects.empty()) {
+            for (const char* k : {"v1", "v2", "v3"})
+                objects.back().triangles.push_back(static_cast<uint32_t>(std::stoul(attr(tag, k))));
+        }
+    }
+    return objects;
+}
+
+static double enclosed(const ReadObject& o) {
+    double s6 = 0.0;
+    for (size_t i = 0; i + 2 < o.triangles.size(); i += 3)
+        s6 += dot(o.vertices[o.triangles[i]],
+                  cross(o.vertices[o.triangles[i + 1]], o.vertices[o.triangles[i + 2]]));
+    return s6 / 6.0;
+}
+
+static bool closedOutward(const ReadObject& o) {
+    std::map<std::pair<uint32_t, uint32_t>, int> edges;
+    for (size_t i = 0; i + 2 < o.triangles.size(); i += 3)
+        for (int k = 0; k < 3; ++k)
+            if (++edges[{o.triangles[i + k], o.triangles[i + (k + 1) % 3]}] > 1) return false;
+    for (const auto& [e, n] : edges)
+        if (!edges.count({e.second, e.first})) return false;
+    for (uint32_t v : o.triangles)
+        if (v >= o.vertices.size()) return false;
+    return !o.triangles.empty() && enclosed(o) > 0.0;
+}
+
+static void test3mf() {
+    // Built on whichever kernel the build has. With the exact one, a box and a
+    // placed, turned cylinder go out tessellated and welded; a mesh sphere goes
+    // out with the vertices it has. A reflected copy checks the winding turns
+    // with it rather than coming out inside out.
+    Scene s;
+    const bool exact = brep::available();
+    s.setDefaultBackend(exact ? Backend::Brep : Backend::Mesh);
+
+    PrimitiveSpec boxSpec;
+    boxSpec.kind = PrimitiveKind::Box;
+    boxSpec.box = {30.0, 20.0, 10.0};
+    const ObjectId box = s.addPrimitive(PrimitiveKind::Box, boxSpec, {0, 0, 5});
+    s.find(box)->name = "Base <plate> & 'lid'";
+
+    PrimitiveSpec cylSpec;
+    cylSpec.kind = PrimitiveKind::Cylinder;
+    cylSpec.cylinder.radius = 6.0;
+    cylSpec.cylinder.height = 25.0;
+    const ObjectId cyl = s.addPrimitive(PrimitiveKind::Cylinder, cylSpec, {60, 10, 0});
+    s.find(cyl)->name = "Peg";
+    s.find(cyl)->transform.rotation = Quat::fromAxisAngle(normalize(Vec3{1, 1, 0}), 0.7);
+
+    Mesh sphere;
+    makeSphere(sphere, {8.0, 32, 16});
+    const ObjectId ball = s.addBody(Body(std::move(sphere)), {-40, 0, 8}, "Ball");
+
+    const ObjectId flipped = s.addPrimitive(PrimitiveKind::Box, boxSpec, {0, 50, 5});
+    s.find(flipped)->name = "Mirrored";
+    s.find(flipped)->transform.scale = {-1.0, 1.0, 1.0};
+    s.reevaluate(flipped);
+
+    const std::string path = tmp("parts.3mf");
+    ThreeMfOptions opt;
+    opt.deviationMm = 0.01;
+    const ThreeMfResult r = export3mf(s, path, opt);
+    check(r.ok, "3MF export succeeds: " + r.error);
+    check(r.objects == 4, "four objects written");
+    check(r.openObjects == 0, "every one of them closed");
+    check(r.meshBodies == (exact ? 1u : 4u), "the mesh bodies are counted");
+
+    std::map<std::string, std::string> parts;
+    std::string why;
+    check(readZip(path, parts, why), "the archive reads back: " + why);
+    check(parts.size() == 3, "three parts in the package");
+    check(parts.count("[Content_Types].xml") && parts["[Content_Types].xml"].find(
+              "application/vnd.ms-package.3dmanufacturing-3dmodel+xml") != std::string::npos,
+          "the content types name the model");
+    check(parts.count("_rels/.rels") &&
+              parts["_rels/.rels"].find("Target=\"/3D/3dmodel.model\"") != std::string::npos,
+          "the relationship points at the model");
+    const std::string& xml = parts["3D/3dmodel.model"];
+    check(xml.find("unit=\"millimeter\"") != std::string::npos, "in millimetres");
+
+    const std::vector<ReadObject> objects = parseModel(xml);
+    check(objects.size() == 4, "four objects in the model");
+    check(xml.find("name=\"Base &lt;plate&gt; &amp; &apos;lid&apos;\"") != std::string::npos,
+          "a name with markup in it is escaped");
+    size_t items = 0;
+    for (size_t at = 0; (at = xml.find("<item ", at)) != std::string::npos; ++at) ++items;
+    check(items == 4, "and each is placed in the build");
+
+    // What each object ought to enclose, from the scene itself.
+    std::unordered_map<std::string, double> want;
+    for (ObjectId id : {box, cyl, ball, flipped}) {
+        const SceneObject* o = s.find(id);
+        want[o->name] = o->body.health(false).volume;
+    }
+    for (const ReadObject& o : objects) {
+        const std::string unescaped = o.name == "Base &lt;plate&gt; &amp; &apos;lid&apos;"
+                                          ? "Base <plate> & 'lid'" : o.name;
+        check(closedOutward(o), o.name + ": closed, and wound outward");
+        const double v = enclosed(o);
+        const double expected = want[unescaped];
+        // The box is flat-faced, so its triangles are exact. The cylinder's
+        // walls sit inside the true surface by at most the tolerance; the mesh
+        // sphere goes out as it is, so it matches its own volume exactly.
+        const double slack = unescaped == "Peg" ? 2.0 * kPi * 6.0 * 25.0 * 0.01 : 1e-6 * expected;
+        check(std::fabs(v - expected) <= slack + 1e-6,
+              o.name + ": encloses " + std::to_string(v) + " of " + std::to_string(expected));
+    }
+
+    // Where they are: the peg's bounds in the file are its world bounds.
+    for (const ReadObject& o : objects) {
+        if (o.name != "Peg") continue;
+        AABB b;
+        for (const Vec3& p : o.vertices) b.expand(p);
+        const AABB w = s.find(cyl)->worldBounds();
+        check(near(b.center().x, w.center().x, 0.1) && near(b.center().y, w.center().y, 0.1) &&
+                  near(b.center().z, w.center().z, 0.1),
+              "the peg is written where it stands in the scene");
+    }
+    std::printf("[3mf] %zu objects, %zu triangles, %zu vertices, %zu bytes of model\n",
+                r.objects, r.triangles, r.vertices, xml.size());
+    std::remove(path.c_str());
+
+    // Selection only takes what is selected.
+    s.clearSelection();
+    s.select(cyl);
+    opt.selectionOnly = true;
+    const ThreeMfResult one = export3mf(s, path, opt);
+    check(one.ok && one.objects == 1, "selection only writes the one selected object");
+    parts.clear();
+    check(readZip(path, parts, why) && parseModel(parts["3D/3dmodel.model"]).size() == 1,
+          "and the file holds just that one");
+    std::remove(path.c_str());
+
+    // Nothing to write is a refusal, and leaves no file behind.
+    s.clearSelection();
+    const ThreeMfResult none = export3mf(s, path, opt);
+    check(!none.ok && !none.error.empty(), "an empty selection is refused with a reason");
+    check(!std::filesystem::exists(path), "and no file is left behind");
+
+    // A place that cannot be written to is a refusal too.
+    opt.selectionOnly = false;
+    const ThreeMfResult nowhere = export3mf(s, tmp("no_such_dir/parts.3mf"), opt);
+    check(!nowhere.ok && !nowhere.error.empty(), "an unwritable path is refused with a reason");
+    std::printf("[3mf] selection, empty selection and bad path handled\n");
+}
+
+// One STL per object, named for the object.
+static void testStlPerObject() {
+    Scene s;
+    s.setDefaultBackend(brep::available() ? Backend::Brep : Backend::Mesh);
+    const ObjectId a = s.addPrimitive(PrimitiveKind::Box, {}, {0, 0, 10});
+    const ObjectId b = s.addPrimitive(PrimitiveKind::Box, {}, {40, 0, 10});
+    const ObjectId c = s.addPrimitive(PrimitiveKind::Box, {}, {80, 0, 10});
+    s.find(a)->name = "Lid";
+    s.find(b)->name = "Lid";            // the same name twice
+    s.find(c)->name = "Base/Left";      // a character no file name can have
+
+    const std::string base = tmp("kit.stl");
+    StlOptions opt;
+    opt.separateFiles = true;
+    const StlResult r = exportStl(s, base, opt);
+    check(r.ok && r.files.size() == 3, "three files, one per object: " + r.error);
+    const std::vector<std::string> want = {tmp("kit - Lid.stl"), tmp("kit - Lid 2.stl"),
+                                           tmp("kit - Base_Left.stl")};
+    check(r.files == want, "named for their objects, a repeat numbered, a slash replaced");
+    for (const std::string& file : r.files) {
+        std::vector<StlTri> tris;
+        check(readBinaryStl(file, tris) && near(stlVolume(tris), 8000.0, 1e-2),
+              file + " holds one 20mm cube");
+        std::remove(file.c_str());
+    }
+    std::printf("[stl] one file per object: %zu files\n", r.files.size());
+}
+
 int main() {
     testExportTolerance();
     testOlderFileOpens();
+    test3mf();
+    testStlPerObject();
 
     // ---- STL ---------------------------------------------------------------
     {

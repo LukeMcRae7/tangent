@@ -5,7 +5,8 @@
   "builtin-baseline": "3723ec118c8354290925feb58d021a9205a3e772",
   "dependencies": [
     "sdl3",
-    "libepoxy"
+    "libepoxy",
+    "zlib"
   ],
   "features": {
     "brep": {

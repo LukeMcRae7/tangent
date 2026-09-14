@@ -1,5 +1,6 @@
 #include "app/application.h"
 
+#include "mesh/export_3mf.h"
 #include "mesh/import_mesh.h"
 #include "geom/kernel_guard.h"
 #include "render/lod.h"
@@ -608,6 +609,10 @@ bool Application::init() {
 
     if (!headlessExport_.empty()) {
         runFileOperation(FileMode::ExportStl, headlessExport_);
+        std::fprintf(stderr, "[app] %s\n", notice_.c_str());
+    }
+    if (!headlessExport3mf_.empty()) {
+        runFileOperation(FileMode::Export3mf, headlessExport3mf_);
         std::fprintf(stderr, "[app] %s\n", notice_.c_str());
     }
     if (fileDemo_ >= 0) beginFilePrompt(static_cast<FileMode>(fileDemo_));
@@ -1875,6 +1880,7 @@ void Application::handleShortcuts() {
             ui_.actions.booleanRequested = true;
             ui_.actions.booleanOp = BooleanOp::Intersection;
         }
+        if (ImGui::IsKeyPressed(ImGuiKey_E, false)) ui_.actions.export3mf = true;
     }
 
     // Numpad view shortcuts; Ctrl gives the opposite side, as in Blender.
@@ -5441,10 +5447,14 @@ ChooserSpec chooserFor(int mode) {
                         {{"STEP file", "step;stp"}, {"All files", "*"}}};
         case 4: return {K::Open, "Import STEP",
                         {{"STEP file", "step;stp"}, {"All files", "*"}}};
-        default: return {K::Open, "Import Mesh",
-                         {{"Mesh", "stl;obj"}, {"STL", "stl"}, {"OBJ", "obj"},
-                          {"All files", "*"}}};
+        case 5: return {K::Open, "Import Mesh",
+                        {{"Mesh", "stl;obj"}, {"STL", "stl"}, {"OBJ", "obj"},
+                         {"All files", "*"}}};
+        case 6: return {K::Save, "Export 3MF",
+                        {{"3MF package", "3mf"}, {"All files", "*"}}};
     }
+    // Only reached by a mode added without a line above.
+    return {K::Open, "Choose a File", {{"All files", "*"}}};
 }
 } // namespace
 
@@ -5498,6 +5508,8 @@ void Application::beginFilePrompt(FileMode mode) {
     };
     if (mode == FileMode::ExportStl) {
         withSuffix("model.stl", ".stl");
+    } else if (mode == FileMode::Export3mf) {
+        withSuffix("model.3mf", ".3mf");
     } else if (mode == FileMode::ExportStep) {
         withSuffix("model.step", ".step");
     } else if (mode == FileMode::ImportStep || mode == FileMode::ImportMesh) {
@@ -5507,9 +5519,12 @@ void Application::beginFilePrompt(FileMode mode) {
     }
     std::snprintf(pathField_, sizeof(pathField_), "%s", seed.c_str());
 
-    // STL export has choices a native chooser cannot carry, so they are asked
+    // Mesh export has choices a native chooser cannot carry, so they are asked
     // first and the chooser comes after. Everything else goes straight to it.
-    if (mode == FileMode::ExportStl) { stlOptionsOpen_ = true; return; }
+    if (mode == FileMode::ExportStl || mode == FileMode::Export3mf) {
+        exportOptionsOpen_ = true;
+        return;
+    }
     if (!typePathInstead_) showFileChooser(mode);
 }
 
@@ -5662,14 +5677,41 @@ void Application::runFileOperation(FileMode mode, const std::string& path) {
                   (added.size() == 1 ? " body from " : " bodies from ") + path);
         break;
     }
+    case FileMode::Export3mf: {
+        ThreeMfOptions opt;
+        opt.selectionOnly = exportSelectionOnly_;
+        opt.deviationMm = exportDeviationMm_;
+        const ThreeMfResult r = export3mf(scene_, path, opt);
+        if (!r.ok) {
+            setNotice("Export failed: " + r.error);
+            break;
+        }
+        std::string note = "Exported " + std::to_string(r.objects) +
+                           (r.objects == 1 ? " object, " : " objects, ") +
+                           std::to_string(r.triangles) + " triangles, to " + path;
+        if (r.meshBodies > 0)
+            note += "  (" + std::to_string(r.meshBodies) +
+                    (r.meshBodies == 1 ? " mesh body at its own resolution)"
+                                       : " mesh bodies at their own resolution)");
+        // Written, because a slicer can often mend it, but not quietly.
+        if (r.openObjects > 0)
+            note += "  (" + std::to_string(r.openObjects) +
+                    (r.openObjects == 1 ? " object is not closed)" : " objects are not closed)");
+        setNotice(note);
+        break;
+    }
     case FileMode::ExportStl: {
         StlOptions opt;
         opt.binary = exportBinaryStl_;
         opt.selectionOnly = exportSelectionOnly_;
+        opt.separateFiles = exportSeparateStl_;
         opt.deviationMm = exportDeviationMm_;
         const StlResult r = exportStl(scene_, path, opt);
         if (r.ok) {
-            std::string note = "Exported " + std::to_string(r.triangles) + " triangles to " + path;
+            std::string note = r.files.size() > 1
+                ? "Exported " + std::to_string(r.files.size()) + " files, " +
+                      std::to_string(r.triangles) + " triangles, beside " + path
+                : "Exported " + std::to_string(r.triangles) + " triangles to " + r.files.front();
             // A mesh body cannot honour a tolerance -- its resolution was fixed
             // when it was made -- and saying so is better than letting the
             // number on the dialog imply otherwise.
@@ -5691,17 +5733,19 @@ void Application::runFileOperation(FileMode mode, const std::string& path) {
 void Application::drawFilePrompt() {
     // Two jobs, and which one depends on why we are here.
     //
-    //   The STL options, always: binary or ASCII, selection or everything, and
-    //   the tolerance. A native chooser has nowhere to put these, so they are
-    //   asked first and the chooser follows the button.
+    //   The mesh export options, always: selection or everything, the
+    //   tolerance, and for STL binary or ASCII and one file or one per object.
+    //   A native chooser has nowhere to put these, so they are asked first and
+    //   the chooser follows the button.
     //
     //   A typed path, only where there is no chooser to be had. That is the
     //   whole of this dialog's former job and is now the fallback for a system
     //   with no XDG portal, no zenity and no kdialog.
     const bool typing = typePathInstead_ && fileMode_ != FileMode::None;
-    if (!stlOptionsOpen_ && !typing) return;
+    if (!exportOptionsOpen_ && !typing) return;
 
-    const char* title = stlOptionsOpen_ ? "Export STL"
+    const char* title = fileMode_ == FileMode::Export3mf  ? "Export 3MF"
+                      : exportOptionsOpen_                ? "Export STL"
                       : fileMode_ == FileMode::Open       ? "Open Project"
                       : fileMode_ == FileMode::Save       ? "Save Project"
                       : fileMode_ == FileMode::ExportStep ? "Export STEP"
@@ -5729,10 +5773,16 @@ void Application::drawFilePrompt() {
                                    ImGuiInputTextFlags_EnterReturnsTrue);
     }
 
-    if (stlOptionsOpen_) {
-        ImGui::Checkbox("Binary", &exportBinaryStl_);
-        ImGui::SameLine();
+    if (exportOptionsOpen_) {
         ImGui::Checkbox("Selection only", &exportSelectionOnly_);
+        if (fileMode_ == FileMode::ExportStl) {
+            ImGui::SameLine();
+            ImGui::Checkbox("Binary", &exportBinaryStl_);
+            ImGui::SameLine();
+            ImGui::Checkbox("One file per object", &exportSeparateStl_);
+        } else {
+            ImGui::TextDisabled("each object is kept separate and named in the file");
+        }
 
         ImGui::SetNextItemWidth(140.0f);
         ImGui::DragFloat("Tolerance", &exportDeviationMm_, 0.001f, 0.001f, 0.5f,
@@ -5745,7 +5795,7 @@ void Application::drawFilePrompt() {
     ImGui::Spacing();
     // The chooser is the way out when there is one; typing is the way out when
     // there is not. Only ever one of them, so the button says which.
-    const bool chooseInstead = stlOptionsOpen_ && !typePathInstead_;
+    const bool chooseInstead = exportOptionsOpen_ && !typePathInstead_;
     const bool confirm =
         ImGui::Button(chooseInstead ? "Choose File..." : "OK", ImVec2(130, 0)) || entered;
     ImGui::SameLine();
@@ -5755,7 +5805,7 @@ void Application::drawFilePrompt() {
     if (confirm) {
         const FileMode mode = fileMode_;
         const bool toChooser = chooseInstead;
-        stlOptionsOpen_ = false;
+        exportOptionsOpen_ = false;
         ImGui::CloseCurrentPopup();
         if (toChooser) {
             showFileChooser(mode);       // the options are set; now pick a file
@@ -5764,7 +5814,7 @@ void Application::drawFilePrompt() {
             runFileOperation(mode, pathField_);
         }
     } else if (cancel) {
-        stlOptionsOpen_ = false;
+        exportOptionsOpen_ = false;
         fileMode_ = FileMode::None;
         ImGui::CloseCurrentPopup();
     }
@@ -5790,6 +5840,7 @@ void Application::applyActions() {
     if (a.openProject && confirmDiscard(PendingAction::Open)) beginFilePrompt(FileMode::Open);
     if (a.saveProjectAs) beginFilePrompt(FileMode::Save);
     if (a.exportStl)     beginFilePrompt(FileMode::ExportStl);
+    if (a.export3mf)     beginFilePrompt(FileMode::Export3mf);
     if (a.exportStep)    beginFilePrompt(FileMode::ExportStep);
     if (a.importStep)    beginFilePrompt(FileMode::ImportStep);
     if (a.importMesh)    beginFilePrompt(FileMode::ImportMesh);

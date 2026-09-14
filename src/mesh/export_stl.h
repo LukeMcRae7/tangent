@@ -14,12 +14,18 @@
 #include "scene/scene.h"
 
 #include <string>
+#include <vector>
 
 namespace tg {
 
 struct StlOptions {
     bool binary = true;         // ASCII is larger and slower; useful for diffing
     bool selectionOnly = false; // otherwise every visible object
+
+    // A file for each object rather than one for all of them, named from the
+    // path given and the object's name: "plate.stl" and "Bracket" make
+    // "plate - Bracket.stl". A multi-part print is loaded a part at a time.
+    bool separateFiles = false;
     std::string solidName = "tangent";
 
     // Chord deviation in millimetres: how far the triangles may sit from the
@@ -38,6 +44,7 @@ struct StlResult {
     size_t triangles = 0;
     size_t objects = 0;
     size_t meshBodies = 0;   // written at whatever resolution they already had
+    std::vector<std::string> files;   // every file written, in order
     std::string error;
 };
 
@@ -45,5 +52,24 @@ struct StlResult {
 // object's transform is baked in -- a slicer has no concept of one.
 StlResult exportStl(const Scene& scene, const std::string& path,
                     const StlOptions& options = {});
+
+// The triangles `obj` is exported as, in its own space: an exact body
+// tessellated afresh to `deviationMm` into `scratch`, or -- for a mesh, or a
+// tolerance of zero -- the triangles already drawn. Shared by every mesh format
+// so they all go out at the same resolution.
+const RenderMesh& exportTriangles(const SceneObject& obj, Real deviationMm, RenderMesh& scratch);
+
+// The objects an export takes: the selected ones, or every visible one, and
+// never an empty body.
+std::vector<const SceneObject*> exportedObjects(const Scene& scene, bool selectionOnly);
+
+// Whether a transform reflects, so that triangles have to be wound the other
+// way for the surface to keep facing outward.
+bool mirrors(const Mat4& m);
+
+// The file one object goes to when each has its own: `path` with the object's
+// name worked into it, never one already in `taken`, which it is added to.
+std::string exportFileFor(const std::string& path, const std::string& objectName,
+                          std::vector<std::string>& taken);
 
 } // namespace tg

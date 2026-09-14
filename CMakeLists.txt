@@ -26,6 +26,10 @@ endif()
 # way, so it needs no help.
 find_package(SDL3 REQUIRED CONFIG)
 
+# Deflate, for the ZIP a 3MF file is. The one compression library every
+# platform already has; CMake's own module finds it on both.
+find_package(ZLIB REQUIRED)
+
 # libepoxy is a meson project. Linux exposes it through pkg-config; the vcpkg
 # build ships neither a CMake config nor a usable .pc, so there it is found by
 # hand. Both arrive as one target and nothing below this needs to know which
@@ -150,7 +154,7 @@ add_executable(tangent
   src/mesh/primitives.cpp src/mesh/import_mesh.cpp src/app/file_dialog.cpp
   ${TANGENT_GEOM}
   src/mesh/health.cpp
-  src/mesh/export_stl.cpp
+  src/mesh/export_stl.cpp src/mesh/export_3mf.cpp src/mesh/zip_writer.cpp
   src/scene/scene.cpp
   src/scene/feature.cpp
   src/scene/serialize.cpp
@@ -165,7 +169,7 @@ add_executable(tangent
   src/ui/command_panel.cpp
 )
 target_include_directories(tangent PRIVATE src)
-target_link_libraries(tangent PRIVATE imgui SDL3::SDL3 tangent_epoxy)
+target_link_libraries(tangent PRIVATE imgui SDL3::SDL3 tangent_epoxy ZLIB::ZLIB)
 target_compile_options(tangent PRIVATE ${TANGENT_WARNINGS_LOOSE})
 
 # Shaders are compiled into the binary via #include of generated headers is
@@ -245,10 +249,11 @@ target_compile_options(test_measure PRIVATE ${TANGENT_WARNINGS_LOOSE})
 add_test(NAME measure COMMAND test_measure)
 
 add_executable(test_io tests/test_io.cpp
-  src/mesh/export_stl.cpp src/scene/serialize.cpp
+  src/mesh/export_stl.cpp src/mesh/export_3mf.cpp src/mesh/zip_writer.cpp src/scene/serialize.cpp
   src/scene/scene.cpp src/scene/feature.cpp
   src/mesh/health.cpp ${TANGENT_GEOM} src/mesh/halfedge.cpp src/mesh/primitives.cpp)
 target_include_directories(test_io PRIVATE src)
+target_link_libraries(test_io PRIVATE ZLIB::ZLIB)
 target_compile_options(test_io PRIVATE ${TANGENT_WARNINGS})
 add_test(NAME io COMMAND test_io)
 

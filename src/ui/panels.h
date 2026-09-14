@@ -46,6 +46,7 @@ struct UiActions {
     bool saveProject = false;
     bool saveProjectAs = false;
     bool exportStl = false;
+    bool export3mf = false;
     bool exportStep = false;
     bool importStep = false;
     bool importMesh = false;

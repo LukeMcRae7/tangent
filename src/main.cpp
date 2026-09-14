@@ -50,6 +50,8 @@ int main(int argc, char** argv) {
             app.setFileDemo(std::atoi(argv[++i]));
         } else if (std::strcmp(argv[i], "--export-stl") == 0 && i + 1 < argc) {
             app.setHeadlessExport(argv[++i]);
+        } else if (std::strcmp(argv[i], "--export-3mf") == 0 && i + 1 < argc) {
+            app.setHeadlessExport3mf(argv[++i]);
         } else if (std::strcmp(argv[i], "--fillet-pair-demo") == 0 && i + 1 < argc) {
             app.setFilletDemo(static_cast<float>(std::atof(argv[++i])));
         } else if (std::strcmp(argv[i], "--ui-mouse") == 0 && i + 1 < argc) {

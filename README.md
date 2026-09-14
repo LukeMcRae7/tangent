@@ -77,6 +77,11 @@ set, and exported as it is. Anything that edits part of a shape -- a boolean, a
 split, a fillet -- asks for it to be converted first (Modify > Convert to
 Solid), and a mesh too dense to convert usefully can be reduced until it is.
 
+**For the slicer**, a model goes out as 3MF -- in millimetres, each part kept
+separate and named, every mesh closed -- or as STL, in one file or one per
+part. Either way an exact body is tessellated to a tolerance you set rather
+than whatever the viewport happened to be drawing.
+
 Either way, tangent rejects non-manifold edges, open surfaces, and other
 invalid results that a slicer would also reject. The status bar indicates
 `solid` or `not solid`, and the Inspector says which kernel a body is made of.
@@ -128,6 +133,7 @@ invalid results that a slicer would also reject. The status bar indicates
 | Z | Toggle wireframe |
 | Ctrl + N / O / S | New / open / save project |
 | Ctrl + E | Export STL |
+| Ctrl + Shift + E | Export 3MF |
 | Ctrl + Q | Quit |
 
 ## Project Structure

@@ -78,5 +78,18 @@ else
   fail=1
 fi
 
+# A 3MF of a shelled, filleted part: written, one object, and closed -- the
+# exporter checks every edge is used once each way and says when one is not.
+rm -f /tmp/tg_sweep.3mf
+out=$(timeout 200 ./build/tangent --shell-fillet-demo --export-3mf /tmp/tg_sweep.3mf --smoke-test 2 2>&1)
+if echo "$out" | grep -q "Exported 1 object, .* triangles, to /tmp/tg_sweep.3mf" &&
+   ! echo "$out" | grep -q "not closed" && [ -s /tmp/tg_sweep.3mf ]; then
+  printf '  ok    --export-3mf\n'
+else
+  printf '  FAIL  export-3mf: not written, or not closed\n'
+  echo "$out" | grep "\[app\]" | sed 's/^/        /'
+  fail=1
+fi
+
 [ $fail -eq 0 ] && echo "sweep clean" || echo "sweep FAILED"
 exit $fail

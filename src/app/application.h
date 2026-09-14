@@ -85,6 +85,7 @@ public:
     void setMeasureDemo() { measureDemo_ = true; }
     void setFileDemo(int mode) { fileDemo_ = mode; }
     void setHeadlessExport(const std::string& p) { headlessExport_ = p; }
+    void setHeadlessExport3mf(const std::string& p) { headlessExport3mf_ = p; }
     void setBooleanDemo(int op) { booleanDemo_ = op; }
     void setFilletEdgesDemo(int edges) { filletEdgesDemo_ = true; filletDemoEdges_ = edges; }
     // Round All Edges on the startup box, committed at 2mm, then the same
@@ -254,8 +255,9 @@ private:
 
     // File handling. There is no native dialog to call on Wayland without
     // taking a dependency, so the prompt is an in-app path field.
+    // The values are what --file-prompt takes, so a new mode goes at the end.
     enum class FileMode { None, Open, Save, ExportStl, ExportStep, ImportStep,
-                          ImportMesh };
+                          ImportMesh, Export3mf };
 
     // Turns the selected mesh body into an exact one. Its own command rather
     // than something the import does on its own: a mesh that will not convert
@@ -286,10 +288,11 @@ private:
     FileDialog  fileDialog_;
     bool        typePathInstead_ = false;
 
-    // Set while the STL options popup is up. Export has choices a native
-    // chooser cannot carry -- binary or ASCII, the tolerance -- so they are
-    // asked first and the chooser follows.
-    bool        stlOptionsOpen_ = false;
+    // Set while the mesh export options are up, for STL or 3MF. Export has
+    // choices a native chooser cannot carry -- the tolerance, what to include,
+    // how to split it into files -- so they are asked first and the chooser
+    // follows.
+    bool        exportOptionsOpen_ = false;
 
     // Starts the OS chooser for `mode`. Returns having asked; the answer is
     // collected by pollFileDialog on a later frame.
@@ -299,6 +302,7 @@ private:
     char        pathField_[512] = {};
     bool        exportBinaryStl_ = true;
     bool        exportSelectionOnly_ = false;
+    bool        exportSeparateStl_ = false;
 
     // The chord tolerance the exported triangles must stay within. Finer than
     // any filament printer resolves, and the number a user should be able to
@@ -900,6 +904,7 @@ private:
     bool        measureDemo_ = false;
     int         fileDemo_ = -1;
     std::string headlessExport_;
+    std::string headlessExport3mf_;
     int         booleanDemo_ = -1;
     bool        filletEdgesDemo_ = false;
     bool        roundAllDemo_ = false;

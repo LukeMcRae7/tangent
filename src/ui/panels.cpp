@@ -216,8 +216,10 @@ void drawMenuBar(UiContext& ctx) {
         ImGui::Separator();
         if (ImGui::MenuItem("Export STEP...")) ctx.actions.exportStep = true;
         ImGui::TextColored(kDim, "  exact; what another CAD package wants");
+        if (ImGui::MenuItem("Export 3MF...", "Ctrl+Shift+E")) ctx.actions.export3mf = true;
+        ImGui::TextColored(kDim, "  for a slicer: millimetres, each part named");
         if (ImGui::MenuItem("Export STL...", "Ctrl+E")) ctx.actions.exportStl = true;
-        ImGui::TextColored(kDim, "  triangles; what a slicer wants");
+        ImGui::TextColored(kDim, "  loose triangles; what every slicer reads");
         ImGui::Separator();
         if (ImGui::MenuItem("Quit", "Ctrl+Q")) ctx.actions.quit = true;
         ImGui::EndMenu();
