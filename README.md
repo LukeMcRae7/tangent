@@ -65,7 +65,7 @@ kernel is missing:
 cmake -S . -B build -G Ninja -DTANGENT_BREP=OFF
 ```
 
-The test suite gains one suite with the exact kernel (29 rather than 28), and
+The test suite gains one suite with the exact kernel (30 rather than 29), and
 the modelling sections of the others run only when it is there.
 
 ## Features

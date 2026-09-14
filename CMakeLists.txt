@@ -85,6 +85,29 @@ target_include_directories(imgui PUBLIC
 target_link_libraries(imgui PUBLIC SDL3::SDL3)
 target_compile_definitions(imgui PUBLIC IMGUI_DEFINE_MATH_OPERATORS)
 
+# ---- planegcs: FreeCAD's 2D constraint solver, vendored ----------------------
+# The sketch's solver. Its sources are FreeCAD's, unmodified, in FreeCAD's own
+# layout; what it expected of the rest of FreeCAD -- a console, an export
+# macro, one Boost.Graph algorithm -- comes from the shims beside it. Eigen,
+# header-only, is vendored alongside. See external/planegcs/README.md.
+#
+# Declared before the kernel's link_libraries below, so none of that is linked
+# into it.
+file(GLOB PLANEGCS_SOURCES CONFIGURE_DEPENDS
+     ${CMAKE_SOURCE_DIR}/external/planegcs/src/Mod/Sketcher/App/planegcs/*.cpp)
+add_library(planegcs STATIC ${PLANEGCS_SOURCES})
+target_include_directories(planegcs SYSTEM PUBLIC
+  ${CMAKE_SOURCE_DIR}/external/eigen
+  ${CMAKE_SOURCE_DIR}/external/planegcs/src/Mod/Sketcher/App
+  ${CMAKE_SOURCE_DIR}/external/planegcs/shim)
+set(PLANEGCS_PRELUDE ${CMAKE_SOURCE_DIR}/external/planegcs/shim/planegcs_prelude.h)
+if(MSVC)
+  target_compile_options(planegcs PRIVATE /W0 /bigobj /FI${PLANEGCS_PRELUDE})
+  target_compile_definitions(planegcs PUBLIC _USE_MATH_DEFINES)
+else()
+  target_compile_options(planegcs PRIVATE -w -include ${PLANEGCS_PRELUDE})
+endif()
+
 # ---- Tangent ----------------------------------------------------------------
 # ---- Optional: the exact B-rep backend ------------------------------------
 #
@@ -339,6 +362,11 @@ add_executable(test_decimate tests/test_decimate.cpp ${TANGENT_GEOM}
 target_include_directories(test_decimate PRIVATE src)
 target_compile_options(test_decimate PRIVATE ${TANGENT_WARNINGS})
 add_test(NAME decimate COMMAND test_decimate)
+
+add_executable(test_planegcs tests/test_planegcs.cpp)
+target_link_libraries(test_planegcs PRIVATE planegcs)
+target_compile_options(test_planegcs PRIVATE ${TANGENT_WARNINGS})
+add_test(NAME planegcs COMMAND test_planegcs)
 
 add_executable(test_bvh tests/test_bvh.cpp)
 target_include_directories(test_bvh PRIVATE src)
