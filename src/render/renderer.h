@@ -39,10 +39,6 @@ struct ViewOptions {
     Real  gridSpacing    = 1.0;
     Real  gridSubdivide  = 10.0;
 
-    // Bevel parameters, driven from the Modify menu.
-    Real  bevelWidth    = 1.0;
-    int   bevelSegments = 1;
-
     // The wall a shell leaves. 2mm is a few perimeters at a common nozzle
     // width, which is the thinnest wall most printers make well.
     Real  shellThickness = 2.0;

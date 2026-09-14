@@ -133,7 +133,7 @@ int main() {
     // faceArea used to fan from that corner and add unsigned triangle areas.
     // Where the fan leaves the polygon, the triangles overlap and their areas
     // add instead of cancelling. Every primitive is convex, so this stayed
-    // hidden until mergeCoplanarFaces began bridging holes -- a bridged face
+    // hidden until faces with a hole bridged into them turned up -- such a face
     // wraps around its hole and is never convex. A bored plate's top face
     // measured 25% over.
     {

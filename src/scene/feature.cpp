@@ -359,7 +359,6 @@ bool evaluateFrom(std::vector<Feature>& features, size_t from,
                 break;
             }
             FilletSpec spec;
-            spec.segments = f.segments;
             spec.salt = f.uid;
             spec.chamfer = f.chamfer;
             spec.edges.reserve(scratchEdges.size());

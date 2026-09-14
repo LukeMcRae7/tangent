@@ -332,8 +332,9 @@ int main() {
         drill.cylinder.height = 40;
         drill.cylinder.segments = 24;
 
-        for (Backend backend : {Backend::Mesh, Backend::Brep}) {
-            if (backend == Backend::Brep && !brep::available()) continue;
+        // Exact only: boring a hole is a boolean, and a mesh has none.
+        for (Backend backend : {Backend::Brep}) {
+            if (!brep::available()) continue;
             Body body, tool, bored;
             check(makePrimitive(plate, body, backend), "plate built");
             check(makePrimitive(drill, tool, backend), "drill built");
@@ -355,18 +356,11 @@ int main() {
             int bridges = 0;
             for (EdgeId e : fe) if (bored.isBridgeEdge(e)) ++bridges;
 
-            if (backend == Backend::Brep) {
-                // One face holds the hole, so nothing had to be invented to
-                // reach it -- which is why the outline can be drawn whole.
-                check(bridges == 0, "an exact bored face has no bridge edges");
-            } else {
-                // The mesh needs them, and they are the lines that used to be
-                // drawn across the opening. What matters is that they can be
-                // told apart from the part's own edges.
-                check(bridges > 0, "a mesh bored face needs bridge edges");
-            }
-            std::printf("  %s: top face has %zu edges, %d of them bridges\n",
-                        backend == Backend::Brep ? "exact" : "mesh ", fe.size(), bridges);
+            // One face holds the hole, so nothing had to be invented to reach
+            // it -- which is why the outline can be drawn whole.
+            check(bridges == 0, "an exact bored face has no bridge edges");
+            std::printf("  exact: top face has %zu edges, %d of them bridges\n",
+                        fe.size(), bridges);
         }
     }
 
@@ -420,10 +414,10 @@ int main() {
         std::printf("  both backends answer a stale handle rather than taking the process with them\n");
     }
 
-    // Operations are still mesh-only; Stage 2 moves them across one at a time,
-    // and this section joins the contract above as it does.
-    std::printf("\n--- Body: operations go through the seam ---\n");
-    {
+    // Modelling is the exact kernel's, so this runs on it when there is one.
+    if (brep::available()) {
+        std::printf("\n--- Body: operations go through the seam ---\n");
+        gBackend = Backend::Brep;
         Body b = box();
         // Find the top face without reaching past the seam for it.
         std::vector<FaceId> faces;
@@ -452,24 +446,79 @@ int main() {
         std::vector<EdgeId> be;
         tooBig.allEdges(be);
         FilletSpec spec;
-        spec.segments = 4;
         spec.edges.push_back({be.front(), 50.0});
         std::string why;
         check(!filletEdges(tooBig, spec, &why), "an impossible radius is refused");
         check(!why.empty(), "and it says why: " + why);
-    }
 
-    std::printf("--- Body: split ---\n");
-    {
-        Body b = box();
+        std::printf("--- Body: split ---\n");
+        Body whole = box();
         std::vector<Body> pieces;
-        check(splitBodies(b, pieces) == 1, "one body splits into itself");
+        check(splitBodies(whole, pieces) == 1, "one body splits into itself");
         check(pieces.size() == 1 && !pieces.front().empty(), "and the piece is usable");
 
         Body lo, hi;
-        check(splitByPlane(b, {0, 0, 0}, {0, 0, 1}, lo, hi), "split a box in half");
+        check(splitByPlane(whole, {0, 0, 0}, {0, 0, 1}, lo, hi), "split a box in half");
         check(near(lo.health(false).volume + hi.health(false).volume, 8000.0, 1e-6),
               "the halves add back up");
+        gBackend = Backend::Mesh;
+    }
+
+    // A mesh has every edit to part of its shape refused, each with the same
+    // reason, and that reason says what to do. Nothing is left half-applied.
+    std::printf("\n--- Body: a mesh is refused, and told how to get past it ---\n");
+    {
+        gBackend = Backend::Mesh;
+        const Body original = box();
+        const Real volume = original.health(false).volume;
+        std::vector<FaceId> faces;
+        original.allFaces(faces);
+        std::vector<EdgeId> edges;
+        original.allEdges(edges);
+        const std::string wanted = brep::available() ? "Convert to Solid" : "exact kernel";
+
+        auto refused = [&](bool ok, const Body& after, const std::string& why, const char* what) {
+            check(!ok, std::string(what) + " on a mesh is refused");
+            check(why.find(wanted) != std::string::npos,
+                  std::string(what) + " says how to get past it: " + why);
+            check(near(after.health(false).volume, volume, 1e-9),
+                  std::string(what) + " leaves the mesh as it was");
+        };
+        {
+            Body m = original; std::string why;
+            refused(extrudeFaces(m, {faces.front()}, 5.0, nullptr, 1, ExtrudeOp::Auto, &why),
+                    m, why, "extrude");
+        }
+        {
+            Body m = original; std::string why;
+            refused(insetFaces(m, {faces.front()}, 1.0, nullptr, 1, &why), m, why, "inset");
+        }
+        {
+            Body m = original; std::string why;
+            FilletSpec spec;
+            spec.edges.push_back({edges.front(), 1.0});
+            refused(filletEdges(m, spec, &why), m, why, "fillet");
+        }
+        {
+            Body m = original; std::string why;
+            refused(shellBody(m, {}, 1.0, 1, &why), m, why, "shell");
+        }
+        {
+            Body out; std::string why;
+            const Body tool = box(5, 5, 50);
+            refused(booleanOp(original, tool, BooleanOp::Difference, out, 1, false, &why),
+                    original, why, "boolean");
+            check(out.empty(), "and the boolean hands nothing back");
+        }
+        {
+            Body lo, hi;
+            check(!splitByPlane(original, {0, 0, 0}, {0, 0, 1}, lo, hi),
+                  "cutting a mesh with a plane is refused");
+            std::vector<Body> pieces;
+            check(splitBodies(original, pieces) == 1 && pieces.front().isMesh(),
+                  "but a mesh still separates into the pieces it is");
+        }
+        std::printf("  every edit refused with: %s\n", wanted.c_str());
     }
 
     std::printf("\n%s (%d failures)\n", failures ? "FAILED" : "ALL PASS", failures);

@@ -9,7 +9,7 @@
 #include "scene/scene.h"
 #include "app/camera.h"
 #include "app/measure.h"
-#include "mesh/boolean.h"
+#include "geom/op_types.h"
 
 #include <string>
 #include <vector>

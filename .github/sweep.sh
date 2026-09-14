@@ -65,5 +65,18 @@ else
   fail=1
 fi
 
+# Round All Edges goes through the fillet gesture, so it is checked for what
+# it built -- all twelve edges of the startup cube at 2mm, to the volume -- and
+# for refusing on a mesh with the way past it.
+out=$(timeout 200 ./build/tangent --round-all-demo --smoke-test 5 2>&1)
+if echo "$out" | grep -q "opened=1 edges=12 rounded=1 volume 8000.0 -> 7804.7 solid=1" &&
+   echo "$out" | grep -q "on a mesh: opened=0 notice .*Convert to Solid"; then
+  printf '  ok    --round-all-demo\n'
+else
+  printf '  FAIL  round-all-demo: the rounds, or the refusal on a mesh, were not right\n'
+  echo "$out" | grep "round-all" | sed 's/^/        /'
+  fail=1
+fi
+
 [ $fail -eq 0 ] && echo "sweep clean" || echo "sweep FAILED"
 exit $fail

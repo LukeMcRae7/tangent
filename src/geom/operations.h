@@ -1,9 +1,11 @@
 // Tangent - modelling operations, over a Body rather than a mesh.
 //
 // Every operation the feature history can run appears here exactly once, taking
-// and returning Body. For a mesh body each one forwards straight to the
-// half-edge implementation in src/mesh; when a second backend arrives, this is
-// the file that dispatches to it, and nothing above changes.
+// and returning Body. Modelling is the exact kernel's job: a mesh body -- an
+// imported STL, or a primitive in a build without the kernel -- is refused by
+// every operation that edits part of a shape, with a reason that says to
+// convert it first. What a mesh can still have done to it is whole-object: be
+// placed, measured, reduced, separated into pieces, exported.
 //
 // Two things are deliberate. Operations take handles, never raw indices dressed
 // up as handles -- see the note in body.h. And every one that can refuse takes a
@@ -12,8 +14,7 @@
 #pragma once
 
 #include "geom/body.h"
-#include "mesh/boolean.h"
-#include "mesh/operations.h"
+#include "geom/op_types.h"
 #include "mesh/primitives.h"
 
 #include <string>
@@ -55,8 +56,7 @@ bool extrudeFaces(Body& body, const std::vector<FaceId>& faces, Real distance,
 // `arcs` is parallel to `points`: a non-zero entry means that span is a
 // circular arc of that sagitta rather than a straight line, which is how a
 // rounded corner stays an arc instead of becoming the polyline a mesh has to
-// settle for. The mesh backend ignores it and the create tool's own polygon
-// path covers that case.
+// settle for.
 bool makeProfileSolid(const std::vector<Vec3>& points, const std::vector<Real>& arcs,
                       Vec3 planeNormal, Real z0, Real z1, Body& out,
                       ElementId salt = 0, std::string* reason = nullptr);
@@ -86,20 +86,42 @@ bool insetFaces(Body& body, const std::vector<FaceId>& faces, Real amount,
 // box shelled with its top face open is a tray. The single most asked-for
 // operation for printing, because it is what turns a solid model into one that
 // does not cost a spool of filament.
-//
-// Exact bodies only. On a mesh, offsetting every face and mitring every corner
-// is a different algorithm and a large one; refusing says so at the interface
-// rather than producing something that is nearly a shell.
 bool shellBody(Body& body, const std::vector<FaceId>& openFaces, Real thickness,
                ElementId salt = 0, std::string* reason = nullptr);
+
+// One edge of a fillet, with its own radius. Fusion attaches a radius per edge
+// within a single fillet feature rather than one radius for the whole
+// selection, and so do we: rounding two edges to different radii in one go is
+// a different solid from rounding them in sequence, because the corner where
+// they meet is blended once instead of twice.
+struct FilletEdge {
+    EdgeId edge   = kInvalid;
+    Real   radius = 1.0;
+
+    // Where the radius ends up at the far end of the edge, for a round that
+    // tapers along its length. Negative means it does not taper and `radius`
+    // holds all the way.
+    Real   endRadius = -1.0;
+};
+
+struct FilletSpec {
+    std::vector<FilletEdge> edges;
+
+    // Identifies the operation when naming what it creates, so that two
+    // fillets in a chain do not hand their new faces the same names. A
+    // feature passes its own identity here; see element_id.h.
+    ElementId salt = 0;
+
+    // A flat cut rather than a round. The same edges, the same distance, a
+    // different surface -- and a different thing to want: a chamfer on a
+    // bottom edge fights elephant's foot, and one around a hole lets a screw
+    // head sit down into it.
+    bool chamfer = false;
+};
 
 // Rounds edges. `reason` gets a short phrase on refusal; see the note above.
 bool filletEdges(Body& body, const FilletSpec& spec, std::string* reason = nullptr);
 
-// Both bodies must be the same kind. Combining a mesh body with an exact one
-// is refused with a reason rather than approximated: the result would be a mesh
-// and the user should be told that before it happens, not after. Stage 6 of the
-// migration is where that becomes an offer instead of a refusal.
 // How a pattern lays its copies out.
 enum class PatternMode : uint32_t {
     Linear,     // `step` mm along `dir`, `count` times
@@ -149,27 +171,23 @@ struct ReduceOptions;
 struct ReduceResult;
 bool reduceBody(Body& body, const ReduceOptions& options, ElementId salt, ReduceResult& result);
 
+// Both bodies must be exact. `trustBNames` is kept for callers that built the
+// second operand from the first's own faces; the exact kernel names its output
+// from the operation's history and does not need it.
 bool booleanOp(const Body& a, const Body& b, BooleanOp op, Body& out,
                ElementId salt = 0, bool trustBNames = false,
                std::string* reason = nullptr);
 
-// Largest radius the whole body can take before a face collapses. For clamping
-// a slider to a range that always produces valid geometry.
-Real maxFilletRadius(const Body& body);
-
 // ---- Analysis -------------------------------------------------------------
-// Extends a selection along tangent-continuous edges, the way F does in Fusion.
-std::vector<EdgeId> extendTangentChain(const Body& body, const std::vector<EdgeId>& edges);
-
 // Splits into connected bodies, largest first. A body that is already one piece
-// yields itself, so a caller can always use the result.
+// yields itself, so a caller can always use the result. Whole-object, so a mesh
+// can have it done too: an STL often holds several parts.
 size_t splitBodies(const Body& body, std::vector<Body>& out);
 
-// On an exact body the two sides are the body intersected with a large box on
-// each side of the plane, which is two booleans the kernel already does well
-// rather than a new way of cutting. Either side may hold more than one solid,
-// where the plane passes through the body more than once. Fails, leaving `a` and
-// `b` unspecified, when the plane misses the body or only grazes it.
+// Cuts an exact body in two with a plane. Either side may hold more than one
+// solid, where the plane passes through the body more than once. Fails, leaving
+// `a` and `b` unspecified, when the plane misses the body or only grazes it --
+// and for a mesh, which has to be converted first.
 bool splitByPlane(const Body& body, Vec3 planePoint, Vec3 planeNormal,
                   Body& a, Body& b);
 

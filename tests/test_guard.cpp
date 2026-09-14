@@ -85,7 +85,6 @@ int main() {
             return tryInChild([&] {
                 Body test = start;
                 FilletSpec spec;
-                spec.segments = 3;
                 for (EdgeId e : edges) spec.edges.push_back({e, r});
                 return filletEdges(test, spec);
             });

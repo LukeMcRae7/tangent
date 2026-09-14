@@ -2,9 +2,9 @@
 // is already manifold -- build() guarantees it -- so what is left to detect is
 // geometry that is manifold but still not a solid.
 #include "mesh/health.h"
-#include "mesh/operations.h"
 #include "mesh/primitives.h"
 
+#include <cmath>
 #include <cstdio>
 #include <string>
 
@@ -51,7 +51,7 @@ int main() {
         std::printf("[health] box: watertight, %d shell, volume %.0f\n", h.shells, h.volume);
     }
 
-    // Every primitive, and results of the mesh operations, stay solid.
+    // Every closed primitive is a solid.
     {
         const PrimitiveKind kinds[] = {PrimitiveKind::Box, PrimitiveKind::Cylinder,
                                        PrimitiveKind::Sphere, PrimitiveKind::Cone,
@@ -70,20 +70,6 @@ int main() {
             check(h.solid(), std::string(primitiveName(k)) + " is printable");
         }
         std::printf("[health] all closed primitives are printable\n");
-    }
-
-    {
-        Mesh m;
-        makeBox(m);
-        Index top = 0;
-        for (Index f = 0; f < m.faceCount(); ++f)
-            if (dot(m.faceNormal(f), Vec3{0,0,1}) > 0.99f) top = f;
-        check(extrudeFaces(m, {top}, 12.0f, nullptr), "extrude");
-        check(checkHealth(m).solid(), "still printable after extrude");
-
-        check(bevelAllEdges(m, 2.0f, 2), "bevel");
-        check(checkHealth(m).solid(), "still printable after a rounded bevel");
-        std::printf("[health] operations preserve printability\n");
     }
 
     // ---- An open surface is manifold but not a solid ------------------------
@@ -125,6 +111,32 @@ int main() {
         check(h.shells == 2, "reported as two shells");
         check(h.watertight && h.solid(), "two separate solids are still printable");
         std::printf("[health] disjoint bodies: %d shells\n", h.shells);
+
+        // And they come apart into the two boxes, largest first, each keeping
+        // the names it had -- names in `both` were built without any, so the
+        // boxes' own are compared through a named copy.
+        Mesh::Names names;
+        for (const MeshVertex& v : a.verts) names.vertices.push_back(v.id);
+        for (const MeshVertex& v : b.verts) names.vertices.push_back(v.id ^ 0xB0B);
+        for (const MeshFace& f : a.faces) names.faces.push_back(f.id);
+        for (const MeshFace& f : b.faces) names.faces.push_back(f.id ^ 0xB0B);
+        Mesh named;
+        check(named.build(pos, sizes, idx, &names), "and build with names");
+        std::vector<Mesh> pieces;
+        check(splitShells(named, pieces) == 2, "they separate into two pieces");
+        if (pieces.size() == 2) {
+            check(std::fabs(checkHealth(pieces[0]).volume - checkHealth(a).volume) < 1e-6 &&
+                  std::fabs(checkHealth(pieces[1]).volume - checkHealth(b).volume) < 1e-6,
+                  "the larger box first, each with its own volume");
+            check(pieces[0].findFace(a.faces[0].id) != kInvalid &&
+                  pieces[1].findFace(b.faces[0].id ^ 0xB0B) != kInvalid,
+                  "each face keeps its name in the piece it went to");
+            check(pieces[0].validate() && pieces[1].validate(), "both pieces are sound");
+        }
+        std::vector<Mesh> one;
+        check(splitShells(a, one) == 1 && one[0].faceCount() == a.faceCount(),
+              "a mesh in one piece yields itself");
+        std::printf("[health] disjoint bodies separate into %zu pieces\n", pieces.size());
     }
 
     // ---- Self-intersection, which a free-form vertex drag can cause ---------

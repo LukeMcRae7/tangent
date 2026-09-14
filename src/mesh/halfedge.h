@@ -40,19 +40,13 @@ struct MeshVertex {
 // One boundary loop per face, and no inner ones.
 //
 // A drilled face genuinely has an inner boundary, so this is a real
-// restriction, not an oversight: a plate with a hole through it cannot be one
-// face here. The cost is that such a region has to be cut into pieces --
-// mergeCoplanarFaces bridges each hole to the boundary around it with two cuts,
-// so n holes come back as n+1 faces joined along 2n edges the surface does not
-// really turn at.
+// restriction: a plate with a hole through it cannot be one face here, and has
+// to arrive as pieces joined along cuts from the hole to the rim.
 //
-// Kept deliberately. Inner loops would touch build's twin pairing and its
-// manifold checks, triangulation, picking, and every operation that walks a
-// face, and the whole of what they would buy is those 2n edges: n+1 faces for a
-// region with n holes is already the minimum this representation allows, and it
-// is reached in every case measured. The restriction is worth revisiting if
-// faces with many holes become common -- a plate on a bolt circle, say -- and
-// not before.
+// It stays because meshes are no longer modelled on. They come from files and
+// primitives, the exact kernel is where a face with a hole is made, and inner
+// loops would touch build's twin pairing, triangulation and picking to buy
+// nothing an imported triangle mesh needs.
 struct MeshFace {
     Index halfedge = kInvalid;  // one half-edge bounding this face
     ElementId id   = kNoId;
@@ -166,11 +160,8 @@ public:
     // offered to a click.
     //
     // Two coplanar faces sharing *more than one* edge is what says so. One
-    // shared edge is the section line an extrude leaves, which is deliberate and
-    // stays; a bridged hole always leaves its two halves joined along both of
-    // its cuts. mergeCoplanarFaces has already absorbed every coplanar pair that
-    // could be merged by the time anyone asks, so what is left sharing one edge
-    // is there on purpose.
+    // shared edge can be a line the file drew on purpose; a bridged hole always
+    // leaves its two halves joined along both of its cuts.
     bool isBridgeEdge(Index he, Real toleranceDegrees = 0.5) const;
 
     // The faces `f` was split into because a face cannot have a hole -- itself,
@@ -212,5 +203,10 @@ private:
     // are local to the face (0 .. degree-1) rather than mesh vertex ids.
     void triangulateFace(Index f, std::vector<Index>& out) const;
 };
+
+// Splits a mesh into its connected pieces, largest first, every name kept.
+// Returns the number produced; a mesh that is already one piece yields itself,
+// so a caller can always use the result. An STL often holds several parts.
+size_t splitShells(const Mesh& mesh, std::vector<Mesh>& out);
 
 } // namespace tg

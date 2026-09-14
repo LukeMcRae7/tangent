@@ -40,8 +40,12 @@ int main(int argc, char** argv) {
         } else if (std::strcmp(argv[i], "--hold-transform") == 0) {
             app.setHoldTransform();
         } else if (std::strcmp(argv[i], "--fillet-demo") == 0 && i + 2 < argc) {
-            const int segs = std::atoi(argv[++i]);
-            app.setFilletDemo(segs, std::atoi(argv[++i]));
+            // The first number was a mesh bevel's segment count. An exact round
+            // has none, so it is read past and the edge count is what counts.
+            ++i;
+            app.setFilletEdgesDemo(std::atoi(argv[++i]));
+        } else if (std::strcmp(argv[i], "--round-all-demo") == 0) {
+            app.setRoundAllDemo();
         } else if (std::strcmp(argv[i], "--file-prompt") == 0 && i + 1 < argc) {
             app.setFileDemo(std::atoi(argv[++i]));
         } else if (std::strcmp(argv[i], "--export-stl") == 0 && i + 1 < argc) {

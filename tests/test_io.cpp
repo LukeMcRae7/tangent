@@ -325,7 +325,8 @@ int main() {
     }
 
     // ---- Project round-trip -------------------------------------------------
-    {
+    // The chain has modelling steps in it, so it needs the exact kernel.
+    if (brep::available()) {
         Scene s;
         const ObjectId id = s.addPrimitive(PrimitiveKind::Box);
         s.find(id)->name = "Bracket";
@@ -439,22 +440,22 @@ int main() {
         std::printf("[project] still parametric after load\n");
     }
 
-    // A boolean's baked tool body has to survive too.
-    {
+    // A boolean's baked tool body has to survive too. Booleans are the exact
+    // kernel's, so this needs one.
+    if (brep::available()) {
         Scene s;
-        // A mesh tool body, so a mesh scene: mixing kernels is refused, and
-        // this block is about the baked body surviving a save, not about that.
-        s.setDefaultBackend(Backend::Mesh);
+        s.setDefaultBackend(Backend::Brep);
         const ObjectId a = s.addPrimitive(PrimitiveKind::Box);
-        Mesh tool;
-        BoxParams p;
-        makeBox(tool, p);
-        for (MeshVertex& v : tool.verts) v.position += Vec3{10, 0, 0};
+        PrimitiveSpec toolSpec;
+        toolSpec.kind = PrimitiveKind::Box;
+        Body tool;
+        check(makePrimitive(toolSpec, tool, Backend::Brep), "tool built");
+        tool.transform(translate(Vec3{10, 0, 0}));
 
         Feature b;
         b.kind = FeatureKind::Boolean;
         b.booleanOp = BooleanOp::Difference;
-        b.bakedBody = Body(tool);
+        b.bakedBody = tool;
         check(s.addFeature(a, b), "boolean added");
         const int facesBefore = s.find(a)->body.faceCount();
 

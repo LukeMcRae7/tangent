@@ -1320,8 +1320,18 @@ bool CreateTool::finishCreation(Scene& scene, Camera& camera, UndoStack& undo) {
             const Real cz0 = depth < 0.0 ? depth : -overshoot;
             const Real cz1 = depth < 0.0 ? overshoot : depth;
 
+            // A cut is a boolean, and booleans are the exact kernel's. Without
+            // one -- or into a mesh -- it is refused with the reason, rather
+            // than a cutter being built only for the combine to turn it down.
+            if (scene.defaultBackend() != Backend::Brep || target->body.isMesh()) {
+                lastError_ = !brep::available()
+                    ? "Cutting needs the exact kernel, which this build does not have"
+                    : "Cutting needs a solid, and this is a mesh: Modify > Convert to Solid first";
+                stage_ = CreateStage::None;
+                return false;
+            }
             Body cutterBody;
-            if (scene.defaultBackend() == Backend::Brep) {
+            {
                 std::vector<Vec3> points;
                 std::vector<Real> arcs;
                 getCurrentProfileArcs(points, arcs);
@@ -1331,11 +1341,6 @@ bool CreateTool::finishCreation(Scene& scene, Camera& camera, UndoStack& undo) {
                     stage_ = CreateStage::None;
                     return false;
                 }
-            } else {
-                Mesh cutter;
-                makePrismMesh(getCurrentProfile(), planeOrigin_, planeU_, planeV_, planeNormal_,
-                              cz0, cz1, cutter);
-                cutterBody = Body(std::move(cutter));
             }
 
             // Into the target object's local space, where its own chain lives.

@@ -2,8 +2,6 @@
 // rebuild. No GL context is involved, so this runs headless.
 #include "scene/scene.h"
 #include "app/camera.h"
-#include "mesh/boolean.h"
-#include "mesh/operations.h"
 #include "mesh/primitives.h"
 
 #include <cmath>
@@ -378,13 +376,18 @@ int main() {
     // is a face they meant to have. Both are checked here, because widening the
     // selection would be easy to get right for one and wrong for the other.
     {
+        // A 40 mm square with a 12 mm square hole, cut into the two pieces a
+        // face with a hole has to be here: joined along both cuts, from each
+        // inner corner to the outer corner behind it.
         Scene s;
-        Mesh plate;
-        makeBox(plate, {40.0, 40.0, 10.0});
-        Mesh drill;
-        makeCylinder(drill, {6.0, 30.0, 24});
+        const std::vector<Vec3> pos = {
+            {-20, -20, 5}, {20, -20, 5}, {20, 20, 5}, {-20, 20, 5},   // outer 0..3
+            {-6, -6, 5},   {6, -6, 5},   {6, 6, 5},   {-6, 6, 5},     // inner 4..7
+        };
         Mesh bored;
-        check(meshBoolean(plate, drill, BooleanOp::Difference, bored, 7), "bore the plate");
+        check(bored.build(pos, {6, 6}, {0, 1, 2, 6, 5, 4,
+                                        2, 3, 0, 4, 7, 6}),
+              "the bored face builds as two pieces");
 
         const ObjectId id = s.addBody(Body(bored));
         const SceneObject* o = s.find(id);
@@ -395,6 +398,7 @@ int main() {
             if (o->body.faceNormal(f).z > 0.99 &&
                 std::fabs(o->body.faceCentroid(f).z - 5.0) < 1e-3) top.push_back(f);
         check(top.size() == 2, "the bored face came back as two pieces");
+        if (top.size() != 2) return 1;
 
         s.selectElement({id, ElementKind::Face, top[0]});
         check(s.selectedFaces(id).size() == 2, "clicking one piece selects the whole face");
@@ -402,7 +406,7 @@ int main() {
         // The area has to add up to the real face, not to one piece.
         double area = 0.0;
         for (Index f : s.selectedFaces(id)) area += o->body.faceArea(f);
-        const double whole = 40.0 * 40.0 - 0.5 * 24.0 * 36.0 * std::sin(kTwoPi / 24.0);
+        const double whole = 40.0 * 40.0 - 12.0 * 12.0;
         check(std::fabs(area - whole) < 1e-6, "and the whole of its area");
 
         // Shift-clicking takes the whole thing back out again.

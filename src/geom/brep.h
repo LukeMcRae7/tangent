@@ -18,7 +18,7 @@
 
 #include "core/math.h"
 #include "mesh/element_id.h"
-#include "mesh/boolean.h"
+#include "geom/op_types.h"
 #include "mesh/halfedge.h"
 #include "mesh/primitives.h"
 #include "mesh/health.h"

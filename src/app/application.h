@@ -86,9 +86,10 @@ public:
     void setFileDemo(int mode) { fileDemo_ = mode; }
     void setHeadlessExport(const std::string& p) { headlessExport_ = p; }
     void setBooleanDemo(int op) { booleanDemo_ = op; }
-    void setFilletDemo(int segments, int edges) {
-        filletDemoSegments_ = segments; filletDemoEdges_ = edges;
-    }
+    void setFilletEdgesDemo(int edges) { filletEdgesDemo_ = true; filletDemoEdges_ = edges; }
+    // Round All Edges on the startup box, committed at 2mm, then the same
+    // command on a mesh, which has to refuse and say how to get past it.
+    void setRoundAllDemo() { roundAllDemo_ = true; }
     void setAutoExtrude(float mm) { autoExtrude_ = true; autoExtrudeMm_ = mm; }
     void setShellDemo(float wallMm) { shellDemo_ = wallMm; }
 
@@ -303,7 +304,6 @@ private:
     // any filament printer resolves, and the number a user should be able to
     // argue with -- so it is offered rather than assumed.
     float       exportDeviationMm_ = 0.01f;
-    void bevelActiveObject();
     void shellActiveObject();
 
     // Insets the selected faces: a smaller copy of the face in its own plane,
@@ -703,6 +703,12 @@ private:
     // until it is confirmed or cancelled.
     bool editToolActive() const;
 
+    // True, with a notice saying how to get past it, when `obj` is a mesh: an
+    // edit to part of a shape needs the exact kernel, and a mesh has to be
+    // converted before it can have one.
+    bool refuseMeshEdit(const SceneObject& obj, const char* what);
+
+    void roundAllEdges();
     void beginReduce();
     void requestReducePreview();
     void updateReduce();
@@ -889,22 +895,14 @@ private:
     int         screenshotFrame_ = -1;
     bool        fixedCamera_ = false;
     bool        startEmpty_ = false;
-    // Set while a transform is finishing an operation that also changed
-    // topology, so commit records one undo entry covering both.
-    ObjectId             pendingMeshObject_ = kNoObject;
-    Body                 pendingMeshBefore_;
-    std::vector<Feature> pendingChainBefore_;
-    std::vector<Index>   pendingExtrudeFaces_;
-    std::vector<Index>   pendingNewFaces_;
-    Vec3                 pendingLocalNormal_{0, 0, 1};
-    std::string          pendingLabel_;
 
     int         pickFace_ = -1;
     bool        measureDemo_ = false;
     int         fileDemo_ = -1;
     std::string headlessExport_;
     int         booleanDemo_ = -1;
-    int         filletDemoSegments_ = 0;
+    bool        filletEdgesDemo_ = false;
+    bool        roundAllDemo_ = false;
     int         filletDemoEdges_ = 1;
     bool        autoExtrude_ = false;
     float       autoExtrudeMm_ = 10.0f;

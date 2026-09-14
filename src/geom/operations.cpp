@@ -6,9 +6,42 @@
 
 namespace tg {
 
-// Every function here is a forwarder while there is one backend. They are not
-// pointless: they are the list of what a second backend must provide, and they
-// are the only place in the codebase that will need a branch when it arrives.
+const char* booleanOpName(BooleanOp op) {
+    switch (op) {
+        case BooleanOp::Union:        return "Union";
+        case BooleanOp::Difference:   return "Difference";
+        case BooleanOp::Intersection: return "Intersection";
+    }
+    return "Boolean";
+}
+
+const char* extrudeOpName(ExtrudeOp op) {
+    switch (op) {
+        case ExtrudeOp::Auto:      return "Auto";
+        case ExtrudeOp::Join:      return "Join";
+        case ExtrudeOp::Cut:       return "Cut";
+        case ExtrudeOp::Intersect: return "Intersect";
+        case ExtrudeOp::NewBody:   return "New Body";
+    }
+    return "Extrude";
+}
+
+namespace {
+
+// One refusal for every operation a mesh cannot have, so that each of them says
+// the same thing and says what to do about it. `what` is the operation, as a
+// gerund, lower case like every other reason: "extruding a face".
+bool refuseMesh(const char* what, std::string* reason) {
+    if (reason) {
+        *reason = what;
+        *reason += brep::available()
+            ? " needs a solid, and this body is a mesh: Modify > Convert to Solid first"
+            : " needs the exact kernel, which this build does not have";
+    }
+    return false;
+}
+
+} // namespace
 
 bool makePrimitive(const PrimitiveSpec& spec, Body& out, Backend backend) {
     if (backend == Backend::Brep) {
@@ -37,6 +70,7 @@ bool makePrimitive(const PrimitiveSpec& spec, Body& out, Backend backend) {
 bool extrudeFaces(Body& body, const std::vector<FaceId>& faces, Real distance,
                   std::vector<FaceId>* newFaces, ElementId salt, ExtrudeOp op,
                   std::string* reason, bool mergeFlush, Vec3 along) {
+    if (reason) reason->clear();
     if (!body.isMesh()) {
         // The exact backend sweeps the face and combines the result, so which
         // way the push goes decides whether that is a join or a cut. ExtrudeOp
@@ -62,13 +96,7 @@ bool extrudeFaces(Body& body, const std::vector<FaceId>& faces, Real distance,
         return true;
     }
 
-    // Transactional, as every operation here is: the mesh function leaves its
-    // input untouched on failure, so a refused edit cannot half-apply.
-    if (!extrudeFaces(body.mesh(), faces, distance, newFaces, salt, op)) {
-        if (reason) *reason = "the extrude could not be built";
-        return false;
-    }
-    return true;
+    return refuseMesh("extruding a face", reason);
 }
 
 bool makeProfileSolid(const std::vector<Vec3>& points, const std::vector<Real>& arcs,
@@ -82,10 +110,7 @@ bool makeProfileSolid(const std::vector<Vec3>& points, const std::vector<Real>& 
 
 bool shellBody(Body& body, const std::vector<FaceId>& openFaces, Real thickness,
                ElementId salt, std::string* reason) {
-    if (body.isMesh()) {
-        if (reason) *reason = "shelling needs the exact kernel, and this body is a mesh";
-        return false;
-    }
+    if (body.isMesh()) return refuseMesh("shelling", reason);
     BrepRef result = brep::shell(body.brepRef(), openFaces, thickness, salt, reason);
     if (!result) return false;
     body = Body(std::move(result));
@@ -110,19 +135,12 @@ bool insetFaces(Body& body, const std::vector<FaceId>& faces, Real amount,
         }
         return true;
     }
-    if (!insetFaces(body.mesh(), faces, amount, newFaces, salt)) {
-        if (reason) *reason = "inset too large";
-        return false;
-    }
-    return true;
+    return refuseMesh("insetting a face", reason);
 }
 
 bool rotateFaces(Body& body, const std::vector<FaceId>& faces, Real angleRad,
                  Vec3 hingePoint, Vec3 hingeDir, ElementId salt, std::string* reason) {
-    if (body.isMesh()) {
-        if (reason) *reason = "rotating a face needs the exact kernel, and this body is a mesh";
-        return false;
-    }
+    if (body.isMesh()) return refuseMesh("rotating a face", reason);
     BrepRef result = brep::rotateFaces(body.brepRef(), faces, angleRad, hingePoint,
                                        hingeDir, salt, reason);
     if (!result) return false;
@@ -132,10 +150,7 @@ bool rotateFaces(Body& body, const std::vector<FaceId>& faces, Real angleRad,
 
 bool scaleFaces(Body& body, const std::vector<FaceId>& faces, Real factor,
                 ElementId salt, std::string* reason) {
-    if (body.isMesh()) {
-        if (reason) *reason = "scaling a face needs the exact kernel, and this body is a mesh";
-        return false;
-    }
+    if (body.isMesh()) return refuseMesh("scaling a face", reason);
     BrepRef result = brep::scaleFaces(body.brepRef(), faces, factor, salt, reason);
     if (!result) return false;
     body = Body(std::move(result));
@@ -143,10 +158,7 @@ bool scaleFaces(Body& body, const std::vector<FaceId>& faces, Real factor,
 }
 
 bool mergeDivisions(Body& body, ElementId salt, std::string* reason) {
-    if (body.isMesh()) {
-        if (reason) *reason = "merging faces needs the exact kernel, and this body is a mesh";
-        return false;
-    }
+    if (body.isMesh()) return refuseMesh("merging faces", reason);
     BrepRef result = brep::mergeDivisions(body.brepRef(), salt, reason);
     if (!result) return false;
     body = Body(std::move(result));
@@ -155,10 +167,7 @@ bool mergeDivisions(Body& body, ElementId salt, std::string* reason) {
 
 bool divideBody(Body& body, Vec3 planePoint, Vec3 planeNormal, ElementId salt,
                 std::string* reason) {
-    if (body.isMesh()) {
-        if (reason) *reason = "dividing a face needs the exact kernel, and this body is a mesh";
-        return false;
-    }
+    if (body.isMesh()) return refuseMesh("dividing a face", reason);
     BrepRef result = brep::divideBody(body.brepRef(), planePoint, planeNormal, salt, reason);
     if (!result) return false;
     body = Body(std::move(result));
@@ -184,7 +193,7 @@ bool filletEdges(Body& body, const FilletSpec& spec, std::string* reason) {
         body = Body(std::move(result));
         return true;
     }
-    return filletEdges(body.mesh(), spec, reason);
+    return refuseMesh(spec.chamfer ? "chamfering an edge" : "filleting an edge", reason);
 }
 
 const char* patternModeName(PatternMode m) {
@@ -220,10 +229,7 @@ bool patternBody(Body& body, const Body& tool, const PatternSpec& spec,
         if (reason) *reason = "there is nothing to pattern";
         return false;
     }
-    if (body.isMesh() || seed.isMesh()) {
-        if (reason) *reason = "patterning needs the exact kernel, and this body is a mesh";
-        return false;
-    }
+    if (body.isMesh() || seed.isMesh()) return refuseMesh("patterning", reason);
     const int n = spec.mode == PatternMode::Mirror ? 2 : spec.count;
     if (n < 2) {
         if (reason) *reason = "a pattern of one copy is the thing it started from";
@@ -290,35 +296,19 @@ bool reduceBody(Body& body, const ReduceOptions& options, ElementId salt, Reduce
 
 bool booleanOp(const Body& a, const Body& b, BooleanOp op, Body& out,
                ElementId salt, bool trustBNames, std::string* reason) {
+    (void)trustBNames;
     if (reason) reason->clear();
-    if (a.isMesh() != b.isMesh()) {
-        if (reason) *reason = "one body is a mesh and the other is exact";
+    // An empty Body answers isMesh() too, and "this body is a mesh" would be
+    // the wrong thing to tell someone who has nothing there at all.
+    if (a.empty() || b.empty()) {
+        if (reason) *reason = "there is nothing to combine";
         return false;
     }
-    if (!a.isMesh()) {
-        BrepRef result = brep::booleanOp(a.brep(), b.brep(), op, salt, reason);
-        if (!result) return false;
-        out = Body(std::move(result));
-        return true;
-    }
-
-    Mesh combined;
-    if (!meshBoolean(a.mesh(), b.mesh(), op, combined, salt, trustBNames)) {
-        // The mesh boolean reports only that it refused. What it does guarantee
-        // is that it refused rather than handing back something broken.
-        if (reason) *reason = "no valid solid came out of it";
-        return false;
-    }
-    out = Body(std::move(combined));
+    if (a.isMesh() || b.isMesh()) return refuseMesh("combining bodies", reason);
+    BrepRef result = brep::booleanOp(a.brep(), b.brep(), op, salt, reason);
+    if (!result) return false;
+    out = Body(std::move(result));
     return true;
-}
-
-Real maxFilletRadius(const Body& body) {
-    return maxBevelWidth(body.mesh());
-}
-
-std::vector<EdgeId> extendTangentChain(const Body& body, const std::vector<EdgeId>& edges) {
-    return extendTangentChain(body.mesh(), edges);
 }
 
 size_t splitBodies(const Body& body, std::vector<Body>& out) {
@@ -340,64 +330,57 @@ size_t splitBodies(const Body& body, std::vector<Body>& out) {
 
 bool splitByPlane(const Body& body, Vec3 planePoint, Vec3 planeNormal,
                   Body& a, Body& b) {
-    if (!body.isMesh()) {
-        const Real nLen = length(planeNormal);
-        if (!(nLen > 1e-12) || body.empty()) return false;
-        const Vec3 n = planeNormal * (Real(1) / nLen);
+    // A mesh is cut after it is converted, where the cut is exact.
+    if (body.isMesh()) return false;
+    const Real nLen = length(planeNormal);
+    if (!(nLen > 1e-12) || body.empty()) return false;
+    const Vec3 n = planeNormal * (Real(1) / nLen);
 
-
-        // One pass through the splitter first. It is about half the work of
-        // the two booleans below, which remain for a body it refuses. It
-        // refuses a side with nothing of substance on it itself, so what it
-        // returns needs no checking here.
-        {
-            BrepRef up, down;
-            if (brep::splitByPlane(body.brep(), planePoint, n, 0x5711C, up, down, nullptr)) {
-                a = Body(std::move(up));
-                b = Body(std::move(down));
-                return true;
-            }
+    // One pass through the splitter first. It is about half the work of
+    // the two booleans below, which remain for a body it refuses. It
+    // refuses a side with nothing of substance on it itself, so what it
+    // returns needs no checking here.
+    {
+        BrepRef up, down;
+        if (brep::splitByPlane(body.brep(), planePoint, n, 0x5711C, up, down, nullptr)) {
+            a = Body(std::move(up));
+            b = Body(std::move(down));
+            return true;
         }
-        const Real whole0 = std::fabs(body.health(false).volume);
-
-        // A frame with the plane's normal as its z axis.
-        const Vec3 helper = std::fabs(n.x) < 0.9 ? Vec3{1, 0, 0} : Vec3{0, 1, 0};
-        const Vec3 u = normalize(cross(helper, n));
-        const Vec3 v = cross(n, u);
-        const Mat4 frame(Vec4(u, 0), Vec4(v, 0), Vec4(n, 0), Vec4(planePoint, 1));
-
-        // Boxes several times the body's size, so that each covers everything on
-        // its side of the plane however the body sits.
-        const AABB box = body.bounds();
-        const Real reach = (length(box.size()) + length(box.center() - planePoint)) * 2 + 1;
-        PrimitiveSpec half;
-        half.kind = PrimitiveKind::Box;
-        half.box = {reach * 2, reach * 2, reach};
-        Body above, below;
-        if (!makePrimitive(half, above, Backend::Brep)) return false;
-        below = above;
-        above.transform(frame * translate({0, 0, reach * 0.5}));
-        below.transform(frame * translate({0, 0, -reach * 0.5}));
-
-        Body sideA, sideB;
-        if (!booleanOp(body, above, BooleanOp::Intersection, sideA, 0x5711A, false, nullptr) ||
-            !booleanOp(body, below, BooleanOp::Intersection, sideB, 0x5711B, false, nullptr))
-            return false;
-        // A plane that misses, or only touches, leaves one side with nothing in
-        // it; that is not a split.
-        const Real whole = whole0;
-        const Real va = sideA.empty() ? 0 : std::fabs(sideA.health(false).volume);
-        const Real vb = sideB.empty() ? 0 : std::fabs(sideB.health(false).volume);
-        const Real crumb = whole * 1e-9;
-        if (va <= crumb || vb <= crumb) return false;
-        a = std::move(sideA);
-        b = std::move(sideB);
-        return true;
     }
-    Mesh ma, mb;
-    if (!splitBodyByPlane(body.mesh(), planePoint, planeNormal, ma, mb)) return false;
-    a = Body(std::move(ma));
-    b = Body(std::move(mb));
+    const Real whole = std::fabs(body.health(false).volume);
+
+    // A frame with the plane's normal as its z axis.
+    const Vec3 helper = std::fabs(n.x) < 0.9 ? Vec3{1, 0, 0} : Vec3{0, 1, 0};
+    const Vec3 u = normalize(cross(helper, n));
+    const Vec3 v = cross(n, u);
+    const Mat4 frame(Vec4(u, 0), Vec4(v, 0), Vec4(n, 0), Vec4(planePoint, 1));
+
+    // Boxes several times the body's size, so that each covers everything on
+    // its side of the plane however the body sits.
+    const AABB box = body.bounds();
+    const Real reach = (length(box.size()) + length(box.center() - planePoint)) * 2 + 1;
+    PrimitiveSpec half;
+    half.kind = PrimitiveKind::Box;
+    half.box = {reach * 2, reach * 2, reach};
+    Body above, below;
+    if (!makePrimitive(half, above, Backend::Brep)) return false;
+    below = above;
+    above.transform(frame * translate({0, 0, reach * 0.5}));
+    below.transform(frame * translate({0, 0, -reach * 0.5}));
+
+    Body sideA, sideB;
+    if (!booleanOp(body, above, BooleanOp::Intersection, sideA, 0x5711A, false, nullptr) ||
+        !booleanOp(body, below, BooleanOp::Intersection, sideB, 0x5711B, false, nullptr))
+        return false;
+    // A plane that misses, or only touches, leaves one side with nothing in
+    // it; that is not a split.
+    const Real va = sideA.empty() ? 0 : std::fabs(sideA.health(false).volume);
+    const Real vb = sideB.empty() ? 0 : std::fabs(sideB.health(false).volume);
+    const Real crumb = whole * 1e-9;
+    if (va <= crumb || vb <= crumb) return false;
+    a = std::move(sideA);
+    b = std::move(sideB);
     return true;
 }
 

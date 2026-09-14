@@ -19,7 +19,7 @@
     {
       "name": "linux-mesh",
       "inherits": "linux",
-      "displayName": "Linux, mesh kernel only",
+      "displayName": "Linux, without the exact kernel (meshes only)",
       "binaryDir": "${sourceDir}/build-mesh",
       "cacheVariables": {
         "TANGENT_BREP": "OFF"
@@ -44,7 +44,7 @@
     {
       "name": "windows-mesh",
       "inherits": "windows",
-      "displayName": "Windows, mesh kernel only",
+      "displayName": "Windows, without the exact kernel (meshes only)",
       "binaryDir": "${sourceDir}/build-msvc-mesh",
       "cacheVariables": {
         "TANGENT_BREP": "OFF"

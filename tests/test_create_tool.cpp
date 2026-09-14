@@ -18,25 +18,9 @@
 //    - Micro-extrusion (0.1 mm), thin-wall (1 mm), fractional (7.35 mm), standard (25 mm), deep column (500 mm)
 //    - Positive depths (+D, outwards along normal)
 //    - Negative depths (-D, inwards against normal)
-//  Section 5: Positive Extrusions Out Of Existing Objects (Boss / Auto-Join)
-//    - Out of Cube flat faces (+Z, -Z, +X, -X, +Y, -Y)
-//    - Out of Cylinder flat caps and lateral curved walls
-//    - Out of Sphere surface (polar and equatorial posts)
-//    - Out of Angled / Chamfered 45-degree faces
-//    - Boss spanning across coplanar planar seams
-//  Section 6: Negative Extrusions Into Existing Objects (Boolean Difference Cuts)
-//    - Shallow and deep blind pockets in Cube
-//    - Full through-hole cuts in Cube
-//    - Corner notch and side edge-step cutaways
-//    - Rounded-corner pockets and circular blind/through holes
-//    - Cuts into Cylinder cap, axis bore (tube), and transverse slot through curved wall
-//    - Cuts into Sphere surface (dimple cavity and through bore)
-//    - Cuts into Angled / Chamfered 45-degree face
-//  Section 7: Complex Multi-Operation Sequences
-//    - Cut-then-Boss (boss extruded out of pocket floor)
-//    - Boss-then-Cut (through-hole drilled through boss and base)
-//    - Orthogonal multi-face cuts on all sides of a body
-//    - Precision volume and topological invariant verifications
+//  (Sections 5-7 tested the mesh boolean directly, and went with it. Cuts and
+//   joins are booleans on the exact kernel now, and are tested through the tool
+//   in section 9.)
 //  Section 9: Cuts and joins belong to the feature history
 //    - The tool's cut/join land in the chain, not over obj->body
 //    - Re-evaluating for any reason preserves them
@@ -44,9 +28,7 @@
 //    - A cut with nothing to cut into refuses instead of adding a body
 #include "app/create_tool.h"
 #include "app/undo.h"
-#include "mesh/boolean.h"
 #include "mesh/health.h"
-#include "mesh/operations.h"
 #include "mesh/primitives.h"
 #include "scene/feature.h"
 #include "scene/scene.h"
@@ -115,59 +97,6 @@ void expectSolid(const Body& m, const std::string& what) {
 
 double volumeOf(const Body& m) {
     return m.health(false).volume;
-}
-
-Mesh makeBoxMesh(Vec3 size, Vec3 center = {0, 0, 0}) {
-    Mesh m;
-    BoxParams p;
-    p.width = size.x;
-    p.depth = size.y;
-    p.height = size.z;
-    makeBox(m, p);
-    for (auto& v : m.verts) v.position += center;
-    return m;
-}
-
-Mesh makeCylinderMesh(Real radius, Real height, int segments = 24, Vec3 center = {0, 0, 0}) {
-    Mesh m;
-    CylinderParams p;
-    p.radius = radius;
-    p.height = height;
-    p.segments = segments;
-    makeCylinder(m, p);
-    for (auto& v : m.verts) v.position += center;
-    return m;
-}
-
-Mesh makeSphereMesh(Real radius, int segments = 24, int rings = 16, Vec3 center = {0, 0, 0}) {
-    Mesh m;
-    SphereParams p;
-    p.radius = radius;
-    p.segments = segments;
-    p.rings = rings;
-    makeSphere(m, p);
-    for (auto& v : m.verts) v.position += center;
-    return m;
-}
-
-// Builds a 45-degree wedge / chamfered block
-Mesh makeWedgeMesh(Real width, Real depth, Real height) {
-    const Real hx = width * 0.5f, hy = depth * 0.5f, hz = height * 0.5f;
-    std::vector<Vec3> pos = {
-        {-hx, -hy, -hz}, { hx, -hy, -hz}, {-hx, -hy,  hz}, // 0, 1, 2 (front triangle y=-hy)
-        {-hx,  hy, -hz}, { hx,  hy, -hz}, {-hx,  hy,  hz}  // 3, 4, 5 (back triangle y=+hy)
-    };
-    std::vector<uint32_t> sizes = {3, 3, 4, 4, 4};
-    std::vector<uint32_t> indices = {
-        0, 1, 2,          // front triangle (-Y)
-        3, 5, 4,          // back triangle (+Y)
-        0, 3, 4, 1,       // bottom face (-Z)
-        0, 2, 5, 3,       // back face (-X)
-        1, 4, 5, 2        // slanted face (+hypotenuse)
-    };
-    Mesh m;
-    m.build(pos, sizes, indices, nullptr);
-    return m;
 }
 
 } // namespace
@@ -536,302 +465,6 @@ void testSection4_ExtrusionDistancesAndDirections() {
 }
 
 // ===========================================================================
-// SECTION 5: Positive Extrusions Out Of Existing Objects (Boss / Auto-Join)
-// ===========================================================================
-void testSection5_PositiveExtrudeAutoJoin() {
-    std::printf("\n--- Section 5: Positive Extrusions (Boss / Auto-Join) ---\n");
-
-    // 5.1 Boss atop Cube Top Face (+Z)
-    {
-        Mesh base = makeBoxMesh({50, 50, 30}, {0, 0, 15}); // z in [0, 30]
-        std::vector<Vec2> bossPoly = CreateTool::makeRectPolygon({-10, -10}, {10, 10}, 0.0);
-        Mesh boss;
-        CreateTool::makePrismMesh(bossPoly, {0, 0, 30}, {1, 0, 0}, {0, 1, 0}, {0, 0, 1}, 0.0, 15.0, boss);
-
-        Mesh result;
-        bool ok = meshBoolean(base, boss, BooleanOp::Union, result);
-        check(ok, "union boss with base box succeeds");
-        mergeCoplanarFaces(result);
-        expectSolid(result, "boss on box top");
-        const double expectedVol = (50.0 * 50.0 * 30.0) + (20.0 * 20.0 * 15.0); // 75000 + 6000 = 81000
-        check(near(volumeOf(result), expectedVol), "boss atop box volume = 81000 mm3");
-    }
-
-    // 5.2 Boss out of Cube Side Face (+X)
-    {
-        Mesh base = makeBoxMesh({40, 40, 40}); // x in [-20, 20]
-        std::vector<Vec2> bossPoly = CreateTool::makeRectPolygon({-8, -8}, {8, 8}, 0.0);
-        Mesh sideBoss;
-        CreateTool::makePrismMesh(bossPoly, {20, 0, 0}, {0, 1, 0}, {0, 0, 1}, {1, 0, 0}, 0.0, 12.0, sideBoss);
-
-        Mesh result;
-        bool ok = meshBoolean(base, sideBoss, BooleanOp::Union, result);
-        check(ok, "union side boss with box succeeds");
-        mergeCoplanarFaces(result);
-        expectSolid(result, "side boss on box");
-        const double expectedVol = 64000.0 + (16.0 * 16.0 * 12.0); // 67072
-        check(near(volumeOf(result), expectedVol), "side boss volume = 67072 mm3");
-    }
-
-    // 5.3 Concentric Cylindrical Boss atop Cylinder Cap
-    {
-        Mesh baseCyl = makeCylinderMesh(20.0, 30.0, 24, {0, 0, 15}); // z in [0, 30]
-        Mesh bossCyl = makeCylinderMesh(8.0, 15.0, 24, {0, 0, 37.5}); // z in [30, 45]
-
-        Mesh result;
-        bool ok = meshBoolean(baseCyl, bossCyl, BooleanOp::Union, result);
-        check(ok, "union concentric cylinder boss succeeds");
-        mergeCoplanarFaces(result);
-        expectSolid(result, "cylinder boss on cylinder cap");
-        const double n = 24.0;
-        const double aBase = 0.5 * n * 400.0 * std::sin(kTwoPi / n);
-        const double aBoss = 0.5 * n * 64.0 * std::sin(kTwoPi / n);
-        const double expectedVol = (aBase * 30.0) + (aBoss * 15.0);
-        check(nearRel(volumeOf(result), expectedVol, 0.01), "stepped cylinder volume exact");
-    }
-
-    // 5.4 Boss Extruded Out of Sphere Surface
-    {
-        Mesh baseSphere = makeSphereMesh(20.0, 24, 16);
-        Mesh post = makeBoxMesh({10, 10, 20}, {0, 0, 25}); // z in [15, 35]
-
-        Mesh result;
-        bool ok = meshBoolean(baseSphere, post, BooleanOp::Union, result);
-        check(ok, "union post with sphere succeeds");
-        mergeCoplanarFaces(result);
-        expectSolid(result, "post on sphere");
-        check(volumeOf(result) > volumeOf(baseSphere), "post on sphere increases total volume");
-        const AABB b = result.bounds();
-        check(near(b.max.z, 35.0), "sphere with post reaches z=35");
-    }
-
-    // 5.5 Boss Extruded Out of Angled / Chamfered 45-Degree Face
-    {
-        Mesh wedge = makeWedgeMesh(30.0, 30.0, 30.0);
-        expectSolid(wedge, "base 45-degree wedge");
-
-        // Boss extending perpendicular to slanted face
-        const Vec3 normal = normalize(Vec3{1, 0, 1});
-        const Vec3 u{0, 1, 0};
-        const Vec3 v = cross(normal, u);
-        std::vector<Vec2> bossPoly = CreateTool::makeRectPolygon({-6, -6}, {6, 6}, 0.0);
-        Mesh boss;
-        CreateTool::makePrismMesh(bossPoly, {0, 0, 0}, u, v, normal, 0.0, 10.0, boss);
-
-        Mesh result;
-        bool ok = meshBoolean(wedge, boss, BooleanOp::Union, result);
-        check(ok, "union boss on angled wedge face succeeds");
-        mergeCoplanarFaces(result);
-        expectSolid(result, "boss on angled wedge");
-        check(volumeOf(result) > volumeOf(wedge), "angled boss increases wedge volume");
-    }
-}
-
-// ===========================================================================
-// SECTION 6: Negative Extrusions Into Existing Objects (Boolean Difference Cuts)
-// ===========================================================================
-void testSection6_NegativeExtrudeCuts() {
-    std::printf("\n--- Section 6: Negative Extrusions (Boolean Difference Cuts) ---\n");
-
-    // 6.1 Shallow Blind Pocket Cut into Cube Top Face
-    {
-        Mesh base = makeBoxMesh({40, 40, 30}, {0, 0, -15}); // z in [-30, 0]
-        std::vector<Vec2> pocketPoly = CreateTool::makeRectPolygon({-10, -10}, {10, 10}, 0.0);
-        Mesh cutter;
-        CreateTool::makePrismMesh(pocketPoly, {0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {0, 0, 1}, -8.0, 1.0, cutter);
-
-        Mesh result;
-        bool ok = meshBoolean(base, cutter, BooleanOp::Difference, result);
-        check(ok, "shallow pocket cut succeeds");
-        mergeCoplanarFaces(result);
-        expectSolid(result, "shallow pocket in box");
-        const double expectedVol = (40.0 * 40.0 * 30.0) - (20.0 * 20.0 * 8.0); // 44800
-        check(near(volumeOf(result), expectedVol), "shallow pocket volume = 44800 mm3");
-    }
-
-    // 6.2 Through-Hole Square Cut Through Entire Cube
-    {
-        Mesh base = makeBoxMesh({40, 40, 30}, {0, 0, -15}); // z in [-30, 0]
-        std::vector<Vec2> holePoly = CreateTool::makeRectPolygon({-8, -8}, {8, 8}, 0.0);
-        Mesh cutter;
-        CreateTool::makePrismMesh(holePoly, {0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {0, 0, 1}, -35.0, 1.0, cutter);
-
-        Mesh result;
-        bool ok = meshBoolean(base, cutter, BooleanOp::Difference, result);
-        check(ok, "through-hole square cut succeeds");
-        mergeCoplanarFaces(result);
-        expectSolid(result, "square through-hole in box");
-        const double expectedVol = (40.0 * 40.0 * 30.0) - (16.0 * 16.0 * 30.0); // 40320
-        check(near(volumeOf(result), expectedVol), "square through-hole volume = 40320 mm3");
-    }
-
-    // 6.3 Corner Notch Cutaway (Overlapping Outer Perimeter)
-    {
-        Mesh base = makeBoxMesh({40, 40, 20}, {20, 20, 10}); // [0, 40] x [0, 40] x [0, 20]
-        std::vector<Vec2> notchPoly = CreateTool::makeRectPolygon({-1, -1}, {15, 15}, 0.0);
-        Mesh cutter;
-        CreateTool::makePrismMesh(notchPoly, {0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {0, 0, 1}, -1.0, 21.0, cutter);
-
-        Mesh result;
-        bool ok = meshBoolean(base, cutter, BooleanOp::Difference, result);
-        check(ok, "corner notch cut succeeds");
-        mergeCoplanarFaces(result);
-        expectSolid(result, "corner notch cutaway");
-        const double expectedVol = (40.0 * 40.0 * 20.0) - (15.0 * 15.0 * 20.0); // 27500
-        check(near(volumeOf(result), expectedVol), "corner notch volume = 27500 mm3");
-    }
-
-    // 6.4 Edge-Straddling Slot Cut on Box Side Wall
-    {
-        Mesh base = makeBoxMesh({40, 40, 40}); // in [-20, 20]^3
-        std::vector<Vec2> slotPoly = CreateTool::makeRectPolygon({-5, -7.5}, {5, 7.5}, 0.0);
-        Mesh slotCutter;
-        CreateTool::makePrismMesh(slotPoly, {20, 0, 0}, {0, 1, 0}, {0, 0, 1}, {1, 0, 0}, -10.0, 1.0, slotCutter);
-
-        Mesh result;
-        bool ok = meshBoolean(base, slotCutter, BooleanOp::Difference, result);
-        check(ok, "side wall slot cut succeeds");
-        mergeCoplanarFaces(result);
-        expectSolid(result, "slot on box side");
-        const double expectedVol = 64000.0 - (10.0 * 15.0 * 10.0); // 62500
-        check(near(volumeOf(result), expectedVol), "side wall slot volume = 62500 mm3");
-    }
-
-    // 6.5 Cylindrical Bore Through Sphere Pole-to-Pole
-    {
-        Mesh sphere = makeSphereMesh(20.0, 24, 16);
-        Mesh drill = makeCylinderMesh(6.0, 50.0, 24);
-
-        Mesh result;
-        bool ok = meshBoolean(sphere, drill, BooleanOp::Difference, result);
-        check(ok, "drill through sphere pole-to-pole succeeds");
-        mergeCoplanarFaces(result);
-        expectSolid(result, "drilled sphere");
-        check(volumeOf(result) < volumeOf(sphere), "drilled sphere volume reduced");
-    }
-
-    // 6.6 Cylindrical Cut Through Cylinder Axis (Coaxial Tube)
-    {
-        Mesh outer = makeCylinderMesh(20.0, 40.0, 24);
-        Mesh inner = makeCylinderMesh(10.0, 50.0, 24);
-
-        Mesh tube;
-        bool ok = meshBoolean(outer, inner, BooleanOp::Difference, tube);
-        check(ok, "hollow cylinder tube cut succeeds");
-        mergeCoplanarFaces(tube);
-        expectSolid(tube, "hollow tube");
-        const double n = 24.0;
-        const double aOuter = 0.5 * n * 400.0 * std::sin(kTwoPi / n);
-        const double aInner = 0.5 * n * 100.0 * std::sin(kTwoPi / n);
-        const double expectedVol = (aOuter - aInner) * 40.0;
-        check(nearRel(volumeOf(tube), expectedVol, 0.01), "tube volume exact");
-    }
-
-    // 6.7 Pocket Cut into Angled / Chamfered 45-Degree Face
-    {
-        Mesh wedge = makeWedgeMesh(40.0, 40.0, 40.0);
-        const Vec3 normal = normalize(Vec3{1, 0, 1});
-        const Vec3 u{0, 1, 0};
-        const Vec3 v = cross(normal, u);
-        std::vector<Vec2> pocketPoly = CreateTool::makeRectPolygon({-6, -6}, {6, 6}, 0.0);
-        Mesh cutter;
-        CreateTool::makePrismMesh(pocketPoly, {0, 0, 0}, u, v, normal, -8.0, 1.0, cutter);
-
-        Mesh result;
-        bool ok = meshBoolean(wedge, cutter, BooleanOp::Difference, result);
-        check(ok, "pocket cut into angled wedge face succeeds");
-        mergeCoplanarFaces(result);
-        expectSolid(result, "pocket in angled wedge");
-        check(volumeOf(result) < volumeOf(wedge), "wedge volume decreased after pocket cut");
-    }
-}
-
-// ===========================================================================
-// SECTION 7: Multi-Operation Sequences & Interaction Chaining
-// ===========================================================================
-void testSection7_MultiOperationSequences() {
-    std::printf("\n--- Section 7: Multi-Operation Chaining ---\n");
-
-    // 7.1 Cut Then Boss: Pocket into box, then a post out of the pocket floor
-    {
-        // 1. Base Box: 60 x 60 x 30 sitting in z in [0, 30]
-        Mesh m = makeBoxMesh({60, 60, 30}, {0, 0, 15});
-
-        // 2. Cut pocket at top face (z=30): 40 x 40 mm, depth 10 mm (pocket floor at z=20)
-        std::vector<Vec2> p1 = CreateTool::makeRectPolygon({-20, -20}, {20, 20}, 0.0);
-        Mesh cutter;
-        CreateTool::makePrismMesh(p1, {0, 0, 30}, {1, 0, 0}, {0, 1, 0}, {0, 0, 1}, -10.0, 1.0, cutter);
-        Mesh withPocket;
-        check(meshBoolean(m, cutter, BooleanOp::Difference, withPocket), "step 1: cut pocket");
-        mergeCoplanarFaces(withPocket);
-
-        // 3. Extrude boss out of pocket floor (z=20): 16 x 16 mm, height +15 mm (reaches z=35)
-        std::vector<Vec2> p2 = CreateTool::makeRectPolygon({-8, -8}, {8, 8}, 0.0);
-        Mesh boss;
-        CreateTool::makePrismMesh(p2, {0, 0, 20}, {1, 0, 0}, {0, 1, 0}, {0, 0, 1}, 0.0, 15.0, boss);
-        Mesh withBoss;
-        check(meshBoolean(withPocket, boss, BooleanOp::Union, withBoss), "step 2: extrude boss in pocket");
-        mergeCoplanarFaces(withBoss);
-        expectSolid(withBoss, "pocket with boss in floor");
-
-        const double expectedVol = (60.0 * 60.0 * 30.0) - (40.0 * 40.0 * 10.0) + (16.0 * 16.0 * 15.0);
-        check(near(volumeOf(withBoss), expectedVol), "cut-then-boss volume = 95840 mm3");
-    }
-
-    // 7.2 Boss Then Cut: Boss atop box, then a through-hole drilled through boss and base
-    {
-        // 1. Base Box: 40 x 40 x 20 (z in [0, 20])
-        Mesh base = makeBoxMesh({40, 40, 20}, {0, 0, 10});
-
-        // 2. Boss: 20 x 20 x 10 atop base (z in [20, 30])
-        Mesh boss = makeBoxMesh({20, 20, 10}, {0, 0, 25});
-        Mesh combined;
-        check(meshBoolean(base, boss, BooleanOp::Union, combined), "boss atop box");
-        mergeCoplanarFaces(combined);
-
-        // 3. Drill through-hole: 8 x 8 square from z=35 to z=-5
-        Mesh drill = makeBoxMesh({8, 8, 40}, {0, 0, 15});
-        Mesh drilled;
-        check(meshBoolean(combined, drill, BooleanOp::Difference, drilled), "drill through boss and base");
-        mergeCoplanarFaces(drilled);
-        expectSolid(drilled, "boss and base with through-hole");
-
-        const double baseVol = 40.0 * 40.0 * 20.0; // 32000
-        const double bossVol = 20.0 * 20.0 * 10.0; // 4000
-        const double holeVol = 8.0 * 8.0 * 30.0;   // 1920 (through total height 30)
-        const double expectedVol = baseVol + bossVol - holeVol; // 34080
-        check(near(volumeOf(drilled), expectedVol), "boss-then-cut volume = 34080 mm3");
-    }
-
-    // 7.3 Multi-Face Orthogonal Cuts (Pockets on 4 sides of a cube)
-    {
-        Mesh cube = makeBoxMesh({40, 40, 40}); // in [-20, 20]^3, vol = 64000
-
-        // Pocket on +Z face: 10 x 10 x 5 deep
-        Mesh cutZ = makeBoxMesh({10, 10, 6}, {0, 0, 18});
-        Mesh r1;
-        check(meshBoolean(cube, cutZ, BooleanOp::Difference, r1), "cut +Z");
-        mergeCoplanarFaces(r1);
-
-        // Pocket on +X face: 10 x 10 x 5 deep
-        Mesh cutX = makeBoxMesh({6, 10, 10}, {18, 0, 0});
-        Mesh r2;
-        check(meshBoolean(r1, cutX, BooleanOp::Difference, r2), "cut +X");
-        mergeCoplanarFaces(r2);
-
-        // Pocket on +Y face: 10 x 10 x 5 deep
-        Mesh cutY = makeBoxMesh({10, 6, 10}, {0, 18, 0});
-        Mesh r3;
-        check(meshBoolean(r2, cutY, BooleanOp::Difference, r3), "cut +Y");
-        mergeCoplanarFaces(r3);
-
-        expectSolid(r3, "cube with 3 orthogonal face pockets");
-        const double expectedVol = 64000.0 - 3.0 * (10.0 * 10.0 * 5.0); // 64000 - 1500 = 62500
-        check(near(volumeOf(r3), expectedVol), "orthogonal pockets volume = 62500 mm3");
-    }
-}
-
-// ===========================================================================
 // SECTION 8: Interactive Scene Lifecycle & Transformed Object Integration
 // ===========================================================================
 void testSection8_SceneLifecycleAndTransforms() {
@@ -887,7 +520,8 @@ void testSection8_SceneLifecycleAndTransforms() {
     }
 
     // 8.2 Positive Extrude / Boss on Transformed Object (Moved in World Space)
-    {
+    // A join and a cut are booleans, which are the exact kernel's.
+    if (brep::available()) {
         Scene scene;
         Camera camera;
         UndoStack undo;
@@ -926,7 +560,7 @@ void testSection8_SceneLifecycleAndTransforms() {
     }
 
     // 8.3 Negative Extrude / Cut into Transformed Object (Moved in World Space)
-    {
+    if (brep::available()) {
         Scene scene;
         Camera camera;
         UndoStack undo;
@@ -1066,6 +700,29 @@ void testSection9_EditsLandInTheHistory() {
     const double kBox    = 36.0 * 20.0 * 20.0;              // 14400
     const double kPocket = kBox - 10.0 * 10.0 * 8.0;        // 13600
 
+    // Without the exact kernel there is no boolean to cut with, and the tool
+    // has to say so rather than leave the cutter lying in the scene.
+    if (!brep::available()) {
+        Scene scene; Camera camera; UndoStack undo;
+        PrimitiveSpec ps;
+        ps.kind = PrimitiveKind::Box;
+        ps.box.width = 36.0; ps.box.depth = 20.0; ps.box.height = 20.0;
+        const ObjectId id = scene.addPrimitive(PrimitiveKind::Box, ps, {0, 0, 10});
+        CreateTool tool;
+        tool.start(PrimitiveKind::Box);
+        tool.setHoveredPlane(PlaneChoice::Face, {0, 0, 20}, {0, 0, 1}, id, 1);
+        tool.commitPlaneSelection(camera);
+        tool.setProfileRect({-5, -5}, {5, 5}, 0.0);
+        tool.setExtrudeDepth(-8.0);
+        tool.setStage(CreateStage::ExtrudeDepth);
+        check(!tool.finishCreation(scene, camera, undo), "a cut without the kernel is refused");
+        check(scene.objectCount() == 1, "and nothing is added");
+        check(tool.takeError().find("exact kernel") != std::string::npos,
+              "and it says what is missing");
+        std::printf("  (the rest needs the exact kernel)\n");
+        return;
+    }
+
     // 9.1 The cut is a feature, and the cache agrees with what is on screen
     {
         Scene scene; Camera camera; UndoStack undo;
@@ -1130,12 +787,11 @@ void testSection9_EditsLandInTheHistory() {
             if (fa == kNoFace || fb == kNoFace) continue;
             if (dot(before.faceNormal(fa), before.faceNormal(fb)) > 0.999) continue;
 
-            const std::vector<EdgeId> edges = extendTangentChain(before, {he});
+            const std::vector<EdgeId> edges{he};
 
             // What the interactive preview computes.
             Body scratch = before;
             FilletSpec spec;
-            spec.segments = 4;
             for (EdgeId e : edges) spec.edges.push_back({e, 1.0});
             if (!filletEdges(scratch, spec)) continue;
             ++previewed;
@@ -1230,6 +886,7 @@ void testSection9_EditsLandInTheHistory() {
 // ===========================================================================
 void testSection10_CreateOperation() {
     std::printf("\n--- Section 10: Join / Cut / New Body ---\n");
+    if (!brep::available()) { std::printf("  (needs the exact kernel)\n"); return; }
 
     const double kBox = 40.0 * 40.0 * 40.0;
     const double kStub = 10.0 * 10.0 * 10.0;
@@ -1913,9 +1570,6 @@ int main() {
     testSection2_StandaloneObjectsOnPlanes();
     testSection3_PreExtrudeModifications();
     testSection4_ExtrusionDistancesAndDirections();
-    testSection5_PositiveExtrudeAutoJoin();
-    testSection6_NegativeExtrudeCuts();
-    testSection7_MultiOperationSequences();
     testSection8_SceneLifecycleAndTransforms();
     testSection9_EditsLandInTheHistory();
     testSection10_CreateOperation();

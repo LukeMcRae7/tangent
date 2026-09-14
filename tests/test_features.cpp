@@ -2,7 +2,7 @@
 // ones, and does a step whose references have gone stale fail visibly rather
 // than producing wrong geometry?
 #include "mesh/health.h"
-#include "mesh/operations.h"
+#include "geom/operations.h"
 #include "scene/scene.h"
 
 #include <cstdio>
@@ -38,6 +38,12 @@ static FaceId faceFacing(const Body& b, Vec3 dir) {
 }
 
 int main() {
+    // Modelling is the exact kernel's. Without it the chain still holds a
+    // primitive, a mesh root and vertex edits, and those sections run; the
+    // rest say they were skipped rather than failing for want of a kernel.
+    const bool exact = brep::available();
+    if (!exact) std::printf("[features] no exact kernel: modelling sections skipped\n");
+
     // ---- A new object starts as a one-feature chain ------------------------
     {
         Scene s;
@@ -50,7 +56,7 @@ int main() {
     }
 
     // ---- Editing the base re-applies everything after it -------------------
-    {
+    if (exact) {
         Scene s;
         const ObjectId id = s.addPrimitive(PrimitiveKind::Box);
         SceneObject* o = s.find(id);
@@ -76,7 +82,7 @@ int main() {
     }
 
     // ---- Disabling a feature skips it, without losing it -------------------
-    {
+    if (exact) {
         Scene s;
         const ObjectId id = s.addPrimitive(PrimitiveKind::Box);
         SceneObject* o = s.find(id);
@@ -108,7 +114,7 @@ int main() {
     // regress into silent corruption: the extrude names a face by index, an
     // earlier bevel renumbers every face, and the extrude must then refuse
     // rather than acting on whatever face now holds that index.
-    {
+    if (exact) {
         Scene s;
         const ObjectId id = s.addPrimitive(PrimitiveKind::Box);
         SceneObject* o = s.find(id);
@@ -143,8 +149,7 @@ int main() {
     // ---- A chain that produces nothing must not destroy the model ----------
     {
         Scene s;
-        // Mesh-kernel behaviour: this block builds its tool bodies as meshes,
-        // or edits vertices, neither of which an exact body does.
+        // On a mesh, so it runs with or without the exact kernel.
         s.setDefaultBackend(Backend::Mesh);
         const ObjectId id = s.addPrimitive(PrimitiveKind::Box);
         SceneObject* o = s.find(id);
@@ -160,8 +165,7 @@ int main() {
     // ---- Free-form vertex edits ride along in the chain --------------------
     {
         Scene s;
-        // Mesh-kernel behaviour: this block builds its tool bodies as meshes,
-        // or edits vertices, neither of which an exact body does.
+        // Vertex edits are a mesh's: an exact body has no free vertices.
         s.setDefaultBackend(Backend::Mesh);
         const ObjectId id = s.addPrimitive(PrimitiveKind::Box);
         SceneObject* o = s.find(id);
@@ -194,7 +198,7 @@ int main() {
     // The tool body is baked into the feature, so its shape cannot be changed
     // here -- but which way it combines can, and the History panel now offers
     // it. This is the behaviour behind that control.
-    {
+    if (exact) {
         Scene s;
         const ObjectId id = s.addPrimitive(PrimitiveKind::Box);   // 20mm cube
         SceneObject* o = s.find(id);
@@ -230,7 +234,7 @@ int main() {
     // The History panel has always marked a failed feature, but the chain is
     // re-run by edits that have nothing to do with the step that breaks. Losing
     // a fillet because a base dimension moved should not be silent.
-    {
+    if (exact) {
         Scene s;
         const ObjectId id = s.addPrimitive(PrimitiveKind::Box);
         SceneObject* o = s.find(id);
@@ -265,7 +269,7 @@ int main() {
     }
 
     // ---- Duplicating an object copies its history --------------------------
-    {
+    if (exact) {
         Scene s;
         const ObjectId id = s.addPrimitive(PrimitiveKind::Box);
         Feature bev;
@@ -283,7 +287,7 @@ int main() {
     }
 
     // ---- Boolean as a feature ----------------------------------------------
-    {
+    if (exact) {
         Scene s;
         const ObjectId a = s.addPrimitive(PrimitiveKind::Box);            // 20mm at origin
         const ObjectId b = s.addPrimitive(PrimitiveKind::Box, {}, Vec3{10, 0, 0});
@@ -314,11 +318,8 @@ int main() {
     }
 
     // The tool's own transform has to be taken into account, not just its mesh.
-    {
+    if (exact) {
         Scene s;
-        // Mesh-kernel behaviour: this block builds its tool bodies as meshes,
-        // or edits vertices, neither of which an exact body does.
-        s.setDefaultBackend(Backend::Mesh);
         const ObjectId a = s.addPrimitive(PrimitiveKind::Box);
         const ObjectId b = s.addPrimitive(PrimitiveKind::Box);
         s.find(b)->transform.position = {10, 0, 0};   // moved by transform only
@@ -340,16 +341,13 @@ int main() {
     }
 
     // A boolean that cannot produce a solid is refused, chain untouched.
-    {
+    if (exact) {
         Scene s;
-        // Mesh-kernel behaviour: this block builds its tool bodies as meshes,
-        // or edits vertices, neither of which an exact body does.
-        s.setDefaultBackend(Backend::Mesh);
         const ObjectId a = s.addPrimitive(PrimitiveKind::Box);
-        Mesh far;
-        BoxParams p;
-        makeBox(far, p);
-        Body farBody(std::move(far));
+        PrimitiveSpec farSpec;
+        farSpec.kind = PrimitiveKind::Box;
+        Body farBody;
+        check(makePrimitive(farSpec, farBody, Backend::Brep), "far box built");
         farBody.transform(translate(Vec3{500, 0, 0}));
 
         Feature f;
@@ -364,15 +362,14 @@ int main() {
     }
 
     // ---- Split into bodies ---------------------------------------------------
-    {
-        // One box either side of a gap, joined into a single mesh by a union.
-        Mesh left, right, both;
-        BoxParams p;
-        makeBox(left, p);
-        makeBox(right, p);
-        Body rightBody(std::move(right));
+    if (exact) {
+        // One box either side of a gap, joined into a single body by a union.
+        PrimitiveSpec boxSpec;
+        boxSpec.kind = PrimitiveKind::Box;
+        Body leftBody, rightBody;
+        check(makePrimitive(boxSpec, leftBody, Backend::Brep) &&
+              makePrimitive(boxSpec, rightBody, Backend::Brep), "two boxes built");
         rightBody.transform(translate(Vec3{100, 0, 0}));
-        Body leftBody(std::move(left));
         Body bothBody;
         check(booleanOp(leftBody, rightBody, BooleanOp::Union, bothBody),
               "union of two disjoint boxes");
@@ -397,8 +394,7 @@ int main() {
     // A BaseMesh chain root carries geometry that has no parameters.
     {
         Scene s;
-        // Mesh-kernel behaviour: this block builds its tool bodies as meshes,
-        // or edits vertices, neither of which an exact body does.
+        // A mesh root, so it runs with or without the exact kernel.
         s.setDefaultBackend(Backend::Mesh);
         const ObjectId id = s.addPrimitive(PrimitiveKind::Box);
         Mesh sphereMesh;
@@ -414,107 +410,28 @@ int main() {
         std::printf("[features] BaseMesh root: %d faces\n", s.find(id)->body.faceCount());
     }
 
-    // ---- An upstream change the fillet has to survive ----------------------
-    // The reason features name what they act on. A rim fillet, then the
-    // cylinder's segment count raised -- a routine smoothness tweak.
-    //
-    // With edges stored as indices this came back silently wrong: the indices
-    // resolved, to different edges, and the model passed a health check with
-    // the rim sharp and a fillet somewhere else entirely. Nothing reported it.
-    {
-        Scene s;
-        // Mesh-kernel behaviour: this block builds its tool bodies as meshes,
-        // or edits vertices, neither of which an exact body does.
-        s.setDefaultBackend(Backend::Mesh);
-        PrimitiveSpec spec;
-        spec.cylinder.segments = 16;
-        const ObjectId id = s.addPrimitive(PrimitiveKind::Cylinder, spec);
-        SceneObject* o = s.find(id);
-
-        const AABB b = o->body.bounds();
-        std::vector<EdgeId> rim, allE;
-        o->body.allEdges(allE);
-        for (EdgeId e : allE) {
-            Vec3 p, q;
-            o->body.edgePositions(e, p, q);
-            if (std::fabs(p.z - b.max.z) < 1e-9 && std::fabs(q.z - b.max.z) < 1e-9)
-                rim.push_back(e);
-        }
-        check(rim.size() == 16, "sixteen rim edges");
-
-        Feature fil;
-        fil.kind = FeatureKind::Bevel;
-        fil.edges = nameEdges(o->body, rim);
-        fil.width = 0.3;
-        fil.segments = 6;
-
-        // Picking a whole rim is recorded as the rim, not as the edges that
-        // happen to make it up today. That is what lets it survive.
-        check(fil.edges.kind == ElementRefs::Kind::FaceBoundary,
-              "a full rim is recorded as the cap's boundary");
-        check(s.addFeature(id, fil), "rim fillet added");
-
-        o = s.find(id);
-        o->features[0].primitive.cylinder.segments = 24;
-        check(s.reevaluate(id), "chain re-evaluates after the segment change");
-        o = s.find(id);
-        check(!o->features[1].errored,
-              std::string("the fillet still resolves: ") + o->features[1].error);
-        check(o->body.health().solid(), "and still produces a solid");
-
-        // Measured, not assumed: against a plain 24-segment cylinder, the
-        // fillet must have removed the sliver a 0.3mm round of that rim takes.
-        Mesh plain;
-        CylinderParams cp;
-        cp.segments = 24;
-        makeCylinder(plain, cp);
-
-        double rimLen = 0.0;
-        const AABB pb = plain.bounds();
-        for (Index h = 0; h < plain.halfedgeCount(); ++h) {
-            if (h > plain.halfedges[h].twin) continue;
-            const Vec3 p = plain.verts[plain.fromVertex(h)].position;
-            const Vec3 q = plain.verts[plain.halfedges[h].vertex].position;
-            if (std::fabs(p.z - pb.max.z) < 1e-9 && std::fabs(q.z - pb.max.z) < 1e-9)
-                rimLen += length(q - p);
-        }
-        const double r = 0.3;
-        const double sector = 0.5 * 6 * r * r * std::sin(kPi / 12.0);
-        const double predicted = rimLen * (r * r - sector);
-        const double removed = volumeOf(Body(plain)) - volumeOf(o->body);
-        check(std::fabs(removed - predicted) < 0.05,
-              "the fillet ran over the whole new rim: removed " +
-                  std::to_string(removed) + " against " + std::to_string(predicted));
-        std::printf("[features] rim fillet survives 16 -> 24 segments: "
-                    "removed %.4f mm3 (analytic %.4f over %.2f mm of rim)\n",
-                    removed, predicted, rimLen);
-    }
-
     // ---- Acting on a body that has been cut --------------------------------
     // Every face of a boolean's output used to come back nameless. A feature
     // acting on one stored nothing, and on the next evaluation nothing matched
     // the first face in the mesh -- so extruding the top of a bored block
     // quietly moved a different face instead. It happened after almost every
     // boolean, which is what made it so visible.
-    {
+    if (exact) {
         Scene s;
-        // Mesh-kernel behaviour: this block builds its tool bodies as meshes,
-        // or edits vertices, neither of which an exact body does.
-        s.setDefaultBackend(Backend::Mesh);
         const ObjectId id = s.addPrimitive(PrimitiveKind::Box);
 
-        CylinderParams bore;
-        bore.radius = 6;
-        bore.height = 40;
-        bore.segments = 32;
-        Mesh tool;
-        makeCylinder(tool, bore);
-        for (auto& v : tool.verts) v.position += Vec3{3, 3, 10};
+        PrimitiveSpec bore;
+        bore.kind = PrimitiveKind::Cylinder;
+        bore.cylinder.radius = 6;
+        bore.cylinder.height = 40;
+        Body tool;
+        check(makePrimitive(bore, tool, Backend::Brep), "bore tool built");
+        tool.transform(translate(Vec3{3, 3, 10}));
 
         Feature cut;
         cut.kind = FeatureKind::Boolean;
         cut.booleanOp = BooleanOp::Difference;
-        cut.bakedBody = Body(tool);
+        cut.bakedBody = tool;
         check(s.addFeature(id, cut), "bore a hole");
 
         SceneObject* o = s.find(id);
@@ -531,10 +448,7 @@ int main() {
                                 std::to_string(unnamed) + " unnamed)");
 
         // Pick the top and extrude it.
-        Index top = 0;
-        for (Index f = 0; f < o->body.faceCount(); ++f)
-            if (dot(o->body.faceNormal(f), Vec3{0, 0, 1}) > 0.99 &&
-                o->body.faceCentroid(f).z > o->body.faceCentroid(top).z) top = f;
+        const FaceId top = faceFacing(o->body, {0, 0, 1});
         const Real bottomBefore = o->body.bounds().min.z;
 
         Feature ext;
@@ -556,11 +470,9 @@ int main() {
 
     // ---- Names are derived, so a chain evaluates to the same names twice ----
     //
-    // This is the property the whole parametric history rests on, and it is the
-    // one that has to keep holding when a second geometry backend arrives --
-    // where names will be propagated through the kernel's own provenance rather
-    // than derived from mesh arithmetic. Written now, against the mesh backend,
-    // so there is something to compare against later.
+    // This is the property the whole parametric history rests on: names are
+    // propagated through the kernel's own history of each operation, and have
+    // to come out the same every time the same chain runs.
     auto namesOf = [](const Body& b) {
         std::vector<ElementId> out;
         std::vector<FaceId> faces;
@@ -574,12 +486,9 @@ int main() {
         return out;
     };
 
-    {
+    if (exact) {
         // A chain with something of everything on it.
         Scene s;
-        // Mesh-kernel behaviour: this block builds its tool bodies as meshes,
-        // or edits vertices, neither of which an exact body does.
-        s.setDefaultBackend(Backend::Mesh);
         PrimitiveSpec ps;
         ps.kind = PrimitiveKind::Box;
         ps.box.width = 40.0; ps.box.depth = 30.0; ps.box.height = 20.0;
@@ -592,13 +501,15 @@ int main() {
         ext.distance = 8.0;
         check(s.addFeature(id, ext), "extrude for the naming chain");
 
-        Mesh cutterMesh;
-        BoxParams cp; cp.width = 10.0; cp.depth = 10.0; cp.height = 60.0;
-        makeBox(cutterMesh, cp);
+        PrimitiveSpec cutterSpec;
+        cutterSpec.kind = PrimitiveKind::Box;
+        cutterSpec.box = {10.0, 10.0, 60.0};
+        Body cutter;
+        check(makePrimitive(cutterSpec, cutter, Backend::Brep), "cutter built");
         Feature cut;
         cut.kind = FeatureKind::Boolean;
         cut.booleanOp = BooleanOp::Difference;
-        cut.bakedBody = Body(std::move(cutterMesh));
+        cut.bakedBody = cutter;
         check(s.addFeature(id, cut), "bore for the naming chain");
 
         const std::vector<ElementId> first = namesOf(s.find(id)->body);

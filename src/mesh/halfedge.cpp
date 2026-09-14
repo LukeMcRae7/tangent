@@ -226,9 +226,9 @@ Real Mesh::faceArea(Index f) const {
     // Not a fan from the first corner summing unsigned triangle areas, which is
     // what this was: on a face the fan origin cannot see all of, the triangles
     // overlap and their areas add instead of cancelling. Convex faces were
-    // right and every primitive is convex, so it went unnoticed until
-    // mergeCoplanarFaces started bridging holes -- a bridged face wraps around
-    // the hole and is never convex. A bored plate's top read 25% over.
+    // right and every primitive is convex, so it went unnoticed until faces
+    // with a hole bridged into them turned up -- such a face wraps around the
+    // hole and is never convex. A bored plate's top read 25% over.
     Vec3 acc{};
     const Index start = faces[f].halfedge;
     Index he = start;
@@ -557,6 +557,84 @@ bool Mesh::validate(std::string* err) const {
             return fail("non-manifold vertex " + std::to_string(v));
     }
     return true;
+}
+
+// ---------------------------------------------------------------------------
+size_t splitShells(const Mesh& mesh, std::vector<Mesh>& out) {
+    out.clear();
+    if (mesh.empty()) return 0;
+
+    // Flood fill across shared edges to label each face with its piece.
+    const size_t nf = static_cast<size_t>(mesh.faceCount());
+    std::vector<int> shell(nf, -1);
+    std::vector<Index> stack;
+    int count = 0;
+    for (Index f = 0; f < mesh.faceCount(); ++f) {
+        if (shell[f] >= 0) continue;
+        const int id = count++;
+        shell[f] = id;
+        stack.push_back(f);
+        while (!stack.empty()) {
+            const Index cur = stack.back();
+            stack.pop_back();
+            const Index start = mesh.faces[cur].halfedge;
+            Index he = start;
+            do {
+                const Index across = mesh.halfedges[mesh.halfedges[he].twin].face;
+                if (across != kInvalid && shell[across] < 0) {
+                    shell[across] = id;
+                    stack.push_back(across);
+                }
+                he = mesh.halfedges[he].next;
+            } while (he != start);
+        }
+    }
+    if (count == 1) {
+        out.push_back(mesh);
+        return 1;
+    }
+
+    // Each piece rebuilt from its own faces, vertices renumbered densely and
+    // every name carried across, so a reference into the whole still finds its
+    // element in whichever piece it went to.
+    std::vector<std::vector<Index>> facesOf(static_cast<size_t>(count));
+    for (Index f = 0; f < mesh.faceCount(); ++f) facesOf[shell[f]].push_back(f);
+
+    std::vector<int32_t> remap(mesh.verts.size(), -1);
+    std::vector<Index> loop;
+    for (const std::vector<Index>& faces : facesOf) {
+        std::vector<Vec3> positions;
+        std::vector<uint32_t> sizes, indices;
+        Mesh::Names names;
+        std::vector<Index> used;
+        sizes.reserve(faces.size());
+        names.faces.reserve(faces.size());
+        for (Index f : faces) {
+            mesh.faceVertices(f, loop);
+            sizes.push_back(static_cast<uint32_t>(loop.size()));
+            names.faces.push_back(mesh.faces[f].id);
+            for (Index v : loop) {
+                if (remap[v] < 0) {
+                    remap[v] = static_cast<int32_t>(positions.size());
+                    positions.push_back(mesh.verts[v].position);
+                    names.vertices.push_back(mesh.verts[v].id);
+                    used.push_back(v);
+                }
+                indices.push_back(static_cast<uint32_t>(remap[v]));
+            }
+        }
+        for (Index v : used) remap[v] = -1;
+
+        Mesh piece;
+        if (piece.build(positions, sizes, indices, &names)) out.push_back(std::move(piece));
+    }
+
+    // Largest first: the biggest piece is the one the user thinks of as "the
+    // part", so it should keep the original object. Stable, so pieces of equal
+    // size come out in the order they were found and the answer never varies.
+    std::stable_sort(out.begin(), out.end(),
+                     [](const Mesh& a, const Mesh& b) { return a.faceCount() > b.faceCount(); });
+    return out.size();
 }
 
 } // namespace tg

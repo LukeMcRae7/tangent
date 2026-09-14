@@ -295,9 +295,6 @@ void drawMenuBar(UiContext& ctx) {
         if (ImGui::MenuItem("Mirror...", "M", false, hasObject))
             ctx.actions.mirror = true;
         ImGui::Separator();
-        ImGui::SetNextItemWidth(140.0f);
-        ImGui::DragScalarN("Width", ImGuiDataType_Double, &ctx.view->bevelWidth, 1,
-                           0.05f, nullptr, nullptr, "%.2f mm");
         const size_t edgeCount = ctx.scene->selectedEdges(ctx.scene->contextObject()).size();
         const size_t faceCount = ctx.scene->selectedFaces(ctx.scene->contextObject()).size();
         const bool canFillet = (edgeCount > 0 || faceCount > 0);

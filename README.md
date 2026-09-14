@@ -28,7 +28,7 @@ ctest --test-dir build --output-on-failure
 Presets cover the four combinations, and the same three commands drive all of
 them:
 
-|             | Exact (default) | Mesh only      |
+|             | Exact (default) | Without kernel |
 |-------------|-----------------|----------------|
 | **Linux**   | `linux`         | `linux-mesh`   |
 | **Windows** | `windows`       | `windows-mesh` |
@@ -45,40 +45,37 @@ Command Prompt, which is where Ninja finds MSVC.
 
 ### Without the exact kernel
 
-Tangent builds bodies two ways: as an exact boundary representation, where a
-hole is a cylinder rather than a thirty-two-sided prism, or as a half-edge mesh.
-Exact is the default and needs OpenCASCADE; only the modelling libraries are
-linked -- no visualization -- so it costs fifteen shared objects and about
-32 MB, with nothing beneath them but libc, libstdc++ and libm.
+Modelling is done on an exact boundary representation, where a hole is a
+cylinder rather than a thirty-two-sided prism. It needs OpenCASCADE; only the
+modelling libraries are linked -- no visualization -- so it costs fifteen
+shared objects and about 32 MB, with nothing beneath them but libc, libstdc++
+and libm.
 
-The mesh kernel alone still builds, and behaves exactly as it did before any of
-this existed:
+A build without it still compiles and runs, and can import, look at, measure,
+reduce and export meshes. Every modelling command in it refuses and says the
+kernel is missing:
 
 ```sh
 cmake -S . -B build -G Ninja -DTANGENT_BREP=OFF
 ```
 
-There is nothing to switch at run time either way: the Inspector says which
-kernel each body is made of. The test suite gains one suite with the exact
-kernel (18 rather than 17).
+The test suite gains one suite with the exact kernel (28 rather than 27), and
+the modelling sections of the others run only when it is there.
 
 ## Features
 
-### Exact where it matters, mesh where it helps
-Tangent holds a body either as an exact boundary representation or as a mesh,
-and both are first-class.
-
-**Exact** is the default where the build has it. A hole is a cylinder, so its
-diameter is 8mm rather than 7.994mm; a fillet is a real blend, so rounding
+### Exact for modelling, meshes for exchange
+Tangent models on an exact boundary representation. A hole is a cylinder, so
+its diameter is 8mm rather than 7.994mm; a fillet is a real blend, so rounding
 every rim of a bolt circle in one operation works rather than being refused;
 and a face is one face, so selecting a bored surface selects the surface.
 
-**Meshes** are the native object of `.stl` files, so importing and exporting
-for 3D printing needs no conversion. This is a large pain point with Fusion360,
-which converts on the way in and on the way out. Mesh bodies can be moved,
-measured, checked and exported as they are, and a mesh-only operation -- moving
-individual vertices, for instance -- says so rather than pretending on an exact
-body.
+**Meshes** are the native object of `.stl` and `.obj` files, and importing one
+needs no conversion to look at it. A mesh can be moved, measured, checked,
+separated into its pieces, reduced to fewer triangles within a tolerance you
+set, and exported as it is. Anything that edits part of a shape -- a boolean, a
+split, a fillet -- asks for it to be converted first (Modify > Convert to
+Solid), and a mesh too dense to convert usefully can be reduced until it is.
 
 Either way, tangent rejects non-manifold edges, open surfaces, and other
 invalid results that a slicer would also reject. The status bar indicates
@@ -137,7 +134,8 @@ invalid results that a slicer would also reject. The status bar indicates
 
 ```
 src/core/     math and colour palette (header only)
-src/mesh/     half-edge kernel, primitives, operations, printability checks
+src/geom/     bodies, the exact kernel behind them, and every modelling operation
+src/mesh/     half-edge meshes: primitives, import, reduction, printability checks
 src/scene/    scene graph, feature history, selection, ray picking
 src/render/   shader and buffer wrappers, viewport renderer
 src/app/      SDL3 shell, orbit camera, input dispatch, transform tool, undo

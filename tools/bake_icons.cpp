@@ -114,7 +114,6 @@ std::vector<Icon> build() {
         }
         FilletSpec spec;
         spec.salt = 1;
-        spec.segments = 4;
         spec.edges.push_back({pick, 6.0});
         if (filletEdges(cube, spec, &why))
             icons.push_back({"fillet", cube, facesNotIn(cube, before), {}});
@@ -122,7 +121,7 @@ std::vector<Icon> build() {
             std::fprintf(stderr, "fillet icon: %s\n", why.c_str());
     }
 
-    // ---- Chamfer: the same edge, cut flat. One segment is a chamfer.
+    // ---- Chamfer: the same edge, cut flat.
     {
         Body cube = primitive(PrimitiveKind::Box, boxSpec(20, 20, 20));
         const Body before = cube;
@@ -138,7 +137,7 @@ std::vector<Icon> build() {
         }
         FilletSpec spec;
         spec.salt = 2;
-        spec.segments = 1;
+        spec.chamfer = true;
         spec.edges.push_back({pick, 6.0});
         if (filletEdges(cube, spec, &why))
             icons.push_back({"chamfer", cube, facesNotIn(cube, before), {}});

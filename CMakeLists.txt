@@ -148,9 +148,8 @@ add_executable(tangent
   src/app/undo.cpp
   src/mesh/halfedge.cpp
   src/mesh/primitives.cpp src/mesh/import_mesh.cpp src/app/file_dialog.cpp
-  ${TANGENT_GEOM} src/mesh/operations.cpp
+  ${TANGENT_GEOM}
   src/mesh/health.cpp
-  src/mesh/boolean.cpp
   src/mesh/export_stl.cpp
   src/scene/scene.cpp
   src/scene/feature.cpp
@@ -185,7 +184,7 @@ enable_testing()
 # The seam. These are the tests a second geometry backend must pass unchanged.
 add_executable(test_body tests/test_body.cpp
   ${TANGENT_GEOM}
-  src/mesh/boolean.cpp src/mesh/health.cpp src/mesh/operations.cpp
+  src/mesh/health.cpp
   src/mesh/halfedge.cpp src/mesh/primitives.cpp)
 target_include_directories(test_body PRIVATE src)
 target_compile_options(test_body PRIVATE ${TANGENT_WARNINGS})
@@ -197,7 +196,7 @@ target_compile_options(test_mesh PRIVATE ${TANGENT_WARNINGS})
 add_test(NAME mesh COMMAND test_mesh)
 
 add_executable(test_scene tests/test_scene.cpp
-  src/scene/scene.cpp src/scene/feature.cpp src/mesh/boolean.cpp src/mesh/health.cpp ${TANGENT_GEOM} src/mesh/operations.cpp
+  src/scene/scene.cpp src/scene/feature.cpp src/mesh/health.cpp ${TANGENT_GEOM}
   src/mesh/halfedge.cpp src/mesh/primitives.cpp src/app/camera.cpp)
 target_include_directories(test_scene PRIVATE src)
 target_compile_options(test_scene PRIVATE ${TANGENT_WARNINGS})
@@ -207,7 +206,7 @@ add_test(NAME scene COMMAND test_scene)
 # test never creates a GL context or issues a draw.
 add_executable(test_transform tests/test_transform.cpp
   src/app/transform_tool.cpp src/app/undo.cpp src/app/camera.cpp
-  src/scene/scene.cpp src/scene/feature.cpp src/mesh/boolean.cpp src/mesh/health.cpp ${TANGENT_GEOM} src/mesh/operations.cpp
+  src/scene/scene.cpp src/scene/feature.cpp src/mesh/health.cpp ${TANGENT_GEOM}
   src/mesh/halfedge.cpp src/mesh/primitives.cpp
   src/render/renderer.cpp src/render/shader.cpp src/render/gpu_mesh.cpp)
 target_include_directories(test_transform PRIVATE src)
@@ -215,62 +214,30 @@ target_link_libraries(test_transform PRIVATE tangent_epoxy)
 target_compile_options(test_transform PRIVATE ${TANGENT_WARNINGS_LOOSE})
 add_test(NAME transform COMMAND test_transform)
 
-add_executable(test_operations tests/test_operations.cpp
-  src/mesh/boolean.cpp src/mesh/health.cpp ${TANGENT_GEOM} src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp)
-target_include_directories(test_operations PRIVATE src)
-target_compile_options(test_operations PRIVATE ${TANGENT_WARNINGS})
-add_test(NAME operations COMMAND test_operations)
-
-add_executable(test_fillet tests/test_fillet.cpp
-  src/mesh/health.cpp src/mesh/boolean.cpp ${TANGENT_GEOM} src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp)
-target_include_directories(test_fillet PRIVATE src)
-target_compile_options(test_fillet PRIVATE ${TANGENT_WARNINGS})
-add_test(NAME fillet COMMAND test_fillet)
-
 add_executable(test_names tests/test_names.cpp
-  src/mesh/health.cpp src/mesh/boolean.cpp ${TANGENT_GEOM} src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp)
+  src/mesh/health.cpp ${TANGENT_GEOM} src/mesh/halfedge.cpp src/mesh/primitives.cpp)
 target_include_directories(test_names PRIVATE src)
 target_compile_options(test_names PRIVATE ${TANGENT_WARNINGS})
 add_test(NAME names COMMAND test_names)
 
-add_executable(test_fillet_mechanics tests/test_fillet_mechanics.cpp
-  src/mesh/health.cpp src/mesh/boolean.cpp ${TANGENT_GEOM} src/mesh/operations.cpp
-  src/mesh/halfedge.cpp src/mesh/primitives.cpp)
-target_include_directories(test_fillet_mechanics PRIVATE src)
-target_compile_options(test_fillet_mechanics PRIVATE ${TANGENT_WARNINGS})
-add_test(NAME fillet_mechanics COMMAND test_fillet_mechanics)
-
-add_executable(test_fillet_sweep tests/test_fillet_sweep.cpp
-  src/mesh/health.cpp src/mesh/boolean.cpp ${TANGENT_GEOM} src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp)
-target_include_directories(test_fillet_sweep PRIVATE src)
-target_compile_options(test_fillet_sweep PRIVATE ${TANGENT_WARNINGS})
-add_test(NAME fillet_sweep COMMAND test_fillet_sweep)
-
 add_executable(test_features tests/test_features.cpp
-  src/scene/scene.cpp src/scene/feature.cpp src/mesh/boolean.cpp src/mesh/health.cpp
-  ${TANGENT_GEOM} src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp)
+  src/scene/scene.cpp src/scene/feature.cpp src/mesh/health.cpp
+  ${TANGENT_GEOM} src/mesh/halfedge.cpp src/mesh/primitives.cpp)
 target_include_directories(test_features PRIVATE src)
 target_compile_options(test_features PRIVATE ${TANGENT_WARNINGS})
 add_test(NAME features COMMAND test_features)
 
 add_executable(test_health tests/test_health.cpp
-  src/mesh/health.cpp src/mesh/boolean.cpp ${TANGENT_GEOM} src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp)
+  src/mesh/health.cpp ${TANGENT_GEOM} src/mesh/halfedge.cpp src/mesh/primitives.cpp)
 target_include_directories(test_health PRIVATE src)
 target_compile_options(test_health PRIVATE ${TANGENT_WARNINGS})
 add_test(NAME health COMMAND test_health)
 
-add_executable(test_boolean tests/test_boolean.cpp
-  src/mesh/boolean.cpp src/mesh/health.cpp ${TANGENT_GEOM} src/mesh/operations.cpp
-  src/mesh/halfedge.cpp src/mesh/primitives.cpp)
-target_include_directories(test_boolean PRIVATE src)
-target_compile_options(test_boolean PRIVATE ${TANGENT_WARNINGS})
-add_test(NAME boolean COMMAND test_boolean)
-
 # Links the renderer only because MeasureTool::drawOverlay references it; no GL
 # context is created.
 add_executable(test_measure tests/test_measure.cpp
-  src/app/measure.cpp src/app/camera.cpp src/scene/scene.cpp src/scene/feature.cpp src/mesh/boolean.cpp
-  src/mesh/health.cpp ${TANGENT_GEOM} src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp
+  src/app/measure.cpp src/app/camera.cpp src/scene/scene.cpp src/scene/feature.cpp
+  src/mesh/health.cpp ${TANGENT_GEOM} src/mesh/halfedge.cpp src/mesh/primitives.cpp
   src/render/renderer.cpp src/render/shader.cpp src/render/gpu_mesh.cpp)
 target_include_directories(test_measure PRIVATE src)
 target_link_libraries(test_measure PRIVATE tangent_epoxy)
@@ -279,8 +246,8 @@ add_test(NAME measure COMMAND test_measure)
 
 add_executable(test_io tests/test_io.cpp
   src/mesh/export_stl.cpp src/scene/serialize.cpp
-  src/scene/scene.cpp src/scene/feature.cpp src/mesh/boolean.cpp
-  src/mesh/health.cpp ${TANGENT_GEOM} src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp)
+  src/scene/scene.cpp src/scene/feature.cpp
+  src/mesh/health.cpp ${TANGENT_GEOM} src/mesh/halfedge.cpp src/mesh/primitives.cpp)
 target_include_directories(test_io PRIVATE src)
 target_compile_options(test_io PRIVATE ${TANGENT_WARNINGS})
 add_test(NAME io COMMAND test_io)
@@ -289,8 +256,8 @@ add_executable(test_create_tool tests/test_create_tool.cpp
   src/app/create_tool.cpp src/app/camera.cpp src/app/undo.cpp src/app/snap.cpp
   src/app/plane_snap.cpp src/app/snap_overlay.cpp src/app/overlay_shapes.cpp
   src/ui/icons.cpp src/ui/command_panel.cpp
-  src/scene/scene.cpp src/scene/feature.cpp src/mesh/boolean.cpp
-  src/mesh/health.cpp ${TANGENT_GEOM} src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp
+  src/scene/scene.cpp src/scene/feature.cpp
+  src/mesh/health.cpp ${TANGENT_GEOM} src/mesh/halfedge.cpp src/mesh/primitives.cpp
   src/render/renderer.cpp src/render/shader.cpp src/render/gpu_mesh.cpp)
 target_include_directories(test_create_tool PRIVATE src ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/backends)
 target_link_libraries(test_create_tool PRIVATE imgui tangent_epoxy)
@@ -298,8 +265,8 @@ target_compile_options(test_create_tool PRIVATE ${TANGENT_WARNINGS_LOOSE})
 add_test(NAME create_tool COMMAND test_create_tool)
 
 add_executable(test_guard tests/test_guard.cpp
-  src/scene/scene.cpp src/scene/feature.cpp src/mesh/boolean.cpp src/mesh/health.cpp
-  ${TANGENT_GEOM} src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp
+  src/scene/scene.cpp src/scene/feature.cpp src/mesh/health.cpp
+  ${TANGENT_GEOM} src/mesh/halfedge.cpp src/mesh/primitives.cpp
   src/app/camera.cpp)
 target_include_directories(test_guard PRIVATE src)
 target_compile_options(test_guard PRIVATE ${TANGENT_WARNINGS})
@@ -308,8 +275,8 @@ add_test(NAME guard COMMAND test_guard)
 add_executable(test_drag tests/test_drag.cpp
   src/app/drag_axis.cpp src/app/camera.cpp
   src/render/renderer.cpp src/render/shader.cpp src/render/gpu_mesh.cpp
-  src/scene/scene.cpp src/scene/feature.cpp src/mesh/boolean.cpp src/mesh/health.cpp
-  ${TANGENT_GEOM} src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp)
+  src/scene/scene.cpp src/scene/feature.cpp src/mesh/health.cpp
+  ${TANGENT_GEOM} src/mesh/halfedge.cpp src/mesh/primitives.cpp)
 target_include_directories(test_drag PRIVATE src)
 target_link_libraries(test_drag PRIVATE tangent_epoxy)
 target_compile_options(test_drag PRIVATE ${TANGENT_WARNINGS})
@@ -317,7 +284,7 @@ add_test(NAME drag COMMAND test_drag)
 
 add_executable(test_printability tests/test_printability.cpp
   src/app/printability.cpp
-  ${TANGENT_GEOM} src/mesh/boolean.cpp src/mesh/health.cpp src/mesh/operations.cpp
+  ${TANGENT_GEOM} src/mesh/health.cpp
   src/mesh/halfedge.cpp src/mesh/primitives.cpp)
 target_include_directories(test_printability PRIVATE src)
 target_compile_options(test_printability PRIVATE ${TANGENT_WARNINGS})
@@ -325,28 +292,28 @@ add_test(NAME printability COMMAND test_printability)
 
 add_executable(test_chain tests/test_chain.cpp
   src/scene/scene.cpp src/scene/feature.cpp src/scene/serialize.cpp
-  src/mesh/boolean.cpp src/mesh/health.cpp ${TANGENT_GEOM} src/mesh/operations.cpp
+  src/mesh/health.cpp ${TANGENT_GEOM}
   src/mesh/halfedge.cpp src/mesh/primitives.cpp)
 target_include_directories(test_chain PRIVATE src)
 target_compile_options(test_chain PRIVATE ${TANGENT_WARNINGS})
 add_test(NAME chain COMMAND test_chain)
 
 add_executable(test_validity tests/test_validity.cpp ${TANGENT_GEOM}
-  src/mesh/boolean.cpp src/mesh/health.cpp src/mesh/operations.cpp
+  src/mesh/health.cpp
   src/mesh/halfedge.cpp src/mesh/primitives.cpp)
 target_include_directories(test_validity PRIVATE src)
 target_compile_options(test_validity PRIVATE ${TANGENT_WARNINGS})
 add_test(NAME validity COMMAND test_validity)
 
 add_executable(test_split tests/test_split.cpp ${TANGENT_GEOM}
-  src/mesh/boolean.cpp src/mesh/health.cpp src/mesh/operations.cpp
+  src/mesh/health.cpp
   src/mesh/halfedge.cpp src/mesh/primitives.cpp src/mesh/import_mesh.cpp)
 target_include_directories(test_split PRIVATE src)
 target_compile_options(test_split PRIVATE ${TANGENT_WARNINGS})
 add_test(NAME split COMMAND test_split)
 
 add_executable(test_decimate tests/test_decimate.cpp ${TANGENT_GEOM}
-  src/mesh/boolean.cpp src/mesh/health.cpp src/mesh/operations.cpp
+  src/mesh/health.cpp
   src/mesh/halfedge.cpp src/mesh/primitives.cpp src/mesh/import_mesh.cpp)
 target_include_directories(test_decimate PRIVATE src)
 target_compile_options(test_decimate PRIVATE ${TANGENT_WARNINGS})
@@ -358,7 +325,7 @@ target_compile_options(test_bvh PRIVATE ${TANGENT_WARNINGS})
 add_test(NAME bvh COMMAND test_bvh)
 
 add_executable(test_import tests/test_import.cpp src/mesh/import_mesh.cpp
-  ${TANGENT_GEOM} src/mesh/boolean.cpp src/mesh/health.cpp src/mesh/operations.cpp
+  ${TANGENT_GEOM} src/mesh/health.cpp
   src/mesh/halfedge.cpp src/mesh/primitives.cpp src/mesh/export_stl.cpp
   src/scene/scene.cpp src/scene/feature.cpp src/app/camera.cpp)
 target_include_directories(test_import PRIVATE src)
@@ -366,7 +333,7 @@ target_compile_options(test_import PRIVATE ${TANGENT_WARNINGS})
 add_test(NAME import COMMAND test_import)
 
 add_executable(test_step tests/test_step.cpp
-  ${TANGENT_GEOM} src/mesh/boolean.cpp src/mesh/health.cpp src/mesh/operations.cpp
+  ${TANGENT_GEOM} src/mesh/health.cpp
   src/mesh/halfedge.cpp src/mesh/primitives.cpp)
 target_include_directories(test_step PRIVATE src)
 target_compile_options(test_step PRIVATE ${TANGENT_WARNINGS})
@@ -374,7 +341,7 @@ add_test(NAME step COMMAND test_step)
 
 add_executable(test_pattern tests/test_pattern.cpp
   src/scene/scene.cpp src/scene/feature.cpp src/scene/serialize.cpp
-  src/mesh/boolean.cpp src/mesh/health.cpp ${TANGENT_GEOM} src/mesh/operations.cpp
+  src/mesh/health.cpp ${TANGENT_GEOM}
   src/mesh/halfedge.cpp src/mesh/primitives.cpp src/app/camera.cpp)
 target_include_directories(test_pattern PRIVATE src)
 target_compile_options(test_pattern PRIVATE ${TANGENT_WARNINGS})
@@ -382,14 +349,14 @@ add_test(NAME pattern COMMAND test_pattern)
 
 add_executable(test_robust tests/test_robust.cpp
   src/geom/kernel_guard.cpp
-  ${TANGENT_GEOM} src/mesh/boolean.cpp src/mesh/health.cpp src/mesh/operations.cpp
+  ${TANGENT_GEOM} src/mesh/health.cpp
   src/mesh/halfedge.cpp src/mesh/primitives.cpp)
 target_include_directories(test_robust PRIVATE src)
 target_compile_options(test_robust PRIVATE ${TANGENT_WARNINGS})
 add_test(NAME robust COMMAND test_robust)
 
 add_executable(test_faceops tests/test_faceops.cpp
-  ${TANGENT_GEOM} src/mesh/boolean.cpp src/mesh/health.cpp src/mesh/operations.cpp
+  ${TANGENT_GEOM} src/mesh/health.cpp
   src/mesh/halfedge.cpp src/mesh/primitives.cpp)
 target_include_directories(test_faceops PRIVATE src)
 target_compile_options(test_faceops PRIVATE ${TANGENT_WARNINGS})
@@ -404,8 +371,8 @@ add_test(NAME icons COMMAND test_icons ${CMAKE_SOURCE_DIR}/assets/icons)
 add_executable(test_view_cube tests/test_view_cube.cpp
   src/ui/view_cube.cpp src/ui/panels.cpp src/ui/theme.cpp src/ui/icons.cpp src/ui/command_panel.cpp
   src/app/camera.cpp src/app/measure.cpp
-  src/scene/scene.cpp src/scene/feature.cpp src/mesh/boolean.cpp src/mesh/health.cpp
-  ${TANGENT_GEOM} src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp
+  src/scene/scene.cpp src/scene/feature.cpp src/mesh/health.cpp
+  ${TANGENT_GEOM} src/mesh/halfedge.cpp src/mesh/primitives.cpp
   src/render/renderer.cpp src/render/shader.cpp src/render/gpu_mesh.cpp)
 target_include_directories(test_view_cube PRIVATE src ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/backends)
 target_link_libraries(test_view_cube PRIVATE imgui tangent_epoxy)
@@ -414,8 +381,8 @@ add_test(NAME view_cube COMMAND test_view_cube)
 
 add_executable(test_snap tests/test_snap.cpp
   src/app/snap.cpp src/app/plane_snap.cpp src/app/camera.cpp
-  src/scene/scene.cpp src/scene/feature.cpp src/mesh/boolean.cpp src/mesh/health.cpp
-  ${TANGENT_GEOM} src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp)
+  src/scene/scene.cpp src/scene/feature.cpp src/mesh/health.cpp
+  ${TANGENT_GEOM} src/mesh/halfedge.cpp src/mesh/primitives.cpp)
 target_include_directories(test_snap PRIVATE src)
 target_link_libraries(test_snap PRIVATE tangent_epoxy)
 target_compile_options(test_snap PRIVATE ${TANGENT_WARNINGS})
@@ -423,8 +390,8 @@ add_test(NAME snap COMMAND test_snap)
 
 add_executable(test_lod tests/test_lod.cpp
   src/render/lod.cpp src/app/camera.cpp
-  src/scene/scene.cpp src/scene/feature.cpp src/mesh/boolean.cpp src/mesh/health.cpp
-  ${TANGENT_GEOM} src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp)
+  src/scene/scene.cpp src/scene/feature.cpp src/mesh/health.cpp
+  ${TANGENT_GEOM} src/mesh/halfedge.cpp src/mesh/primitives.cpp)
 target_include_directories(test_lod PRIVATE src)
 target_link_libraries(test_lod PRIVATE tangent_epoxy)
 target_compile_options(test_lod PRIVATE ${TANGENT_WARNINGS})
@@ -435,8 +402,8 @@ add_test(NAME lod COMMAND test_lod)
 # covers what only this one can do.
 if(TANGENT_BREP)
   add_executable(test_brep tests/test_brep.cpp
-    src/mesh/health.cpp src/mesh/boolean.cpp ${TANGENT_GEOM}
-    src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp)
+    src/mesh/health.cpp ${TANGENT_GEOM}
+  src/mesh/halfedge.cpp src/mesh/primitives.cpp)
   target_include_directories(test_brep PRIVATE src)
   target_compile_options(test_brep PRIVATE ${TANGENT_WARNINGS})
   add_test(NAME brep COMMAND test_brep)
@@ -445,15 +412,15 @@ endif()
 # Not a test: it bakes the toolbar icons out of the kernel. Run it by hand when
 # the icons change, and commit what it produces.
 add_executable(bake_icons EXCLUDE_FROM_ALL tools/bake_icons.cpp tools/icon_raster.cpp tools/png_write.cpp
-  src/mesh/health.cpp src/mesh/boolean.cpp ${TANGENT_GEOM}
-  src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp)
+  src/mesh/health.cpp ${TANGENT_GEOM}
+  src/mesh/halfedge.cpp src/mesh/primitives.cpp)
 target_include_directories(bake_icons PRIVATE src tools)
 target_compile_options(bake_icons PRIVATE ${TANGENT_WARNINGS})
 
 # Not a test: a stopwatch for the heavy paths. Run it by hand.
 add_executable(bench EXCLUDE_FROM_ALL tests/bench.cpp
   src/scene/scene.cpp src/scene/feature.cpp src/mesh/health.cpp
-  src/mesh/boolean.cpp ${TANGENT_GEOM} src/mesh/operations.cpp src/mesh/halfedge.cpp src/mesh/primitives.cpp
+ ${TANGENT_GEOM} src/mesh/halfedge.cpp src/mesh/primitives.cpp
   src/render/lod.cpp src/app/camera.cpp)
 target_include_directories(bench PRIVATE src)
 target_link_libraries(bench PRIVATE tangent_epoxy)

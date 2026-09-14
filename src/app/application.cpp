@@ -146,7 +146,7 @@ bool Application::init() {
         }
     }
 
-    if (filletDemoSegments_ > 0 && !scene_.objects().empty()) {
+    if (filletEdgesDemo_ && !scene_.objects().empty()) {
         const ObjectId id = scene_.objects().front()->id;
         const Body& m = scene_.find(id)->body;
         // Edges of the top face, so the demo covers both a lone edge and a
@@ -167,11 +167,44 @@ bool Application::init() {
             for (int i = 0; i < filletDemoEdges_ && i < static_cast<int>(fe.size()); ++i)
                 scene_.selectElement({id, ElementKind::Edge, fe[i]}, true);
         }
-        view_.bevelWidth = 4.0;
-        view_.bevelSegments = filletDemoSegments_;
         filletSelectedEdges();
         scene_.clearElementSelection();
         scene_.select(id);
+    }
+
+    if (roundAllDemo_ && !scene_.objects().empty()) {
+        const ObjectId id = scene_.objects().front()->id;
+        scene_.select(id);
+        const Real before = scene_.find(id)->body.health(false).volume;
+        roundAllEdges();
+        const bool opened = filletTool_.active;
+        const size_t picked = filletTool_.edges.size();
+        if (opened) {
+            for (int i = 0; i < 400 && filletTool_.search.active; ++i) {
+                stepFilletLimitSearch();
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+            filletTool_.typedValue = "2";
+            updateFillet(false);
+            while (filletTool_.preview.busy()) updateFillet(false);
+            updateFillet(false);
+            commitFillet();
+        }
+        const SceneObject* r = scene_.find(id);
+        const bool rounded = r->features.size() == 2 && r->features[1].kind == FeatureKind::Bevel &&
+                             !r->features[1].errored && r->features[1].edges.count() == picked;
+        std::fprintf(stderr, "[round-all] opened=%d edges=%zu rounded=%d volume %.1f -> %.1f solid=%d\n",
+                     (int)opened, picked, (int)rounded, before, r->body.health(false).volume,
+                     (int)r->body.health(false).solid());
+
+        Mesh cube;
+        makeBox(cube);
+        const ObjectId meshId = scene_.addBody(Body(std::move(cube)), {40, 0, 10}, "Mesh cube");
+        scene_.select(meshId);
+        notice_.clear();
+        roundAllEdges();
+        std::fprintf(stderr, "[round-all] on a mesh: opened=%d notice \"%s\"\n",
+                     (int)filletTool_.active, notice_.c_str());
     }
 
     if (booleanDemo_ >= 0 && !scene_.objects().empty()) {
@@ -271,7 +304,6 @@ bool Application::init() {
         int features = 0;
         auto inSequence = [&](Vec3 am, Vec3 bm) -> Real {
             restore();
-            view_.bevelSegments = 4;
             for (Vec3 at : {am, bm}) {
                 const EdgeId e = edgeAtMidpoint(at);   // resolved against the body as it is now
                 if (e == kInvalid) return -1.0;
@@ -476,7 +508,6 @@ bool Application::init() {
                 auto once = [&](Real r) {
                     Body test = o2->body;
                     FilletSpec spec;
-                    spec.segments = 4;
                     for (EdgeId e : es) spec.edges.push_back({e, r});
                     return filletEdges(test, spec);
                 };
@@ -635,6 +666,16 @@ Vec2 Application::mouseInViewport() const {
 bool Application::editToolActive() const {
     return filletTool_.active || faceTool_.active || divideTool_.active || patternTool_.active ||
            reduceTool_.active;
+}
+
+bool Application::refuseMeshEdit(const SceneObject& obj, const char* what) {
+    if (!obj.body.isMesh()) return false;
+    // Said once, here, so every command that edits part of a shape tells a
+    // person the same thing -- and the thing that gets them unstuck.
+    setNotice(std::string(what) + (brep::available()
+        ? " needs a solid, and this is a mesh: Modify > Convert to Solid first"
+        : " needs the exact kernel, which this build does not have"));
+    return true;
 }
 
 void Application::beginTransform(TransformMode mode) {
@@ -1905,45 +1946,6 @@ void Application::commitTransform() {
     justFinishedModal_ = true;
     std::unique_ptr<Command> cmd = tool_.confirm(scene_);
 
-    if (pendingMeshObject_ != kNoObject) {
-        const ObjectId id = pendingMeshObject_;
-        pendingMeshObject_ = kNoObject;
-
-        SceneObject* obj = scene_.find(id);
-        if (obj && !pendingNewFaces_.empty() && !pendingExtrudeFaces_.empty()) {
-            // Recover the distance from the geometry itself rather than from
-            // the drag: the drag happened in world space, and the feature needs
-            // an object-space distance along the face normal, which differ as
-            // soon as the object carries a scale.
-            const Vec3 fromC = pendingMeshBefore_.faceCentroid(pendingExtrudeFaces_[0]);
-            const Vec3 toC   = obj->body.faceCentroid(pendingNewFaces_[0]);
-            const float distance = dot(toC - fromC, pendingLocalNormal_);
-
-            Feature f;
-            f.kind = FeatureKind::Extrude;
-            f.faces = nameFaces(pendingMeshBefore_, pendingExtrudeFaces_);
-            f.distance = distance;
-
-            // Roll back to the pre-extrude chain, then let the feature produce
-            // the result, so the mesh is always something the history can
-            // reproduce.
-            obj->features = pendingChainBefore_;
-            if (scene_.addFeature(id, f) && editKeepsSolid(id)) {
-                undo_.push(std::make_unique<FeatureCommand>(
-                    id, pendingChainBefore_, obj->features, pendingLabel_));
-            } else {
-                obj->features = pendingChainBefore_;
-                scene_.reevaluate(id);
-                setNotice("Extrude refused: it would make the model self-intersect");
-            }
-        }
-        pendingMeshBefore_ = Body{};
-        pendingChainBefore_.clear();
-        pendingExtrudeFaces_.clear();
-        pendingNewFaces_.clear();
-        return;
-    }
-
     // A free-form drag of vertices is recorded as a feature too. It is not
     // parametric, but it has to live in the chain: otherwise re-evaluating an
     // earlier feature would silently discard it.
@@ -1978,43 +1980,28 @@ void Application::commitTransform() {
 void Application::abortTransform() {
     justFinishedModal_ = true;
     tool_.cancel(scene_);
-
-    if (pendingMeshObject_ != kNoObject) {
-        if (SceneObject* obj = scene_.find(pendingMeshObject_)) {
-            obj->features = pendingChainBefore_;
-            obj->body = std::move(pendingMeshBefore_);
-            obj->refreshDerived();
-            scene_.clearElementSelection();
-        }
-        pendingMeshObject_ = kNoObject;
-        pendingMeshBefore_ = Body{};
-        pendingChainBefore_.clear();
-        pendingExtrudeFaces_.clear();
-        pendingNewFaces_.clear();
-    }
 }
 
-void Application::bevelActiveObject() {
-    const ObjectId target = scene_.contextObject();
-    SceneObject* obj = scene_.find(target);
-    if (!obj) return;
+// Every edge of the body, through the same gesture as a picked edge. That
+// gesture is what finds how large a round the part can take, and it does so in
+// another process -- a round the size of a wall can take OpenCASCADE down with
+// it, and committing a width straight from the menu gave it that chance.
+void Application::roundAllEdges() {
+    // Checked before the selection is touched: beginFillet would decline too,
+    // but only after this had replaced what the user had picked.
+    if (tool_.active() || createTool_.active() || editToolActive()) return;
+    const ObjectId id = scene_.contextObject();
+    SceneObject* obj = scene_.find(id);
+    if (!obj || obj->body.empty()) { setNotice("Select an object to round"); return; }
+    if (refuseMeshEdit(*obj, "Rounding edges")) return;
 
-    // Clamp to what the geometry can actually take, so the slider cannot ask
-    // for a bevel that inverts a face.
-    const float limit = static_cast<float>(maxFilletRadius(obj->body));
-    const Real width = std::min(view_.bevelWidth, limit * Real(0.95));
-    if (width <= 1e-4f) return;
-
-    Feature f;
-    f.kind = FeatureKind::Bevel;
-    f.edges.kind = ElementRefs::Kind::All;   // whole-part rounding
-    f.width = width;
-    f.segments = view_.bevelSegments;
-
-    std::vector<Feature> chainBefore = obj->features;
-    if (!scene_.addFeature(target, f)) return;
-    undo_.push(std::make_unique<FeatureCommand>(target, std::move(chainBefore),
-                                                obj->features, "Bevel"));
+    std::vector<EdgeId> all;
+    obj->body.allEdges(all);
+    if (all.empty()) { setNotice("That body has no edges to round"); return; }
+    scene_.select(id);
+    scene_.clearElementSelection();
+    for (EdgeId e : all) scene_.selectElement({id, ElementKind::Edge, e}, true);
+    beginFillet();
 }
 
 // ---------------------------------------------------------------------------
@@ -2300,6 +2287,7 @@ void Application::insetSelectedFaces() {
     const ObjectId target = scene_.contextObject();
     SceneObject* obj = scene_.find(target);
     if (!obj) { setNotice("Select an object first"); return; }
+    if (refuseMeshEdit(*obj, "Insetting a face")) return;
 
     const std::vector<FaceId> faces = scene_.selectedFaces(target);
     if (faces.empty()) { setNotice("Select a face to inset"); return; }
@@ -2324,6 +2312,7 @@ void Application::shellActiveObject() {
     const ObjectId target = scene_.contextObject();
     SceneObject* obj = scene_.find(target);
     if (!obj) return;
+    if (refuseMeshEdit(*obj, "Shelling")) return;
 
     Feature f;
     f.kind = FeatureKind::Shell;
@@ -2450,13 +2439,16 @@ void Application::beginFaceMove(FaceOp op) {
     const ObjectId id = scene_.contextObject();
     SceneObject* obj = scene_.find(id);
     if (!obj) { setNotice("Select an object first"); return; }
+    {
+        const char* what = op == FaceOp::Rotate  ? "Rotating a face"
+                         : op == FaceOp::Scale   ? "Scaling a face"
+                         : op == FaceOp::Extrude ? "Extruding a face"
+                                                 : "Moving a face";
+        if (refuseMeshEdit(*obj, what)) return;
+    }
 
     const std::vector<Index> faces = scene_.selectedFaces(id);
     if (faces.empty()) { setNotice("Select a face to move"); return; }
-    if (obj->body.isMesh() && op == FaceOp::Rotate) {
-        setNotice("Rotating a face needs the exact kernel");
-        return;
-    }
 
     faceTool_.reset();
     faceTool_.active = true;
@@ -2862,7 +2854,7 @@ void Application::mergeSelected() {
     const ObjectId id = scene_.contextObject();
     SceneObject* obj = scene_.find(id);
     if (!obj) { setNotice("Select an object first"); return; }
-    if (obj->body.isMesh()) { setNotice("Merging faces needs the exact kernel"); return; }
+    if (refuseMeshEdit(*obj, "Merging faces")) return;
 
     const int before = obj->body.faceCount();
     std::vector<Feature> chainBefore = obj->features;
@@ -2958,7 +2950,7 @@ void Application::beginPattern(PatternMode mode) {
     const ObjectId id = scene_.contextObject();
     SceneObject* obj = scene_.find(id);
     if (!obj) { setNotice("Select an object first"); return; }
-    if (obj->body.isMesh()) { setNotice("Patterning needs the exact kernel"); return; }
+    if (refuseMeshEdit(*obj, "Patterning")) return;
 
     patternTool_.reset();
     patternTool_.active = true;
@@ -3200,7 +3192,7 @@ void Application::beginDivide() {
     const ObjectId id = scene_.contextObject();
     SceneObject* obj = scene_.find(id);
     if (!obj) { setNotice("Select an object first"); return; }
-    if (obj->body.isMesh()) { setNotice("Dividing a face needs the exact kernel"); return; }
+    if (refuseMeshEdit(*obj, "Dividing a face")) return;
 
     // The cut runs square across a chosen edge and slides along it, which is
     // what a loop cut is: pick the direction by pointing at an edge.
@@ -3423,6 +3415,7 @@ void Application::beginFillet() {
         setNotice("Select an object to fillet");
         return;
     }
+    if (refuseMeshEdit(*obj, "Filleting an edge")) return;
 
     std::vector<Index> edges = scene_.selectedEdges(id);
     if (edges.empty()) {
@@ -3446,10 +3439,6 @@ void Application::beginFillet() {
         setNotice("Select edges or faces to fillet");
         return;
     }
-
-    // Requirement 2: If a fillet is attempted on an edge composed of multiple sections,
-    // extend selection to remaining sections and seamlessly act in unison.
-    edges = extendTangentChain(obj->body, edges);
 
     // Nothing about the geometry is decided here. Every trial -- the floor the
     // gesture starts from and the limit it can reach -- runs in another
@@ -4973,7 +4962,6 @@ void Application::updateFillet(bool snap, bool follow) {
     // The number and the guide are the pointer's own, so they move now. The
     // geometry is the kernel's and arrives when it arrives.
     filletTool_.currentRadius = newR;
-    view_.bevelWidth = newR;
 
     // Nothing has been verified yet -- the floor trial is still in flight -- so
     // there is no radius it would be safe to hand a worker thread. A preview
@@ -5154,6 +5142,8 @@ void Application::applyBoolean(BooleanOp op) {
     SceneObject* target = scene_.find(targetId);
     SceneObject* tool = scene_.find(toolId);
     if (!target || !tool || targetId == toolId) return;
+    if (refuseMeshEdit(*target, "Combining bodies") || refuseMeshEdit(*tool, "Combining bodies"))
+        return;
 
     // Bake the tool into the target's local space. The two objects have their
     // own transforms, and the boolean is defined on geometry, so they have to
@@ -5168,8 +5158,10 @@ void Application::applyBoolean(BooleanOp op) {
     f.bakedBody = std::move(baked);
 
     std::vector<Feature> chainBefore = target->features;
-    if (!scene_.addFeature(targetId, std::move(f))) {
-        setNotice(std::string(booleanOpName(op)) + " produced no valid solid");
+    std::string why;
+    if (!scene_.addFeature(targetId, std::move(f), &why)) {
+        setNotice(std::string(booleanOpName(op)) +
+                  (why.empty() ? " produced no valid solid" : " refused: " + why));
         return;
     }
 
@@ -5329,6 +5321,7 @@ void Application::splitActiveObject() {
         std::vector<Feature> chain1;
         Feature base1;
         base1.kind = FeatureKind::BaseMesh;
+        base1.backend = piece1.isMesh() ? Backend::Mesh : Backend::Brep;
         base1.bakedBody = std::move(piece1);
         chain1.push_back(std::move(base1));
         obj->features = std::move(chain1);
@@ -5355,6 +5348,9 @@ void Application::splitActiveObject() {
         return;
     }
 
+    // A mesh can come apart into the pieces it already is, above, but is only
+    // cut by a plane once it is a solid.
+    if (refuseMeshEdit(*obj, "Cutting a body in two")) return;
     setNotice("Split Body could not cut this object");
 }
 
@@ -5884,7 +5880,7 @@ void Application::applyActions() {
     if (a.pattern) beginPattern(PatternMode::Linear);
     if (a.mirror) beginPattern(PatternMode::Mirror);
     if (a.mergeFaces) mergeSelected();
-    if (a.bevel)   bevelActiveObject();
+    if (a.bevel)   roundAllEdges();
     if (a.split)   splitActiveObject();
     if (a.fillet)  beginFillet();
     if (a.shell)   shellActiveObject();

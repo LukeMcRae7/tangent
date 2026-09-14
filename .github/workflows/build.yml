@@ -1,8 +1,8 @@
 # Two configurations, because the project supports two and a change that breaks
 # one of them currently gets found by hand or not at all.
 #
-#   kernel   -- the real thing: OpenCASCADE linked, 27 tests, every demo mode
-#   no-kernel -- brep_stub.cpp instead, 26 tests; proves the seam still holds
+#   kernel   -- the real thing: OpenCASCADE linked, 28 tests, every demo mode
+#   no-kernel -- brep_stub.cpp instead, 27 tests; meshes only, modelling refused
 #
 # The demo sweep runs headless. Every --*-demo flag drives a real gesture through
 # the real code and reports the geometry it produced, so a sweep that renders
