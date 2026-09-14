@@ -1,6 +1,7 @@
 #include "mesh/decimate.h"
 
 #include "core/bvh.h"
+#include "geom/kernel_guard.h"
 #include "mesh/element_id.h"
 
 #include <algorithm>
@@ -523,6 +524,8 @@ private:
 };
 
 size_t workerCount() {
+    // One thread in a forked child: see inIsolatedChild.
+    if (inIsolatedChild()) return 1;
     const size_t hw = std::thread::hardware_concurrency();
     return std::max<size_t>(1, std::min<size_t>(hw == 0 ? 1 : hw, 8));
 }
@@ -584,6 +587,7 @@ private:
     // ---- state ----
     ReduceOptions opt_;
     Real tol_ = 0, checkTol_ = 0, checkTol2_ = 0, areaEps_ = 0;
+    Real loosenCeiling_ = 0;
 
     // The original, which is what the tolerance is measured against. Never
     // modified: the tree over it holds pointers into these arrays.
@@ -710,6 +714,7 @@ bool Simplifier::prepare(Real inner, std::string& why) {
         hi = {std::max(hi.x, p.x), std::max(hi.y, p.y), std::max(hi.z, p.z)};
     }
     const Real diag = length(hi - lo);
+    loosenCeiling_ = std::max(tol_, diag * 0.02);
     // A triangle smaller than this has no direction worth trusting. Relative to
     // the part, because a ring's worth of float noise on a 200mm part is not
     // the same size as on a 2mm one.
@@ -1255,7 +1260,9 @@ Real Simplifier::measure(const std::vector<Vec3>& positions,
     findings.originalWorst.assign(originalTris, 0);
     findings.reducedPeaks.assign(live.size(), {0, Vec3{}});
 
+    const auto stopped = [&] { return opt_.cancel && opt_.cancel->load(std::memory_order_relaxed); };
     workers.run(reducedChunks, [&](size_t c) {
+        if (stopped()) return;
         PeakSearch s{&original_, climb, never, radius};
         Real w = 0;
         for (size_t i = c * kChunk; i < std::min(live.size(), (c + 1) * kChunk); ++i) {
@@ -1273,6 +1280,7 @@ Real Simplifier::measure(const std::vector<Vec3>& positions,
         worst[c] = w;
     });
     workers.run(originalChunks, [&](size_t c) {
+        if (stopped()) return;
         PeakSearch s{&reduced, climb, never, radius};
         Real w = 0;
         for (size_t i = c * kChunk; i < std::min(originalTris, (c + 1) * kChunk); ++i) {
@@ -1321,8 +1329,13 @@ ReduceResult Simplifier::run(Mesh& out, ElementId salt, Real inner, const std::v
     std::vector<Entry> deferred;
     std::vector<std::pair<Vec3, Vec3>> committedBoxes;
     std::vector<uint32_t> hood;
+    for (;;) {
     while (!queue_.empty()) {
         if (opt_.targetTriangles > 0 && liveTris_ <= opt_.targetTriangles) break;
+        if (opt_.cancel && opt_.cancel->load(std::memory_order_relaxed)) {
+            r.error = "cancelled";
+            return r;
+        }
 
         const size_t batch = std::clamp<size_t>(liveTris_ / 512, 1, 48);
         size_t selected = 0, scanned = 0;
@@ -1380,6 +1393,27 @@ ReduceResult Simplifier::run(Mesh& out, ElementId salt, Real inner, const std::v
         flushRepush(workers);
     }
 
+    // Out of collapses the tolerance allows. If a target was asked for, not
+    // reached, and loosening is allowed, loosen and carry on: every collapse
+    // made so far was checked against a tighter limit, so it still holds, and
+    // every edge goes back in the queue to be judged against the new one.
+    if (!(opt_.loosenToReachTarget && opt_.targetTriangles > 0 && liveTris_ > opt_.targetTriangles))
+        break;
+    if (tol_ >= loosenCeiling_) break;
+    const Real step = std::min<Real>(1.25, loosenCeiling_ / tol_);
+    tol_ *= step;
+    checkTol_ *= step;
+    checkTol2_ *= step * step;
+    for (Real& limit : sampleLimit2_) limit *= step * step;
+    for (size_t v = 0; v < vertTris_.size(); ++v) {
+        if (!vertAlive_[v]) continue;
+        neighbours(static_cast<uint32_t>(v), aroundScratch_);
+        for (uint32_t w : aroundScratch_)
+            if (w > v) repush_.push_back(edgeKey(static_cast<uint32_t>(v), w));
+    }
+    flushRepush(workers);
+    }
+
     // ---- rebuild ----
     std::vector<uint32_t> remap(p_.size(), kNone);
     std::vector<Vec3> positions;
@@ -1434,13 +1468,22 @@ ReduceResult Simplifier::run(Mesh& out, ElementId salt, Real inner, const std::v
         return r;
     }
 
+    if (opt_.cancel && opt_.cancel->load(std::memory_order_relaxed)) {
+        r.error = "cancelled";
+        return r;
+    }
     r.deviationMm = measure(positions, live, workers, findings);
+    if (opt_.cancel && opt_.cancel->load(std::memory_order_relaxed)) {
+        r.error = "cancelled";          // the measurement may have stopped part way
+        return r;
+    }
     out = std::move(built);
     r.ok = true;
     r.trianglesAfter = live.size();
     r.verticesAfter = positions.size();
     r.reachedTarget = opt_.targetTriangles > 0 && live.size() <= opt_.targetTriangles;
     r.withinTolerance = r.deviationMm <= tol_;
+    r.toleranceUsedMm = tol_;
     return r;
 }
 
@@ -1515,9 +1558,13 @@ ReduceResult reduceMesh(const Mesh& in, const ReduceOptions& options, Mesh& out,
     std::vector<Real> factors;
     ReduceResult last;
     Mesh attempt;
+    // A pass that loosened its tolerance to reach a target has found the
+    // tolerance the target needs; passes after it hold that one, fixed, so that
+    // tightening around a problem does not loosen everything else to pay for it.
+    ReduceOptions passOptions = options;
     constexpr int kPasses = 3;
     for (int pass = 1; pass <= kPasses; ++pass) {
-        Simplifier s(in, options);
+        Simplifier s(in, passOptions);
         if (factors.empty()) sharpCreaseFactors(s.originalPositions(), s.originalTriangles(),
                                                 options.creaseAngleDeg, options.sharpCreaseMargin, factors);
         Simplifier::Findings findings;
@@ -1529,7 +1576,9 @@ ReduceResult reduceMesh(const Mesh& in, const ReduceOptions& options, Mesh& out,
         attempt = Mesh();
         if (r.withinTolerance || pass == kPasses) break;
 
-        const Real tol = options.toleranceMm;
+        passOptions.toleranceMm = r.toleranceUsedMm;
+        passOptions.loosenToReachTarget = false;
+        const Real tol = r.toleranceUsedMm;
         const size_t nt = factors.size();
         std::vector<Real> tighten(nt, 1);
         auto demand = [&](uint32_t tri, Real measured) {

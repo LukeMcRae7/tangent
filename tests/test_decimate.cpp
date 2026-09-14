@@ -469,6 +469,43 @@ int main() {
               "a tolerance too tight for the target stops short and says so");
     }
 
+    // --- loosening to reach a count -----------------------------------------
+    std::printf("--- loosening only as far as a count needs ---\n");
+    {
+        const Mesh in = spikyBlob(15, 100, 200);
+        // At 0.02mm this blob cannot get anywhere near 1,500 triangles.
+        Mesh held;
+        ReduceOptions strict;
+        strict.toleranceMm = 0.02;
+        strict.targetTriangles = 1500;
+        const ReduceResult rs = reduceMesh(in, strict, held, 30);
+        check(rs.ok && !rs.reachedTarget && rs.trianglesAfter > 1500,
+              "held to the tolerance, the count is out of reach");
+        check(std::fabs(rs.toleranceUsedMm - 0.02) < 1e-12, "and the tolerance is the one asked for");
+
+        Mesh fitted;
+        ReduceOptions loose = strict;
+        loose.loosenToReachTarget = true;
+        const ReduceResult rl = reduceMesh(in, loose, fitted, 30);
+        const Real dense = rl.ok ? denseDeviation(in, fitted, 8, 31) : -1;
+        std::printf("  held: %zu triangles at 0.02mm; loosened: %zu triangles at %.4f mm used, "
+                    "measured %.4f, dense %.4f, %d pass%s\n", rs.trianglesAfter, rl.trianglesAfter,
+                    rl.toleranceUsedMm, rl.deviationMm, dense, rl.passes, rl.passes == 1 ? "" : "es");
+        check(rl.ok && rl.reachedTarget && rl.trianglesAfter <= 1500, "loosened, it reaches the count");
+        check(rl.toleranceUsedMm > 0.02, "by loosening");
+        check(rl.withinTolerance && rl.deviationMm <= rl.toleranceUsedMm && dense <= rl.toleranceUsedMm,
+              "and is verified within the tolerance it ended at");
+        check(eulerOf(fitted) == 2 && checkHealth(fitted, true).selfIntersections == 0, "still whole");
+
+        // And where the count is reachable anyway, nothing loosens.
+        Mesh easy;
+        ReduceOptions reachable = loose;
+        reachable.targetTriangles = 20000;
+        const ReduceResult re = reduceMesh(in, reachable, easy, 30);
+        check(re.ok && re.reachedTarget && std::fabs(re.toleranceUsedMm - 0.02) < 1e-12,
+              "a reachable count loosens nothing");
+    }
+
     // --- the same every time -----------------------------------------------
     {
         const Mesh in = torus(20, 4, 80, 24);
@@ -477,12 +514,34 @@ int main() {
         o.toleranceMm = 0.2;
         reduceMesh(in, o, a, 10);
         reduceMesh(in, o, b, 10);
-        bool same = a.verts.size() == b.verts.size() && a.faces.size() == b.faces.size();
-        for (size_t i = 0; same && i < a.verts.size(); ++i)
-            same = a.verts[i].position.x == b.verts[i].position.x &&
-                   a.verts[i].position.y == b.verts[i].position.y &&
-                   a.verts[i].position.z == b.verts[i].position.z;
-        check(same, "the same mesh reduces to the same result");
+        auto identical = [](const Mesh& x, const Mesh& y) {
+            if (x.verts.size() != y.verts.size() || x.faces.size() != y.faces.size()) return false;
+            for (size_t i = 0; i < x.verts.size(); ++i)
+                if (x.verts[i].position.x != y.verts[i].position.x ||
+                    x.verts[i].position.y != y.verts[i].position.y ||
+                    x.verts[i].position.z != y.verts[i].position.z || x.verts[i].id != y.verts[i].id)
+                    return false;
+            std::vector<Index> lx, ly;
+            for (size_t f = 0; f < x.faces.size(); ++f) {
+                x.faceVertices(static_cast<Index>(f), lx);
+                y.faceVertices(static_cast<Index>(f), ly);
+                if (lx != ly || x.faces[f].id != y.faces[f].id) return false;
+            }
+            return true;
+        };
+        // Bit for bit, names included. Committing a preview's result instead of
+        // building it again is only honest if building it again gives exactly
+        // that -- and a project reopened later rebuilds it.
+        check(identical(a, b), "the same mesh reduces to the same result, bit for bit");
+        const Mesh blob = spikyBlob(15, 60, 120);
+        Mesh c, d;
+        ReduceOptions t;
+        t.toleranceMm = 0.05;
+        t.targetTriangles = 2000;
+        t.loosenToReachTarget = true;
+        reduceMesh(blob, t, c, 40);
+        reduceMesh(blob, t, d, 40);
+        check(identical(c, d), "including one stopped at a count, with the tolerance loosened");
     }
 
     // --- refusals ----------------------------------------------------------

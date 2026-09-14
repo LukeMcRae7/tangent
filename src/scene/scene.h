@@ -187,6 +187,17 @@ public:
     bool setFeatures(ObjectId id, std::vector<Feature> features,
                      std::string* error = nullptr);
 
+    // Appends a feature whose result has already been built -- by a preview on
+    // another thread, from this object's current body -- instead of building it
+    // again. For a step that takes seconds, like reducing a large mesh, which a
+    // user has just watched finish and should not wait for twice.
+    //
+    // The caller vouches that `result` is exactly what evaluating `feature` on
+    // the current body gives, which for a deterministic operation means: the
+    // same body, the same parameters, and the same uid, since the uid names what
+    // it makes. The feature must arrive with that uid already set.
+    void addFeatureWithResult(ObjectId id, Feature feature, Body result);
+
     // For serialisation, which has to preserve the counter alongside the
     // features it has already handed numbers to.
     uint64_t nextFeatureUid() const { return nextFeatureUid_; }

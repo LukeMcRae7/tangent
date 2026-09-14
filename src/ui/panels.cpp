@@ -276,6 +276,10 @@ void drawMenuBar(UiContext& ctx) {
             // no explanation is a worse answer than one that says why.
             const SceneObject* o = ctx.scene->find(ctx.scene->contextObject());
             const bool isMesh = o && !o->body.empty() && o->body.isMesh();
+            if (ImGui::MenuItem("Reduce Mesh...", nullptr, false, isMesh))
+                ctx.actions.reduceMesh = true;
+            if (isMesh)
+                ImGui::TextColored(kDim, "  fewer triangles, within a tolerance");
             if (ImGui::MenuItem("Convert to Solid", nullptr, false, isMesh))
                 ctx.actions.convertToSolid = true;
             if (isMesh)
@@ -809,6 +813,44 @@ void drawHistory(UiContext& ctx) {
                 }
                 ImGui::TextColored(kDim, "about %.2f, %.2f, %.2f",
                                    f.axisPoint.x, f.axisPoint.y, f.axisPoint.z);
+                break;
+            }
+            case FeatureKind::Reduce: {
+                // Applied when a field is finished with, not on every frame of
+                // a drag: a reduction takes seconds on a large mesh, and
+                // re-running it per frame would freeze the editor under the
+                // pointer.
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextUnformatted("Within");
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(-1.0f);
+                double tol = f.reduceTolerance;
+                ImGui::InputDouble("##rtol", &tol, 0.0, 0.0, "%.3f mm");
+                if (ImGui::IsItemDeactivatedAfterEdit() && tol > 0.0 && tol != f.reduceTolerance) {
+                    f.reduceTolerance = tol;
+                    changed = true;
+                }
+
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextUnformatted("Stop at");
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(-1.0f);
+                int target = f.reduceTarget;
+                ImGui::InputInt("##rtarget", &target, 0, 0);
+                if (ImGui::IsItemDeactivatedAfterEdit() && target >= 0 && target != f.reduceTarget) {
+                    f.reduceTarget = target;
+                    changed = true;
+                }
+                bool loosen = f.reduceLoosen;
+                if (f.reduceTarget > 0 && ImGui::Checkbox("Loosen to reach it", &loosen)) {
+                    f.reduceLoosen = loosen;
+                    changed = true;
+                }
+                ImGui::TextColored(kDim, "%s", f.reduceTarget == 0
+                                               ? "0: as few triangles as the tolerance allows"
+                                               : f.reduceLoosen
+                                               ? "the tolerance loosens only as far as the count needs"
+                                               : "triangles, or the tolerance, whichever comes first");
                 break;
             }
             case FeatureKind::Pattern: {

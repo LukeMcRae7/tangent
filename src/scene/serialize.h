@@ -16,7 +16,7 @@
 
 namespace tg {
 
-inline constexpr uint32_t kProjectVersion = 10;
+inline constexpr uint32_t kProjectVersion = 11;
 // 3: features name what they act on
 // 4: geometry is a tagged Body
 // 5: bodies may be exact, and say which kernel built them

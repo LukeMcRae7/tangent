@@ -430,13 +430,13 @@ SolidifyResult toSolid(Body& body, ElementId salt, int maxFaces) {
             std::snprintf(buf, sizeof buf,
                           "this would give %d faces, over the limit of %d: its %d triangles "
                           "lie on %d different planes, so it looks scanned or sculpted and "
-                          "there is almost nothing to merge",
+                          "there is almost nothing to merge. Modify > Reduce Mesh first",
                           predicted, maxFaces, r.facesBefore, predicted);
         else
             std::snprintf(buf, sizeof buf,
                           "this would give %d faces, over the limit of %d: the flat faces "
-                          "merge, but its curved surfaces were exported as many thin strips "
-                          "and would come back as flat strips rather than curves",
+                          "merge, but its curved surfaces were exported as many thin strips. "
+                          "Modify > Reduce Mesh first",
                           predicted, maxFaces);
         r.error = buf;
         return r;

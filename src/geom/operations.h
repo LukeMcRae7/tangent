@@ -142,6 +142,13 @@ bool patternBody(Body& body, const Body& tool, const PatternSpec& spec,
 // copies are going to land before committing to building them.
 Mat4 patternPlacement(const PatternSpec& spec, int i);
 
+// Reduces a mesh body to fewer triangles within a tolerance. See
+// mesh/decimate.h for what is and is not promised. Mesh bodies only: an exact
+// body has no triangles to reduce.
+struct ReduceOptions;
+struct ReduceResult;
+bool reduceBody(Body& body, const ReduceOptions& options, ElementId salt, ReduceResult& result);
+
 bool booleanOp(const Body& a, const Body& b, BooleanOp op, Body& out,
                ElementId salt = 0, bool trustBNames = false,
                std::string* reason = nullptr);
@@ -158,6 +165,11 @@ std::vector<EdgeId> extendTangentChain(const Body& body, const std::vector<EdgeI
 // yields itself, so a caller can always use the result.
 size_t splitBodies(const Body& body, std::vector<Body>& out);
 
+// On an exact body the two sides are the body intersected with a large box on
+// each side of the plane, which is two booleans the kernel already does well
+// rather than a new way of cutting. Either side may hold more than one solid,
+// where the plane passes through the body more than once. Fails, leaving `a` and
+// `b` unspecified, when the plane misses the body or only grazes it.
 bool splitByPlane(const Body& body, Vec3 planePoint, Vec3 planeNormal,
                   Body& a, Body& b);
 

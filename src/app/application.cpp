@@ -632,7 +632,16 @@ Vec2 Application::mouseInViewport() const {
     return {m.x - viewRect_.x, m.y - viewRect_.y};
 }
 
+bool Application::editToolActive() const {
+    return filletTool_.active || faceTool_.active || divideTool_.active || patternTool_.active ||
+           reduceTool_.active;
+}
+
 void Application::beginTransform(TransformMode mode) {
+    // Not over another operation. Keys are held by whichever tool is running,
+    // but the menu's Move, Rotate and Scale reached here regardless and started
+    // a transform on top of it.
+    if (editToolActive()) { setNotice("Finish the current operation first"); return; }
     dismissSettled();
     measure_.end();
 
@@ -677,6 +686,7 @@ void Application::handleViewportMouse() {
     stepStepDemo();
     stepDialogDemo();
     stepMeshBench();
+    stepReduceDemo();
     stepFaceStress();
     stepPrintDemo();
     stepPreviewCheck();
@@ -718,6 +728,13 @@ void Application::handleViewportMouse() {
             if (ImGui::IsMouseClicked(ImGuiMouseButton_Left))       commitFaceMove();
             else if (ImGui::IsMouseClicked(ImGuiMouseButton_Right))  abortFaceMove();
         }
+        return;
+    }
+    if (reduceTool_.active) {
+        // Nothing follows the pointer, so a click in the viewport confirms
+        // nothing; the right button cancels, as it does everywhere else.
+        updateReduce();
+        if (!io.WantCaptureMouse && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) abortReduce();
         return;
     }
     if (patternTool_.active) {
@@ -1371,7 +1388,7 @@ void Application::drawPrintIssues() {
 
     if (!view_.showPrintIssues) return;
     if (filletTool_.active || faceTool_.active || divideTool_.active ||
-        patternTool_.active || createTool_.active() || tool_.active())
+        patternTool_.active || reduceTool_.active || createTool_.active() || tool_.active())
         return;                       // a gesture owns the model while it runs
 
     const Vec4 thin{0.95f, 0.30f, 0.22f, 0.34f};
@@ -1594,6 +1611,22 @@ void Application::handleShortcuts() {
         if (ImGui::IsKeyPressed(ImGuiKey_Y, false)) setFaceAxis(1);
         if (ImGui::IsKeyPressed(ImGuiKey_Z, false)) setFaceAxis(2);
         typedInto(faceTool_.typedValue, [&] { updateFaceMove(true); });
+        return;
+    }
+
+    if (reduceTool_.active) {
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) { abortReduce(); return; }
+        if (ImGui::IsKeyPressed(ImGuiKey_Enter, false) ||
+            ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false)) { commitReduce(); return; }
+        typedInto(reduceTool_.typedValue, [&] {
+            try {
+                const Real v = std::stod(reduceTool_.typedValue);
+                if (v > 0 && v != reduceTool_.tolerance) {
+                    reduceTool_.tolerance = v;
+                    requestReducePreview();
+                }
+            } catch (...) {}
+        });
         return;
     }
 
@@ -1984,6 +2017,235 @@ void Application::bevelActiveObject() {
                                                 obj->features, "Bevel"));
 }
 
+// ---------------------------------------------------------------------------
+// Reducing a mesh.
+
+void Application::beginReduce() {
+    dismissSettled();
+    if (tool_.active() || filletTool_.active || createTool_.active() || faceTool_.active ||
+        divideTool_.active || patternTool_.active || reduceTool_.active)
+        return;
+    const ObjectId id = scene_.contextObject();
+    SceneObject* obj = scene_.find(id);
+    if (!obj) { setNotice("Select a mesh to reduce"); return; }
+    if (!obj->body.isMesh()) {
+        setNotice("That body is already exact: reducing is for meshes");
+        return;
+    }
+
+    reduceTool_.reset();
+    reduceTool_.active = true;
+    reduceTool_.objectId = id;
+    reduceTool_.before = obj->body;
+    reduceTool_.chainBefore = obj->features;
+    reduceTool_.uid = scene_.takeFeatureUid();
+
+    // A starting tolerance in proportion to the part: a thousandth of its size,
+    // rounded to a figure a person would type. A 60mm part starts at 0.05mm.
+    const Real size = obj->localBounds.valid() ? length(obj->localBounds.size()) : 50.0;
+    const Real steps[] = {0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0};
+    Real start = steps[0];
+    for (Real st : steps)
+        if (st <= size * 0.001) start = st;
+    reduceTool_.tolerance = start;
+    reduceTool_.target = 0;
+    requestReducePreview();
+}
+
+void Application::requestReducePreview() {
+    auto job = std::make_shared<ReduceJob>();
+    job->tolerance = reduceTool_.tolerance;
+    job->target = reduceTool_.target;
+    job->loosen = reduceTool_.loosen;
+
+    // Whatever is building is now for parameters nobody wants; tell it to stop.
+    if (reduceTool_.running) reduceTool_.running->cancel = true;
+    const bool building = reduceTool_.preview.busy();
+
+    const ElementId uid = reduceTool_.uid;
+    reduceTool_.preview.request(reduceTool_.before, [job, uid](Body& b) {
+        ReduceOptions options;
+        options.toleranceMm = job->tolerance;
+        options.targetTriangles = job->target > 0 ? static_cast<size_t>(job->target) : 0;
+        options.loosenToReachTarget = job->loosen;
+        options.cancel = &job->cancel;
+        if (!reduceBody(b, options, uid, job->result)) return false;
+        job->solidFaces = predictSolidFaces(b);
+        return true;
+    });
+    if (building) reduceTool_.pending = job;
+    else          reduceTool_.running = job;
+}
+
+void Application::updateReduce() {
+    if (!reduceTool_.active) return;
+    SceneObject* obj = scene_.find(reduceTool_.objectId);
+    if (!obj) { abortReduce(); return; }
+
+    Body built;
+    bool failed = false;
+    const bool finished = reduceTool_.preview.take(built, &failed);
+    if (finished || failed) {
+        const std::shared_ptr<ReduceJob> done = reduceTool_.running;
+        // take() starts whatever was waiting, which is now the one running.
+        reduceTool_.running = reduceTool_.pending;
+        reduceTool_.pending.reset();
+        if (finished && done) {
+            reduceTool_.shown = done;
+            reduceTool_.shownBody = built;
+            obj->body = std::move(built);
+            obj->refreshDerived();
+        } else if (failed && done && !done->cancel) {
+            reduceTool_.shown = done;             // a real refusal: say why
+        }
+    }
+}
+
+void Application::commitReduce() {
+    if (!reduceTool_.active || !reduceTool_.ready()) return;
+    const ObjectId id = reduceTool_.objectId;
+    SceneObject* obj = scene_.find(id);
+    if (!obj) { abortReduce(); return; }
+
+    Feature f;
+    f.kind = FeatureKind::Reduce;
+    f.uid = reduceTool_.uid;
+    f.reduceTolerance = reduceTool_.tolerance;
+    f.reduceTarget = reduceTool_.target;
+    f.reduceLoosen = reduceTool_.loosen;
+
+    const ReduceResult r = reduceTool_.shown->result;
+    std::vector<Feature> chainBefore = reduceTool_.chainBefore;
+    obj->features = reduceTool_.chainBefore;
+    obj->body = reduceTool_.before;
+    // The preview already built exactly this, from this body, with this uid.
+    scene_.addFeatureWithResult(id, std::move(f), reduceTool_.shownBody);
+    undo_.push(std::make_unique<FeatureCommand>(id, std::move(chainBefore), obj->features,
+                                                "Reduce Mesh"));
+
+    char buf[200];
+    std::snprintf(buf, sizeof buf, "Reduced %zu triangles to %zu, within %.3g mm (measured %.3g)",
+                  r.trianglesBefore, r.trianglesAfter, static_cast<double>(reduceTool_.tolerance),
+                  static_cast<double>(r.deviationMm));
+    setNotice(buf);
+    justFinishedModal_ = true;
+    reduceTool_.active = false;
+    reduceTool_.reset();
+}
+
+void Application::abortReduce() {
+    if (!reduceTool_.active) return;
+    if (SceneObject* obj = scene_.find(reduceTool_.objectId)) {
+        obj->features = reduceTool_.chainBefore;
+        obj->body = reduceTool_.before;
+        obj->refreshDerived();
+    }
+    justFinishedModal_ = true;
+    reduceTool_.active = false;
+    reduceTool_.reset();
+}
+
+void Application::drawReducePanel() {
+    if (!reduceTool_.active) return;
+    if (!ui::beginCommand("##reduce", "Reduce Mesh", Icon::Count, viewRect_.x + 16.0f,
+                          viewRect_.y + 16.0f))
+        return;
+
+    const Real tolBefore = reduceTool_.tolerance;
+    const int targetBefore = reduceTool_.target;
+    const bool loosenBefore = reduceTool_.loosen;
+
+    if (ui::commandNumber("Within", reduceTool_.tolerance, "mm", !reduceTool_.typedValue.empty(),
+                          !reduceTool_.typedValue.empty(), reduceTool_.typedValue.c_str()))
+        reduceTool_.typedValue.clear();
+
+    // The tolerances people actually use, one click each.
+    ui::commandRow("");
+    {
+        // Wrapped to the panel rather than run off its edge: the last one used
+        // to be cut away where the panel ended.
+        const Real presets[] = {0.01, 0.02, 0.05, 0.1, 0.25};
+        const float column = ImGui::GetCursorPosX();
+        const float right = ImGui::GetWindowContentRegionMax().x;
+        for (int i = 0; i < 5; ++i) {
+            char label[16];
+            std::snprintf(label, sizeof label, "%g", presets[i]);
+            if (i) {
+                const ImGuiStyle& st = ImGui::GetStyle();
+                const float need = ImGui::CalcTextSize(label).x + st.FramePadding.x * 2;
+                ImGui::SameLine();
+                if (ImGui::GetCursorPosX() + need > right) {
+                    ImGui::NewLine();
+                    ImGui::SetCursorPosX(column);
+                }
+            }
+            const bool on = std::fabs(reduceTool_.tolerance - presets[i]) < 1e-12;
+            if (on) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+            if (ImGui::SmallButton(label)) {
+                reduceTool_.tolerance = presets[i];
+                reduceTool_.typedValue.clear();
+            }
+            if (on) ImGui::PopStyleColor();
+        }
+    }
+
+    ui::commandRow("Stop at");
+    {
+        // Few enough triangles to convert, however far the tolerance has to
+        // loosen to get there -- which is only as far as the last few collapses
+        // need. What it came to is shown under "Moved".
+        const bool fit = reduceTool_.target == kSolidifyFaceLimit && reduceTool_.loosen;
+        if (ImGui::Button(fit ? "Fit for conversion  (on)" : "Fit for conversion")) {
+            reduceTool_.target = fit ? 0 : kSolidifyFaceLimit;
+            reduceTool_.loosen = !fit;
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Reduce until there are few enough triangles to convert to a solid.\n"
+                              "The tolerance is loosened only as far as that needs.");
+    }
+
+    // What it gives.
+    const ReduceJob* shown = reduceTool_.shown.get();
+    const bool stale = !reduceTool_.ready();
+    char text[160];
+    if (reduceTool_.preview.busy()) {
+        ui::commandValue("Triangles", "reducing...");
+    } else if (shown && !shown->result.ok) {
+        ui::commandValue("Triangles", shown->result.error.c_str());
+    } else if (shown) {
+        std::snprintf(text, sizeof text, "%zu  ->  %zu", shown->result.trianglesBefore,
+                      shown->result.trianglesAfter);
+        ui::commandValue("Triangles", text);
+    }
+    if (shown && shown->result.ok) {
+        std::snprintf(text, sizeof text, "%.3g mm, measured%s", static_cast<double>(shown->result.deviationMm),
+                      shown->result.withinTolerance ? "" : " -- over");
+        ui::commandValue("Moved", text);
+        if (shown->result.toleranceUsedMm > shown->tolerance * 1.0001) {
+            std::snprintf(text, sizeof text, "loosened to %.3g mm", static_cast<double>(shown->result.toleranceUsedMm));
+            ui::commandValue("To fit", text);
+        }
+        if (shown->solidFaces <= kSolidifyFaceLimit)
+            std::snprintf(text, sizeof text, "%d faces: will convert", shown->solidFaces);
+        else
+            std::snprintf(text, sizeof text, "%d faces: too many to convert", shown->solidFaces);
+        ui::commandValue("As a solid", text);
+    }
+
+    ui::commandHint("Flat faces reduce to almost nothing; curved ones as far as the tolerance "
+                    "allows. Edges, corners and holes stay within the tolerance, and the result "
+                    "is measured before it is shown.");
+
+    const int footer = ui::commandFooter(stale ? "OK  (wait)" : "OK  (Enter)", !stale);
+    ui::endCommand();
+
+    if (reduceTool_.tolerance != tolBefore || reduceTool_.target != targetBefore ||
+        reduceTool_.loosen != loosenBefore)
+        requestReducePreview();
+    if (footer > 0)      commitReduce();
+    else if (footer < 0) abortReduce();
+}
+
 void Application::convertSelectedToSolid() {
     dismissSettled();
     const ObjectId id = scene_.contextObject();
@@ -1998,21 +2260,21 @@ void Application::convertSelectedToSolid() {
         return;
     }
 
-    // The whole chain is replaced rather than appended to. The root was a
-    // BaseMesh holding triangles; it now holds a solid, and every step after it
-    // re-runs against that. In practice an imported mesh has no later steps,
-    // but a user who modelled on it before converting should not lose the work.
+    // The chain becomes its root alone, holding the solid. What is converted
+    // is the body as it now stands -- after a reduction, typically, which is
+    // what makes a large mesh convertible at all -- so the steps that got it
+    // there are in the solid already. Kept after it they would run again on the
+    // exact body, where every one of them refuses: they are operations on
+    // triangles, and there are no triangles any more.
     std::vector<Feature> chainBefore = obj->features;
-    std::vector<Feature> next = obj->features;
-    bool replaced = false;
-    for (Feature& f : next) {
-        if (f.kind != FeatureKind::BaseMesh) continue;
-        f.bakedBody = converted;
-        f.backend = Backend::Brep;
-        replaced = true;
-        break;
+    if (obj->features.empty() || obj->features.front().kind != FeatureKind::BaseMesh) {
+        setNotice("That body did not come from an import");
+        return;
     }
-    if (!replaced) { setNotice("That body did not come from an import"); return; }
+    std::vector<Feature> next(1, obj->features.front());
+    next.front().bakedBody = converted;
+    next.front().backend = Backend::Brep;
+    const size_t baked = obj->features.size() - 1;
 
     std::string why;
     if (!scene_.setFeatures(id, std::move(next), &why)) {
@@ -2023,12 +2285,13 @@ void Application::convertSelectedToSolid() {
     undo_.push(std::make_unique<FeatureCommand>(id, std::move(chainBefore),
                                                 obj->features, "Convert to Solid"));
 
-    char buf[192];
+    char buf[240];
     std::snprintf(buf, sizeof buf,
-                  "Converted: %d triangles became %d faces%s", r.facesBefore,
+                  "Converted: %d triangles became %d faces%s%s", r.facesBefore,
                   r.facesAfter,
                   r.facesAfter < r.facesBefore / 2
-                      ? "" : "  (little merged: the mesh may not have been CAD)");
+                      ? "" : "  (little merged: the mesh may not have been CAD)",
+                  baked > 0 ? "  -- the steps before it are part of the solid now" : "");
     setNotice(buf);
 }
 
@@ -2180,7 +2443,8 @@ static Real materialBehindEdges(const SceneObject& obj,
 void Application::beginFaceMove(FaceOp op) {
     dismissSettled();
     if (tool_.active() || filletTool_.active || createTool_.active() ||
-        faceTool_.active || divideTool_.active || patternTool_.active)
+        faceTool_.active || divideTool_.active || patternTool_.active ||
+        reduceTool_.active)
         return;
 
     const ObjectId id = scene_.contextObject();
@@ -2687,7 +2951,8 @@ void Application::recommitSettled() {
 void Application::beginPattern(PatternMode mode) {
     dismissSettled();
     if (tool_.active() || filletTool_.active || createTool_.active() ||
-        faceTool_.active || divideTool_.active || patternTool_.active)
+        faceTool_.active || divideTool_.active || patternTool_.active ||
+        reduceTool_.active)
         return;
 
     const ObjectId id = scene_.contextObject();
@@ -2928,7 +3193,8 @@ void Application::abortPattern() {
 void Application::beginDivide() {
     dismissSettled();
     if (tool_.active() || filletTool_.active || createTool_.active() ||
-        faceTool_.active || divideTool_.active || patternTool_.active)
+        faceTool_.active || divideTool_.active || patternTool_.active ||
+        reduceTool_.active)
         return;
 
     const ObjectId id = scene_.contextObject();
@@ -3149,7 +3415,7 @@ FilletSpec Application::filletSpecAt(Real radius) const {
 
 void Application::beginFillet() {
     dismissSettled();
-    if (tool_.active() || filletTool_.active || createTool_.active()) return;
+    if (tool_.active() || filletTool_.active || createTool_.active() || reduceTool_.active) return;
 
     const ObjectId id = scene_.contextObject();
     SceneObject* obj = scene_.find(id);
@@ -3503,6 +3769,79 @@ void Application::stepFilletOpenDemo() {
     mouseOverride_ = px + Vec2{40.0, -40.0};
 }
 
+// A plate drilled with a grid of holes, exported fine as an STL, for the
+// benchmarks and demos to work on without a file of the user's. It is the other
+// kind of large mesh: one that was CAD before it was triangles, where the
+// triangle count is high and the faces behind it are few.
+std::string Application::writeDrilledPlate() {
+    scene_.clear();
+    PrimitiveSpec ps;
+    ps.kind = PrimitiveKind::Box;
+    ps.box = {120, 120, 8};
+    const ObjectId pid = scene_.addPrimitive(PrimitiveKind::Box, ps);
+    PrimitiveSpec hs;
+    hs.kind = PrimitiveKind::Cylinder;
+    hs.cylinder = {2.5, 30, 48};
+    Body holes;
+    makePrimitive(hs, holes, Backend::Brep);
+    for (int ix = 0; ix < 8; ++ix)
+        for (int iy = 0; iy < 8; ++iy) {
+            Body h;
+            makePrimitive(hs, h, Backend::Brep);
+            h.transform(translate({-49.0 + ix * 14.0, -49.0 + iy * 14.0, 0}));
+            if (ix == 0 && iy == 0) { holes = h; continue; }
+            Body u;
+            if (booleanOp(holes, h, BooleanOp::Union, u, 900 + ix * 8 + iy, false, nullptr))
+                holes = std::move(u);
+        }
+    Feature cut;
+    cut.kind = FeatureKind::Boolean;
+    cut.booleanOp = BooleanOp::Difference;
+    cut.bakedBody = std::move(holes);
+    scene_.addFeature(pid, std::move(cut), nullptr);
+    StlOptions opt;
+    opt.binary = true;
+    opt.deviationMm = 0.002;
+    const std::string out = (std::filesystem::temp_directory_path() / "tangent_plate_bench.stl").string();
+    const StlResult sr = exportStl(scene_, out, opt);
+    std::fprintf(stderr, "[demo] built a drilled plate: %d faces, %zu triangles out\n",
+                 scene_.objects().front()->body.faceCount(), sr.triangles);
+    scene_.clear();
+    return out;
+}
+
+// Opens a mesh and the Reduce Mesh panel on it, with Fit for conversion on, and
+// waits for the preview so that a screenshot shows real numbers. `:plate` uses
+// the drilled plate above.
+void Application::stepReduceDemo() {
+    if (reduceDemo_.empty() || reduceDemoDone_ || viewRect_.w <= 0) return;
+    reduceDemoDone_ = true;
+    const std::string path = reduceDemo_ == ":plate" ? writeDrilledPlate() : reduceDemo_;
+    scene_.clear();
+    runFileOperation(FileMode::ImportMesh, path);
+    if (scene_.objects().empty()) { std::fprintf(stderr, "[reduce-demo] nothing imported\n"); return; }
+    beginReduce();
+    if (!reduceTool_.active) { std::fprintf(stderr, "[reduce-demo] the panel did not open\n"); return; }
+    reduceTool_.target = kSolidifyFaceLimit;
+    reduceTool_.loosen = true;
+    requestReducePreview();
+    while (reduceTool_.preview.busy()) {
+        updateReduce();
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    updateReduce();
+    const ReduceJob* shown = reduceTool_.shown.get();
+    if (!shown) { std::fprintf(stderr, "[reduce-demo] no preview came back\n"); return; }
+    std::fprintf(stderr, "[reduce-demo] ready=%d ok=%d %zu -> %zu, used %.4f, measured %.4f, solid faces %d %s\n",
+                 (int)reduceTool_.ready(), (int)shown->result.ok, shown->result.trianglesBefore,
+                 shown->result.trianglesAfter, shown->result.toleranceUsedMm, shown->result.deviationMm,
+                 shown->solidFaces, shown->result.error.c_str());
+    const SceneObject* o = scene_.find(reduceTool_.objectId);
+    if (o) camera_.frame(o->worldBounds());
+    camera_.snapToGoal();
+    view_.showWireframe = true;          // the triangles are the point
+}
+
 // Times every stage a mesh goes through between a file and a drawn frame, so
 // that "importing is slow" becomes a number attached to a particular step.
 void Application::stepMeshBench() {
@@ -3523,42 +3862,7 @@ void Application::stepMeshBench() {
     // triangles. A plate drilled with a grid of holes and exported fine, so the
     // triangle count is large but the faces behind it are few, and conversion
     // is allowed through. That is the case the prediction does not stop.
-    if (meshBench_.rfind(":plate", 0) == 0) {
-        PrimitiveSpec ps;
-        ps.kind = PrimitiveKind::Box;
-        ps.box = {120, 120, 8};
-        const ObjectId pid = scene_.addPrimitive(PrimitiveKind::Box, ps);
-        PrimitiveSpec hs;
-        hs.kind = PrimitiveKind::Cylinder;
-        hs.cylinder = {2.5, 30, 48};
-        Body holes;
-        makePrimitive(hs, holes, Backend::Brep);
-        for (int ix = 0; ix < 8; ++ix)
-            for (int iy = 0; iy < 8; ++iy) {
-                Body h;
-                makePrimitive(hs, h, Backend::Brep);
-                h.transform(translate({-49.0 + ix * 14.0, -49.0 + iy * 14.0, 0}));
-                if (ix == 0 && iy == 0) { holes = h; continue; }
-                Body u;
-                if (booleanOp(holes, h, BooleanOp::Union, u, 900 + ix * 8 + iy, false, nullptr))
-                    holes = std::move(u);
-            }
-        Feature cut;
-        cut.kind = FeatureKind::Boolean;
-        cut.booleanOp = BooleanOp::Difference;
-        cut.bakedBody = std::move(holes);
-        scene_.addFeature(pid, std::move(cut), nullptr);
-        StlOptions opt;
-        opt.binary = true;
-        opt.deviationMm = 0.002;
-        const std::string out =
-            (std::filesystem::temp_directory_path() / "tangent_plate_bench.stl").string();
-        const StlResult sr = exportStl(scene_, out, opt);
-        std::fprintf(stderr, "[mesh-bench] built a drilled plate: %d faces, %zu triangles out\n",
-                     scene_.objects().front()->body.faceCount(), sr.triangles);
-        meshBench_ = out;
-        scene_.clear();
-    }
+    if (meshBench_.rfind(":plate", 0) == 0) meshBench_ = writeDrilledPlate();
 
     // --- reading ---
     Body body;
@@ -3607,59 +3911,64 @@ void Application::stepMeshBench() {
         say("refreshDerived", ms(ta, tb));
     }
 
-    // --- conversion ---
+    // --- the path a large mesh takes: reduce, convert, then what it is for ---
+    //
+    // A boolean and a split, timed on the converted solid, because those are
+    // the reasons a mesh is converted at all. Every step is checked to have
+    // made what it should, not only timed.
     if (brep::available() && r.closed) {
-        Body copy = body;
-        auto tc = Clock::now();
-        auto tp0 = Clock::now();
-        const int predicted = predictSolidFaces(copy);
-        auto tp1 = Clock::now();
-        say("predict face count", ms(tp0, tp1));
-        std::fprintf(stderr, "[mesh-bench] would be %d faces\n", predicted);
+        Body work = body;
+        ReduceOptions options;
+        options.toleranceMm = 0.05;
+        options.targetTriangles = kSolidifyFaceLimit;
+        options.loosenToReachTarget = true;
+        ReduceResult rr;
+        auto t0 = Clock::now();
+        const bool reduced = reduceBody(work, options, 5151, rr);
+        say("reduce (0.05mm, fit)", ms(t0, Clock::now()));
+        std::fprintf(stderr, "[mesh-bench] reduce ok=%d %zu -> %zu, %d pass%s, measured %.4f of %.4f used, within=%d %s\n",
+                     (int)reduced, rr.trianglesBefore, rr.trianglesAfter, rr.passes,
+                     rr.passes == 1 ? "" : "es", rr.deviationMm, rr.toleranceUsedMm,
+                     (int)rr.withinTolerance, rr.error.c_str());
 
-        // With the real limit, which is what a user gets.
-        const SolidifyResult sc = toSolid(copy, 4242);
-        if (!sc.ok && predicted < 100000) {
-            // And what it would have cost had it been let through, so the limit
-            // is a measured choice rather than a guess.
-            Body forced = body;
-            auto tx0 = Clock::now();
-            const SolidifyResult fx = toSolid(forced, 4243, 200000);
-            auto tx1 = Clock::now();
-            say("toSolid, limit lifted", ms(tx0, tx1));
-            auto th0 = Clock::now();
-            const MeshHealth fh = forced.health(false);
-            auto th1 = Clock::now();
-            say("health of converted body", ms(th0, th1));
-            std::fprintf(stderr, "[mesh-bench] forced: ok=%d, %d -> %d faces, %s, watertight=%d, %.1f mm3\n",
-                         (int)fx.ok, fx.facesBefore, fx.facesAfter,
-                         fx.viaRegions ? "regions" : "per-triangle fallback",
-                         (int)fh.watertight, fh.volume);
+        t0 = Clock::now();
+        const SolidifyResult sc = toSolid(work, 4242);
+        say("convert", ms(t0, Clock::now()));
+        std::fprintf(stderr, "[mesh-bench] convert ok=%d, %d triangles -> %d faces, closed=%d %s\n",
+                     (int)sc.ok, sc.facesBefore, sc.facesAfter,
+                     (int)(sc.ok && brep::closedShell(work.brep())), sc.error.c_str());
 
-            // And an ordinary edit on it afterwards, which is the cost of having
-            // converted at all: a fillet on one straight outer edge.
-            std::vector<EdgeId> es;
-            forced.allEdges(es);
-            EdgeId longest = kInvalid;
-            Real best = 0;
-            for (EdgeId e : es) { const Real L = forced.edgeLength(e); if (L > best) { best = L; longest = e; } }
-            if (longest != kInvalid) {
-                FilletSpec sp;
-                sp.edges.push_back({longest, 1.0});
-                sp.salt = 31337;
-                Body edited = forced;
-                std::string why;
-                auto te0 = Clock::now();
-                const bool ok = filletEdges(edited, sp, &why);
-                auto te1 = Clock::now();
-                say("fillet on converted body", ms(te0, te1));
-                std::fprintf(stderr, "[mesh-bench] fillet ok=%d %s\n", (int)ok, why.c_str());
-            }
+        if (sc.ok) {
+            const AABB wb = work.bounds();
+            PrimitiveSpec cyl;
+            cyl.kind = PrimitiveKind::Cylinder;
+            cyl.cylinder = {std::max<Real>(0.5, length(wb.size()) * 0.05), length(wb.size()) * 2, 48};
+            Body tool;
+            makePrimitive(cyl, tool, Backend::Brep);
+            tool.transform(translate(wb.center()));
+            Body drilled;
+            std::string why;
+            t0 = Clock::now();
+            const bool bored = booleanOp(work, tool, BooleanOp::Difference, drilled, 5252, false, &why);
+            say("boolean (bore a hole)", ms(t0, Clock::now()));
+            std::fprintf(stderr, "[mesh-bench] boolean ok=%d closed=%d, %.1f -> %.1f mm3 %s\n", (int)bored,
+                         (int)(bored && brep::closedShell(drilled.brep())), work.health(false).volume,
+                         bored ? drilled.health(false).volume : 0.0, why.c_str());
+
+            const Body& toSplit = bored ? drilled : work;
+            Body top, bottom;
+            t0 = Clock::now();
+            const bool cut = splitByPlane(toSplit, toSplit.bounds().center(), {0, 0, 1}, top, bottom);
+            say("split (through the middle)", ms(t0, Clock::now()));
+            if (cut)
+                std::fprintf(stderr, "[mesh-bench] split ok, %.1f + %.1f = %.1f of %.1f mm3, closed=%d/%d\n",
+                             top.health(false).volume, bottom.health(false).volume,
+                             top.health(false).volume + bottom.health(false).volume,
+                             toSplit.health(false).volume, (int)brep::closedShell(top.brep()),
+                             (int)brep::closedShell(bottom.brep()));
+            else
+                std::fprintf(stderr, "[mesh-bench] split REFUSED\n");
         }
-        auto td = Clock::now();
-        say("toSolid", ms(tc, td));
-        std::fprintf(stderr, "[mesh-bench] convert ok=%d, %d tris -> %d faces%s\n",
-                     (int)sc.ok, sc.facesBefore, sc.facesAfter, sc.error.c_str());
     }
 
     // --- and the whole thing as a user does it: one menu action ---
@@ -4777,7 +5086,8 @@ void Application::abortFillet() {
 }
 
 void Application::beginAddPrimitivePrompt(PrimitiveKind kind) {
-    if (tool_.active() || filletTool_.active || createTool_.active()) return;
+    if (tool_.active() || createTool_.active()) return;
+    if (editToolActive()) { setNotice("Finish the current operation first"); return; }
     createTool_.start(kind);
 }
 
@@ -4899,6 +5209,7 @@ void Application::splitActiveObject() {
                 std::vector<Feature> chain1;
                 Feature base1;
                 base1.kind = FeatureKind::BaseMesh;
+                base1.backend = piece1.isMesh() ? Backend::Mesh : Backend::Brep;
                 base1.bakedBody = std::move(piece1);
                 chain1.push_back(std::move(base1));
                 obj->features = std::move(chain1);
@@ -4945,6 +5256,7 @@ void Application::splitActiveObject() {
                 std::vector<Feature> chain1;
                 Feature base1;
                 base1.kind = FeatureKind::BaseMesh;
+                base1.backend = piece1.isMesh() ? Backend::Mesh : Backend::Brep;
                 base1.bakedBody = std::move(piece1);
                 chain1.push_back(std::move(base1));
                 targetObj->features = std::move(chain1);
@@ -4981,6 +5293,7 @@ void Application::splitActiveObject() {
         std::vector<Feature> chain;
         Feature base;
         base.kind = FeatureKind::BaseMesh;
+        base.backend = bodies.front().isMesh() ? Backend::Mesh : Backend::Brep;
         base.bakedBody = bodies.front();
         chain.push_back(std::move(base));
         obj->features = std::move(chain);
@@ -5276,7 +5589,7 @@ void Application::runFileOperation(FileMode mode, const std::string& path) {
                               "  (Convert to Solid would give %d faces)", faces);
             else
                 std::snprintf(tail, sizeof tail,
-                              "  (%d distinct planes: too many to convert usefully)",
+                              "  (would be %d faces: Modify > Reduce Mesh before converting)",
                               faces);
             note += tail;
         }
@@ -5470,7 +5783,7 @@ void Application::applyActions() {
     // catches the commands that are not gestures.
     if (a.addRequested || a.deleteSelected || a.duplicateSelected || a.mergeFaces ||
         a.booleanRequested || a.split || a.shell || a.inset || a.undo || a.redo ||
-        a.importStep || a.importMesh || a.convertToSolid ||
+        a.importStep || a.importMesh || a.convertToSolid || a.reduceMesh ||
         a.newProject || a.openProject || a.rebuildObject != kNoObject ||
         a.transformEdited != kNoObject || a.featuresEdited != kNoObject)
         dismissSettled();
@@ -5485,6 +5798,7 @@ void Application::applyActions() {
     if (a.importStep)    beginFilePrompt(FileMode::ImportStep);
     if (a.importMesh)    beginFilePrompt(FileMode::ImportMesh);
     if (a.convertToSolid) convertSelectedToSolid();
+    if (a.reduceMesh) beginReduce();
     if (a.saveProject) {
         // Save straight over the current file; prompt only the first time.
         if (projectPath_.empty()) beginFilePrompt(FileMode::Save);
@@ -5701,6 +6015,7 @@ void Application::buildUi() {
     drawFacePanel();
     drawDividePanel();
     drawPatternPanel();
+    drawReducePanel();
     if (createTool_.active()) {
         // Under the toolbar, in the corner of the viewport opposite the view
         // cube: a dialog over the middle of the model is a dialog in the way of
@@ -5939,6 +6254,12 @@ int Application::run() {
                               ? "Rotate face  %.1f deg   type a number   Click confirm   Esc cancel"
                               : "Push / pull  %.2f mm   A auto  J join  D cut   type a number   Click confirm   Esc cancel",
                           faceTool_.value);
+            ui_.toolStatus = buf;
+        } else if (reduceTool_.active) {
+            char buf[160];
+            std::snprintf(buf, sizeof buf, "Reduce Mesh  within %.3g mm%s   type a number   Enter confirm   Esc cancel",
+                          static_cast<double>(reduceTool_.tolerance),
+                          reduceTool_.preview.busy() ? "   reducing..." : "");
             ui_.toolStatus = buf;
         } else if (patternTool_.active) {
             char buf[160];

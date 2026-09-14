@@ -45,6 +45,7 @@
 
 #include "mesh/halfedge.h"
 
+#include <atomic>
 #include <string>
 
 namespace tg {
@@ -59,6 +60,17 @@ struct ReduceOptions {
     // says so rather than pretending the target was met.
     size_t targetTriangles = 0;
 
+    // When the tolerance runs out before the target, loosen it -- a step at a
+    // time, carrying on from where the reduction stopped -- until the target is
+    // reached, rather than stopping short. Nearly every collapse still happens
+    // at the tolerance asked for; only the last few needed to reach the count
+    // are allowed more. For "make this convertible", where missing the count by
+    // a handful of triangles is the one outcome that is no use at all.
+    //
+    // Never loosened past two per cent of the part's size. What was actually
+    // needed is reported in ReduceResult::toleranceUsedMm, and verified.
+    bool loosenToReachTarget = false;
+
     // Edges sharper than this weigh the quadric toward keeping them. It changes
     // which collapses come first and where vertices land; the tolerance, not
     // this, is what guarantees the edge survives.
@@ -71,6 +83,12 @@ struct ReduceOptions {
     // looser means more second passes, tighter means less reduction.
     Real firstPassMargin = 0.98;
     Real sharpCreaseMargin = 0.9;
+
+    // Set from another thread to stop a reduction early. A preview that the
+    // user has already moved on from should not hold the next one up for the
+    // seconds a large mesh takes; the reduction looks at this between batches
+    // and returns, not ok, soon after.
+    const std::atomic<bool>* cancel = nullptr;
 };
 
 struct ReduceResult {
@@ -83,7 +101,11 @@ struct ReduceResult {
     // Measured on the finished result, both ways, by the verification pass.
     Real deviationMm = 0.0;
 
-    // Whether that measurement is within the tolerance. Only false after every
+    // The tolerance the result was held to: the one asked for, or more when
+    // loosenToReachTarget needed it.
+    Real toleranceUsedMm = 0.0;
+
+    // Whether that measurement is within toleranceUsedMm. Only false after every
     // tightened pass still came out over, which the result then says rather
     // than hiding.
     bool withinTolerance = false;

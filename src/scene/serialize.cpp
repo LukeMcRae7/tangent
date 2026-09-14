@@ -241,6 +241,10 @@ void writeFeature(Writer& w, const Feature& f) {
     // v10.
     w.u32(static_cast<uint32_t>(f.patternMode));
     w.i32(f.patternCount);
+    // v11.
+    w.f64(f.reduceTolerance);
+    w.i32(f.reduceTarget);
+    w.u32(f.reduceLoosen ? 1u : 0u);
 }
 
 // `version` is the file's, not this build's: a project written before bodies
@@ -251,7 +255,7 @@ bool readFeature(Reader& r, Feature& f, uint32_t version) {
     const uint32_t kind = r.u32();
     // The last of the enum, not a name from the middle of it: a kind added
     // later would otherwise be rejected by a build that has it.
-    if (kind > static_cast<uint32_t>(FeatureKind::Pattern)) return false;
+    if (kind > static_cast<uint32_t>(FeatureKind::Reduce)) return false;
     f.kind = static_cast<FeatureKind>(kind);
     f.enabled = r.u8() != 0;
     if (!readSpec(r, f.primitive)) return false;
@@ -332,6 +336,13 @@ bool readFeature(Reader& r, Feature& f, uint32_t version) {
         f.patternMode = static_cast<PatternMode>(mode);
         f.patternCount = r.i32();
         if (f.patternCount < 1 || f.patternCount > 4096) return false;
+    }
+    // Older files have no reductions in them.
+    if (version >= 11) {
+        f.reduceTolerance = r.f64();
+        f.reduceTarget = r.i32();
+        f.reduceLoosen = r.u32() != 0;
+        if (!(f.reduceTolerance > 0) || f.reduceTarget < 0) return false;
     }
     return !r.bad;
 }
@@ -441,7 +452,15 @@ ProjectResult loadProject(Scene& scene, const std::string& path) {
         }
         if (r.bad) { res.error = "truncated file"; return res; }
 
-        const ObjectId newId = loaded.addPrimitive(spec.kind, spec, t.position);
+        // An object that came from a file -- a STEP import, a mesh, a piece of a
+        // split -- has no primitive to start from: its chain begins with the
+        // geometry itself. Starting every object from a primitive refused
+        // these outright, so a project holding one saved and then would not
+        // open.
+        const bool fromGeometry = !chain.empty() && chain.front().kind == FeatureKind::BaseMesh;
+        const ObjectId newId = fromGeometry
+            ? loaded.addImportedBody(chain.front().bakedBody, name)
+            : loaded.addPrimitive(spec.kind, spec, t.position);
         if (newId == kNoObject) { res.error = "object '" + name + "' failed to build"; return res; }
 
         SceneObject* o = loaded.find(newId);

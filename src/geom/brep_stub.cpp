@@ -132,6 +132,11 @@ MeshHealth health(const BrepShape&, bool) { return {}; }
 
 BrepRef transformed(const BrepShape&, const Mat4&) { return {}; }
 BrepRef mirrored(const BrepShape&, Vec3, Vec3) { return {}; }
+size_t separateSolids(const BrepShape&, std::vector<BrepRef>& out) { out.clear(); return 0; }
+bool splitByPlane(const BrepShape&, Vec3, Vec3, ElementId, BrepRef&, BrepRef&, std::string* reason) {
+    if (reason) *reason = "splitting an exact body needs the exact kernel, which this build does not have";
+    return false;
+}
 
 bool writeStep(const std::vector<const BrepShape*>&, const std::string&,
                std::string* reason) {

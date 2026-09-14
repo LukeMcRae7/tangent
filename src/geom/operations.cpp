@@ -1,5 +1,7 @@
 #include "geom/operations.h"
 
+#include "mesh/decimate.h"
+
 #include <cstdio>
 
 namespace tg {
@@ -273,6 +275,19 @@ bool patternBody(Body& body, const Body& tool, const PatternSpec& spec,
     return true;
 }
 
+bool reduceBody(Body& body, const ReduceOptions& options, ElementId salt, ReduceResult& result) {
+    if (!body.isMesh()) {
+        result = ReduceResult{};
+        result.error = "this body is already exact, so it has no triangles to reduce";
+        return false;
+    }
+    Mesh out;
+    result = reduceMesh(body.mesh(), options, out, salt);
+    if (!result.ok) return false;
+    body = Body(std::move(out));
+    return true;
+}
+
 bool booleanOp(const Body& a, const Body& b, BooleanOp op, Body& out,
                ElementId salt, bool trustBNames, std::string* reason) {
     if (reason) reason->clear();
@@ -307,6 +322,14 @@ std::vector<EdgeId> extendTangentChain(const Body& body, const std::vector<EdgeI
 }
 
 size_t splitBodies(const Body& body, std::vector<Body>& out) {
+    if (!body.isMesh()) {
+        std::vector<BrepRef> solids;
+        brep::separateSolids(body.brep(), solids);
+        out.clear();
+        for (BrepRef& r : solids) out.push_back(Body(std::move(r)));
+        if (out.empty() && !body.empty()) out.push_back(body);
+        return out.size();
+    }
     std::vector<Mesh> pieces;
     const size_t n = splitShells(body.mesh(), pieces);
     out.clear();
@@ -317,6 +340,60 @@ size_t splitBodies(const Body& body, std::vector<Body>& out) {
 
 bool splitByPlane(const Body& body, Vec3 planePoint, Vec3 planeNormal,
                   Body& a, Body& b) {
+    if (!body.isMesh()) {
+        const Real nLen = length(planeNormal);
+        if (!(nLen > 1e-12) || body.empty()) return false;
+        const Vec3 n = planeNormal * (Real(1) / nLen);
+
+
+        // One pass through the splitter first. It is about half the work of
+        // the two booleans below, which remain for a body it refuses. It
+        // refuses a side with nothing of substance on it itself, so what it
+        // returns needs no checking here.
+        {
+            BrepRef up, down;
+            if (brep::splitByPlane(body.brep(), planePoint, n, 0x5711C, up, down, nullptr)) {
+                a = Body(std::move(up));
+                b = Body(std::move(down));
+                return true;
+            }
+        }
+        const Real whole0 = std::fabs(body.health(false).volume);
+
+        // A frame with the plane's normal as its z axis.
+        const Vec3 helper = std::fabs(n.x) < 0.9 ? Vec3{1, 0, 0} : Vec3{0, 1, 0};
+        const Vec3 u = normalize(cross(helper, n));
+        const Vec3 v = cross(n, u);
+        const Mat4 frame(Vec4(u, 0), Vec4(v, 0), Vec4(n, 0), Vec4(planePoint, 1));
+
+        // Boxes several times the body's size, so that each covers everything on
+        // its side of the plane however the body sits.
+        const AABB box = body.bounds();
+        const Real reach = (length(box.size()) + length(box.center() - planePoint)) * 2 + 1;
+        PrimitiveSpec half;
+        half.kind = PrimitiveKind::Box;
+        half.box = {reach * 2, reach * 2, reach};
+        Body above, below;
+        if (!makePrimitive(half, above, Backend::Brep)) return false;
+        below = above;
+        above.transform(frame * translate({0, 0, reach * 0.5}));
+        below.transform(frame * translate({0, 0, -reach * 0.5}));
+
+        Body sideA, sideB;
+        if (!booleanOp(body, above, BooleanOp::Intersection, sideA, 0x5711A, false, nullptr) ||
+            !booleanOp(body, below, BooleanOp::Intersection, sideB, 0x5711B, false, nullptr))
+            return false;
+        // A plane that misses, or only touches, leaves one side with nothing in
+        // it; that is not a split.
+        const Real whole = whole0;
+        const Real va = sideA.empty() ? 0 : std::fabs(sideA.health(false).volume);
+        const Real vb = sideB.empty() ? 0 : std::fabs(sideB.health(false).volume);
+        const Real crumb = whole * 1e-9;
+        if (va <= crumb || vb <= crumb) return false;
+        a = std::move(sideA);
+        b = std::move(sideB);
+        return true;
+    }
     Mesh ma, mb;
     if (!splitBodyByPlane(body.mesh(), planePoint, planeNormal, ma, mb)) return false;
     a = Body(std::move(ma));

@@ -15,10 +15,19 @@ namespace tg {
 
 bool childIsolationAvailable() { return TG_HAVE_FORK != 0; }
 
+namespace {
+// Written once, in the child, before it runs anything; read from then on by
+// that single thread. No lock is needed and none would be safe to take.
+bool gIsolatedChild = false;
+}
+
+bool inIsolatedChild() { return gIsolatedChild; }
+
 Attempt tryInChild(const std::function<bool()>& work) {
 #if TG_HAVE_FORK
     const pid_t pid = fork();
     if (pid == 0) {
+        gIsolatedChild = true;
         // The child. Anything it touches is thrown away with it, so the only
         // thing that has to be right is the exit code.
         int code = 2;
@@ -65,6 +74,7 @@ void AsyncTrial::start(const std::function<bool()>& work) {
 #if TG_HAVE_FORK
     const pid_t pid = fork();
     if (pid == 0) {
+        gIsolatedChild = true;
         int code = 2;
         try {
             code = work() ? 0 : 1;

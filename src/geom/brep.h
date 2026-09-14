@@ -327,6 +327,18 @@ BrepRef transformed(const BrepShape& s, const Mat4& m);
 // that from a mirror transform; it cannot know it from a matrix.
 BrepRef mirrored(const BrepShape& s, Vec3 point, Vec3 normal);
 
+// Each solid of a shape that holds more than one, as its own shape, keeping the
+// names its faces had. Largest first, so a caller keeping one piece in place
+// keeps the main one. A shape with a single solid yields that solid.
+size_t separateSolids(const BrepShape& s, std::vector<BrepRef>& out);
+
+// Cuts a body in two along a plane, in one pass: the plane goes in as a single
+// face and every solid that comes out is sorted by which side its centre is on.
+// `above` is the side `normal` points to. Either side may hold several solids.
+// False, with `reason`, when the plane does not cut through.
+bool splitByPlane(const BrepShape& s, Vec3 point, Vec3 normal, ElementId salt,
+                  BrepRef& above, BrepRef& below, std::string* reason);
+
 // ---------------------------------------------------------------------------
 // STEP.
 //

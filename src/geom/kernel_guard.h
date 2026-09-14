@@ -75,4 +75,14 @@ private:
 // a crash in `work` is still fatal and callers should probe less adventurously.
 bool childIsolationAvailable();
 
+// True in a process forked to run kernel work in isolation.
+//
+// Such a child has exactly one thread -- the one that forked -- but inherits
+// the bookkeeping of every thread pool its parent had started, OpenCASCADE's
+// included. A parallel boolean run in it waits for workers that were never
+// copied across, and waits forever: turning on OCCT's parallel mode hung both
+// tests that exercise isolation, parent and child at zero CPU. Anything that
+// would spread work across threads asks this first and stays on one.
+bool inIsolatedChild();
+
 } // namespace tg

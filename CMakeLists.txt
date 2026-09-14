@@ -338,6 +338,13 @@ target_include_directories(test_validity PRIVATE src)
 target_compile_options(test_validity PRIVATE ${TANGENT_WARNINGS})
 add_test(NAME validity COMMAND test_validity)
 
+add_executable(test_split tests/test_split.cpp ${TANGENT_GEOM}
+  src/mesh/boolean.cpp src/mesh/health.cpp src/mesh/operations.cpp
+  src/mesh/halfedge.cpp src/mesh/primitives.cpp src/mesh/import_mesh.cpp)
+target_include_directories(test_split PRIVATE src)
+target_compile_options(test_split PRIVATE ${TANGENT_WARNINGS})
+add_test(NAME split COMMAND test_split)
+
 add_executable(test_decimate tests/test_decimate.cpp ${TANGENT_GEOM}
   src/mesh/boolean.cpp src/mesh/health.cpp src/mesh/operations.cpp
   src/mesh/halfedge.cpp src/mesh/primitives.cpp src/mesh/import_mesh.cpp)

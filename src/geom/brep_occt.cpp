@@ -15,6 +15,7 @@
 // elements a boolean invents.
 #include "geom/brep.h"
 #include "geom/brep_valid.h"
+#include "geom/kernel_guard.h"
 
 // STEP. Kept together and commented because these are the only headers here
 // that are not modelling -- they come from the DataExchange module.
@@ -49,6 +50,7 @@
 #include <BRep_Tool.hxx>
 #include <TopoDS_Shell.hxx>
 #include <gp_Pln.hxx>
+#include <BRepAlgoAPI_Splitter.hxx>
 #include <TopoDS_Compound.hxx>
 #include <TopLoc_Location.hxx>
 #include <Geom_Surface.hxx>
@@ -1127,7 +1129,7 @@ bool edgeUsesConsistent(const TopoDS_Shape& shape) {
 } // namespace
 
 bool fullAnalyzerValid(const TopoDS_Shape& shape) {
-    return !shape.IsNull() && BRepCheck_Analyzer(shape).IsValid();
+    return !shape.IsNull() && BRepCheck_Analyzer(shape, Standard_True, !inIsolatedChild()).IsValid();
 }
 
 bool shapeIsValid(const TopoDS_Shape& shape, size_t prunedAbove) {
@@ -1139,8 +1141,9 @@ bool shapeIsValid(const TopoDS_Shape& shape, size_t prunedAbove) {
     for (int i = 1; i <= faces.Extent() && !anyHeavy; ++i)
         anyHeavy = heavy(weigh(faces(i)), prunedAbove);
 
-    // The ordinary case, untouched.
-    if (!anyHeavy) return BRepCheck_Analyzer(shape).IsValid();
+    // The ordinary case: the whole analyzer, across the cores. Parallel
+    // changes how the sub-shapes are shared out, not what is checked.
+    if (!anyHeavy) return BRepCheck_Analyzer(shape, Standard_True, !inIsolatedChild()).IsValid();
 
     // The light faces together, in one pass: each of their edges and vertices
     // is then checked once rather than once per face that touches it, and the
@@ -1158,7 +1161,7 @@ bool shapeIsValid(const TopoDS_Shape& shape, size_t prunedAbove) {
             builder.Add(light, f);
         }
     }
-    if (!BRepCheck_Analyzer(light).IsValid()) return false;
+    if (!BRepCheck_Analyzer(light, Standard_True, !inIsolatedChild()).IsValid()) return false;
     return edgeUsesConsistent(shape);
 }
 
@@ -1238,11 +1241,24 @@ BrepRef booleanOp(const BrepShape& a, const BrepShape& b, BooleanOp op,
     try {
         std::unique_ptr<BRepAlgoAPI_BooleanOperation> algo;
         switch (op) {
-            case BooleanOp::Union:        algo = std::make_unique<BRepAlgoAPI_Fuse>(a.shape, b.shape); break;
-            case BooleanOp::Difference:   algo = std::make_unique<BRepAlgoAPI_Cut>(a.shape, b.shape); break;
-            case BooleanOp::Intersection: algo = std::make_unique<BRepAlgoAPI_Common>(a.shape, b.shape); break;
+            case BooleanOp::Union:        algo = std::make_unique<BRepAlgoAPI_Fuse>(); break;
+            case BooleanOp::Difference:   algo = std::make_unique<BRepAlgoAPI_Cut>(); break;
+            case BooleanOp::Intersection: algo = std::make_unique<BRepAlgoAPI_Common>(); break;
         }
         if (!algo) return {};
+        TopTools_ListOfShape arguments, tools;
+        arguments.Append(a.shape);
+        tools.Append(b.shape);
+        algo->SetArguments(arguments);
+        algo->SetTools(tools);
+        // Across the cores, and with boxes that turn with the faces they bound.
+        // Neither changes what is computed, only how it is found: on a solid
+        // converted from a scan -- five thousand faces -- boring one hole spent
+        // most of a second finding which faces might meet, on one thread, with
+        // axis-aligned boxes that on a tilted facet enclose mostly air.
+        algo->SetRunParallel(!inIsolatedChild());
+        algo->SetUseOBB(Standard_True);
+        algo->Build();
         if (!algo->IsDone() || algo->HasErrors()) {
             if (reason) {
                 std::ostringstream os;
@@ -2705,6 +2721,179 @@ BrepRef solidFromTriangles(const std::vector<Vec3>& points,
     } catch (const Standard_Failure& e) {
         if (reason) *reason = kernelReason(e, "the mesh could not be made solid");
         return {};
+    }
+}
+
+size_t separateSolids(const BrepShape& s, std::vector<BrepRef>& out) {
+    out.clear();
+    if (s.shape.IsNull()) return 0;
+    struct Piece { BrepRef shape; Real volume; };
+    std::vector<Piece> pieces;
+    try {
+        TopTools_IndexedMapOfShape solids;
+        TopExp::MapShapes(s.shape, TopAbs_SOLID, solids);
+        for (int i = 1; i <= solids.Extent(); ++i) {
+            const TopoDS_Shape& solid = solids(i);
+            // Each face keeps the name it had in the whole: it is the same face,
+            // and anything that referred to it should still find it.
+            TopTools_IndexedMapOfShape faces;
+            TopExp::MapShapes(solid, TopAbs_FACE, faces);
+            std::vector<ElementId> names(static_cast<size_t>(faces.Extent()), kNoId);
+            for (int f = 1; f <= faces.Extent(); ++f) {
+                const int at = s.faces.FindIndex(faces(f));
+                if (at > 0 && static_cast<size_t>(at - 1) < s.faceNames.size())
+                    names[static_cast<size_t>(f - 1)] = s.faceNames[static_cast<size_t>(at - 1)];
+            }
+            GProp_GProps props;
+            BRepGProp::VolumeProperties(solid, props);
+            BrepRef r = makeBrep(solid, names);
+            if (r) pieces.push_back({std::move(r), std::fabs(props.Mass())});
+        }
+    } catch (const Standard_Failure&) {
+        out.clear();
+        return 0;
+    }
+    std::stable_sort(pieces.begin(), pieces.end(),
+                     [](const Piece& a, const Piece& b) { return a.volume > b.volume; });
+    for (Piece& p : pieces) out.push_back(std::move(p.shape));
+    return out.size();
+}
+
+bool splitByPlane(const BrepShape& s, Vec3 point, Vec3 normal, ElementId salt,
+                  BrepRef& above, BrepRef& below, std::string* reason) {
+    if (reason) reason->clear();
+    const Real len = length(normal);
+    if (s.shape.IsNull() || !(len > 1e-12)) {
+        if (reason) *reason = "there is nothing to split, or no plane to split it by";
+        return false;
+    }
+    const Vec3 n = normal * (Real(1) / len);
+    try {
+        // The plane as one face, big enough to reach past the body however the
+        // body sits relative to the point it was given.
+        Bnd_Box box;
+        BRepBndLib::Add(s.shape, box);
+        Standard_Real x0, y0, z0, x1, y1, z1;
+        box.Get(x0, y0, z0, x1, y1, z1);
+        const Vec3 lo{x0, y0, z0}, hi{x1, y1, z1};
+        const Real reach = length(hi - lo) + length((lo + hi) * Real(0.5) - point) + 1;
+        const gp_Pln plane(gp_Pnt(point.x, point.y, point.z), gp_Dir(n.x, n.y, n.z));
+        BRepBuilderAPI_MakeFace face(plane, -reach, reach, -reach, reach);
+        if (!face.IsDone()) {
+            if (reason) *reason = "the cutting plane could not be made";
+            return false;
+        }
+        const TopoDS_Face tool = face.Face();
+        BrepRef toolShape = makeBrep(tool, nameImportedFaces(tool, nameId(salt, IdRole::Split, 1)));
+
+        BRepAlgoAPI_Splitter splitter;
+        TopTools_ListOfShape arguments, tools;
+        arguments.Append(s.shape);
+        tools.Append(tool);
+        splitter.SetArguments(arguments);
+        splitter.SetTools(tools);
+        // As the booleans: across the cores, with boxes that turn with their
+        // faces, and never in an isolated child.
+        splitter.SetRunParallel(!inIsolatedChild());
+        splitter.SetUseOBB(Standard_True);
+        splitter.Build();
+        if (!splitter.IsDone() || splitter.HasErrors()) {
+            if (reason) *reason = "the kernel could not cut it along that plane";
+            return false;
+        }
+        const TopoDS_Shape result = splitter.Shape();
+        if (!acceptable(result, reason)) return false;
+        const std::vector<ElementId> names =
+            propagateNames(splitter, {{&s}, {toolShape.get()}}, result, salt);
+
+        TopTools_IndexedMapOfShape resultFaces;
+        TopExp::MapShapes(result, TopAbs_FACE, resultFaces);
+
+        // Each solid to its side. After the cut every solid lies wholly on one
+        // side of the plane, touching it at most, so the point of it furthest
+        // from the plane says which side.
+        //
+        // Found as cheaply as the shape allows. Its vertices first: on a part
+        // made of flat faces that settles it, and a volume integral to learn one
+        // sign cost a tenth of a second on a converted scan. But a curved solid
+        // can have every vertex on the cut -- half a cylinder cut through its
+        // axis, half a sphere at its equator -- so then points along its edges'
+        // actual curves, and, where even those lie in the plane as a torus's do,
+        // its volume and the side its centre is on.
+        //
+        // Nothing with volume is ever dropped. The first version dropped any
+        // solid whose vertices were all on the plane as a sliver; the halves of
+        // a cylinder, a sphere and a torus all went, and only the fallback
+        // below -- triggered because a side came back empty -- hid it. A side
+        // holding two solids, one of them like that, would not have been empty,
+        // and would have lost a piece without a word.
+        BRep_Builder builder;
+        TopoDS_Compound up, down;
+        builder.MakeCompound(up);
+        builder.MakeCompound(down);
+        int ups = 0, downs = 0;
+        TopoDS_Shape oneUp, oneDown;
+        const Real sliver = reach * 1e-9;
+        auto signedDistance = [&](const gp_Pnt& p) {
+            return (p.X() - point.x) * n.x + (p.Y() - point.y) * n.y + (p.Z() - point.z) * n.z;
+        };
+        for (TopExp_Explorer ex(result, TopAbs_SOLID); ex.More(); ex.Next()) {
+            const TopoDS_Shape& solid = ex.Current();
+            Real furthest = 0;
+            auto consider = [&](Real d) { if (std::fabs(d) > std::fabs(furthest)) furthest = d; };
+
+            for (TopExp_Explorer v(solid, TopAbs_VERTEX); v.More(); v.Next())
+                consider(signedDistance(BRep_Tool::Pnt(TopoDS::Vertex(v.Current()))));
+
+            if (std::fabs(furthest) <= sliver) {
+                for (TopExp_Explorer e(solid, TopAbs_EDGE); e.More(); e.Next()) {
+                    const TopoDS_Edge& edge = TopoDS::Edge(e.Current());
+                    if (BRep_Tool::Degenerated(edge)) continue;
+                    BRepAdaptor_Curve curve(edge);
+                    const Standard_Real t0 = curve.FirstParameter(), t1 = curve.LastParameter();
+                    for (Real f : {0.25, 0.5, 0.75}) consider(signedDistance(curve.Value(t0 + (t1 - t0) * f)));
+                }
+            }
+
+            if (std::fabs(furthest) <= sliver) {
+                GProp_GProps props;
+                BRepGProp::VolumeProperties(solid, props);
+                // Negligible against a cube the size of the cut, not against zero.
+                if (std::fabs(props.Mass()) <= reach * reach * reach * 1e-15) continue;
+                consider(signedDistance(props.CentreOfMass()));
+                if (furthest == 0) {
+                    // A real volume with its centre exactly on the plane cannot
+                    // lie wholly on one side of it: the cut did not separate it.
+                    if (reason) *reason = "the cut left a solid it could not place on either side";
+                    return false;
+                }
+            }
+
+            if (furthest > 0) { builder.Add(up, solid); oneUp = solid; ++ups; }
+            else              { builder.Add(down, solid); oneDown = solid; ++downs; }
+        }
+        if (ups == 0 || downs == 0) {
+            if (reason) *reason = "the plane does not cut through it";
+            return false;
+        }
+
+        // A side with one solid is that solid, not a compound holding it.
+        auto keep = [&](const TopoDS_Shape& shape) {
+            TopTools_IndexedMapOfShape faces;
+            TopExp::MapShapes(shape, TopAbs_FACE, faces);
+            std::vector<ElementId> own(static_cast<size_t>(faces.Extent()), kNoId);
+            for (int f = 1; f <= faces.Extent(); ++f) {
+                const int at = resultFaces.FindIndex(faces(f));
+                if (at > 0) own[static_cast<size_t>(f - 1)] = names[static_cast<size_t>(at - 1)];
+            }
+            return makeBrep(shape, own);
+        };
+        above = keep(ups == 1 ? oneUp : TopoDS_Shape(up));
+        below = keep(downs == 1 ? oneDown : TopoDS_Shape(down));
+        return above && below;
+    } catch (const Standard_Failure& e) {
+        if (reason) *reason = kernelReason(e, "the body could not be split");
+        return false;
     }
 }
 

@@ -42,5 +42,28 @@ for m in 1 2 3 4 5; do
   fi
 done
 
+# A large mesh has to get all the way to being useful: reduced to fit, turned
+# into a solid, bored, and split -- each step checked for what it made, not
+# only for running. The plate is generated, so this needs no file on disk.
+out=$(timeout 300 ./build/tangent --reduce-demo :plate --smoke-test 5 2>&1)
+if ! echo "$out" | grep -q "\[reduce-demo\] ready=1 ok=1"; then
+  printf '  FAIL  reduce-demo: the panel did not come back ready\n'
+  echo "$out" | grep "reduce-demo" | sed 's/^/        /'
+  fail=1
+else
+  printf '  ok    --reduce-demo :plate\n'
+fi
+out=$(timeout 300 ./build/tangent --mesh-bench :plate --smoke-test 5 2>&1)
+if echo "$out" | grep -q "reduce ok=1.*within=1" &&
+   echo "$out" | grep -q "convert ok=1.*closed=1" &&
+   echo "$out" | grep -q "boolean ok=1 closed=1" &&
+   echo "$out" | grep -q "split ok,.*closed=1/1"; then
+  printf '  ok    --mesh-bench :plate\n'
+else
+  printf '  FAIL  mesh-bench: reduce, convert, boolean or split did not hold\n'
+  echo "$out" | grep "mesh-bench" | sed 's/^/        /'
+  fail=1
+fi
+
 [ $fail -eq 0 ] && echo "sweep clean" || echo "sweep FAILED"
 exit $fail

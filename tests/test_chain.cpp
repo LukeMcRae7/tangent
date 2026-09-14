@@ -12,7 +12,10 @@
 // back the same through a file. Does it survive its root being changed.
 #include "scene/scene.h"
 #include "scene/serialize.h"
+#include "geom/brep.h"
 #include "geom/operations.h"
+#include "mesh/decimate.h"
+#include "mesh/health.h"
 
 #include <cmath>
 #include <cstdio>
@@ -240,6 +243,124 @@ int main() {
         show("wider box", wider);
         check(wider.solid, "and it is still a solid");
         check(wider.volume > built.volume, "with more material in it");
+    }
+
+    // --- a reduced mesh, through the chain and a file ----------------------
+    std::printf("--- a reduced mesh, in the chain and in a file ---\n");
+    {
+        // A lumpy closed mesh, built directly: the stand-in for an import.
+        const int rings = 40, segs = 80;
+        std::vector<Vec3> p;
+        std::vector<uint32_t> sizes, idx;
+        auto at = [&](Real th, Real ph) {
+            const Real r = 12 * (1 + 0.08 * std::sin(4 * th) * std::cos(5 * ph));
+            return Vec3{r * std::sin(th) * std::cos(ph), r * std::sin(th) * std::sin(ph), r * std::cos(th)};
+        };
+        p.push_back(at(0, 0));
+        for (int i = 1; i < rings; ++i)
+            for (int j = 0; j < segs; ++j) p.push_back(at(kPi * i / rings, 2 * kPi * j / segs));
+        p.push_back(at(kPi, 0));
+        const uint32_t south = static_cast<uint32_t>(p.size() - 1);
+        auto V = [&](int i, int j) { return static_cast<uint32_t>(1 + (i - 1) * segs + (j % segs)); };
+        auto tri = [&](uint32_t a, uint32_t b, uint32_t c) { sizes.push_back(3); idx.insert(idx.end(), {a, b, c}); };
+        for (int j = 0; j < segs; ++j) tri(0, V(1, j), V(1, j + 1));
+        for (int i = 1; i < rings - 1; ++i)
+            for (int j = 0; j < segs; ++j) { tri(V(i, j), V(i + 1, j), V(i + 1, j + 1)); tri(V(i, j), V(i + 1, j + 1), V(i, j + 1)); }
+        for (int j = 0; j < segs; ++j) tri(V(rings - 1, j), south, V(rings - 1, j + 1));
+        Mesh m;
+        check(m.build(p, sizes, idx), "the mesh builds");
+
+        Scene s;
+        const ObjectId id = s.addImportedBody(Body(m), "lumpy");
+        check(id != kNoObject, "and comes in as an object");
+        SceneObject* obj = s.find(id);
+
+        Feature f;
+        f.kind = FeatureKind::Reduce;
+        f.uid = 777001;
+        f.reduceTolerance = 0.05;
+        f.reduceTarget = 1200;
+        f.reduceLoosen = true;
+
+        // The way the editor commits: the result built beforehand, from the
+        // same body with the same uid, handed over instead of rebuilt.
+        Body preview = obj->body;
+        ReduceOptions o;
+        o.toleranceMm = f.reduceTolerance;
+        o.targetTriangles = static_cast<size_t>(f.reduceTarget);
+        o.loosenToReachTarget = f.reduceLoosen;
+        ReduceResult rr;
+        check(reduceBody(preview, o, f.uid, rr), "the preview reduces: " + rr.error);
+        s.addFeatureWithResult(id, f, preview);
+        const Body committed = obj->body;
+
+        // And the way a chain is rebuilt: from nothing.
+        check(s.reevaluate(id), "the chain re-evaluates");
+        check(!obj->features.back().errored, "the reduction evaluates: " + obj->features.back().error);
+        auto sameMesh = [](const Body& a, const Body& b) {
+            if (!a.isMesh() || !b.isMesh()) return false;
+            const Mesh& x = a.mesh();
+            const Mesh& y = b.mesh();
+            if (x.verts.size() != y.verts.size() || x.faces.size() != y.faces.size()) return false;
+            for (size_t i = 0; i < x.verts.size(); ++i)
+                if (x.verts[i].position.x != y.verts[i].position.x || x.verts[i].position.y != y.verts[i].position.y ||
+                    x.verts[i].position.z != y.verts[i].position.z || x.verts[i].id != y.verts[i].id)
+                    return false;
+            for (size_t i = 0; i < x.faces.size(); ++i)
+                if (x.faces[i].id != y.faces[i].id) return false;
+            return true;
+        };
+        check(sameMesh(committed, obj->body), "rebuilding gives exactly what was committed, names and all");
+        check(obj->body.faceCount() <= 1200, "within the count it was asked for");
+
+        const std::string path = "/tmp/tg_chain_reduce.tgt";
+        check(saveProject(s, path).ok, "saved");
+        Scene back;
+        const ProjectResult res = loadProject(back, path);
+        check(res.ok, "loaded: " + res.error);
+        SceneObject* again = back.objects().empty() ? nullptr : back.objects().front().get();
+        check(again && again->features.size() == 2, "with both steps");
+        if (again && again->features.size() == 2) {
+            const Feature& g = again->features[1];
+            check(g.kind == FeatureKind::Reduce && g.reduceTolerance == 0.05 && g.reduceTarget == 1200 &&
+                      g.reduceLoosen, "the reduction's settings come back");
+            check(sameMesh(committed, again->body), "and so does exactly the same mesh");
+        }
+        std::remove(path.c_str());
+    }
+
+    // --- an imported exact body, in a file ----------------------------------
+    // What a STEP import makes: an object whose chain starts with an exact
+    // solid rather than a primitive. Saved, it used to refuse to open.
+    if (brep::available()) {
+        std::printf("--- an imported exact body survives a file ---\n");
+        PrimitiveSpec spec;
+        spec.kind = PrimitiveKind::Cylinder;
+        spec.cylinder = {8, 20, 48};
+        Body solid;
+        check(makePrimitive(spec, solid, Backend::Brep), "a solid to import");
+        const Real vol = solid.health(false).volume;
+        const int faces = solid.faceCount();
+
+        Scene s;
+        const ObjectId id = s.addImportedBody(solid, "bracket");
+        check(id != kNoObject, "comes in as an object");
+        s.find(id)->transform.position = {5, 6, 7};
+
+        const std::string path = "/tmp/tg_chain_import.tgt";
+        check(saveProject(s, path).ok, "saved");
+        Scene back;
+        const ProjectResult res = loadProject(back, path);
+        check(res.ok, "loaded: " + res.error);
+        const SceneObject* o = back.objects().empty() ? nullptr : back.objects().front().get();
+        check(o != nullptr, "the object is there");
+        if (o) {
+            check(o->name == "bracket", "with its name");
+            check(!o->body.isMesh() && o->body.faceCount() == faces, "still exact, with its faces");
+            check(std::fabs(o->body.health(false).volume - vol) < vol * 1e-9, "and its volume");
+            check(length(o->transform.position - Vec3{5, 6, 7}) < 1e-12, "where it was put");
+        }
+        std::remove(path.c_str());
     }
 
     std::printf("\n%s (%d failures)\n", failures ? "FAILED" : "ALL PASS", failures);

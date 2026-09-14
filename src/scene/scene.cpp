@@ -298,6 +298,26 @@ bool Scene::addFeature(ObjectId id, Feature feature, std::string* error) {
     return true;
 }
 
+void Scene::addFeatureWithResult(ObjectId id, Feature feature, Body result) {
+    SceneObject* obj = find(id);
+    if (!obj) return;
+    // The cache is trusted by its length alone, so it has to be whole before a
+    // result is placed at its end: an incremental evaluation later starts from
+    // the entry before the step it is re-running, and a gap there would hand it
+    // an empty body. An imported mesh's chain is its root, which is cheap to
+    // evaluate; anything longer costs what an ordinary append would have.
+    if (obj->featureCache.size() != obj->features.size()) {
+        Body current;
+        evaluateFrom(obj->features, 0, obj->featureCache, current);
+    }
+    if (feature.uid == 0) feature.uid = nextFeatureUid_++;
+    obj->features.push_back(std::move(feature));
+    obj->featureCache.push_back(result);
+    obj->body = std::move(result);
+    obj->refreshDerived();
+    pruneElementSelection();
+}
+
 bool Scene::setFeatures(ObjectId id, std::vector<Feature> features, std::string* error) {
     if (error) error->clear();
     SceneObject* obj = find(id);

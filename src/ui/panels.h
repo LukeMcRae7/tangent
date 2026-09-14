@@ -58,6 +58,7 @@ struct UiActions {
     bool mergeFaces = false;
     bool pattern = false;
     bool mirror = false;
+    bool reduceMesh = false;
     bool inset = false;
     bool bevel = false;
     bool split = false;

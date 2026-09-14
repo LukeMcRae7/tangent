@@ -1,5 +1,7 @@
 #include "scene/feature.h"
 
+#include "mesh/decimate.h"
+
 #include "geom/operations.h"
 
 #include <algorithm>
@@ -25,6 +27,7 @@ const char* featureKindName(FeatureKind k) {
         case FeatureKind::Divide:     return "Divide";
         case FeatureKind::Merge:      return "Merge Faces";
         case FeatureKind::Pattern:    return "Pattern";
+        case FeatureKind::Reduce:     return "Reduce Mesh";
     }
     return "Feature";
 }
@@ -142,6 +145,15 @@ std::string Feature::summary() const {
                                   patternCount, static_cast<double>(degrees(angle)));
                     break;
             }
+            break;
+        case FeatureKind::Reduce:
+            if (reduceTarget > 0)
+                std::snprintf(buf, sizeof(buf), "Reduce  %s %.3g mm, to %d triangles",
+                              reduceLoosen ? "from" : "within",
+                              static_cast<double>(reduceTolerance), reduceTarget);
+            else
+                std::snprintf(buf, sizeof(buf), "Reduce  within %.3g mm",
+                              static_cast<double>(reduceTolerance));
             break;
         case FeatureKind::Divide:
             std::snprintf(buf, sizeof(buf), "Divide  at %.2f, %.2f, %.2f",
@@ -416,6 +428,33 @@ bool evaluateFrom(std::vector<Feature>& features, size_t from,
             std::string why;
             if (!patternBody(body, f.bakedBody, f.pattern(), f.uid, &why))
                 fail(why.empty() ? "the pattern could not be built" : why.c_str());
+            break;
+        }
+
+        case FeatureKind::Reduce: {
+            if (body.empty()) { fail("nothing to reduce"); break; }
+            ReduceOptions options;
+            options.toleranceMm = f.reduceTolerance;
+            options.targetTriangles = f.reduceTarget > 0 ? static_cast<size_t>(f.reduceTarget) : 0;
+            options.loosenToReachTarget = f.reduceLoosen;
+            ReduceResult result;
+            Body reduced = body;
+            if (!reduceBody(reduced, options, f.uid, result)) {
+                fail(result.error.empty() ? "the mesh could not be reduced" : result.error.c_str());
+                break;
+            }
+            // The tolerance is the promise. A result that could not be brought
+            // within it is not quietly kept.
+            if (!result.withinTolerance) {
+                char why[160];
+                std::snprintf(why, sizeof why,
+                              "could only hold %.3g mm, not the %.3g it set out to",
+                              static_cast<double>(result.deviationMm),
+                              static_cast<double>(result.toleranceUsedMm));
+                fail(why);
+                break;
+            }
+            body = std::move(reduced);
             break;
         }
 

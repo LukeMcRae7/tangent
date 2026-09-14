@@ -4,6 +4,7 @@
 #include "app/camera.h"
 #include "app/drag_axis.h"
 #include "app/async_build.h"
+#include "mesh/decimate.h"
 #include "geom/kernel_guard.h"
 #include "app/create_tool.h"
 #include "app/file_dialog.h"
@@ -18,7 +19,9 @@
 #include "scene/scene.h"
 #include "ui/panels.h"
 
+#include <atomic>
 #include <future>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -124,6 +127,7 @@ public:
     void setStepDemo(const std::string& path) { stepDemo_ = path; }
     void setDialogDemo(int mode) { dialogDemo_ = mode; }
     void setMeshBench(const std::string& path) { meshBench_ = path; }
+    void setReduceDemo(const std::string& path) { reduceDemo_ = path; }
 
     // Throws a fast, wandering drag at the extrude, including the places a
     // hand actually goes: the corners of the window, and straight through the
@@ -183,6 +187,10 @@ private:
     std::string meshBench_;
     bool meshBenchDone_ = false;
     void stepMeshBench();
+    std::string reduceDemo_;
+    bool reduceDemoDone_ = false;
+    void stepReduceDemo();
+    std::string writeDrilledPlate();
 
     // Runs the print check on one object and gathers the triangles it flagged,
     // so drawing them later costs those triangles and nothing else. Synchronous;
@@ -630,6 +638,77 @@ private:
         }
     };
     PatternToolState patternTool_;
+
+    // Reducing a mesh. A panel with a live preview rather than a gesture: the
+    // pointer drives nothing, a reduction takes seconds on a large mesh, and
+    // what someone needs while choosing a tolerance is to see what it gives --
+    // the triangles left, how far the surface moved, and whether the result
+    // will convert.
+    //
+    // Each preview is a job with its own parameters, cancel flag and result.
+    // When the tolerance changes mid-build the running job is told to stop, so
+    // the one asked for next starts within a batch rather than seconds later.
+    struct ReduceJob {
+        Real tolerance = 0;
+        int  target = 0;
+        bool loosen = false;
+        std::atomic<bool> cancel{false};
+        ReduceResult result;
+        int  solidFaces = 0;           // what Convert to Solid would make of it
+    };
+    struct ReduceToolState {
+        bool     active = false;
+        ObjectId objectId = kNoObject;
+        Real     tolerance = 0.05;
+        int      target = 0;
+        bool     loosen = false;
+        std::string typedValue;
+
+        // The uid the committed feature will carry, taken before the first
+        // preview so the preview names its faces exactly as evaluating the
+        // feature later will.
+        ElementId uid = 0;
+
+        Body before;
+        std::vector<Feature> chainBefore;
+        AsyncBuild preview;
+        std::shared_ptr<ReduceJob> running, pending, shown;
+        Body shownBody;
+
+        void reset() {
+            if (running) running->cancel = true;
+            preview.cancel();
+            objectId = kNoObject;
+            typedValue.clear();
+            uid = 0;
+            before = Body();
+            chainBefore.clear();
+            running.reset();
+            pending.reset();
+            shown.reset();
+            shownBody = Body();
+        }
+
+        // Whether what is on screen is a finished, verified result for the
+        // parameters as they stand -- the only thing OK will commit.
+        bool ready() const {
+            return shown && shown->tolerance == tolerance && shown->target == target &&
+                   shown->loosen == loosen &&
+                   shown->result.ok && shown->result.withinTolerance;
+        }
+    };
+    ReduceToolState reduceTool_;
+
+    // Whether a modal editing operation is running -- one that owns the model
+    // until it is confirmed or cancelled.
+    bool editToolActive() const;
+
+    void beginReduce();
+    void requestReducePreview();
+    void updateReduce();
+    void commitReduce();
+    void abortReduce();
+    void drawReducePanel();
 
     // Whether the pointer is somewhere a gesture can read a value from.
     //

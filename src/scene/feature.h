@@ -42,6 +42,7 @@ enum class FeatureKind {
     Merge,       // drop every division that does not define the shape
     FaceScale,   // grow or shrink a face in its own plane
     Pattern,     // repeat a tool, or the body, in a row, around an axis, or mirrored
+    Reduce,      // fewer triangles for a mesh, within a tolerance
 
     // New kinds go on the end and nowhere else. The value is what is written
     // to a file, so inserting one in the middle renumbers every kind after it
@@ -212,6 +213,14 @@ struct Feature {
     // half a symmetric part becomes the whole of it.
     PatternMode patternMode = PatternMode::Linear;
     int         patternCount = 2;
+
+    // Reduce: how far the surface may move, and optionally how few triangles
+    // to stop at (0: as few as the tolerance allows). The reduction is
+    // deterministic, so re-evaluating the chain names the same faces again and
+    // anything after it still finds what it refers to.
+    Real reduceTolerance = 0.05;
+    int  reduceTarget = 0;
+    bool reduceLoosen = false;       // loosen past the tolerance to reach the target
 
     // The pattern this feature describes, assembled from the fields above.
     PatternSpec pattern() const;
