@@ -3,6 +3,7 @@
 #include "mesh/export_3mf.h"
 #include "mesh/import_mesh.h"
 #include "geom/kernel_guard.h"
+#include "scene/trials.h"
 #include "render/lod.h"
 #include "ui/command_panel.h"
 #include "app/printability.h"
@@ -3630,12 +3631,7 @@ void Application::stepFilletFloorSearch() {
 void Application::startFilletTrial(Real radius) {
     // The same operation the preview and the commit will run, so the largest
     // radius found is the largest radius of the thing being made.
-    const Body start = filletTool_.buildBase;
-    const FilletSpec spec = filletSpecAt(radius);
-    filletTool_.search.trial.start([start, spec] {
-        Body test = start;
-        return filletEdges(test, spec);
-    });
+    filletTool_.search.trial.start(filletTrial(filletTool_.buildBase, filletSpecAt(radius)));
 }
 
 // Where the demo stands, in the sketch plane's own coordinates, and how far off
@@ -5897,11 +5893,7 @@ void Application::applyActions() {
                 if (f.kind == FeatureKind::Bevel && f.enabled) rounds = true;
 
             if (rounds) {
-                std::vector<Feature> trial = o->features;
-                const Attempt attempt = tryInChild([&] {
-                    Body out;
-                    return evaluateFeatures(trial, out);
-                });
+                const Attempt attempt = tryIsolated(chainTrial(o->features));
                 if (attempt == Attempt::Crashed) {
                     o->features = a.featuresBefore;
                     scene_.reevaluate(a.featuresEdited);

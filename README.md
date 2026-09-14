@@ -1,7 +1,7 @@
 <p align="center">
   <img src="assets/logo.png" alt="Project Logo" width="300" height="auto">
 </p>
-Meet tangent, a Linux-based 3D modeling software built for the ergonomics of Blender with the precision of Fusion360. Built for 3D printing purposes, it models on an exact kernel and exports to .stl natively, rejecting invalid operations immediately rather than handing back geometry that looks right and is not. It's fast, accurate, and just works. Tangent is C++ on OpenGL 3.3, targeting Linux/Wayland; the exact kernel is an optional dependency on OpenCASCADE, and without it the build has none beyond the system GL stack.<br><br>
+Meet tangent, a Linux-based 3D modeling software built for the ergonomics of Blender with the precision of Fusion360. Built for 3D printing purposes, it models on an exact kernel and exports to .3mf and .stl natively, rejecting invalid operations immediately rather than handing back geometry that looks right and is not. It's fast, accurate, and just works. Tangent is C++ on OpenGL 3.3, targeting Linux/Wayland; the exact kernel is an optional dependency on OpenCASCADE, and without it the build needs nothing beyond the system GL stack and zlib.<br><br>
 
 **Status:** early development, not ready for use
 
@@ -43,6 +43,12 @@ Linux takes the dependencies from the system. Windows takes them from vcpkg
 through `vcpkg.json`, so it wants `VCPKG_ROOT` set and an x64 Native Tools
 Command Prompt, which is where Ninja finds MSVC.
 
+A kernel call that might crash is tried in another process first. Linux forks
+for it; Windows has no fork, so the build makes `tangent_trial` for the purpose,
+and it has to stay beside `tangent` wherever that is copied. Setting
+`TANGENT_ISOLATION=worker` uses it on Linux too, which is how that path is
+tested.
+
 ### Without the exact kernel
 
 Modelling is done on an exact boundary representation, where a hole is a
@@ -59,7 +65,7 @@ kernel is missing:
 cmake -S . -B build -G Ninja -DTANGENT_BREP=OFF
 ```
 
-The test suite gains one suite with the exact kernel (28 rather than 27), and
+The test suite gains one suite with the exact kernel (29 rather than 28), and
 the modelling sections of the others run only when it is there.
 
 ## Features

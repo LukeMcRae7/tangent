@@ -479,4 +479,29 @@ ProjectResult loadProject(Scene& scene, const std::string& path) {
     return res;
 }
 
+// ---------------------------------------------------------------------------
+std::string encodeFeatures(const std::vector<Feature>& features) {
+    Writer w;
+    w.u32(kProjectVersion);
+    w.u32(static_cast<uint32_t>(features.size()));
+    for (const Feature& f : features) writeFeature(w, f);
+    return std::string(reinterpret_cast<const char*>(w.buf.data()), w.buf.size());
+}
+
+bool decodeFeatures(const std::string& bytes, std::vector<Feature>& out) {
+    out.clear();
+    Reader r{reinterpret_cast<const unsigned char*>(bytes.data()),
+             reinterpret_cast<const unsigned char*>(bytes.data()) + bytes.size(), false};
+    const uint32_t version = r.u32();
+    if (r.bad || version != kProjectVersion) return false;
+    const uint32_t n = r.u32();
+    // Every feature is far more than a byte, so a count past that is corrupt.
+    if (r.bad || n > bytes.size()) return false;
+    out.resize(n);
+    for (Feature& f : out)
+        if (!readFeature(r, f, version)) { out.clear(); return false; }
+    if (r.bad || r.p != r.end) { out.clear(); return false; }
+    return true;
+}
+
 } // namespace tg

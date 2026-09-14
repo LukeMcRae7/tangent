@@ -13,6 +13,7 @@
 #include "scene/scene.h"
 
 #include <string>
+#include <vector>
 
 namespace tg {
 
@@ -40,5 +41,10 @@ ProjectResult saveProject(const Scene& scene, const std::string& path);
 
 // Replaces the scene's contents on success; leaves it untouched on failure.
 ProjectResult loadProject(Scene& scene, const std::string& path);
+
+// A feature chain as bytes and back, in this build's own format: for handing a
+// chain to another process, not for a file, so only the same version reads.
+std::string encodeFeatures(const std::vector<Feature>& features);
+bool decodeFeatures(const std::string& bytes, std::vector<Feature>& out);
 
 } // namespace tg

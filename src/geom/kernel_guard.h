@@ -9,17 +9,31 @@
 // A modelling tool may refuse an operation. It may not lose the user's work
 // because a library walked off the end of something.
 //
-// So an operation that has not been proven safe is tried in a forked child
-// first. The child does the work and exits with a code; the parent waits. A
-// crash there costs a process that owns nothing -- no window, no file, no
-// scene -- and reads to the caller as one more way for an operation to be
-// refused. Only a radius that survived the child is run for real.
+// So an operation that has not been proven safe is tried in another process
+// first, and a crash there costs a process that owns nothing -- no window, no
+// file, no scene -- and reads to the caller as one more way for an operation
+// to be refused. Only what survived is run for real.
 //
-// Windows has no fork. There the call runs directly, as it always has, and the
-// comment on Attempt::Crashed says what that means.
+// Two ways to get another process:
+//
+//   Fork, where there is one. The child is a copy of this process at that
+//   moment, so the work is simply called there; nothing has to be described.
+//
+//   A worker, where there is not -- Windows. tangent_trial runs beside the
+//   application and is handed the work as bytes, which is why guarded work
+//   carries a way to write itself down as well as a way to run. The worker
+//   stays up between trials, because starting a process and loading the kernel
+//   costs far more than any one trial; when a trial takes it down, the next one
+//   starts another.
+//
+// TANGENT_ISOLATION=worker picks the worker where fork is available too, which
+// is how that path is tested on Linux; =none runs guarded work directly.
 #pragma once
 
+#include <cstdint>
 #include <functional>
+#include <memory>
+#include <string>
 
 namespace tg {
 
@@ -29,11 +43,32 @@ enum class Attempt {
     Crashed,   // it took its process down; treat as a refusal that cannot explain itself
 };
 
-// Runs `work` where a crash is survivable, if the platform allows it.
+enum class Isolation { Fork, Worker, None };
+
+// How guarded work is run in this process, decided once.
+Isolation isolation();
+
+// Whether a crash in guarded work is survivable here.
+bool childIsolationAvailable();
+
+// Work to be run where a crash is survivable.
 //
-// `work` must be self-contained: it runs in a child that shares the parent's
-// memory at the moment of the fork and whose side effects are discarded. Use it
-// to find out *whether* something works, then do it again for real.
+// `run` is the work. `kind` and `encode` are the same work written down, for a
+// worker in another process to rebuild: `encode` is only called when a worker
+// is used, so describing the work costs nothing where fork is enough. The
+// worker's side is `runEncodedTrial` in scene/trials.h, which knows every kind.
+struct GuardedWork {
+    std::function<bool()> run;
+    uint32_t kind = 0;
+    std::function<std::string()> encode;
+};
+
+// Runs `work` where a crash is survivable, and waits for the answer.
+Attempt tryIsolated(const GuardedWork& work);
+
+// Runs a closure in a forked child, where there is fork, and directly where
+// there is not. For tests and probes that only make sense on a platform that
+// can fork; the application uses tryIsolated, which is guarded everywhere.
 Attempt tryInChild(const std::function<bool()>& work);
 
 // The same isolation, without stopping to wait for it.
@@ -45,20 +80,23 @@ Attempt tryInChild(const std::function<bool()>& work);
 // whenever it is ready.
 class AsyncTrial {
 public:
-    AsyncTrial() = default;
+    AsyncTrial();
     ~AsyncTrial();
     AsyncTrial(const AsyncTrial&) = delete;
     AsyncTrial& operator=(const AsyncTrial&) = delete;
 
     // Begins `work` elsewhere. Where that is not possible the work runs here
     // and finishes before this returns, which is correct but not free.
-    void start(const std::function<bool()>& work);
+    void start(const GuardedWork& work);
 
-    bool running() const { return pid_ >= 0; }
+    bool running() const;
     bool finished() const { return done_; }
 
     // Collects the answer if there is one yet. Never blocks.
     bool poll();
+
+    // Waits for the answer, however long it takes.
+    Attempt wait();
 
     Attempt result() const { return result_; }
 
@@ -66,14 +104,13 @@ public:
     void abandon();
 
 private:
-    int     pid_ = -1;
+    struct Worker;
+    int     pid_ = -1;                     // a forked child, while one runs
+    std::unique_ptr<Worker> worker_;       // kept between trials
+    bool    waitingOnWorker_ = false;
     bool    done_ = false;
     Attempt result_ = Attempt::Refused;
 };
-
-// Whether tryInChild actually isolates. False on platforms without fork, where
-// a crash in `work` is still fatal and callers should probe less adventurously.
-bool childIsolationAvailable();
 
 // True in a process forked to run kernel work in isolation.
 //
@@ -83,6 +120,15 @@ bool childIsolationAvailable();
 // copied across, and waits forever: turning on OCCT's parallel mode hung both
 // tests that exercise isolation, parent and child at zero CPU. Anything that
 // would spread work across threads asks this first and stays on one.
+//
+// A worker process is not such a child. It started as itself, its thread
+// pools are its own, and it runs in parallel like anything else.
 bool inIsolatedChild();
+
+// The worker's main loop: reads work from standard input, runs it with `run`,
+// answers on standard output, and returns when its input closes. What
+// tangent_trial's main is.
+using EncodedRunner = bool (*)(uint32_t kind, const std::string& payload);
+int serveTrials(EncodedRunner run);
 
 } // namespace tg

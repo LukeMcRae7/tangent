@@ -158,6 +158,7 @@ add_executable(tangent
   src/scene/scene.cpp
   src/scene/feature.cpp
   src/scene/serialize.cpp
+  src/scene/trials.cpp
   src/render/shader.cpp
   src/render/gpu_mesh.cpp
   src/render/renderer.cpp
@@ -169,6 +170,16 @@ add_executable(tangent
   src/ui/command_panel.cpp
 )
 target_include_directories(tangent PRIVATE src)
+
+# Where guarded kernel work is tried on a platform without fork, and on Linux
+# when TANGENT_ISOLATION=worker asks for it. It has to sit beside whatever runs
+# it, so everything that guards work depends on it being built.
+add_executable(tangent_trial src/scene/trial_worker.cpp src/scene/trials.cpp
+  src/scene/serialize.cpp src/scene/scene.cpp src/scene/feature.cpp
+  src/mesh/health.cpp ${TANGENT_GEOM} src/mesh/halfedge.cpp src/mesh/primitives.cpp)
+target_include_directories(tangent_trial PRIVATE src)
+target_compile_options(tangent_trial PRIVATE ${TANGENT_WARNINGS})
+add_dependencies(tangent tangent_trial)
 target_link_libraries(tangent PRIVATE imgui SDL3::SDL3 tangent_epoxy ZLIB::ZLIB)
 target_compile_options(tangent PRIVATE ${TANGENT_WARNINGS_LOOSE})
 
@@ -270,12 +281,17 @@ target_compile_options(test_create_tool PRIVATE ${TANGENT_WARNINGS_LOOSE})
 add_test(NAME create_tool COMMAND test_create_tool)
 
 add_executable(test_guard tests/test_guard.cpp
-  src/scene/scene.cpp src/scene/feature.cpp src/mesh/health.cpp
-  ${TANGENT_GEOM} src/mesh/halfedge.cpp src/mesh/primitives.cpp
+  src/scene/scene.cpp src/scene/feature.cpp src/scene/serialize.cpp src/scene/trials.cpp
+  src/mesh/health.cpp ${TANGENT_GEOM} src/mesh/halfedge.cpp src/mesh/primitives.cpp
   src/app/camera.cpp)
 target_include_directories(test_guard PRIVATE src)
 target_compile_options(test_guard PRIVATE ${TANGENT_WARNINGS})
+add_dependencies(test_guard tangent_trial)
 add_test(NAME guard COMMAND test_guard)
+# The same test through the worker process, which is what Windows uses: fork
+# would otherwise be chosen here and the worker path never run.
+add_test(NAME guard_worker COMMAND test_guard)
+set_tests_properties(guard_worker PROPERTIES ENVIRONMENT "TANGENT_ISOLATION=worker")
 
 add_executable(test_drag tests/test_drag.cpp
   src/app/drag_axis.cpp src/app/camera.cpp
