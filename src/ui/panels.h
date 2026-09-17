@@ -66,6 +66,11 @@ struct UiActions {
     bool fillet = false;
     bool shell = false;
 
+    // A new sketch, or one already in an object's history re-opened to edit.
+    bool      sketch = false;
+    ObjectId  editSketchObject = kNoObject;
+    ElementId editSketchUid = 0;
+
     bool      booleanRequested = false;
     BooleanOp booleanOp = BooleanOp::Difference;
 

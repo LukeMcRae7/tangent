@@ -4,6 +4,7 @@
 #include "ui/theme.h"
 
 #include "core/palette.h"
+#include "geom/brep.h"
 
 #include "imgui.h"
 #include "imgui_internal.h"
@@ -36,6 +37,7 @@ Icon iconFor(const Feature& f) {
     switch (f.kind) {
         case FeatureKind::Primitive: return iconFor(f.primitive.kind);
         case FeatureKind::Extrude:   return Icon::Extrude;
+        case FeatureKind::ExtrudeProfile: return Icon::Extrude;
         case FeatureKind::Bevel:     return Icon::Fillet;
         case FeatureKind::Shell:      return Icon::Shell;
         case FeatureKind::FaceRotate: return Icon::Chamfer;
@@ -191,6 +193,11 @@ void drawAddMenuItems(UiContext& ctx) {
             ctx.actions.addKind = e.kind;
         }
     }
+    ImGui::Separator();
+    if (ImGui::MenuItem("Sketch", "Shift+S", false, brep::available()))
+        ctx.actions.sketch = true;
+    ImGui::TextColored(kDim, brep::available() ? "  lines, circles and arcs, kept and sized"
+                                               : "  needs the exact kernel");
 }
 
 void drawMenuBar(UiContext& ctx) {
@@ -495,6 +502,18 @@ float drawToolbar(UiContext& ctx) {
     }
     ImGui::SameLine();
 
+    // A sketch begins a part as much as a shape does, so it sits beside the
+    // shapes. In words: there is no baked picture of one, and a borrowed
+    // picture of something else would say the wrong thing.
+    ImGui::BeginDisabled(!brep::available());
+    if (ImGui::Button("Sketch", ImVec2(0.0f, icon + st.FramePadding.y * 2.0f)))
+        ctx.actions.sketch = true;
+    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip(brep::available()
+                              ? "Sketch  (Shift+S): lines, circles and arcs on a plane, then extrude"
+                              : "Sketching needs the exact kernel, which this build does not have");
+
     auto gap = [&] {
         ImGui::SameLine(0.0f, 10.0f);
         const ImVec2 p = ImGui::GetCursorScreenPos();
@@ -658,7 +677,10 @@ void drawOutliner(UiContext& ctx) {
 
         // The kind, but only when it is not already the name. Every new object
         // is called after its shape, so the default row used to read "Box Box".
-        const char* kind = primitiveName(obj->spec.kind);
+        // A part that began as a sketch is not a mesh, whatever its spec says.
+        const bool sketched = !obj->features.empty() &&
+                              obj->features.front().kind == FeatureKind::Sketch;
+        const char* kind = sketched ? "Sketched" : primitiveName(obj->spec.kind);
         if (obj->name != kind) {
             ImGui::SameLine();
             ImGui::TextColored(kDim, "%s", kind);
@@ -708,7 +730,9 @@ void drawInspector(UiContext& ctx) {
     if (ImGui::SmallButton("Reset Transform")) obj->transform = Transform{};
 
     sectionLabel("GEOMETRY");
-    if (drawPrimitiveParams(*obj)) {
+    if (!obj->features.empty() && obj->features.front().kind == FeatureKind::Sketch) {
+        ImGui::TextColored(kDim, "Sized by its sketch: open it in the History");
+    } else if (drawPrimitiveParams(*obj)) {
         ctx.actions.rebuildObject = obj->id;
         ctx.actions.specBefore = specBefore;
     }
@@ -850,6 +874,58 @@ void drawHistory(UiContext& ctx) {
                                                : f.reduceLoosen
                                                ? "the tolerance loosens only as far as the count needs"
                                                : "triangles, or the tolerance, whichever comes first");
+                break;
+            }
+            case FeatureKind::Sketch: {
+                // The drawing itself is edited where it was drawn, on its plane.
+                if (ImGui::SmallButton("Edit Sketch")) {
+                    ctx.actions.editSketchObject = obj->id;
+                    ctx.actions.editSketchUid = f.uid;
+                }
+                // The numbers that size it. Changing one re-solves the sketch
+                // and re-runs everything built from it -- the reason a sketch
+                // is kept in the history rather than consumed. Labelled with
+                // the same #id a conflict is reported by, so a sketch that
+                // will not solve can be traced to the rows to look at.
+                bool hasDimensions = false;
+                for (SketchConstraint& k : f.sketch.constraints) {
+                    if (!isDimension(k.rule)) continue;
+                    hasDimensions = true;
+                    ImGui::PushID(static_cast<int>(k.id));
+                    char label[32];
+                    if (k.rule == SketchRule::Angle) {
+                        std::snprintf(label, sizeof label, "Angle #%u", k.id);
+                        Real deg = degrees(k.value);
+                        if (labeledDrag(label, deg, 0.2f, 0.0f, 360.0f, "%.1f deg")) {
+                            k.value = radians(deg);
+                            changed = true;
+                        }
+                    } else {
+                        std::snprintf(label, sizeof label, "%s #%u",
+                                      k.rule == SketchRule::Radius ? "Radius" : "Distance", k.id);
+                        changed |= labeledDrag(label, k.value, 0.1f, 0.001f, 100000.0f);
+                    }
+                    ImGui::PopID();
+                }
+                if (!hasDimensions)
+                    ImGui::TextColored(kDim, "no dimensions: its size is what was drawn");
+                ImGui::TextColored(kDim, "%s", f.sketchFreedoms == 0
+                                                   ? "fully constrained"
+                                                   : "not fully constrained: some of it can still move");
+                break;
+            }
+            case FeatureKind::ExtrudeProfile: {
+                changed |= labeledDrag("Distance", f.distance, 0.1f, -10000.0f, 10000.0f);
+                const char* const opNames[] = {"Auto", "Join", "Cut", "Intersect"};
+                int currentOp = static_cast<int>(f.extrudeOp);
+                if (currentOp > 3) currentOp = 0;
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextUnformatted("Operation");
+                ImGui::SameLine();
+                if (ImGui::Combo("##ExtrudeProfileOp", &currentOp, opNames, 4)) {
+                    f.extrudeOp = static_cast<ExtrudeOp>(currentOp);
+                    changed = true;
+                }
                 break;
             }
             case FeatureKind::Pattern: {

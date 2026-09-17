@@ -99,8 +99,16 @@ int main() {
         std::printf("exact kernel not built; nothing to be robust about\n");
         return 0;
     }
-    if (!childIsolationAvailable()) {
-        std::printf("no process isolation here, so a crash would take this with it\n");
+    // Every attempt here goes through tryInChild, which isolates only where it
+    // can fork. Windows has isolation too -- the worker, which test_guard
+    // drives through a real crash -- so asking childIsolationAvailable said yes
+    // and then ran these closures in this process, where the first input that
+    // takes OpenCASCADE down took the whole run with it. A closure cannot be
+    // sent to a worker, so this probe is a fork-platform probe; what it finds
+    // is a fact about the kernel, not about the platform.
+    if (!forkIsolationAvailable()) {
+        std::printf("no fork here, so these closures cannot be isolated; "
+                    "the worker path is covered by test_guard\n");
         return 0;
     }
 

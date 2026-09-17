@@ -441,6 +441,64 @@ bool Application::init() {
         // here would point somewhere else by the time anything was drawn.
     }
 
+    if (sketchDemo_ > 0) {
+        // A plate with a bore, drawn the way a person would: a rectangle, a
+        // circle in the middle of it, and the circle's radius picked to edit.
+        scene_.clear();
+        camera_.yaw = 0.7f;
+        camera_.pitch = 0.6f;
+        camera_.distance = 150.0f;
+        camera_.target = {0, 0, 0};
+        camera_.snapToGoal();
+
+        sketchTool_.start();
+        sketchTool_.choosePlane(PlaneChoice::XY, camera_);
+        sketchTool_.setMode(SketchMode::Rectangle);
+        sketchTool_.clickAt({-30, -20});
+        sketchTool_.clickAt({30, 20});
+        sketchTool_.setMode(SketchMode::Circle);
+        sketchTool_.clickAt({0, 0});
+        sketchTool_.clickAt({10, 0});
+        sketchTool_.setMode(SketchMode::Line);
+        sketchTool_.clickAt({-20, 25});
+        sketchTool_.clickAt({20, 25.3});
+        sketchTool_.clearPending();
+        sketchTool_.setMode(SketchMode::Dimension);
+        for (const SketchEntity& e : sketchTool_.sketch().entities)
+            if (e.curve == SketchCurve::Circle) sketchTool_.dimensionEntity(e.id);
+        camera_.snapToGoal();
+
+        if (sketchDemo_ >= 2) {
+            // The plate, which is the region with the bore as its hole.
+            if (sketchTool_.beginExtrude(&camera_)) {
+                for (const SketchProfile& r : sketchTool_.regions())
+                    if (r.holes.size() == 1) sketchTool_.toggleRegion(r.key);
+            }
+            camera_.snapToGoal();
+        }
+        if (sketchDemo_ >= 3) {
+            sketchTool_.beginDepth();
+            sketchTool_.typeKey('1');
+            sketchTool_.typeKey('5');
+        }
+        if (sketchDemo_ >= 4) {
+            sketchTool_.finish(scene_, camera_, undo_, true);
+            if (!scene_.objects().empty()) {
+                const SceneObject* o = scene_.objects().front().get();
+                std::fprintf(stderr, "[sketch-demo] %s: %zu features, %d faces, %.3f mm3\n",
+                             o->name.c_str(), o->features.size(), o->body.faceCount(),
+                             o->body.health(false).volume);
+                sketchTool_.startEdit(scene_, o->id, o->features.front().uid, camera_);
+            }
+            camera_.snapToGoal();
+        }
+        if (std::string e = sketchTool_.takeError(); !e.empty())
+            std::fprintf(stderr, "[sketch-demo] %s\n", e.c_str());
+        std::fprintf(stderr, "[sketch-demo] stage %d, %zu entities, %zu regions, %d free\n",
+                     static_cast<int>(sketchTool_.stage()), sketchTool_.sketch().entities.size(),
+                     sketchTool_.regions().size(), sketchTool_.solveState().freedoms);
+    }
+
     if (shellFilletDemo_ && !scene_.objects().empty()) {
         const ObjectId id = scene_.objects().front()->id;
         // The ordinary case first, on solid material: one edge of the untouched
@@ -737,6 +795,24 @@ void Application::handleViewportMouse() {
     stepFaceStress();
     stepPrintDemo();
     stepPreviewCheck();
+
+    // Sketching. The same arrangement as the create tool below: the wheel still
+    // zooms, and the pointer on the dialog leaves the drawing alone.
+    if (sketchTool_.active()) {
+        if (io.MouseWheel != 0.0f && overViewport && !io.WantCaptureMouse)
+            camera_.dolly(io.MouseWheel);
+        if (!io.WantCaptureMouse) {
+            sketchTool_.update(scene_, camera_, mouseInViewport(), !io.KeyCtrl);
+            if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && overViewport) {
+                sketchTool_.handleMouseDown(scene_, camera_, undo_);
+                if (!sketchTool_.active()) justFinishedModal_ = true;
+            } else if (ImGui::IsMouseClicked(ImGuiMouseButton_Right) && overViewport) {
+                sketchTool_.handleRightClick(camera_);
+                if (!sketchTool_.active()) justFinishedModal_ = true;
+            }
+        }
+        return;
+    }
 
     // Interactive Object Creation & Sketching Tool:
     if (createTool_.active()) {
@@ -1435,7 +1511,7 @@ void Application::drawPrintIssues() {
 
     if (!view_.showPrintIssues) return;
     if (filletTool_.active || faceTool_.active || divideTool_.active ||
-        patternTool_.active || reduceTool_.active || createTool_.active() || tool_.active())
+        patternTool_.active || reduceTool_.active || createTool_.active() || sketchTool_.active() || tool_.active())
         return;                       // a gesture owns the model while it runs
 
     const Vec4 thin{0.95f, 0.30f, 0.22f, 0.34f};
@@ -1745,6 +1821,41 @@ void Application::handleShortcuts() {
         return;
     }
 
+    if (sketchTool_.active()) {
+        auto send = [&](int key) {
+            return sketchTool_.handleKey(key, io.KeyShift, io.KeyCtrl, scene_, camera_, undo_);
+        };
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) { send(27); return; }
+        if (ImGui::IsKeyPressed(ImGuiKey_Enter, false) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false)) {
+            send(13);
+            return;
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_Delete, false)) { send(127); return; }
+        for (const auto& [imKey, ch] : {
+                 std::pair{ImGuiKey_L, 'L'}, std::pair{ImGuiKey_R, 'R'}, std::pair{ImGuiKey_C, 'C'},
+                 std::pair{ImGuiKey_A, 'A'}, std::pair{ImGuiKey_D, 'D'}, std::pair{ImGuiKey_Q, 'Q'},
+                 std::pair{ImGuiKey_X, 'X'}, std::pair{ImGuiKey_E, 'E'}, std::pair{ImGuiKey_J, 'J'},
+                 std::pair{ImGuiKey_N, 'N'}, std::pair{ImGuiKey_Z, 'Z'}}) {
+            if (ImGui::IsKeyPressed(imKey, false)) { send(ch); return; }
+        }
+        for (int d = 0; d <= 9; ++d) {
+            if (ImGui::IsKeyPressed(static_cast<ImGuiKey>(ImGuiKey_0 + d), false) ||
+                ImGui::IsKeyPressed(static_cast<ImGuiKey>(ImGuiKey_Keypad0 + d), false)) {
+                send('0' + d);
+                return;
+            }
+        }
+        for (const auto& [imKey, ch] : {std::pair{ImGuiKey_Period, '.'},
+                                        std::pair{ImGuiKey_KeypadDecimal, '.'},
+                                        std::pair{ImGuiKey_Minus, '-'},
+                                        std::pair{ImGuiKey_KeypadSubtract, '-'},
+                                        std::pair{ImGuiKey_Backspace, static_cast<char>(8)},
+                                        std::pair{ImGuiKey_Tab, static_cast<char>(9)}}) {
+            if (ImGui::IsKeyPressed(imKey, false)) { send(ch); return; }
+        }
+        return;
+    }
+
     if (createTool_.active()) {
         // Escape goes through handleKey rather than straight to cancel: with a
         // number half typed it takes back the mouse, and only then the tool.
@@ -1829,6 +1940,9 @@ void Application::handleShortcuts() {
             else        beginTransform(TransformMode::Scale);
         }
     }
+
+    // Sketch. Shift+S, beside Shift+A for the shapes it stands in for.
+    if (shift && !ctrl && !alt && ImGui::IsKeyPressed(ImGuiKey_S, false)) ui_.actions.sketch = true;
 
     // Add menu at the cursor.
     if (shift && ImGui::IsKeyPressed(ImGuiKey_A, false)) openAddMenu_ = true;
@@ -1996,7 +2110,7 @@ void Application::abortTransform() {
 void Application::roundAllEdges() {
     // Checked before the selection is touched: beginFillet would decline too,
     // but only after this had replaced what the user had picked.
-    if (tool_.active() || createTool_.active() || editToolActive()) return;
+    if (tool_.active() || createTool_.active() || sketchTool_.active() || editToolActive()) return;
     const ObjectId id = scene_.contextObject();
     SceneObject* obj = scene_.find(id);
     if (!obj || obj->body.empty()) { setNotice("Select an object to round"); return; }
@@ -2016,7 +2130,7 @@ void Application::roundAllEdges() {
 
 void Application::beginReduce() {
     dismissSettled();
-    if (tool_.active() || filletTool_.active || createTool_.active() || faceTool_.active ||
+    if (tool_.active() || filletTool_.active || createTool_.active() || sketchTool_.active() || faceTool_.active ||
         divideTool_.active || patternTool_.active || reduceTool_.active)
         return;
     const ObjectId id = scene_.contextObject();
@@ -2438,7 +2552,7 @@ static Real materialBehindEdges(const SceneObject& obj,
 
 void Application::beginFaceMove(FaceOp op) {
     dismissSettled();
-    if (tool_.active() || filletTool_.active || createTool_.active() ||
+    if (tool_.active() || filletTool_.active || createTool_.active() || sketchTool_.active() ||
         faceTool_.active || divideTool_.active || patternTool_.active ||
         reduceTool_.active)
         return;
@@ -2949,7 +3063,7 @@ void Application::recommitSettled() {
 
 void Application::beginPattern(PatternMode mode) {
     dismissSettled();
-    if (tool_.active() || filletTool_.active || createTool_.active() ||
+    if (tool_.active() || filletTool_.active || createTool_.active() || sketchTool_.active() ||
         faceTool_.active || divideTool_.active || patternTool_.active ||
         reduceTool_.active)
         return;
@@ -3191,7 +3305,7 @@ void Application::abortPattern() {
 
 void Application::beginDivide() {
     dismissSettled();
-    if (tool_.active() || filletTool_.active || createTool_.active() ||
+    if (tool_.active() || filletTool_.active || createTool_.active() || sketchTool_.active() ||
         faceTool_.active || divideTool_.active || patternTool_.active ||
         reduceTool_.active)
         return;
@@ -3414,7 +3528,7 @@ FilletSpec Application::filletSpecAt(Real radius) const {
 
 void Application::beginFillet() {
     dismissSettled();
-    if (tool_.active() || filletTool_.active || createTool_.active() || reduceTool_.active) return;
+    if (tool_.active() || filletTool_.active || createTool_.active() || sketchTool_.active() || reduceTool_.active) return;
 
     const ObjectId id = scene_.contextObject();
     SceneObject* obj = scene_.find(id);
@@ -5076,9 +5190,28 @@ void Application::abortFillet() {
 }
 
 void Application::beginAddPrimitivePrompt(PrimitiveKind kind) {
-    if (tool_.active() || createTool_.active()) return;
+    if (tool_.active() || createTool_.active() || sketchTool_.active()) return;
     if (editToolActive()) { setNotice("Finish the current operation first"); return; }
     createTool_.start(kind);
+}
+
+void Application::beginSketch() {
+    if (tool_.active() || createTool_.active() || sketchTool_.active()) return;
+    if (editToolActive()) { setNotice("Finish the current operation first"); return; }
+    if (!brep::available()) {
+        setNotice("Sketching needs the exact kernel, which this build does not have");
+        return;
+    }
+    measure_.end();
+    sketchTool_.start();
+}
+
+void Application::beginEditSketch(ObjectId object, ElementId sketchUid) {
+    if (tool_.active() || createTool_.active() || sketchTool_.active()) return;
+    if (editToolActive()) { setNotice("Finish the current operation first"); return; }
+    measure_.end();
+    if (!sketchTool_.startEdit(scene_, object, sketchUid, camera_))
+        setNotice(sketchTool_.takeError());
 }
 
 // Folds `edges`, picked on the current mesh, into the fillet at the end of the
@@ -5823,7 +5956,8 @@ void Application::applyActions() {
     // Anything that changes the model, or what the model is, is the start of
     // the next thing. The gestures put their own panel away in begin*; this
     // catches the commands that are not gestures.
-    if (a.addRequested || a.deleteSelected || a.duplicateSelected || a.mergeFaces ||
+    if (a.addRequested || a.sketch || a.editSketchObject != kNoObject ||
+        a.deleteSelected || a.duplicateSelected || a.mergeFaces ||
         a.booleanRequested || a.split || a.shell || a.inset || a.undo || a.redo ||
         a.importStep || a.importMesh || a.convertToSolid || a.reduceMesh ||
         a.newProject || a.openProject || a.rebuildObject != kNoObject ||
@@ -5854,6 +5988,8 @@ void Application::applyActions() {
     if (a.addRequested) {
         beginAddPrimitivePrompt(a.addKind);
     }
+    if (a.sketch) beginSketch();
+    if (a.editSketchObject != kNoObject) beginEditSketch(a.editSketchObject, a.editSketchUid);
 
     if (a.duplicateSelected) {
         const std::vector<ObjectId> sel = scene_.selection();
@@ -6055,6 +6191,13 @@ void Application::buildUi() {
     drawDividePanel();
     drawPatternPanel();
     drawReducePanel();
+    if (sketchTool_.active()) {
+        sketchTool_.setHudOrigin(viewRect_.x + 16.0f, viewRect_.y + 16.0f);
+        sketchTool_.setViewportOrigin(viewRect_.x, viewRect_.y);
+        bool finished = false;
+        sketchTool_.drawHud(scene_, camera_, undo_, finished);
+        if (finished) justFinishedModal_ = true;
+    }
     if (createTool_.active()) {
         // Under the toolbar, in the corner of the viewport opposite the view
         // cube: a dialog over the middle of the model is a dialog in the way of
@@ -6324,6 +6467,26 @@ int Application::run() {
             std::snprintf(buf, sizeof(buf), "Fillet  %.2f mm   type a number   Click confirm   Esc cancel",
                           filletTool_.currentRadius);
             ui_.toolStatus = buf;
+        } else if (sketchTool_.active()) {
+            switch (sketchTool_.stage()) {
+            case SketchStage::SelectPlane:
+                ui_.toolStatus = "Sketch: click an origin plane or a face  [7 top, 1 front, 3 right]   Esc cancel";
+                break;
+            case SketchStage::Draw:
+                ui_.toolStatus = std::string("Sketch: ") + sketchModeName(sketchTool_.mode()) +
+                                 "   L R C A D tools   X delete   E extrude   Esc cancel";
+                break;
+            case SketchStage::Regions:
+                ui_.toolStatus = "Extrude: click the regions to sweep, Enter for the depth   Esc back";
+                break;
+            case SketchStage::Depth:
+                ui_.toolStatus = std::string("Extrude: move to set the depth, ") +
+                                 createOpName(sketchTool_.resolvedOp()) +
+                                 "   A auto  J join  D cut  N new body   click finish   Esc back";
+                break;
+            case SketchStage::None:
+                break;
+            }
         } else if (createTool_.active()) {
             if (createTool_.stage() == CreateStage::SelectPlane) {
                 ui_.toolStatus = "Select Plane: Click origin tile or object face [1: XZ, 3: YZ, 7: XY] (Esc cancel)";
@@ -6391,6 +6554,8 @@ int Application::run() {
         // drained once here rather than at each of them.
         if (std::string createErr = createTool_.takeError(); !createErr.empty())
             setNotice(createErr);
+        if (std::string sketchErr = sketchTool_.takeError(); !sketchErr.empty())
+            setNotice(sketchErr);
 
         applyActions();
 
@@ -6406,6 +6571,7 @@ int Application::run() {
         drawPrintIssues();
         drawSelectionHighlights();
         if (createTool_.active()) createTool_.drawOverlay(scene_, camera_, renderer_);
+        if (sketchTool_.active()) sketchTool_.drawOverlay(scene_, camera_, renderer_);
         measureResult_ = measure_.active() ? measure_.compute(scene_) : MeasureResult{};
         measure_.drawOverlay(renderer_, camera_, measureResult_);
         tool_.drawOverlay(renderer_, camera_);

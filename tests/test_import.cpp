@@ -9,6 +9,7 @@
 #include "mesh/import_mesh.h"
 #include "mesh/export_stl.h"
 #include "scene/scene.h"
+#include "temp_path.h"
 
 #include <cmath>
 #include <cstdio>
@@ -38,7 +39,7 @@ static bool writeVia(Scene& scene, PrimitiveKind kind, const PrimitiveSpec& spec
 
 int main() {
     std::printf("import\n");
-    const std::string path = "/tmp/tg_import_test.stl";
+    const std::string path = tempPath("import.stl");
     Scene scene;
 
     check(meshFormatOf("a/b/part.STL") == MeshFormat::Stl, "an upper-case .STL is an STL");
@@ -166,10 +167,10 @@ int main() {
     // --- refusals ----------------------------------------------------------
     {
         Body b;
-        MeshImport r = readMesh("/tmp/tg_definitely_absent.stl", b);
+        MeshImport r = readMesh(tempPath("definitely_absent.stl"), b);
         check(!r.ok && !r.error.empty(), "a missing file is refused, with a reason");
 
-        r = readMesh("/tmp/tg_import_test.step", b);
+        r = readMesh(tempPath("import.step"), b);
         check(!r.ok, "an extension this does not read is refused");
 
         if (brep::available()) {

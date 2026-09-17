@@ -186,6 +186,91 @@ bool readSpec(Reader& r, PrimitiveSpec& s) {
     return !r.bad;
 }
 
+// A sketch is written whole -- plane, points, entities, constraints -- with
+// every reference kept as the id it had. Ids are never reused within a sketch,
+// so reading it back gives the same sketch rather than one renumbered.
+void writeSketch(Writer& w, const Sketch& s) {
+    w.vec3(s.plane.origin);
+    w.vec3(s.plane.xAxis);
+    w.vec3(s.plane.yAxis);
+    w.u32(s.nextId);
+    w.u32(static_cast<uint32_t>(s.points.size()));
+    for (const SketchPoint& p : s.points) {
+        w.u32(p.id);
+        w.f64(p.at.x);
+        w.f64(p.at.y);
+    }
+    w.u32(static_cast<uint32_t>(s.entities.size()));
+    for (const SketchEntity& e : s.entities) {
+        w.u32(e.id);
+        w.u8(static_cast<uint8_t>(e.curve));
+        w.u8(e.construction ? 1 : 0);
+        w.u32(e.a);
+        w.u32(e.b);
+        w.u32(e.c);
+        w.u32(e.d);
+        w.f64(e.radius);
+    }
+    w.u32(static_cast<uint32_t>(s.constraints.size()));
+    for (const SketchConstraint& k : s.constraints) {
+        w.u32(k.id);
+        w.u8(static_cast<uint8_t>(k.rule));
+        w.u32(k.first);
+        w.u32(k.second);
+        w.f64(k.value);
+        w.f64(k.value2);
+    }
+}
+
+bool readSketch(Reader& r, Sketch& s) {
+    s.plane.origin = r.vec3();
+    s.plane.xAxis = r.vec3();
+    s.plane.yAxis = r.vec3();
+    s.nextId = r.u32();
+
+    // Each count is checked against what is left of the file before anything is
+    // allocated for it: a corrupt count must not become a four-gigabyte vector.
+    const uint32_t points = r.u32();
+    if (r.bad || !r.need(static_cast<size_t>(points) * 20)) return false;
+    s.points.resize(points);
+    for (SketchPoint& p : s.points) {
+        p.id = r.u32();
+        p.at.x = r.f64();
+        p.at.y = r.f64();
+    }
+
+    const uint32_t entities = r.u32();
+    if (r.bad || !r.need(static_cast<size_t>(entities) * 30)) return false;
+    s.entities.resize(entities);
+    for (SketchEntity& e : s.entities) {
+        e.id = r.u32();
+        const uint8_t curve = r.u8();
+        if (curve > static_cast<uint8_t>(SketchCurve::Bezier)) return false;
+        e.curve = static_cast<SketchCurve>(curve);
+        e.construction = r.u8() != 0;
+        e.a = r.u32();
+        e.b = r.u32();
+        e.c = r.u32();
+        e.d = r.u32();
+        e.radius = r.f64();
+    }
+
+    const uint32_t constraints = r.u32();
+    if (r.bad || !r.need(static_cast<size_t>(constraints) * 29)) return false;
+    s.constraints.resize(constraints);
+    for (SketchConstraint& k : s.constraints) {
+        k.id = r.u32();
+        const uint8_t rule = r.u8();
+        if (rule > static_cast<uint8_t>(SketchRule::Angle)) return false;
+        k.rule = static_cast<SketchRule>(rule);
+        k.first = r.u32();
+        k.second = r.u32();
+        k.value = r.f64();
+        k.value2 = r.f64();
+    }
+    return !r.bad;
+}
+
 void writeFeature(Writer& w, const Feature& f) {
     w.u32(static_cast<uint32_t>(f.kind));
     w.u8(f.enabled ? 1 : 0);
@@ -245,6 +330,10 @@ void writeFeature(Writer& w, const Feature& f) {
     w.f64(f.reduceTolerance);
     w.i32(f.reduceTarget);
     w.u32(f.reduceLoosen ? 1u : 0u);
+    // v12: a sketch, and which region of which sketch an extrusion sweeps.
+    writeSketch(w, f.sketch);
+    w.u64(f.sketchUid);
+    w.u32(f.profileKey);
 }
 
 // `version` is the file's, not this build's: a project written before bodies
@@ -255,7 +344,7 @@ bool readFeature(Reader& r, Feature& f, uint32_t version) {
     const uint32_t kind = r.u32();
     // The last of the enum, not a name from the middle of it: a kind added
     // later would otherwise be rejected by a build that has it.
-    if (kind > static_cast<uint32_t>(FeatureKind::Reduce)) return false;
+    if (kind > static_cast<uint32_t>(FeatureKind::ExtrudeProfile)) return false;
     f.kind = static_cast<FeatureKind>(kind);
     f.enabled = r.u8() != 0;
     if (!readSpec(r, f.primitive)) return false;
@@ -343,6 +432,12 @@ bool readFeature(Reader& r, Feature& f, uint32_t version) {
         f.reduceTarget = r.i32();
         f.reduceLoosen = r.u32() != 0;
         if (!(f.reduceTolerance > 0) || f.reduceTarget < 0) return false;
+    }
+    // Older files have no sketches in them.
+    if (version >= 12) {
+        if (!readSketch(r, f.sketch)) return false;
+        f.sketchUid = r.u64();
+        f.profileKey = r.u32();
     }
     return !r.bad;
 }

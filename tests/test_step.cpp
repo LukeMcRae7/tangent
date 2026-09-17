@@ -8,6 +8,7 @@
 // would still measure correctly.
 #include "geom/brep.h"
 #include "geom/operations.h"
+#include "temp_path.h"
 
 #include <cmath>
 #include <cstdio>
@@ -42,7 +43,7 @@ int main() {
         return 0;
     }
     std::printf("step\n");
-    const std::string path = "/tmp/tg_step_test.stp";
+    const std::string path = tempPath("step.stp");
 
     // --- a box goes out and comes back a box -------------------------------
     {
@@ -176,7 +177,7 @@ int main() {
     {
         std::string why;
         std::vector<BrepRef> back;
-        check(!brep::readStep("/tmp/tg_definitely_not_here.stp", 1, back, &why),
+        check(!brep::readStep(tempPath("definitely_not_here.stp"), 1, back, &why),
               "a missing file is refused");
         check(!why.empty(), "and says why");
 

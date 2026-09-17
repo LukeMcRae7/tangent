@@ -28,6 +28,8 @@ const char* featureKindName(FeatureKind k) {
         case FeatureKind::Merge:      return "Merge Faces";
         case FeatureKind::Pattern:    return "Pattern";
         case FeatureKind::Reduce:     return "Reduce Mesh";
+        case FeatureKind::Sketch:     return "Sketch";
+        case FeatureKind::ExtrudeProfile: return "Extrude Profile";
     }
     return "Feature";
 }
@@ -154,6 +156,24 @@ std::string Feature::summary() const {
             else
                 std::snprintf(buf, sizeof(buf), "Reduce  within %.3g mm",
                               static_cast<double>(reduceTolerance));
+            break;
+        case FeatureKind::Sketch: {
+            // Whether it is fully constrained is the thing a person wants to
+            // know about a sketch at a glance, so it is in the line itself.
+            const size_t dims = static_cast<size_t>(std::count_if(
+                sketch.constraints.begin(), sketch.constraints.end(),
+                [](const SketchConstraint& k) { return isDimension(k.rule); }));
+            if (sketchFreedoms == 0)
+                std::snprintf(buf, sizeof(buf), "Sketch  %zu entities, %zu dims, fully constrained",
+                              sketch.entities.size(), dims);
+            else
+                std::snprintf(buf, sizeof(buf), "Sketch  %zu entities, %zu dims, %d free",
+                              sketch.entities.size(), dims, sketchFreedoms);
+            break;
+        }
+        case FeatureKind::ExtrudeProfile:
+            std::snprintf(buf, sizeof(buf), "Extrude Profile  %.2f mm  (%s)",
+                          static_cast<double>(distance), extrudeOpName(extrudeOp));
             break;
         case FeatureKind::Divide:
             std::snprintf(buf, sizeof(buf), "Divide  at %.2f, %.2f, %.2f",
@@ -462,6 +482,70 @@ bool evaluateFrom(std::vector<Feature>& features, size_t from,
             std::string why;
             if (!divideBody(body, f.axisPoint, f.axisDir, f.uid, &why))
                 fail(why.empty() ? "the divide could not be built" : why.c_str());
+            break;
+        }
+
+        case FeatureKind::Sketch: {
+            // A sketch changes no body. It is solved here so that what follows
+            // sees the shape its constraints describe -- and so that when its
+            // constraints disagree, the sketch is the step named as failing,
+            // not the extrude that happened to be built from it.
+            const SketchSolve solved = solveSketch(f.sketch);
+            f.sketchFreedoms = solved.freedoms;
+            if (!solved.solved) fail(solved.reason.c_str());
+            break;
+        }
+
+        case FeatureKind::ExtrudeProfile: {
+            const Feature* source = nullptr;
+            for (size_t j = 0; j < i; ++j)
+                if (features[j].kind == FeatureKind::Sketch && features[j].uid == f.sketchUid)
+                    source = &features[j];
+            if (!source) { fail("the sketch it extrudes is not earlier in the history"); break; }
+            if (!source->enabled) { fail("the sketch it extrudes is turned off"); break; }
+            if (source->errored) { fail("the sketch it extrudes does not solve"); break; }
+
+            const std::vector<SketchProfile> regions = sketchProfiles(source->sketch);
+            const auto region = std::find_if(regions.begin(), regions.end(),
+                [&](const SketchProfile& p) { return p.key == f.profileKey; });
+            if (region == regions.end()) {
+                fail("that region of the sketch no longer closes");
+                break;
+            }
+
+            const bool cut = f.extrudeOp == ExtrudeOp::Cut ||
+                             (f.extrudeOp == ExtrudeOp::Auto && f.distance < 0.0);
+            std::string why;
+            BrepRef tool = brep::sketchSolid(source->sketch, *region, 0.0, f.distance, f.uid, &why);
+            if (!tool) {
+                fail(why.empty() ? "the region could not be swept" : why.c_str());
+                break;
+            }
+
+            if (body.empty()) {
+                // The first solid in the chain, which is how a part drawn as a
+                // sketch begins. There is nothing to cut from or intersect with
+                // yet, and saying so beats quietly adding instead.
+                if (cut || f.extrudeOp == ExtrudeOp::Intersect) {
+                    fail("there is no body yet to take this away from");
+                    break;
+                }
+                body = Body(std::move(tool));
+                any = true;
+                break;
+            }
+            if (f.extrudeOp == ExtrudeOp::NewBody) {
+                fail("a separate body belongs in a separate object");
+                break;
+            }
+            const BooleanOp op = cut ? BooleanOp::Difference
+                               : f.extrudeOp == ExtrudeOp::Intersect ? BooleanOp::Intersection
+                                                                     : BooleanOp::Union;
+            Body combined;
+            if (!booleanOp(body, Body(std::move(tool)), op, combined, f.uid, false, &why))
+                fail(why.empty() ? "the extrusion could not be combined with the body" : why.c_str());
+            else
+                body = std::move(combined);
             break;
         }
 

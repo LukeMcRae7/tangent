@@ -124,6 +124,8 @@ Isolation isolation() {
 
 bool childIsolationAvailable() { return isolation() != Isolation::None; }
 
+bool forkIsolationAvailable() { return TG_HAVE_FORK != 0; }
+
 // ---- the worker process, from the application's side ----------------------
 
 struct AsyncTrial::Worker {

@@ -10,6 +10,7 @@
 #include "scene/feature.h"
 #include "scene/serialize.h"
 #include "scene/scene.h"
+#include "temp_path.h"
 
 #include <cmath>
 #include <cstdio>
@@ -235,7 +236,7 @@ int main() {
             o->spec.cylinder = {30, 5, 48};
             scene.rebuild(id);
 
-            const std::string path = "/tmp/tg_pattern_test.tgt";
+            const std::string path = tempPath("pattern.tgt");
             check(saveProject(scene, path).ok, "it saves");
             Scene back;
             check(loadProject(back, path).ok, "it loads");

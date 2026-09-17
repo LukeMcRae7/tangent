@@ -7,6 +7,7 @@
 // because nobody looks closely at a 24-pixel picture.
 #include "ui/icons.h"
 #include "icon_raster.h"
+#include "temp_path.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -38,8 +39,7 @@ int main(int argc, char** argv) {
                                            static_cast<uint8_t>(x ^ (y * 3)),
                                            static_cast<uint8_t>(y * 23 + x)};
 
-        const std::string path = std::string(std::getenv("TMPDIR") ? std::getenv("TMPDIR") : "/tmp")
-                               + "/tangent-icon-roundtrip.png";
+        const std::string path = tempPath("icon-roundtrip.png");
         check(icons::writePng(img, path), "wrote the test image");
 
         int w = 0, h = 0;
@@ -73,8 +73,7 @@ int main(int argc, char** argv) {
             for (int x = 0; x < img.width; ++x)
                 img.at(x, y) = icons::Rgba{static_cast<uint8_t>(x), static_cast<uint8_t>(y),
                                            static_cast<uint8_t>(x + y), 255};
-        const std::string path = std::string(std::getenv("TMPDIR") ? std::getenv("TMPDIR") : "/tmp")
-                               + "/tangent-icon-blocks.png";
+        const std::string path = tempPath("icon-blocks.png");
         check(icons::writePng(img, path), "wrote a 96KB image");
 
         int w = 0, h = 0;

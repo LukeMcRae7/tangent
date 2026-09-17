@@ -37,6 +37,11 @@ using VertexId = Index;
 // else holds it through a pointer and asks the functions below.
 struct BrepShape;
 
+// Declared in sketch/sketch.h; held by reference here so this header does not
+// grow a dependency on the sketch for the many files that never sweep one.
+struct Sketch;
+struct SketchProfile;
+
 using BrepRef = std::shared_ptr<const BrepShape>;
 
 // How closely triangles have to follow the surface they stand for.
@@ -280,6 +285,21 @@ BrepRef insetFaces(const BrepRef& s, const std::vector<FaceId>& faces, Real amou
 // solid that self-intersects.
 BrepRef shell(const BrepRef& s, const std::vector<FaceId>& openFaces, Real thickness,
               ElementId salt, std::string* reason);
+
+// A solid swept from one region of a sketch, between two offsets along the
+// sketch plane's normal.
+//
+// Built from the sketch's own curves rather than from points and sagittas: a
+// circle is one circle and an arc has its true centre, so a bore swept from a
+// sketch is one cylindrical face rather than four. A hole in the region is a
+// hole in the solid.
+//
+// Each wall is named for the sketch entity it was swept from, and the two caps
+// for which end they are. Changing a dimension moves faces without renaming
+// them, which is the whole reason for a sketch being in the history -- a fillet
+// on the edge a line swept stays on that edge when the line gets longer.
+BrepRef sketchSolid(const Sketch& sketch, const SketchProfile& profile, Real from, Real to,
+                    ElementId salt, std::string* reason);
 
 // A solid from a closed outline on a plane, swept between two heights along the
 // plane's normal. The create tool's profiles arrive this way.

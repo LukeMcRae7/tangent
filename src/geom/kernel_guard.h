@@ -51,6 +51,15 @@ Isolation isolation();
 // Whether a crash in guarded work is survivable here.
 bool childIsolationAvailable();
 
+// Whether tryInChild itself isolates, which is only where there is fork.
+//
+// Not the same question as the one above. On Windows guarded work is
+// survivable -- through the worker -- but a bare closure cannot be handed to a
+// worker, so tryInChild runs it in this process and a crash in it is fatal.
+// A probe built on tryInChild asks this; one built on tryIsolated asks
+// childIsolationAvailable.
+bool forkIsolationAvailable();
+
 // Work to be run where a crash is survivable.
 //
 // `run` is the work. `kind` and `encode` are the same work written down, for a

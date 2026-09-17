@@ -12,6 +12,7 @@
 // back the same through a file. Does it survive its root being changed.
 #include "scene/scene.h"
 #include "scene/serialize.h"
+#include "temp_path.h"
 #include "geom/brep.h"
 #include "geom/operations.h"
 #include "mesh/decimate.h"
@@ -193,9 +194,7 @@ int main() {
 
     std::printf("--- and the same after a trip through a file ---\n");
     {
-        const std::string path =
-            std::string(std::getenv("TMPDIR") ? std::getenv("TMPDIR") : "/tmp") +
-            "/tangent-chain.tgt";
+        const std::string path = tempPath("chain.tgt");
         check(saveProject(s, path).ok, "saved");
 
         Scene loaded;
@@ -313,7 +312,7 @@ int main() {
         check(sameMesh(committed, obj->body), "rebuilding gives exactly what was committed, names and all");
         check(obj->body.faceCount() <= 1200, "within the count it was asked for");
 
-        const std::string path = "/tmp/tg_chain_reduce.tgt";
+        const std::string path = tempPath("chain_reduce.tgt");
         check(saveProject(s, path).ok, "saved");
         Scene back;
         const ProjectResult res = loadProject(back, path);
@@ -347,7 +346,7 @@ int main() {
         check(id != kNoObject, "comes in as an object");
         s.find(id)->transform.position = {5, 6, 7};
 
-        const std::string path = "/tmp/tg_chain_import.tgt";
+        const std::string path = tempPath("chain_import.tgt");
         check(saveProject(s, path).ok, "saved");
         Scene back;
         const ProjectResult res = loadProject(back, path);

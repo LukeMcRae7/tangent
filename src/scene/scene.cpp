@@ -133,6 +133,36 @@ ObjectId Scene::addBody(Body body, Vec3 position, const std::string& name) {
     return id;
 }
 
+ObjectId Scene::addFeatureChain(std::vector<Feature> features, const std::string& name,
+                                std::string* error) {
+    if (error) error->clear();
+    auto obj = std::make_unique<SceneObject>();
+    obj->spec.kind = PrimitiveKind::Custom;
+    for (Feature& f : features)
+        if (f.uid == 0) f.uid = nextFeatureUid_++;
+    obj->features = std::move(features);
+
+    const bool built = evaluateFrom(obj->features, 0, obj->featureCache, obj->body);
+    for (const Feature& f : obj->features) {
+        if (!f.errored) continue;
+        if (error) *error = f.error;
+        return kNoObject;
+    }
+    if (!built) {
+        if (error) *error = "the history produced no solid";
+        return kNoObject;
+    }
+
+    obj->id = nextId_++;
+    obj->name = uniqueName(name.empty() ? "Part" : name);
+    obj->body.tessellate(obj->render);
+    obj->localBounds = obj->body.bounds();
+
+    const ObjectId id = obj->id;
+    objects_.push_back(std::move(obj));
+    return id;
+}
+
 bool Scene::removeObject(ObjectId id) {
     auto it = std::find_if(objects_.begin(), objects_.end(),
                            [&](const auto& o) { return o->id == id; });

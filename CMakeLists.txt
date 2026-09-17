@@ -108,6 +108,13 @@ else()
   target_compile_options(planegcs PRIVATE -w -include ${PLANEGCS_PRELUDE})
 endif()
 
+# The sketch is in every build, with or without the exact kernel: solving one
+# and finding its profiles needs no OpenCASCADE -- only sweeping a profile into a
+# solid does. So every target from here on links the solver, the same way the
+# kernel's libraries are linked below. Placed after planegcs itself, so it does
+# not link itself.
+link_libraries(planegcs)
+
 # ---- Tangent ----------------------------------------------------------------
 # ---- Optional: the exact B-rep backend ------------------------------------
 #
@@ -156,7 +163,8 @@ if(TANGENT_BREP)
 endif()
 
 set(TANGENT_GEOM src/geom/body.cpp src/geom/operations.cpp
-                 src/geom/kernel_guard.cpp src/mesh/decimate.cpp ${TANGENT_BREP_SRC})
+                 src/geom/kernel_guard.cpp src/mesh/decimate.cpp src/sketch/sketch.cpp
+                 ${TANGENT_BREP_SRC})
 
 add_executable(tangent
   src/main.cpp
@@ -164,6 +172,7 @@ add_executable(tangent
   src/app/camera.cpp
   src/app/transform_tool.cpp
   src/app/create_tool.cpp
+  src/app/sketch_tool.cpp
   src/app/measure.cpp
   src/app/snap.cpp
   src/app/drag_axis.cpp
@@ -303,6 +312,18 @@ target_link_libraries(test_create_tool PRIVATE imgui tangent_epoxy)
 target_compile_options(test_create_tool PRIVATE ${TANGENT_WARNINGS_LOOSE})
 add_test(NAME create_tool COMMAND test_create_tool)
 
+add_executable(test_sketch_tool tests/test_sketch_tool.cpp
+  src/app/sketch_tool.cpp src/app/create_tool.cpp src/app/camera.cpp src/app/undo.cpp
+  src/app/snap.cpp src/app/plane_snap.cpp src/app/snap_overlay.cpp src/app/overlay_shapes.cpp
+  src/ui/icons.cpp src/ui/command_panel.cpp
+  src/scene/scene.cpp src/scene/feature.cpp
+  src/mesh/health.cpp ${TANGENT_GEOM} src/mesh/halfedge.cpp src/mesh/primitives.cpp
+  src/render/renderer.cpp src/render/shader.cpp src/render/gpu_mesh.cpp)
+target_include_directories(test_sketch_tool PRIVATE src ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/backends)
+target_link_libraries(test_sketch_tool PRIVATE imgui tangent_epoxy)
+target_compile_options(test_sketch_tool PRIVATE ${TANGENT_WARNINGS})
+add_test(NAME sketch_tool COMMAND test_sketch_tool)
+
 add_executable(test_guard tests/test_guard.cpp
   src/scene/scene.cpp src/scene/feature.cpp src/scene/serialize.cpp src/scene/trials.cpp
   src/mesh/health.cpp ${TANGENT_GEOM} src/mesh/halfedge.cpp src/mesh/primitives.cpp
@@ -367,6 +388,15 @@ add_executable(test_planegcs tests/test_planegcs.cpp)
 target_link_libraries(test_planegcs PRIVATE planegcs)
 target_compile_options(test_planegcs PRIVATE ${TANGENT_WARNINGS})
 add_test(NAME planegcs COMMAND test_planegcs)
+
+# The sketch built on it: solving, profiles, and a sketch in the history.
+add_executable(test_sketch tests/test_sketch.cpp
+  src/scene/scene.cpp src/scene/feature.cpp src/scene/serialize.cpp
+  src/mesh/health.cpp ${TANGENT_GEOM}
+  src/mesh/halfedge.cpp src/mesh/primitives.cpp)
+target_include_directories(test_sketch PRIVATE src)
+target_compile_options(test_sketch PRIVATE ${TANGENT_WARNINGS})
+add_test(NAME sketch COMMAND test_sketch)
 
 add_executable(test_bvh tests/test_bvh.cpp)
 target_include_directories(test_bvh PRIVATE src)

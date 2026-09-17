@@ -7,6 +7,7 @@
 #include "mesh/decimate.h"
 #include "geom/kernel_guard.h"
 #include "app/create_tool.h"
+#include "app/sketch_tool.h"
 #include "app/file_dialog.h"
 #include "app/printability.h"
 #include "app/measure.h"
@@ -109,6 +110,11 @@ public:
     // 3 on a grid crossing, 4 on the hole's centre.
     void setSnapDemo(int mode) { snapDemo_ = mode; }
 
+    // Drives the sketch tool to a step so it can be looked at: 1 drawing, with
+    // a line half-drawn, 2 choosing regions, 3 setting the depth, 4 the part it
+    // made, re-opened for editing.
+    void setSketchDemo(int step) { sketchDemo_ = step; }
+
     // Drives the create tool to a given step so the handles and the dimension
     // row can be looked at: 1 adjusting a profile, 2 rounding a corner,
     // 3 setting the depth.
@@ -176,6 +182,7 @@ private:
     // Set only by the headless demos, which have no pointer of their own.
     Vec2 mouseOverride_{-1.0, -1.0};
     int  snapDemo_ = 0;
+    int  sketchDemo_ = 0;
     int  profileDemo_ = 0;
     bool profileDemoDone_ = false;
     bool filletOpen_ = false;
@@ -776,8 +783,11 @@ private:
     void drawFilletPanel();
 
     CreateTool createTool_;
+    SketchTool sketchTool_;
 
     void beginAddPrimitivePrompt(PrimitiveKind kind);
+    void beginSketch();
+    void beginEditSketch(ObjectId object, ElementId sketchUid);
 
     bool justFinishedModal_ = false;
 

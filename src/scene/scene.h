@@ -151,6 +151,13 @@ public:
     Backend defaultBackend() const { return defaultBackend_; }
     void setDefaultBackend(Backend b) { defaultBackend_ = b; }
     ObjectId addBody(Body body, Vec3 position = {}, const std::string& name = "Object");
+
+    // Adds an object made entirely by its history -- a part that begins as a
+    // sketch and a region swept out of it, with no primitive underneath. The
+    // chain is evaluated first, and nothing is added unless every step of it
+    // succeeds; `error` then says which step did not.
+    ObjectId addFeatureChain(std::vector<Feature> features, const std::string& name,
+                             std::string* error = nullptr);
     bool     removeObject(ObjectId id);
     ObjectId duplicateObject(ObjectId id);
 

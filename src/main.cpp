@@ -80,6 +80,8 @@ int main(int argc, char** argv) {
             app.setFilletOpen();
         } else if (std::strcmp(argv[i], "--profile-demo") == 0 && i + 1 < argc) {
             app.setProfileDemo(std::atoi(argv[++i]));
+        } else if (std::strcmp(argv[i], "--sketch-demo") == 0 && i + 1 < argc) {
+            app.setSketchDemo(std::atoi(argv[++i]));
         } else if (std::strcmp(argv[i], "--snap-demo") == 0 && i + 1 < argc) {
             app.setSnapDemo(std::atoi(argv[++i]));
         } else if (std::strcmp(argv[i], "--shell-fillet-demo") == 0) {

@@ -22,6 +22,7 @@
 
 #include "geom/body.h"
 #include "geom/operations.h"
+#include "sketch/sketch.h"
 
 #include <string>
 #include <vector>
@@ -43,6 +44,8 @@ enum class FeatureKind {
     FaceScale,   // grow or shrink a face in its own plane
     Pattern,     // repeat a tool, or the body, in a row, around an axis, or mirrored
     Reduce,      // fewer triangles for a mesh, within a tolerance
+    Sketch,      // constrained 2D geometry on a plane; changes no body itself
+    ExtrudeProfile, // a region of a sketch swept into a solid
 
     // New kinds go on the end and nowhere else. The value is what is written
     // to a file, so inserting one in the middle renumbers every kind after it
@@ -225,6 +228,19 @@ struct Feature {
     // The pattern this feature describes, assembled from the fields above.
     PatternSpec pattern() const;
 
+    // Sketch: the geometry, what has been said about it, and its plane. Solved
+    // each time the chain is evaluated, with the solved positions written back
+    // here -- so what follows, and anyone looking at it, sees the shape its
+    // constraints describe rather than the one it happened to be drawn as.
+    Sketch sketch;
+
+    // ExtrudeProfile: which sketch, and which region of it. The sketch is named
+    // by its feature's uid and the region by its key, neither of which changes
+    // when a step is added before it or a line is added elsewhere in the
+    // sketch. `distance` and `extrudeOp` say how far, and what to do with it.
+    ElementId sketchUid = 0;
+    SketchId  profileKey = kNoSketchId;
+
     // VertexEdit: a free-form drag, recorded as explicit offsets. Not
     // parametric in any meaningful sense, but it has to live in the chain so
     // that re-evaluating an earlier feature does not discard it.
@@ -234,6 +250,7 @@ struct Feature {
     // Set by evaluation; not part of the definition.
     bool        errored = false;
     std::string error;
+    int         sketchFreedoms = 0;   // Sketch: what the last solve left free
 
     // Short description for the timeline, e.g. "Extrude  12.0 mm".
     std::string summary() const;
