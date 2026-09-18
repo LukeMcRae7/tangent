@@ -1,6 +1,8 @@
 #include "ui/view_cube.h"
 
 #include "core/palette.h"
+#include "ui/theme.h"
+#include "ui/widgets.h"
 
 #include "imgui.h"
 
@@ -140,10 +142,7 @@ void drawViewCube(UiContext& ctx, float x, float y, float w, float h,
 
         // A press that moves is an orbit; a press that does not is a view.
         // Deciding on release rather than on press is what lets one gesture be
-        // both, without the cube twitching before it knows which. There is one
-        // view cube, so one flag is enough to remember which it turned out to
-        // be -- ImGui's drag threshold decides, so a shaky click still counts
-        // as a click.
+        // both, without the cube twitching before it knows which.
         static bool dragged = false;
         if (ImGui::IsItemActivated()) dragged = false;
         if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
@@ -169,11 +168,11 @@ void drawViewCube(UiContext& ctx, float x, float y, float w, float h,
         const float band = 1.0f - clampf(style.bandFraction, 0.05f, 0.49f);
         ImDrawList* dl = ImGui::GetWindowDrawList();
 
-        const ImU32 faceCol   = toU32(palette::kRaised, 0.95f);
-        const ImU32 faceLit   = toU32(palette::kHover, 0.97f);
-        const ImU32 hoverCol  = toU32(palette::kBrand, 0.90f);
-        const ImU32 lineCol   = toU32(palette::kBorder, 1.0f);
-        const ImU32 textCol   = toU32(palette::kText, 0.92f);
+        const ImU32 faceCol   = toU32(palette::kRaised, 0.92f);
+        const ImU32 faceLit   = toU32(palette::kHover, 0.95f);
+        const ImU32 hoverCol  = toU32(palette::kBrand, 0.92f);
+        const ImU32 lineCol   = toU32(palette::kBorderStrong, 1.0f);
+        const ImU32 textCol   = toU32(palette::kText, 0.9f);
 
         for (Vec3 n : kFaces) {
             const float facing = static_cast<float>(dot(n, camera.forward()));
@@ -215,41 +214,39 @@ void drawViewCube(UiContext& ctx, float x, float y, float w, float h,
                 project(camera, n + a - b, scale, centre),
                 project(camera, n + a + b, scale, centre),
                 project(camera, n - a + b, scale, centre)};
-            dl->AddPolyline(outline, 4, lineCol, ImDrawFlags_Closed, 1.4f);
+            dl->AddPolyline(outline, 4, lineCol, ImDrawFlags_Closed, 1.2f);
 
-            // The label, if there is room for it to be read. Not rotated with
-            // the face: upright text is legible at every orientation, and a
-            // cube that spins its lettering is harder to read than one that
-            // does not.
+            // The label, if there is room for it to be read. Upright text is
+            // legible at every orientation.
             const ImVec2 c = project(camera, n, scale, centre);
             const float span = std::min(
                 std::hypot(outline[1].x - outline[0].x, outline[1].y - outline[0].y),
                 std::hypot(outline[2].x - outline[1].x, outline[2].y - outline[1].y));
             const char* label = faceLabel(n);
             if (span > 34.0f) {
+                pushFont(FontWeight::Medium, uiFonts().size * 0.7f);
                 const ImVec2 ts = ImGui::CalcTextSize(label);
                 dl->AddText(ImVec2(c.x - ts.x * 0.5f, c.y - ts.y * 0.5f), textCol, label);
+                ImGui::PopFont();
             }
         }
 
-        // Where a click would take you, said in words. On the widget itself it
-        // would have to be a name long enough to push the cube out of the
-        // corner -- "Front Bottom Right" is wider than the cube is -- and a
-        // hover is when the question is being asked anyway.
+        // Where a click would take you, said in words.
         if (over && lengthSq(hovered) > 0.5f)
             ImGui::SetTooltip("%s", viewCubeZoneName(hovered).c_str());
 
         // ---- the one control that changes what is drawn --------------------
         const char* proj = camera.orthographic ? "Ortho" : "Persp";
+        pushFont(FontWeight::Medium, uiFonts().size * 0.82f);
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
-        ImGui::PushStyleColor(ImGuiCol_Text,
-                              camera.orthographic
-                                  ? ImVec4(palette::kText.r, palette::kText.g, palette::kText.b, 0.75f)
-                                  : ImVec4(palette::kBrand.r, palette::kBrand.g, palette::kBrand.b, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ui::im(palette::kHover, 0.6f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ui::im(palette::kActive, 0.6f));
+        ImGui::PushStyleColor(ImGuiCol_Text, ui::im(palette::kBrand));
         const float tw = ImGui::CalcTextSize(proj).x + ImGui::GetStyle().FramePadding.x * 2.0f;
         ImGui::SetCursorPosX(ImGui::GetCursorPosX() + std::max(0.0f, (box - tw) * 0.5f));
         if (ImGui::Button(proj)) camera.toggleProjection();
-        ImGui::PopStyleColor(2);
+        ImGui::PopStyleColor(4);
+        ImGui::PopFont();
         if (ImGui::IsItemHovered()) {
             over = true;
             ImGui::SetTooltip("%s", camera.orthographic

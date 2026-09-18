@@ -2,7 +2,7 @@
 
 #include "app/overlay_shapes.h"
 #include "ui/command_panel.h"
-#include "ui/icons.h"
+#include "ui/widgets.h"
 #include "app/snap_overlay.h"
 
 #include "app/camera.h"
@@ -45,7 +45,7 @@ namespace {
 
 constexpr Vec4 kCreateCol(0.20f, 0.60f, 0.95f, 0.70f);
 constexpr Vec4 kCutCol(0.95f, 0.35f, 0.20f, 0.70f);
-constexpr ImVec4 kAccentIm(0.20f, 0.60f, 0.95f, 1.0f);
+const ImVec4 kAccentIm(palette::kBrand.r, palette::kBrand.g, palette::kBrand.b, 1.0f);
 
 bool intersectRayPlane(const Ray& ray, Vec3 p0, Vec3 normal, float& outT, Vec3& outPt) {
     const float denom = dot(normal, ray.dir);
@@ -1759,12 +1759,12 @@ bool CreateTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& ou
     // The panel says what is being done now, which during a round is not the
     // same as what the command is called.
     const bool rounding = stage_ == CreateStage::AdjustProfile && isFilleting_;
-    const Icon icon = rounding                            ? Icon::Fillet
-                    : kind_ == PrimitiveKind::Cylinder    ? Icon::Cylinder
-                    : kind_ == PrimitiveKind::Sphere      ? Icon::Sphere
-                    : kind_ == PrimitiveKind::Cone        ? Icon::Cone
-                    : kind_ == PrimitiveKind::Torus       ? Icon::Torus
-                                                          : Icon::Box;
+    const Glyph icon = rounding                           ? Glyph::Fillet
+                     : kind_ == PrimitiveKind::Cylinder   ? Glyph::Cylinder
+                     : kind_ == PrimitiveKind::Sphere     ? Glyph::Sphere
+                     : kind_ == PrimitiveKind::Cone       ? Glyph::Cone
+                     : kind_ == PrimitiveKind::Torus      ? Glyph::Torus
+                                                          : Glyph::Box;
     char title[64];
     if (rounding)
         std::snprintf(title, sizeof title, "Round %s",
@@ -1772,7 +1772,32 @@ bool CreateTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& ou
     else
         std::snprintf(title, sizeof title, "Create %s", primitiveName(kind_));
 
-    if (!ui::beginCommand("##create", title, icon, hudX_, hudY_)) return true;
+    if (!ui::beginCommand("##create", title, icon)) return true;
+
+    // How far a bar reaches. What is being drawn is being drawn in this view,
+    // so the view's own height is the natural extent for a side or a depth:
+    // it does not move while the bar is pulled, and it grows when the user
+    // zooms out to draw something bigger. A corner round is bounded by the
+    // profile it sits in, the same bound setField applies.
+    const double extent = niceStepAbove(static_cast<double>(camera.orthoHeight()) * 0.5);
+    const double fieldMax = (stage_ == CreateStage::AdjustProfile && isFilleting_)
+                                ? std::min(currentWidth_, currentDepth_) * 0.499
+                                : extent;
+
+    // A number pulled on the panel is a number typed: the bar fixes the field
+    // the way the keyboard would, and the pointer lets go of it.
+    auto pulled = [&](int f, const ui::NumberEdit& e) {
+        if (e.dragged) {
+            char b[48];
+            std::snprintf(b, sizeof b, "%.6g", e.value);
+            typedField_ = f;
+            typedValue_ = b;
+            syncTypedField();
+            typedValue_.clear();
+        } else if (e.clicked) {
+            typedField_ = f;
+        }
+    };
 
     int footer = 0;
     switch (stage_) {
@@ -1803,9 +1828,9 @@ bool CreateTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& ou
     // -----------------------------------------------------------------------
     case CreateStage::DrawProfile_Pt2: {
         for (int f = 0; f < fieldCount(); ++f)
-            if (ui::commandNumber(fieldName(f), fieldDisplay(f), "mm", fieldFixed_[f],
-                                  f == typedField_ && typing(), typedValue_.c_str()))
-                typedField_ = f;
+            pulled(f, ui::commandNumber(fieldName(f), fieldDisplay(f), "mm", fieldFixed_[f],
+                                        f == typedField_ && typing(), typedValue_.c_str(),
+                                        0.0, fieldMax));
         if (activeSnap_.valid()) ui::commandValue("Snapped", describeSnap(activeSnap_).c_str());
         ui::commandHint(fieldCount() > 1
             ? "Type a number to fix a side; the other still follows the mouse.  Tab next, Enter confirm."
@@ -1817,9 +1842,9 @@ bool CreateTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& ou
     // -----------------------------------------------------------------------
     case CreateStage::AdjustProfile: {
         for (int f = 0; f < fieldCount(); ++f)
-            if (ui::commandNumber(fieldName(f), fieldDisplay(f), "mm", fieldFixed_[f],
-                                  f == typedField_ && typing(), typedValue_.c_str()))
-                typedField_ = f;
+            pulled(f, ui::commandNumber(fieldName(f), fieldDisplay(f), "mm", fieldFixed_[f],
+                                        f == typedField_ && typing(), typedValue_.c_str(),
+                                        0.0, fieldMax));
 
         if (kind_ != PrimitiveKind::Cylinder && !isFilleting_) {
             ui::commandRow("Corners");
@@ -1828,7 +1853,7 @@ bool CreateTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& ou
             ImGui::AlignTextToFramePadding();
             ImGui::TextUnformatted(r);
             ImGui::SameLine();
-            if (ImGui::SmallButton("Round all  (F)")) {
+            if (ui::pillButton("Round all", false)) {
                 isFilleting_ = true;
                 isDragging_ = false;
                 activeHandle_ = HandleId::FaceCenter;
@@ -1842,36 +1867,33 @@ bool CreateTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& ou
         ui::commandHint(isFilleting_
             ? "Move away from the corner to open it out.  Click or Enter confirms, Esc puts it back."
             : "Drag a handle to move it.  Hover one and press F to round that corner.");
-        footer = ui::commandFooter(isFilleting_ ? "Done  (Enter)" : "Extrude  (E)");
+        footer = ui::commandFooter(isFilleting_ ? "Done" : "Extrude");
         break;
     }
 
     // -----------------------------------------------------------------------
     case CreateStage::ExtrudeDepth: {
-        if (ui::commandNumber("Depth", extrudeDepth_, "mm", fieldFixed_[0],
-                              typing(), typedValue_.c_str()))
-            typedField_ = 0;
+        {
+            // Either way: out adds, in cuts. As far as the view is tall.
+            const double span = std::max(extent, std::fabs(extrudeDepth_));
+            pulled(0, ui::commandNumber("Depth", extrudeDepth_, "mm", fieldFixed_[0],
+                                        typing(), typedValue_.c_str(), -span, span, true));
+        }
 
         if (hasTargetBody()) {
-            const float ic = ImGui::GetTextLineHeight() * 1.4f;
-            ui::commandRow("Operation");
-            {
-                const bool on = op_ == CreateOp::Auto;
-                if (on) ImGui::PushStyleColor(ImGuiCol_Button, kAccentIm);
-                if (ImGui::Button("Auto")) op_ = CreateOp::Auto;
-                if (on) ImGui::PopStyleColor();
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("Join when pushed out of the face, cut when pushed in  (A)");
-            }
-            ImGui::SameLine();
-            if (iconButton(Icon::Union, "join", ic, "Join  (J)", op_ == CreateOp::Join))
-                op_ = CreateOp::Join;
-            ImGui::SameLine();
-            if (iconButton(Icon::Difference, "cut", ic, "Cut  (D)", op_ == CreateOp::Cut))
-                op_ = CreateOp::Cut;
-            ImGui::SameLine();
-            if (iconButton(Icon::Box, "newbody", ic, "New body  (N)", op_ == CreateOp::NewBody))
-                op_ = CreateOp::NewBody;
+            static const ui::Choice kOps[4] = {
+                {Glyph::PushPull,   "Auto", "A", "Join when pushed out of the face, cut when pushed in  (A)"},
+                {Glyph::Union,      "Join", "J", "Add the material to the body  (J)"},
+                {Glyph::Difference, "Cut",  "D", "Take the material out of the body  (D)"},
+                {Glyph::NewBody,    "New",  "N", "A body of its own  (N)"},
+            };
+            const int on = op_ == CreateOp::Auto ? 0 : op_ == CreateOp::Join ? 1
+                         : op_ == CreateOp::Cut  ? 2 : 3;
+            const int pick = ui::commandChoices("Operation", kOps, 4, on);
+            if (pick == 0) op_ = CreateOp::Auto;
+            if (pick == 1) op_ = CreateOp::Join;
+            if (pick == 2) op_ = CreateOp::Cut;
+            if (pick == 3) op_ = CreateOp::NewBody;
 
             // What will actually happen, spelled out. With Auto the operation
             // follows the sign of the depth, so the choice above does not say
@@ -1885,13 +1907,15 @@ bool CreateTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& ou
                                                   : "beside",
                           target ? target->name.c_str() : "the body");
             ui::commandRow("Result");
-            ImGui::TextColored(shown == CreateOp::Cut ? ImVec4(0.95f, 0.35f, 0.25f, 1.0f)
-                                                      : kAccentIm,
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextColored(shown == CreateOp::Cut ? kAccentIm
+                                                      : ImVec4(palette::kValid.r, palette::kValid.g,
+                                                               palette::kValid.b, 1.0f),
                                "%s", result);
         }
 
-        ui::commandHint("Move to set the depth, or type one.  A negative depth cuts.");
-        footer = ui::commandFooter("Finish  (E)");
+        ui::commandHint("Move to set the depth, drag the bar, or type one.  A negative depth cuts.");
+        footer = ui::commandFooter("Finish");
         break;
     }
 

@@ -133,26 +133,54 @@ ObjectId Scene::addBody(Body body, Vec3 position, const std::string& name) {
     return id;
 }
 
+namespace {
+
+// The object a chain describes, evaluated. Not in the scene yet: whether a
+// chain that failed is kept is the caller's decision.
+std::unique_ptr<SceneObject> buildFromChain(std::vector<Feature> features, bool& built) {
+    auto obj = std::make_unique<SceneObject>();
+    obj->spec.kind = PrimitiveKind::Custom;
+    obj->features = std::move(features);
+    built = evaluateFrom(obj->features, 0, obj->featureCache, obj->body);
+    return obj;
+}
+
+} // namespace
+
 ObjectId Scene::addFeatureChain(std::vector<Feature> features, const std::string& name,
                                 std::string* error) {
     if (error) error->clear();
-    auto obj = std::make_unique<SceneObject>();
-    obj->spec.kind = PrimitiveKind::Custom;
     for (Feature& f : features)
         if (f.uid == 0) f.uid = nextFeatureUid_++;
-    obj->features = std::move(features);
 
-    const bool built = evaluateFrom(obj->features, 0, obj->featureCache, obj->body);
+    bool built = false;
+    std::unique_ptr<SceneObject> obj = buildFromChain(std::move(features), built);
     for (const Feature& f : obj->features) {
         if (!f.errored) continue;
         if (error) *error = f.error;
         return kNoObject;
     }
     if (!built) {
-        if (error) *error = "the history produced no solid";
+        if (error) *error = "the history produced nothing";
         return kNoObject;
     }
 
+    obj->id = nextId_++;
+    obj->name = uniqueName(name.empty() ? "Part" : name);
+    obj->body.tessellate(obj->render);
+    obj->localBounds = obj->body.bounds();
+
+    const ObjectId id = obj->id;
+    objects_.push_back(std::move(obj));
+    return id;
+}
+
+ObjectId Scene::addChainAsIs(std::vector<Feature> features, const std::string& name) {
+    for (Feature& f : features)
+        if (f.uid == 0) f.uid = nextFeatureUid_++;
+
+    bool built = false;
+    std::unique_ptr<SceneObject> obj = buildFromChain(std::move(features), built);
     obj->id = nextId_++;
     obj->name = uniqueName(name.empty() ? "Part" : name);
     obj->body.tessellate(obj->render);

@@ -7,9 +7,11 @@
 #include "render/lod.h"
 #include "ui/command_panel.h"
 #include "app/printability.h"
+#include "ui/glyph.h"
 #include "ui/icons.h"
 #include "ui/view_cube.h"
 #include "ui/theme.h"
+#include "ui/widgets.h"
 
 #include "core/palette.h"
 
@@ -69,12 +71,32 @@ bool Application::init() {
     SDL_GL_SetAttribute(SDL_GL_MULTISAMPLEBUFFERS, 1);
     SDL_GL_SetAttribute(SDL_GL_MULTISAMPLESAMPLES, 4);
 
-    window_ = SDL_CreateWindow("Tangent", 1600, 950,
-                               SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE |
-                               SDL_WINDOW_HIGH_PIXEL_DENSITY);
+    // The application draws its own frame: the bar along the top is the title
+    // bar, and the window's three buttons sit at its right-hand end. The
+    // system's frame is a flag away for anyone who wants it back.
+    if (SDL_getenv("TANGENT_NATIVE_FRAME")) nativeFrame_ = true;
+    SDL_WindowFlags windowFlags = SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE |
+                                  SDL_WINDOW_HIGH_PIXEL_DENSITY;
+    if (!nativeFrame_) windowFlags |= SDL_WINDOW_BORDERLESS;
+    window_ = SDL_CreateWindow("Tangent", 1600, 950, windowFlags);
     if (!window_) {
         std::fprintf(stderr, "[app] SDL_CreateWindow failed: %s\n", SDL_GetError());
         return false;
+    }
+    if (!nativeFrame_) {
+        // The window manager asks, for every press, what the point under it
+        // is: empty bar drags the window, the edges resize it, and a button
+        // on the bar is a button.
+        SDL_SetWindowHitTest(
+            window_,
+            [](SDL_Window*, const SDL_Point* p, void* data) -> SDL_HitTestResult {
+                return static_cast<SDL_HitTestResult>(
+                    static_cast<Application*>(data)->frameHitTest(p->x, p->y));
+            },
+            this);
+        // A borderless window has no minimum of its own, and one shrunk to
+        // nothing cannot be taken hold of again.
+        SDL_SetWindowMinimumSize(window_, 900, 560);
     }
 
     glCtx_ = SDL_GL_CreateContext(window_);
@@ -100,7 +122,7 @@ bool Application::init() {
     io.ConfigWindowsMoveFromTitleBarOnly = true;
     io.IniFilename = "tangent.ini";
 
-    loadFonts(15.0f);
+    loadFonts(resolveAssetDir(), 14.0f);
     applyDarkTheme();
 
     if (!ImGui_ImplSDL3_InitForOpenGL(window_, glCtx_)) {
@@ -119,6 +141,7 @@ bool Application::init() {
     // Not fatal: without them the interface falls back to its words, which is
     // what it had before there were icons at all.
     loadIcons(resolveAssetDir() + "/icons");
+    loadBrandAssets(resolveAssetDir());
 
     ui_.scene  = &scene_;
     ui_.camera = &camera_;
@@ -468,7 +491,7 @@ bool Application::init() {
             if (e.curve == SketchCurve::Circle) sketchTool_.dimensionEntity(e.id);
         camera_.snapToGoal();
 
-        if (sketchDemo_ >= 2) {
+        if (sketchDemo_ >= 2 && sketchDemo_ <= 4) {
             // The plate, which is the region with the bore as its hole.
             if (sketchTool_.beginExtrude(&camera_)) {
                 for (const SketchProfile& r : sketchTool_.regions())
@@ -476,12 +499,12 @@ bool Application::init() {
             }
             camera_.snapToGoal();
         }
-        if (sketchDemo_ >= 3) {
+        if (sketchDemo_ >= 3 && sketchDemo_ <= 4) {
             sketchTool_.beginDepth();
             sketchTool_.typeKey('1');
             sketchTool_.typeKey('5');
         }
-        if (sketchDemo_ >= 4) {
+        if (sketchDemo_ == 4) {
             sketchTool_.finish(scene_, camera_, undo_, true);
             if (!scene_.objects().empty()) {
                 const SceneObject* o = scene_.objects().front().get();
@@ -491,6 +514,38 @@ bool Application::init() {
                 sketchTool_.startEdit(scene_, o->id, o->features.front().uid, camera_);
             }
             camera_.snapToGoal();
+        }
+        if (sketchDemo_ == 5) {
+            // Kept as a sketch and nothing else: an object in the outliner with
+            // no body, drawn where it was drawn.
+            sketchTool_.finish(scene_, camera_, undo_, false);
+            if (!scene_.objects().empty()) {
+                const SceneObject* o = scene_.objects().front().get();
+                std::fprintf(stderr, "[sketch-demo] kept '%s': %zu features, body empty=%d\n",
+                             o->name.c_str(), o->features.size(), (int)o->body.empty());
+                scene_.select(o->id);
+            }
+            camera_.snapToGoal();
+        }
+        if (sketchDemo_ == 6) {
+            // Edit mode: a triangle with nothing sizing it, one corner dragged,
+            // beside a rectangle that is fully constrained -- the two colours.
+            sketchTool_.setMode(SketchMode::Line);
+            sketchTool_.clickAt({-25, -35});
+            sketchTool_.clickAt({15, -35});
+            sketchTool_.clickAt({-5, -12});
+            sketchTool_.clickAt({-25, -35});
+            sketchTool_.setMode(SketchMode::Select);
+            SketchId apex = kNoSketchId;
+            for (const SketchPoint& p : sketchTool_.sketch().points)
+                if (std::fabs(p.at.x + 5.0) < 1e-6 && std::fabs(p.at.y + 12.0) < 1e-6) apex = p.id;
+            if (apex != kNoSketchId && sketchTool_.beginDrag(apex)) {
+                sketchTool_.dragTo({2, -6});
+                sketchTool_.handleMouseUp();
+            }
+            std::fprintf(stderr, "[sketch-demo] dragged: %zu free of %zu entities\n",
+                         sketchTool_.solveState().freeEntities.size(),
+                         sketchTool_.sketch().entities.size());
         }
         if (std::string e = sketchTool_.takeError(); !e.empty())
             std::fprintf(stderr, "[sketch-demo] %s\n", e.c_str());
@@ -685,6 +740,7 @@ bool Application::init() {
 }
 
 void Application::shutdown() {
+    unloadBrandAssets();
     unloadIcons();
     renderer_.shutdown();
     if (ImGui::GetCurrentContext()) {
@@ -713,6 +769,37 @@ void Application::handleEvent(const SDL_Event& e) {
         default:
             break;
     }
+}
+
+int Application::frameHitTest(int x, int y) const {
+    if (nativeFrame_ || !window_) return SDL_HITTEST_NORMAL;
+
+    int w = 0, h = 0;
+    SDL_GetWindowSize(window_, &w, &h);
+    const bool maximized = (SDL_GetWindowFlags(window_) & SDL_WINDOW_MAXIMIZED) != 0;
+
+    // The edges, when there are edges to take hold of.
+    if (!maximized) {
+        const int edge = 6;
+        const bool l = x < edge, r = x >= w - edge, t = y < edge, b = y >= h - edge;
+        if (t && l) return SDL_HITTEST_RESIZE_TOPLEFT;
+        if (t && r) return SDL_HITTEST_RESIZE_TOPRIGHT;
+        if (b && l) return SDL_HITTEST_RESIZE_BOTTOMLEFT;
+        if (b && r) return SDL_HITTEST_RESIZE_BOTTOMRIGHT;
+        if (t) return SDL_HITTEST_RESIZE_TOP;
+        if (b) return SDL_HITTEST_RESIZE_BOTTOM;
+        if (l) return SDL_HITTEST_RESIZE_LEFT;
+        if (r) return SDL_HITTEST_RESIZE_RIGHT;
+    }
+
+    // The bar, except where it is a button.
+    if (static_cast<float>(y) < hitFrame_.barHeight) {
+        if (hitFrame_.popupOpen) return SDL_HITTEST_NORMAL;
+        for (const FrameState::Rect& r : hitFrame_.noDrag)
+            if (x >= r.x0 && x <= r.x1 && y >= r.y0 && y <= r.y1) return SDL_HITTEST_NORMAL;
+        return SDL_HITTEST_DRAGGABLE;
+    }
+    return SDL_HITTEST_NORMAL;
 }
 
 bool Application::pointerDrives() const {
@@ -806,6 +893,10 @@ void Application::handleViewportMouse() {
             if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && overViewport) {
                 sketchTool_.handleMouseDown(scene_, camera_, undo_);
                 if (!sketchTool_.active()) justFinishedModal_ = true;
+            } else if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+                // Wherever the pointer ended up: a drag let go of outside the
+                // viewport is still let go of.
+                sketchTool_.handleMouseUp();
             } else if (ImGui::IsMouseClicked(ImGuiMouseButton_Right) && overViewport) {
                 sketchTool_.handleRightClick(camera_);
                 if (!sketchTool_.active()) justFinishedModal_ = true;
@@ -969,479 +1060,21 @@ void Application::drawReadout(const std::string& text, float px, float py,
     if (text.empty()) return;
 
     auto u8 = [](Real v) { return static_cast<int>(clampf(v, 0.0, 1.0) * 255.0 + 0.5); };
-    const Rgb& bg = palette::kMenuBar;
-    const Rgb& border = emphasise ? palette::kBrand : palette::kBorder;
-    const Rgb& fg = emphasise ? palette::kBrand : palette::kText;
+    const Rgb& bg = palette::kCommand;
+    const Rgb& border = emphasise ? palette::kBrand : palette::kBorderStrong;
+    const Rgb& fg = palette::kText;
 
+    pushFont(FontWeight::Medium);
     ImDrawList* dl = ImGui::GetForegroundDrawList();
     const ImVec2 size = ImGui::CalcTextSize(text.c_str());
     const ImVec2 a(px, py);
-    const ImVec2 b(px + size.x + 14.0f, py + size.y + 8.0f);
+    const ImVec2 b(px + size.x + 16.0f, py + size.y + 8.0f);
 
-    dl->AddRectFilled(a, b, IM_COL32(u8(bg.r), u8(bg.g), u8(bg.b), 236), 4.0f);
-    dl->AddRect(a, b, IM_COL32(u8(border.r), u8(border.g), u8(border.b), 255), 4.0f);
-    dl->AddText(ImVec2(px + 7.0f, py + 4.0f),
+    dl->AddRectFilled(a, b, IM_COL32(u8(bg.r), u8(bg.g), u8(bg.b), 236), 6.0f);
+    dl->AddRect(a, b, IM_COL32(u8(border.r), u8(border.g), u8(border.b), emphasise ? 160 : 255), 6.0f);
+    dl->AddText(ImVec2(px + 8.0f, py + 4.0f),
                 IM_COL32(u8(fg.r), u8(fg.g), u8(fg.b), 255), text.c_str());
-}
-
-// The fillet's own dialog, in the same shape as the create tool's.
-//
-// The gesture already says what the radius is -- the arrow, and the number by
-// the cursor -- but a gesture cannot say how many segments are being used, how
-// many edges were caught, or how to commit without a keyboard. An operation
-// with parameters gets a panel; that is the rule the create tool follows and
-// there is no reason for this one to be different.
-void Application::drawFilletPanel() {
-    const bool settled = settledIs(Settled::Fillet);
-    if (!filletTool_.active && !settled) return;
-
-    auto signature = [&] {
-        char b[96];
-        std::snprintf(b, sizeof b, "%d|%.9g|%.9g", (int)filletTool_.chamfer,
-                      filletTool_.currentRadius, filletTool_.endRadius);
-        return std::string(b);
-    };
-    const std::string was = settled ? signature() : std::string();
-
-    if (!ui::beginCommand("##fillet", filletTool_.chamfer ? "Chamfer" : "Fillet",
-                          filletTool_.chamfer ? Icon::Chamfer : Icon::Fillet,
-                          viewRect_.x + 16.0f, viewRect_.y + 16.0f))
-        return;
-
-    if (ui::commandNumber("Radius", filletTool_.currentRadius, "mm",
-                          !filletTool_.typedValue.empty(), !filletTool_.typedValue.empty(),
-                          filletTool_.typedValue.c_str())) {
-        // Clicking the field is a way in for the mouse: it clears whatever was
-        // typed and hands the radius back to the pointer.
-        filletTool_.typedValue.clear();
-    }
-
-    char edges[64];
-    std::snprintf(edges, sizeof edges, "%zu edge%s", filletTool_.edges.size(),
-                  filletTool_.edges.size() == 1 ? "" : "s");
-    ui::commandValue("Selection", edges);
-
-    // While the limit is still being found there is no honest number to show
-    // for it, and a maximum that grows as you read it is worse than none.
-    if (!filletTool_.search.active && filletTool_.maxRadius > 0.0) {
-        char limit[48];
-        std::snprintf(limit, sizeof limit, "%.2f mm", filletTool_.maxRadius);
-        ui::commandValue("Largest", limit);
-    }
-
-    // A flat cut or a round, and whether the round holds its size along the
-    // edge. Both change what gets built, so both re-plan and re-preview.
-    ui::commandRow("Cut");
-    {
-        const float ic = ImGui::GetTextLineHeight() * 1.4f;
-        if (iconButton(Icon::Fillet, "asround", ic, "Round  (R)", !filletTool_.chamfer) &&
-            filletTool_.chamfer) {
-            filletTool_.chamfer = false;
-            filletTool_.requestedRadius = -1.0;
-            filletTool_.previewValid = false;
-        }
-        ImGui::SameLine();
-        if (iconButton(Icon::Chamfer, "asflat", ic, "Flat  (C)", filletTool_.chamfer) &&
-            !filletTool_.chamfer) {
-            filletTool_.chamfer = true;
-            filletTool_.endRadius = -1.0;         // a flat cut does not taper
-            filletTool_.requestedRadius = -1.0;
-            filletTool_.previewValid = false;
-        }
-    }
-
-    if (!filletTool_.chamfer) {
-        const bool tapering = filletTool_.endRadius > 0.0;
-        ui::commandRow("Taper");
-        if (ImGui::Button(tapering ? "Even" : "Taper to...")) {
-            filletTool_.endRadius = tapering ? -1.0
-                                             : std::max(filletTool_.currentRadius * 0.25, 0.1);
-            filletTool_.requestedRadius = -1.0;
-            filletTool_.previewValid = false;
-        }
-        if (tapering) {
-            ui::commandRow("Ends at");
-            ImGui::SetNextItemWidth(-1.0f);
-            if (ImGui::DragScalar("##end", ImGuiDataType_Double, &filletTool_.endRadius,
-                                  0.05f, nullptr, nullptr, "%.2f mm")) {
-                filletTool_.endRadius = std::max(filletTool_.endRadius, Real(0.05));
-                filletTool_.requestedRadius = -1.0;
-                filletTool_.previewValid = false;
-            }
-        }
-    }
-
-    if (settled) ui::commandApplied(filletTool_.chamfer ? "Chamfer" : "Fillet");
-    ui::commandHint(filletTool_.chamfer
-        ? "Pull along the arrow, or type a distance. The cut is the same from both faces."
-        : "Pull along the arrow, or type a radius.");
-
-    const int footer = settled ? ui::commandFooter("Done", true, nullptr)
-                               : ui::commandFooter("OK  (Click)");
-    ui::endCommand();
-
-    if (settled) {
-        if (footer > 0)             dismissSettled();
-        else if (signature() != was) recommitSettled();
-        return;
-    }
-    if (footer > 0)      commitFillet();
-    else if (footer < 0) abortFillet();
-}
-
-void Application::drawFacePanel() {
-    const bool settled = settledIs(Settled::Face);
-    if (!faceTool_.active && !settled) return;
-
-    auto signature = [&] {
-        char b[96];
-        std::snprintf(b, sizeof b, "%d|%.9g|%.9g|%.9g|%.9g", (int)faceTool_.op,
-                      faceTool_.value, faceTool_.direction.x,
-                      faceTool_.direction.y, faceTool_.direction.z);
-        return std::string(b);
-    };
-    const std::string was = settled ? signature() : std::string();
-
-    const bool rotate  = faceTool_.op == FaceOp::Rotate;
-    const bool scale   = faceTool_.op == FaceOp::Scale;
-    const bool extrude = faceTool_.op == FaceOp::Extrude;
-
-    if (!ui::beginCommand("##faceop",
-                          rotate ? "Rotate Face" : scale ? "Scale Face"
-                                 : extrude ? "Extrude" : "Move Face",
-                          rotate ? Icon::Chamfer : scale ? Icon::Cone : Icon::Extrude,
-                          viewRect_.x + 16.0f, viewRect_.y + 16.0f))
-        return;
-
-    if (ui::commandNumber(rotate ? "Angle" : scale ? "Change" : "Distance",
-                          faceTool_.value, rotate ? "deg" : scale ? "%" : "mm",
-                          !faceTool_.typedValue.empty(),
-                          !faceTool_.typedValue.empty(), faceTool_.typedValue.c_str()))
-        faceTool_.typedValue.clear();
-
-    // The multiple the percentage comes to, since that is the number a person
-    // thinks in when they say "half again as big".
-    if (scale) {
-        char mult[32];
-        std::snprintf(mult, sizeof mult, "%.3g x", 1.0 + faceTool_.value / 100.0);
-        ui::commandValue("Size", mult);
-    }
-
-    char sel[64];
-    std::snprintf(sel, sizeof sel, "%zu face%s", faceTool_.faces.size(),
-                  faceTool_.faces.size() == 1 ? "" : "s");
-    ui::commandValue("Selection", sel);
-
-    // Which way it goes. The face's own normal unless an axis key says
-    // otherwise -- for a rotate, which way round it turns. A scale goes every
-    // way at once, so there is nothing to point.
-    if (!scale) {
-    ui::commandRow(rotate ? "Pivot" : "Along");
-    static const char* kAxisName[3] = {"X", "Y", "Z"};
-    {
-        const bool on = faceTool_.lockedAxis < 0;
-        if (on) ImGui::PushStyleColor(ImGuiCol_Button,
-                                      ImVec4(palette::kBrand.r, palette::kBrand.g,
-                                             palette::kBrand.b, 0.85f));
-        if (ImGui::Button(rotate ? "Edge" : "Normal")) setFaceAxis(-1);
-        if (on) ImGui::PopStyleColor();
-    }
-    for (int a = 0; a < 3; ++a) {
-        ImGui::SameLine();
-        const bool on = faceTool_.lockedAxis == a;
-        if (on) ImGui::PushStyleColor(ImGuiCol_Button,
-                                      ImVec4(palette::kBrand.r, palette::kBrand.g,
-                                             palette::kBrand.b, 0.85f));
-        if (ImGui::Button(kAxisName[a])) setFaceAxis(a);
-        if (on) ImGui::PopStyleColor();
-    }
-    }
-
-    // What the number is doing to the body, said plainly. Not a choice: moving
-    // a face out adds material and moving it in takes some away, and offering
-    // to override that would be offering to make the tool lie.
-    if (!rotate && !scale) {
-        ui::commandRow("Result");
-        const bool cutting = faceTool_.value < 0.0;
-        if (std::fabs(faceTool_.value) < 1e-6)
-            ImGui::TextDisabled("unchanged");
-        else
-            ImGui::TextColored(cutting ? ImVec4(0.95f, 0.35f, 0.25f, 1.0f)
-                                       : ImVec4(palette::kBrand.r, palette::kBrand.g,
-                                                palette::kBrand.b, 1.0f),
-                               "%s", cutting ? "takes material away" : "adds material");
-    }
-
-    // Only when it has actually run into something. Fusion asks at this point
-    // and not before, and for the same reason: until the material meets
-    // another body there is no decision to make.
-    if (!rotate && faceTool_.meets != kNoObject) {
-        const SceneObject* other = scene_.find(faceTool_.meets);
-        ui::commandRow("Meets");
-        ImGui::TextColored(ImVec4(palette::kBrand.r, palette::kBrand.g,
-                                  palette::kBrand.b, 1.0f),
-                           "%s", other ? other->name.c_str() : "another body");
-
-        ui::commandRow("");
-        {
-            const bool on = !faceTool_.combineWithMeet;
-            if (on) ImGui::PushStyleColor(ImGuiCol_Button,
-                                          ImVec4(palette::kBrand.r, palette::kBrand.g,
-                                                 palette::kBrand.b, 0.85f));
-            if (ImGui::Button("Leave")) faceTool_.combineWithMeet = false;
-            if (on) ImGui::PopStyleColor();
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Two bodies that overlap, left as they are");
-        }
-        const float ic = ImGui::GetTextLineHeight() * 1.4f;
-        ImGui::SameLine();
-        if (iconButton(Icon::Union, "mjoin", ic, "Join them into one",
-                       faceTool_.combineWithMeet && faceTool_.meetOp == BooleanOp::Union)) {
-            faceTool_.combineWithMeet = true;
-            faceTool_.meetOp = BooleanOp::Union;
-        }
-        ImGui::SameLine();
-        if (iconButton(Icon::Difference, "mcut", ic, "Cut this one out of it",
-                       faceTool_.combineWithMeet && faceTool_.meetOp == BooleanOp::Difference)) {
-            faceTool_.combineWithMeet = true;
-            faceTool_.meetOp = BooleanOp::Difference;
-        }
-    }
-
-    ui::commandHint(scale
-        ? "Pull out from the middle of the face to grow it, in to shrink it. The "
-          "faces around it slant to follow."
-        : rotate
-        ? "Pull either way across the pivot, or type an angle. X / Y / Z choose "
-          "which way it turns."
-        : extrude
-        ? "Grows a boss off the face and leaves its outline, so you can take "
-          "hold of it afterwards. Negative cuts in."
-        : "Moves the face; the body follows. X / Y / Z move it along a world "
-          "axis instead of its own.");
-
-    if (settled)
-        ui::commandApplied(rotate ? "Rotation" : scale ? "Scale"
-                                  : extrude ? "Extrude" : "Move");
-
-    const int footer = settled ? ui::commandFooter("Done", true, nullptr)
-                               : ui::commandFooter("OK  (Click)");
-    ui::endCommand();
-    if (settled) {
-        if (footer > 0)             dismissSettled();
-        else if (signature() != was) recommitSettled();
-        return;
-    }
-    if (footer > 0)      commitFaceMove();
-    else if (footer < 0) abortFaceMove();
-}
-
-void Application::drawPatternPanel() {
-    const bool settled = settledIs(Settled::Pattern);
-    if (!patternTool_.active && !settled) return;
-
-    // What the panel is showing, so that a control moved while the operation is
-    // already applied re-applies it. Comparing one signature across the frame
-    // beats hanging a call off every widget: a control added later is covered
-    // by having been drawn, not by being remembered.
-    auto signature = [&] {
-        char b[96];
-        std::snprintf(b, sizeof b, "%d|%d|%d|%d|%.9g", (int)patternTool_.mode,
-                      patternTool_.count, patternTool_.axisIndex,
-                      (int)patternTool_.useTool, patternTool_.dragged());
-        return std::string(b);
-    };
-    const std::string was = settled ? signature() : std::string();
-
-    const bool mirror = patternTool_.mode == PatternMode::Mirror;
-    if (!ui::beginCommand("##pattern", mirror ? "Mirror" : "Pattern",
-                          mirror ? Icon::Difference : Icon::Intersection,
-                          viewRect_.x + 16.0f, viewRect_.y + 16.0f))
-        return;
-
-    // How the copies are laid out. Three answers to one question, so three
-    // buttons rather than a dropdown.
-    ui::commandRow("Layout");
-    {
-        // Words rather than icons: none of the baked pictures depicts a row or
-        // a ring, and a picture that has to be explained by its tooltip is a
-        // worse label than the word it was standing in for.
-        struct Choice { const char* label; PatternMode mode; const char* tip; };
-        static const Choice kChoices[3] = {
-            {"Row",    PatternMode::Linear,   "Along a direction  (L)"},
-            {"Ring",   PatternMode::Circular, "Around an axis  (C)"},
-            {"Mirror", PatternMode::Mirror,   "Reflected across a plane  (M)"},
-        };
-        const float w = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x * 2.0f) / 3.0f;
-        for (int i = 0; i < 3; ++i) {
-            if (i) ImGui::SameLine();
-            const bool on = patternTool_.mode == kChoices[i].mode;
-            if (on) ImGui::PushStyleColor(ImGuiCol_Button,
-                                          ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
-            if (ImGui::Button(kChoices[i].label, ImVec2(w, 0)) && !on) {
-                if (kChoices[i].mode == PatternMode::Circular) patternTool_.axisIndex = 2;
-                setPatternMode(kChoices[i].mode);
-            }
-            if (on) ImGui::PopStyleColor();
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", kChoices[i].tip);
-        }
-    }
-
-    // The axis, or the plane's normal. Same three keys the transform tools use.
-    ui::commandRow(mirror ? "Plane" : "Axis");
-    {
-        static const char* kAxis[3] = {"X", "Y", "Z"};
-        for (int i = 0; i < 3; ++i) {
-            if (i) ImGui::SameLine();
-            const bool on = patternTool_.axisIndex == i;
-            if (on) ImGui::PushStyleColor(ImGuiCol_Button,
-                                          ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
-            if (ImGui::Button(kAxis[i], ImVec2(ImGui::GetTextLineHeight() * 1.8f, 0)) && !on) {
-                patternTool_.axisIndex = i;
-                setPatternMode(patternTool_.mode);
-            }
-            if (on) ImGui::PopStyleColor();
-        }
-    }
-
-    if (mirror) {
-        if (ui::commandNumber("Plane at", patternTool_.offset, "mm",
-                              !patternTool_.typedValue.empty(),
-                              !patternTool_.typedValue.empty(),
-                              patternTool_.typedValue.c_str()))
-            patternTool_.typedValue.clear();
-    } else {
-        if (ui::commandNumber(patternTool_.mode == PatternMode::Circular ? "Turn" : "Spacing",
-                              patternTool_.dragged(),
-                              patternTool_.mode == PatternMode::Circular ? "deg" : "mm",
-                              !patternTool_.typedValue.empty(),
-                              !patternTool_.typedValue.empty(),
-                              patternTool_.typedValue.c_str()))
-            patternTool_.typedValue.clear();
-
-        ui::commandRow("Copies");
-        // A full turn is what a ring pattern is nearly always for, and working
-        // out 360 over the count by hand is not modelling. It shares the row,
-        // so the count field leaves room for it.
-        const bool ring = patternTool_.mode == PatternMode::Circular;
-        const float turnW = ring ? ImGui::CalcTextSize("Full turn").x +
-                                       ImGui::GetStyle().FramePadding.x * 2.0f +
-                                       ImGui::GetStyle().ItemSpacing.x
-                                 : 0.0f;
-        ImGui::SetNextItemWidth(-1.0f - turnW);
-        int n = patternTool_.count;
-        if (ImGui::DragInt("##count", &n, 0.1f, 2, 256, "%d")) {
-            patternTool_.count = n < 2 ? 2 : (n > 256 ? 256 : n);
-            patternTool_.previewValid = false;
-        }
-        if (ring) {
-            ImGui::SameLine();
-            if (ImGui::Button("Full turn")) {
-                patternTool_.stepAngle = radians(360.0 / std::max(2, patternTool_.count));
-                patternTool_.typedValue.clear();
-                patternTool_.previewValid = false;   // the next frame rebuilds
-            }
-        }
-    }
-
-    // What is being repeated. A boolean at the end of the chain leaves a tool
-    // behind that can be repeated instead of the whole body, and repeating that
-    // is what a person means by "pattern this hole".
-    if (patternTool_.toolAvailable) {
-        ui::commandRow("Repeat");
-        if (ImGui::Button(patternTool_.useTool ? "The cut" : "The body")) {
-            patternTool_.useTool = !patternTool_.useTool;
-            patternTool_.previewValid = false;
-            // A plane that was right for one of these is a no-op for the other.
-            if (mirror) setPatternMode(PatternMode::Mirror);
-        }
-    }
-
-    if (settled) ui::commandApplied(mirror ? "Mirror" : "Pattern");
-    ui::commandHint(mirror
-        ? (patternTool_.useTool
-               ? "The last cut is reflected across the plane and made again."
-               : "The body is reflected across the plane, and the two halves fuse.")
-        : (patternTool_.useTool
-               ? "The last cut is repeated. Its first copy is where it already is."
-               : "The body is repeated, and the copies fuse where they meet."));
-
-    const int footer = settled ? ui::commandFooter("Done", true, nullptr)
-                               : ui::commandFooter("OK  (Click)");
-    ui::endCommand();
-    if (settled) {
-        if (footer > 0)            dismissSettled();
-        else if (signature() != was) recommitSettled();
-        return;
-    }
-    if (footer > 0)      commitPattern();
-    else if (footer < 0) abortPattern();
-}
-
-void Application::drawDividePanel() {
-    const bool settled = settledIs(Settled::Divide);
-    if (!divideTool_.active && !settled) return;
-
-    if (!ui::beginCommand("##divide", "Divide", Icon::Inset,
-                          viewRect_.x + 16.0f, viewRect_.y + 16.0f))
-        return;
-
-    const Real len = length(divideTool_.dir);
-    if (ui::commandNumber("Along", divideTool_.t * len, "mm",
-                          !divideTool_.typedValue.empty(),
-                          !divideTool_.typedValue.empty(),
-                          divideTool_.typedValue.c_str()))
-        divideTool_.typedValue.clear();
-
-    char of[48];
-    std::snprintf(of, sizeof of, "%.2f mm", len);
-    ui::commandValue("Edge", of);
-
-    if (settled) ui::commandApplied("Divide");
-    ui::commandHint("The cut runs square across the edge you chose and slides "
-                    "along it. The body stays whole.");
-
-    const int footer = settled ? ui::commandFooter("Done", true, nullptr)
-                               : ui::commandFooter("OK  (Click)");
-    ui::endCommand();
-    if (settled) {
-        if (footer > 0) dismissSettled();
-        return;
-    }
-    if (footer > 0)      commitDivide();
-    else if (footer < 0) abortDivide();
-}
-
-// The live value sits next to the cursor rather than only in the status bar.// The live value sits next to the cursor rather than only in the status bar.
-// During a drag the eye is on the geometry, and a number at the bottom of the
-// window is somewhere the user is not looking.
-void Application::drawTransformReadout() {
-    if (filletTool_.active) {
-        char buf[128];
-        std::snprintf(buf, sizeof(buf), "Fillet  %.2f mm", filletTool_.currentRadius);
-        ImVec2 at(viewRect_.x + viewRect_.w * 0.5f, viewRect_.y + viewRect_.h * 0.5f);
-        if (ImGui::IsMousePosValid()) {
-            const ImVec2 m = ImGui::GetIO().MousePos;
-            at = ImVec2(m.x + 20.0f, m.y - 34.0f);
-        }
-        drawReadout(buf, at.x, at.y, /*emphasise=*/true);
-        return;
-    }
-
-
-    if (!tool_.active()) return;
-    const std::string text = tool_.statusText();
-    if (text.empty()) return;
-
-    // If the cursor has never entered the window ImGui reports a sentinel
-    // position, and the box would be drawn off-screen. Fall back to the
-    // viewport centre so the value is never simply missing.
-    ImVec2 at(viewRect_.x + viewRect_.w * 0.5f, viewRect_.y + viewRect_.h * 0.5f);
-    if (ImGui::IsMousePosValid()) {
-        const ImVec2 m = ImGui::GetIO().MousePos;
-        at = ImVec2(m.x + 20.0f, m.y - 34.0f);
-    }
-    drawReadout(text, at.x, at.y, /*emphasise=*/true);
+    ImGui::PopFont();
 }
 
 void Application::drawMeasureLabel() {
@@ -1835,7 +1468,8 @@ void Application::handleShortcuts() {
                  std::pair{ImGuiKey_L, 'L'}, std::pair{ImGuiKey_R, 'R'}, std::pair{ImGuiKey_C, 'C'},
                  std::pair{ImGuiKey_A, 'A'}, std::pair{ImGuiKey_D, 'D'}, std::pair{ImGuiKey_Q, 'Q'},
                  std::pair{ImGuiKey_X, 'X'}, std::pair{ImGuiKey_E, 'E'}, std::pair{ImGuiKey_J, 'J'},
-                 std::pair{ImGuiKey_N, 'N'}, std::pair{ImGuiKey_Z, 'Z'}}) {
+                 std::pair{ImGuiKey_N, 'N'}, std::pair{ImGuiKey_Z, 'Z'}, std::pair{ImGuiKey_S, 'S'},
+                 std::pair{ImGuiKey_K, 'K'}}) {
             if (ImGui::IsKeyPressed(imKey, false)) { send(ch); return; }
         }
         for (int d = 0; d <= 9; ++d) {
@@ -2251,107 +1885,6 @@ void Application::abortReduce() {
     justFinishedModal_ = true;
     reduceTool_.active = false;
     reduceTool_.reset();
-}
-
-void Application::drawReducePanel() {
-    if (!reduceTool_.active) return;
-    if (!ui::beginCommand("##reduce", "Reduce Mesh", Icon::Count, viewRect_.x + 16.0f,
-                          viewRect_.y + 16.0f))
-        return;
-
-    const Real tolBefore = reduceTool_.tolerance;
-    const int targetBefore = reduceTool_.target;
-    const bool loosenBefore = reduceTool_.loosen;
-
-    if (ui::commandNumber("Within", reduceTool_.tolerance, "mm", !reduceTool_.typedValue.empty(),
-                          !reduceTool_.typedValue.empty(), reduceTool_.typedValue.c_str()))
-        reduceTool_.typedValue.clear();
-
-    // The tolerances people actually use, one click each.
-    ui::commandRow("");
-    {
-        // Wrapped to the panel rather than run off its edge: the last one used
-        // to be cut away where the panel ended.
-        const Real presets[] = {0.01, 0.02, 0.05, 0.1, 0.25};
-        const float column = ImGui::GetCursorPosX();
-        const float right = ImGui::GetWindowContentRegionMax().x;
-        for (int i = 0; i < 5; ++i) {
-            char label[16];
-            std::snprintf(label, sizeof label, "%g", presets[i]);
-            if (i) {
-                const ImGuiStyle& st = ImGui::GetStyle();
-                const float need = ImGui::CalcTextSize(label).x + st.FramePadding.x * 2;
-                ImGui::SameLine();
-                if (ImGui::GetCursorPosX() + need > right) {
-                    ImGui::NewLine();
-                    ImGui::SetCursorPosX(column);
-                }
-            }
-            const bool on = std::fabs(reduceTool_.tolerance - presets[i]) < 1e-12;
-            if (on) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
-            if (ImGui::SmallButton(label)) {
-                reduceTool_.tolerance = presets[i];
-                reduceTool_.typedValue.clear();
-            }
-            if (on) ImGui::PopStyleColor();
-        }
-    }
-
-    ui::commandRow("Stop at");
-    {
-        // Few enough triangles to convert, however far the tolerance has to
-        // loosen to get there -- which is only as far as the last few collapses
-        // need. What it came to is shown under "Moved".
-        const bool fit = reduceTool_.target == kSolidifyFaceLimit && reduceTool_.loosen;
-        if (ImGui::Button(fit ? "Fit for conversion  (on)" : "Fit for conversion")) {
-            reduceTool_.target = fit ? 0 : kSolidifyFaceLimit;
-            reduceTool_.loosen = !fit;
-        }
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Reduce until there are few enough triangles to convert to a solid.\n"
-                              "The tolerance is loosened only as far as that needs.");
-    }
-
-    // What it gives.
-    const ReduceJob* shown = reduceTool_.shown.get();
-    const bool stale = !reduceTool_.ready();
-    char text[160];
-    if (reduceTool_.preview.busy()) {
-        ui::commandValue("Triangles", "reducing...");
-    } else if (shown && !shown->result.ok) {
-        ui::commandValue("Triangles", shown->result.error.c_str());
-    } else if (shown) {
-        std::snprintf(text, sizeof text, "%zu  ->  %zu", shown->result.trianglesBefore,
-                      shown->result.trianglesAfter);
-        ui::commandValue("Triangles", text);
-    }
-    if (shown && shown->result.ok) {
-        std::snprintf(text, sizeof text, "%.3g mm, measured%s", static_cast<double>(shown->result.deviationMm),
-                      shown->result.withinTolerance ? "" : " -- over");
-        ui::commandValue("Moved", text);
-        if (shown->result.toleranceUsedMm > shown->tolerance * 1.0001) {
-            std::snprintf(text, sizeof text, "loosened to %.3g mm", static_cast<double>(shown->result.toleranceUsedMm));
-            ui::commandValue("To fit", text);
-        }
-        if (shown->solidFaces <= kSolidifyFaceLimit)
-            std::snprintf(text, sizeof text, "%d faces: will convert", shown->solidFaces);
-        else
-            std::snprintf(text, sizeof text, "%d faces: too many to convert", shown->solidFaces);
-        ui::commandValue("As a solid", text);
-    }
-
-    ui::commandHint("Flat faces reduce to almost nothing; curved ones as far as the tolerance "
-                    "allows. Edges, corners and holes stay within the tolerance, and the result "
-                    "is measured before it is shown.");
-
-    const int footer = ui::commandFooter(stale ? "OK  (wait)" : "OK  (Enter)", !stale);
-    ui::endCommand();
-
-    if (reduceTool_.tolerance != tolBefore || reduceTool_.target != targetBefore ||
-        reduceTool_.loosen != loosenBefore)
-        requestReducePreview();
-    if (footer > 0)      commitReduce();
-    else if (footer < 0) abortReduce();
 }
 
 void Application::convertSelectedToSolid() {
@@ -5195,6 +4728,37 @@ void Application::beginAddPrimitivePrompt(PrimitiveKind kind) {
     createTool_.start(kind);
 }
 
+// The sketches the scene is holding, drawn where they were drawn.
+//
+// A sketch is a thing in the model, not a step that happened: it stays in the
+// outliner, it can be shown or hidden there, and a sketch nothing has been
+// built from yet is all there is to see of the object that holds it. The one
+// being edited is left out -- the tool draws that itself, in the colours of
+// what is still free to move.
+void Application::drawSceneSketches() {
+    for (const auto& obj : scene_.objects()) {
+        if (!obj->visible) continue;
+        const bool selected = scene_.isSelected(obj->id);
+        const Mat4 model = obj->modelMatrix();
+        for (const Feature& f : obj->features) {
+            if (f.kind != FeatureKind::Sketch || !f.sketchShown || !f.enabled) continue;
+            if (sketchTool_.editing() && sketchTool_.editingUid() == f.uid) continue;
+
+            const Vec4 col = selected ? toVec4(palette::kBrand, 0.95f)
+                                      : Vec4{0.55f, 0.62f, 0.72f, 0.75f};
+            for (const SketchEntity& e : f.sketch.entities) {
+                const std::vector<Vec2> pts = sketchEntityPoints(f.sketch, e);
+                for (size_t i = 0; i + 1 < pts.size(); ++i) {
+                    const Vec3 a = transformPoint(model, f.sketch.plane.toWorld(pts[i]));
+                    const Vec3 b = transformPoint(model, f.sketch.plane.toWorld(pts[i + 1]));
+                    if (e.construction) renderer_.addFrontDashes(camera_, a, b, col, 1.2);
+                    else                renderer_.addFrontLine(camera_, a, b, col, 1.8);
+                }
+            }
+        }
+    }
+}
+
 void Application::beginSketch() {
     if (tool_.active() || createTool_.active() || sketchTool_.active()) return;
     if (editToolActive()) { setNotice("Finish the current operation first"); return; }
@@ -5500,15 +5064,10 @@ bool Application::confirmDiscard(PendingAction next) {
 void Application::drawUnsavedPrompt() {
     if (pending_ == PendingAction::None) return;
 
-    ImGui::OpenPopup("Unsaved Changes");
-    ImGuiViewport* vp = ImGui::GetMainViewport();
-    ImGui::SetNextWindowPos(ImVec2(vp->GetCenter().x, vp->GetCenter().y),
-                            ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-
-    if (ImGui::BeginPopupModal("Unsaved Changes", nullptr,
-                               ImGuiWindowFlags_AlwaysAutoResize)) {
-        ImGui::TextUnformatted("This project has unsaved changes.");
-        ImGui::Spacing();
+    ImGui::OpenPopup("##unsaved");
+    if (ui::beginCard("##unsaved", "Unsaved changes", 400.0f)) {
+        ImGui::TextColored(ui::im(palette::kTextDim), "This project has changes that have not been saved.");
+        ImGui::Dummy(ImVec2(0, 10));
 
         const PendingAction next = pending_;
         auto finish = [&](bool proceed) {
@@ -5525,19 +5084,19 @@ void Application::drawUnsavedPrompt() {
             }
         };
 
-        if (ImGui::Button("Save First", ImVec2(110, 0))) {
+        if (ui::primaryButton("Save first", ImVec2(110, 0))) {
             pending_ = PendingAction::None;
             ImGui::CloseCurrentPopup();
             if (projectPath_.empty()) beginFilePrompt(FileMode::Save);
             else                      runFileOperation(FileMode::Save, projectPath_);
         }
         ImGui::SameLine();
-        if (ImGui::Button("Discard", ImVec2(110, 0))) finish(true);
+        if (ui::quietButton("Discard", ImVec2(110, 0))) finish(true);
         ImGui::SameLine();
-        if (ImGui::Button("Cancel", ImVec2(110, 0)) ||
+        if (ui::quietButton("Cancel", ImVec2(110, 0)) ||
             ImGui::IsKeyPressed(ImGuiKey_Escape, false)) finish(false);
 
-        ImGui::EndPopup();
+        ui::endCard();
     }
 }
 
@@ -5881,19 +5440,12 @@ void Application::drawFilePrompt() {
                       : fileMode_ == FileMode::ImportStep ? "Import STEP"
                       : fileMode_ == FileMode::ImportMesh ? "Import Mesh"
                                                           : "Export STL";
-    ImGui::OpenPopup(title);
-
-    ImGuiViewport* vp = ImGui::GetMainViewport();
-    ImGui::SetNextWindowPos(ImVec2(vp->GetCenter().x, vp->GetCenter().y),
-                            ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(ImVec2(460.0f, 0.0f));
-
-    if (!ImGui::BeginPopupModal(title, nullptr, ImGuiWindowFlags_AlwaysAutoResize))
-        return;
+    ImGui::OpenPopup("##fileprompt");
+    if (!ui::beginCard("##fileprompt", title, 480.0f)) return;
 
     bool entered = false;
     if (typing) {
-        ImGui::TextUnformatted("Path");
+        ImGui::TextColored(ui::im(palette::kTextDim), "Path");
         ImGui::SetNextItemWidth(-1.0f);
         // Focused on open, and Enter confirms, so the whole thing is keyboard
         // driven without reaching for the mouse.
@@ -5913,22 +5465,26 @@ void Application::drawFilePrompt() {
             ImGui::TextDisabled("each object is kept separate and named in the file");
         }
 
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextColored(ui::im(palette::kTextDim), "Tolerance");
+        ImGui::SameLine(ui::labelColumn());
         ImGui::SetNextItemWidth(140.0f);
-        ImGui::DragFloat("Tolerance", &exportDeviationMm_, 0.001f, 0.001f, 0.5f,
-                         "%.3f mm");
+        ImGui::DragFloat("##tol", &exportDeviationMm_, 0.001f, 0.001f, 0.5f, "%.3f mm");
         ImGui::SameLine();
-        ImGui::TextDisabled("how far a triangle may sit from the surface");
+        ImGui::TextColored(ui::im(palette::kTextFaint), "how far a triangle may sit from the surface");
         ImGui::Spacing();
     }
 
-    ImGui::Spacing();
+    ImGui::Dummy(ImVec2(0, 8));
     // The chooser is the way out when there is one; typing is the way out when
     // there is not. Only ever one of them, so the button says which.
     const bool chooseInstead = exportOptionsOpen_ && !typePathInstead_;
+    const float bw = 130.0f + 90.0f + ImGui::GetStyle().ItemSpacing.x;
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + std::max(0.0f, ImGui::GetContentRegionAvail().x - bw));
     const bool confirm =
-        ImGui::Button(chooseInstead ? "Choose File..." : "OK", ImVec2(130, 0)) || entered;
+        ui::primaryButton(chooseInstead ? "Choose File..." : "OK", ImVec2(130, 0)) || entered;
     ImGui::SameLine();
-    const bool cancel = ImGui::Button("Cancel", ImVec2(90, 0)) ||
+    const bool cancel = ui::quietButton("Cancel", ImVec2(90, 0)) ||
                         ImGui::IsKeyPressed(ImGuiKey_Escape, false);
 
     if (confirm) {
@@ -5947,7 +5503,7 @@ void Application::drawFilePrompt() {
         fileMode_ = FileMode::None;
         ImGui::CloseCurrentPopup();
     }
-    ImGui::EndPopup();
+    ui::endCard();
 }
 
 void Application::applyActions() {
@@ -6099,6 +5655,15 @@ void Application::applyActions() {
     // its own undo entry.
     if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) undo_.breakMergeChain();
 
+    // The transforms, from the bar or a menu: the same gestures the keys start.
+    if (a.moveObject)   beginTransform(TransformMode::Translate);
+    if (a.rotateObject) beginTransform(TransformMode::Rotate);
+    if (a.scaleObject)  beginTransform(TransformMode::Scale);
+    if (a.toggleMeasure) {
+        if (measure_.active()) measure_.end();
+        else                   measure_.begin();
+    }
+
     if (a.frameSelected) {
         const AABB b = scene_.selection().empty() ? scene_.bounds() : scene_.selectionBounds();
         camera_.frame(b);
@@ -6112,11 +5677,14 @@ void Application::applyActions() {
 // ---------------------------------------------------------------------------
 void Application::buildUi() {
     ImGuiViewport* vp = ImGui::GetMainViewport();
-    const float statusH = ImGui::GetFrameHeight();
 
-    // Dockspace host, inset to leave room for the status bar.
+    ui_.frame.customFrame = !nativeFrame_;
+    ui_.frame.maximized = (SDL_GetWindowFlags(window_) & SDL_WINDOW_MAXIMIZED) != 0;
+
+    // Dockspace host: the whole window. The bar is drawn inside it first, so
+    // the panels and the viewport share what is left under it.
     ImGui::SetNextWindowPos(vp->WorkPos);
-    ImGui::SetNextWindowSize(ImVec2(vp->WorkSize.x, vp->WorkSize.y - statusH));
+    ImGui::SetNextWindowSize(vp->WorkSize);
     ImGui::SetNextWindowViewport(vp->ID);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
@@ -6131,10 +5699,9 @@ void Application::buildUi() {
     ImGui::Begin("##DockHost", nullptr, hostFlags);
     ImGui::PopStyleVar(3);
 
-    // The operations, above the panels and the viewport both.
-    drawToolbar(ui_);
+    drawTopBar(ui_);
 
-    const ImGuiID dockId = ImGui::GetID("TangentDockspace");
+    const ImGuiID dockId = ImGui::GetID("TangentDock2");
     // PassthruCentralNode leaves the central node unpainted, so the GL scene
     // drawn underneath shows through instead of needing a render target.
     ImGui::DockSpace(dockId, ImVec2(0, 0), ImGuiDockNodeFlags_PassthruCentralNode);
@@ -6147,15 +5714,26 @@ void Application::buildUi() {
         ImGui::DockBuilderAddNode(dockId,
             static_cast<ImGuiDockNodeFlags>(ImGuiDockNodeFlags_PassthruCentralNode) |
             static_cast<ImGuiDockNodeFlags>(ImGuiDockNodeFlags_DockSpace));
-        ImGui::DockBuilderSetNodeSize(dockId, ImVec2(vp->WorkSize.x, vp->WorkSize.y - statusH));
+        ImGui::DockBuilderSetNodeSize(dockId,
+                                      ImVec2(vp->WorkSize.x, vp->WorkSize.y - ui_.frame.barHeight));
 
+        // The outliner down the left, the inspector down the right, the model
+        // between them.
         ImGuiID centre = dockId;
-        ImGuiID right  = ImGui::DockBuilderSplitNode(centre, ImGuiDir_Right, 0.21f, nullptr, &centre);
-        ImGuiID lower  = ImGui::DockBuilderSplitNode(right, ImGuiDir_Down, 0.62f, nullptr, &right);
+        ImGuiID left  = ImGui::DockBuilderSplitNode(centre, ImGuiDir_Left, 0.15f, nullptr, &centre);
+        ImGuiID right = ImGui::DockBuilderSplitNode(centre, ImGuiDir_Right, 0.21f, nullptr, &centre);
+        // The panels are panels, not windows: no tab strip along the top of
+        // each, nothing to close, nothing to drop another window onto.
+        for (ImGuiID side : {left, right}) {
+            if (ImGuiDockNode* n = ImGui::DockBuilderGetNode(side))
+                n->SetLocalFlags(n->LocalFlags | ImGuiDockNodeFlags_NoTabBar |
+                                 ImGuiDockNodeFlags_NoWindowMenuButton |
+                                 ImGuiDockNodeFlags_NoCloseButton |
+                                 ImGuiDockNodeFlags_NoDockingOverMe);
+        }
 
-        ImGui::DockBuilderDockWindow("Outliner", right);
-        ImGui::DockBuilderDockWindow("Inspector", lower);
-        ImGui::DockBuilderDockWindow("History", lower);
+        ImGui::DockBuilderDockWindow("Outliner##v2", left);
+        ImGui::DockBuilderDockWindow("Inspector##v2", right);
         ImGui::DockBuilderFinish(dockId);
     }
     firstLayout_ = false;
@@ -6166,19 +5744,16 @@ void Application::buildUi() {
         viewRect_ = {central->Pos.x - vp->Pos.x, central->Pos.y - vp->Pos.y,
                      central->Size.x, central->Size.y};
     } else {
-        viewRect_ = {vp->WorkPos.x - vp->Pos.x, vp->WorkPos.y - vp->Pos.y,
-                     vp->WorkSize.x, vp->WorkSize.y - statusH};
+        viewRect_ = {vp->WorkPos.x - vp->Pos.x, vp->WorkPos.y - vp->Pos.y + ui_.frame.barHeight,
+                     vp->WorkSize.x, vp->WorkSize.y - ui_.frame.barHeight};
     }
+    ui::setCommandAnchor(viewRect_.x, viewRect_.y, viewRect_.w, viewRect_.h);
 
-    drawMenuBar(ui_);
     drawOutliner(ui_);
     drawInspector(ui_);
-    drawHistory(ui_);
-    drawStatusBar(ui_);
-    // The cube carries the view's name and its projection, so the corner
-    // readout that used to say both is gone: two places telling you the same
-    // thing is one place too many, and the cube is where the eye already goes
-    // to find out which way it is looking.
+    drawViewportOverlays(ui_, viewRect_.x, viewRect_.y, viewRect_.w, viewRect_.h);
+    // The cube carries the view's name and its projection: it is where the
+    // eye already goes to find out which way it is looking.
     drawViewCube(ui_, viewRect_.x, viewRect_.y, viewRect_.w, viewRect_.h);
     pollFileDialog();
     drawFilePrompt();
@@ -6192,17 +5767,12 @@ void Application::buildUi() {
     drawPatternPanel();
     drawReducePanel();
     if (sketchTool_.active()) {
-        sketchTool_.setHudOrigin(viewRect_.x + 16.0f, viewRect_.y + 16.0f);
         sketchTool_.setViewportOrigin(viewRect_.x, viewRect_.y);
         bool finished = false;
         sketchTool_.drawHud(scene_, camera_, undo_, finished);
         if (finished) justFinishedModal_ = true;
     }
     if (createTool_.active()) {
-        // Under the toolbar, in the corner of the viewport opposite the view
-        // cube: a dialog over the middle of the model is a dialog in the way of
-        // the thing being made.
-        createTool_.setHudOrigin(viewRect_.x + 16.0f, viewRect_.y + 16.0f);
         bool finished = false;
         createTool_.drawHud(scene_, camera_, undo_, finished);
         if (finished) justFinishedModal_ = true;
@@ -6212,13 +5782,21 @@ void Application::buildUi() {
         ImGui::OpenPopup("##addmenu");
         openAddMenu_ = false;
     }
-    if (ImGui::BeginPopup("##addmenu")) {
-        ImGui::TextColored(ImVec4(palette::kTextDim.r, palette::kTextDim.g,
-                          palette::kTextDim.b, 1.0f), "ADD");
-        ImGui::Separator();
+    if (ui::beginMenuPopup("##addmenu")) {
+        ui::menuHeader("Add");
         drawAddMenuItems(ui_);
         ImGui::EndPopup();
     }
+
+    // What the bar's own buttons asked for.
+    if (ui_.frame.wantMinimize) SDL_MinimizeWindow(window_);
+    if (ui_.frame.wantToggleMaximize) {
+        if (ui_.frame.maximized) SDL_RestoreWindow(window_);
+        else                     SDL_MaximizeWindow(window_);
+    }
+    if (ui_.frame.wantClose) ui_.actions.quit = true;
+    ui_.frame.wantMinimize = ui_.frame.wantToggleMaximize = ui_.frame.wantClose = false;
+    hitFrame_ = ui_.frame;
 }
 
 void Application::drawFrame() {
@@ -6424,6 +6002,9 @@ int Application::run() {
         noticeAge_ += lastDt_;
         if (noticeAge_ > 4.0f) notice_.clear();
         ui_.notice = notice_;
+        ui_.noticeAge = noticeAge_;
+        ui_.projectName = projectPath_.empty() ? "Untitled" : fileStem(projectPath_);
+        ui_.dirty = dirty();
 
         ui_.measuring = measure_.active();
         ui_.measurement = measureResult_;
@@ -6571,45 +6152,17 @@ int Application::run() {
         drawPrintIssues();
         drawSelectionHighlights();
         if (createTool_.active()) createTool_.drawOverlay(scene_, camera_, renderer_);
+        drawSceneSketches();
         if (sketchTool_.active()) sketchTool_.drawOverlay(scene_, camera_, renderer_);
         measureResult_ = measure_.active() ? measure_.compute(scene_) : MeasureResult{};
         measure_.drawOverlay(renderer_, camera_, measureResult_);
         tool_.drawOverlay(renderer_, camera_);
 
-        // The line that says which way makes the fillet bigger, with ticks at
-        // the step so the cost of a step is visible. Drawn after the preview so
-        // it sits on top of the geometry it is about.
-        if (filletTool_.active && filletTool_.axis.valid) {
-            const SceneObject* o = scene_.find(filletTool_.objectId);
-            const Real step = o ? DragAxis::stepFor(camera_, filletTool_.axis.origin,
-                                                   filletTool_.maxRadius)
-                                : 0.0;
-            filletTool_.axis.drawGuide(renderer_, camera_, filletTool_.currentRadius, step,
-                                       filletTool_.maxRadius);
-        }
-
-        // The same arrow for the face tools, since the gesture is the same one:
-        // pull along a line and watch the number.
-        if (faceTool_.active && faceTool_.axis.valid) {
-            const Real step = faceTool_.op == FaceOp::Rotate
-                                  ? 5.0
-                                  : DragAxis::stepFor(camera_, faceTool_.axis.origin,
-                                                      faceTool_.axis.spanValue);
-            faceTool_.axis.drawGuide(renderer_, camera_, faceTool_.value, step, 0.0);
-        }
-        if (patternTool_.active && patternTool_.axis.valid) {
-            const Real step = DragAxis::stepFor(camera_, patternTool_.axis.origin,
-                                                patternTool_.axis.spanValue);
-            patternTool_.axis.drawGuide(renderer_, camera_, patternTool_.dragged(), step,
-                                        patternTool_.axis.spanValue);
-        }
-        if (divideTool_.active && divideTool_.axis.valid) {
-            const Real step = DragAxis::stepFor(camera_, divideTool_.axis.origin,
-                                                divideTool_.axis.spanValue);
-            divideTool_.axis.drawGuide(renderer_, camera_,
-                                       divideTool_.t * length(divideTool_.dir), step,
-                                       divideTool_.axis.spanValue);
-        }
+        // The arrow that says which way makes the value bigger, with ticks at
+        // the step so the cost of a step is visible. One for every gesture
+        // that pulls along a line, drawn on the screen where the value is
+        // measured.
+        drawDragGuides();
 
         camera_.update(dt);
 

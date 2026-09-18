@@ -329,6 +329,11 @@ bool evaluateFrom(std::vector<Feature>& features, size_t from,
     cache.resize(features.size());
     bool any = from > 0 || false;
 
+    // A chain can legitimately produce no solid: a sketch on its own is a thing
+    // in the scene, drawn and saved and later extruded, and refusing it would
+    // mean a sketch could only exist inside a part that already had a body.
+    bool drew = false;
+
     std::vector<FaceId> scratchFaces;
     std::vector<EdgeId> scratchEdges;
 
@@ -486,6 +491,7 @@ bool evaluateFrom(std::vector<Feature>& features, size_t from,
         }
 
         case FeatureKind::Sketch: {
+            drew = true;
             // A sketch changes no body. It is solved here so that what follows
             // sees the shape its constraints describe -- and so that when its
             // constraints disagree, the sketch is the step named as failing,
@@ -600,6 +606,11 @@ bool evaluateFrom(std::vector<Feature>& features, size_t from,
         cache[i] = body;
     }
 
+    // Nothing but sketches: the chain ran, and what it drew is all there is.
+    if (!any && drew) {
+        out = Body{};
+        return true;
+    }
     if (!any || body.empty()) return false;
     out = std::move(body);
     return true;

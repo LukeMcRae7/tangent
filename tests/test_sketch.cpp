@@ -12,6 +12,7 @@
 #include "temp_path.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <string>
@@ -99,6 +100,125 @@ int main() {
         check(near(c.x, 55) && near(c.y, 25), "to 55 by 25");
         check(near(sk.constraint(r.width)->value, 55), "and the sketch records the new width");
         check(!solver.setDimension(r.bottom, 3), "a line is not a dimension");
+    }
+
+    std::printf("--- what is still free, and what is pinned down ---\n");
+    {
+        Sketch sk;
+        const Sketch::Rectangle r = sk.addRectangle({0, 0}, 40, 25);
+        const SketchSolve s = solveSketch(sk);
+        check(s.solved && s.freedoms == 0, "a rectangle with both dimensions is fully constrained");
+        check(s.freeEntities.empty() && s.freePoints.empty(), "so nothing in it is free");
+
+        // One line more, hanging off a corner, free at its far end.
+        const SketchId loose = sk.addPoint({60, 40});
+        const SketchId spur = sk.addLine(sk.entity(r.right)->b, loose);
+        const SketchSolve s2 = solveSketch(sk);
+        check(s2.solved && s2.freedoms == 2, "an added line brings two freedoms with it");
+        check(s2.freePoints.size() == 1 && s2.freePoints[0] == loose,
+              "the end nothing holds is the free one");
+        check(s2.freeEntities.size() == 1 && s2.freeEntities[0] == spur,
+              "and the line on it is the free geometry");
+
+        sk.constrain(SketchRule::Fix, loose, kNoSketchId, 60, 40);
+        const SketchSolve s3 = solveSketch(sk);
+        check(s3.freedoms == 0 && s3.freeEntities.empty(), "fixing that end pins the lot");
+    }
+
+    std::printf("--- dragging, with the constraints holding ---\n");
+    {
+        // A line held level, its left end fixed: dragging the right end can
+        // change how long it is and nothing else.
+        Sketch sk;
+        const SketchId a = sk.addPoint({0, 0}), b = sk.addPoint({20, 0});
+        const SketchId line = sk.addLine(a, b);
+        sk.constrain(SketchRule::Fix, a, kNoSketchId, 0, 0);
+        sk.constrain(SketchRule::Horizontal, line);
+
+        SketchSolver solver(sk);
+        check(solver.solve().solved, "it solves to start with");
+        check(solver.beginDrag(b), "a point can be taken hold of");
+        check(solver.dragging(), "and is held");
+        check(solver.dragTo({35, 18}), "dragging it up and to the right moves the sketch");
+        check(near(sk.point(b)->at.x, 35.0, 1e-6), "it follows the pointer along the line");
+        check(near(sk.point(b)->at.y, 0.0, 1e-6), "and not off it: level is still level");
+        check(near(sk.point(a)->at.x, 0.0, 1e-9) && near(sk.point(a)->at.y, 0.0, 1e-9),
+              "the fixed end did not move");
+        solver.endDrag();
+        check(!solver.dragging(), "and it can be let go of");
+        const SketchSolve after = solver.solve();
+        check(after.solved, "the sketch still solves afterwards: " + after.reason);
+    }
+    {
+        // Fully constrained: a drag is a question the sketch answers with no.
+        Sketch sk;
+        const Sketch::Rectangle r = sk.addRectangle({0, 0}, 40, 25);
+        const SketchId corner = sk.entity(r.right)->b;
+        const Vec2 was = sk.point(corner)->at;
+        SketchSolver solver(sk);
+        solver.solve();
+        check(solver.beginDrag(corner), "a corner of a fully constrained rectangle can be grabbed");
+        solver.dragTo({80, 80});
+        check(near(sk.point(corner)->at.x, was.x, 1e-9) &&
+                  near(sk.point(corner)->at.y, was.y, 1e-9),
+              "but it does not move: every dimension still holds");
+        solver.endDrag();
+        check(near(sk.constraint(r.width)->value, 40.0), "and no dimension was quietly rewritten");
+    }
+    {
+        // An arc has no radius dimension of its own, so its rim can be pulled.
+        Sketch sk;
+        const SketchId c = sk.addPoint({0, 0});
+        const SketchId s0 = sk.addPoint({10, 0}), e0 = sk.addPoint({0, 10});
+        const SketchId arc = sk.addArc(c, s0, e0);
+        sk.constrain(SketchRule::Fix, c, kNoSketchId, 0, 0);
+        SketchSolver solver(sk);
+        check(solver.solve().solved, "an arc solves");
+        check(solver.beginRadiusDrag(arc), "its rim can be taken hold of");
+        check(solver.dragRadiusTo(16.0), "and pulled out");
+        check(near(sk.entity(arc)->radius, 16.0, 1e-4), "the arc takes the new radius");
+        check(near(length(sk.point(s0)->at), 16.0, 1e-4) &&
+                  near(length(sk.point(e0)->at), 16.0, 1e-4),
+              "and both its ends stay on it");
+        solver.endDrag();
+    }
+
+    std::printf("--- a drag stays inside a frame ---\n");
+    {
+        // Performance here is part of the specification, not a hope: the solver
+        // runs on every mouse move, so a drag on a sketch larger than anything
+        // a person would draw by hand still has to fit in a frame.
+        Sketch sk;
+        SketchId prev = sk.addPoint({0, 0});
+        const SketchId first = prev;
+        sk.constrain(SketchRule::Fix, prev, kNoSketchId, 0, 0);
+        for (int i = 1; i <= 60; ++i) {
+            const Real a = kTwoPi * i / 61.0;
+            const SketchId next = sk.addPoint({40.0 * std::cos(a), 40.0 * std::sin(a)});
+            sk.addLine(prev, next);
+            prev = next;
+        }
+        sk.addLine(prev, first);
+
+        SketchSolver solver(sk);
+        const SketchSolve s = solver.solve();
+        check(s.solved, "a 61-sided ring of lines solves: " + s.reason);
+        check(solver.beginDrag(prev), "one of its corners can be dragged");
+
+        constexpr int kFrames = 200;
+        const auto start = std::chrono::steady_clock::now();
+        int moved = 0;
+        for (int i = 0; i < kFrames; ++i) {
+            const Real t = static_cast<Real>(i) / kFrames;
+            if (solver.dragTo({40.0 + 6.0 * t, 6.0 * t})) ++moved;
+        }
+        const double ms = std::chrono::duration<double, std::milli>(
+                              std::chrono::steady_clock::now() - start).count() / kFrames;
+        solver.endDrag();
+        check(moved == kFrames, "every drag frame solved");
+        std::printf("    %d entities, %.3f ms a drag frame\n",
+                    static_cast<int>(sk.entities.size()), ms);
+        check(ms < 16.0, "and each one fits in a 60 Hz frame: " + std::to_string(ms) + " ms");
     }
 
     std::printf("--- a line tangent to a circle ---\n");
@@ -242,6 +362,46 @@ int main() {
         sk.addLine(a, b);
         sk.addBezier(b, c1, c2, a);
         check(sketchProfiles(sk).size() == 1, "a line closed by a curve is a region");
+    }
+
+    std::printf("--- a sketch of its own, in the scene and through a file ---\n");
+    {
+        // An object that is nothing but a sketch. It has no body, and adding it,
+        // re-running its history, saving it and opening it again all have to be
+        // fine with that -- a sketch is a thing in the model before anything is
+        // built from it. None of this needs the exact kernel.
+        Scene scene;
+        Sketch plan;
+        plan.addRectangle({0, 0}, 20, 12);
+        Feature s;
+        s.kind = FeatureKind::Sketch;
+        s.uid = scene.takeFeatureUid();
+        s.sketch = plan;
+        s.sketchShown = false;   // hidden, to check the flag survives the file
+
+        std::string why;
+        const ObjectId id = scene.addFeatureChain({s}, "Sketch", &why);
+        check(id != kNoObject, "a chain of nothing but a sketch makes an object: " + why);
+        if (id != kNoObject) {
+            check(scene.find(id)->body.empty(), "with no body");
+            check(scene.reevaluate(id), "and a history that re-runs");
+        }
+
+        const std::string path = tempPath("sketch_only.tng");
+        check(saveProject(scene, path).ok, "saved");
+        Scene back;
+        const ProjectResult loaded = loadProject(back, path);
+        check(loaded.ok, "loaded: " + loaded.error);
+        if (loaded.ok && back.objectCount() == 1) {
+            const SceneObject* o = back.objects().front().get();
+            check(o->features.size() == 1 && o->features[0].kind == FeatureKind::Sketch,
+                  "the sketch came back");
+            check(o->features[0].sketch.entities.size() == 4, "with its four lines");
+            check(!o->features[0].sketchShown, "and hidden, as it was saved");
+            check(o->body.empty(), "still with no body");
+        } else {
+            check(false, "one object came back");
+        }
     }
 
     if (!brep::available()) {

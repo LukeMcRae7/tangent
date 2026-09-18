@@ -88,6 +88,9 @@ enum class SketchRule : uint8_t {
 // These are the numbers a person edits.
 bool isDimension(SketchRule rule);
 
+// What to call a rule when naming it to a person: "distance", "radius".
+const char* sketchRuleName(SketchRule rule);
+
 struct SketchConstraint {
     SketchId id = kNoSketchId;
     SketchRule rule = SketchRule::Coincident;
@@ -149,6 +152,13 @@ struct SketchSolve {
     std::vector<SketchId> conflicting;
     std::vector<SketchId> redundant;
 
+    // What still has freedom left in it. A sketch is drawn in two colours from
+    // this: geometry a later dimension could still move, and geometry that is
+    // pinned down. Everything is free until something says otherwise, so an
+    // undimensioned sketch lists all of it.
+    std::vector<SketchId> freePoints;
+    std::vector<SketchId> freeEntities;
+
     std::string reason;   // for a person, when !solved
 };
 
@@ -171,6 +181,33 @@ public:
     // Changes a dimension's value and leaves the rest of the system as it is.
     // False when the id is not a dimension of this sketch.
     bool setDimension(SketchId constraint, Real value);
+
+    // ---- Dragging -----------------------------------------------------------
+    //
+    // A drag is a pull toward where the pointer is, not an instruction: the
+    // constraints hold, and what is free moves as far as they allow. A point on
+    // a line held horizontal slides along it; a fully constrained sketch does
+    // not move at all.
+    //
+    // It works by adding one temporary pull on the solver's *secondary* system,
+    // which planegcs minimises subject to the real constraints rather than
+    // alongside them -- so a drag can never make a sketch conflict, and the
+    // diagnosis a person sees is unaffected by where they happen to be pulling.
+    //
+    // The system is built once, at beginDrag, and every dragTo after that
+    // re-solves the same system: that is what keeps a drag inside a frame.
+    bool beginDrag(SketchId point);
+
+    // The same, for how big something is: dragging the rim of a circle or an arc.
+    bool beginRadiusDrag(SketchId entity);
+
+    // True when the sketch moved. False leaves it exactly as it was, which is
+    // what a fully constrained sketch does.
+    bool dragTo(Vec2 at);
+    bool dragRadiusTo(Real radius);
+
+    void endDrag();
+    bool dragging() const;
 
 private:
     struct Impl;

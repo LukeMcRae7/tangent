@@ -16,7 +16,9 @@
 #pragma once
 
 #include "app/camera.h"
-#include "render/renderer.h"
+#include "geom/body.h"
+
+#include <vector>
 
 namespace tg {
 
@@ -84,16 +86,11 @@ struct DragAxis {
     // false the caller should say so rather than let the number jump about.
     bool facingCamera(const Camera& camera) const;
 
-    // The guide. It does not move: the anchor and the direction are fixed when
-    // the gesture starts, and only the marker inside travels. A line that slid
-    // about under the cursor would be a second thing to track rather than a
-    // thing to aim along.
-    //
-    // `limit` is how far the value can go -- the largest fillet that will
-    // build, say -- so the track has an end and approaching it is visible
-    // rather than felt. Zero means unbounded.
-    void drawGuide(Renderer& renderer, const Camera& camera, Real value, Real step,
-                   Real limit = 0.0) const;
+    // The guide itself -- the track, the ticks and the arrow -- is drawn on the
+    // screen rather than in the world, by ui::drawDragGuide. It does not move:
+    // the anchor and the direction are fixed when the gesture starts, and only
+    // the marker inside travels. A line that slid about under the cursor would
+    // be a second thing to track rather than a thing to aim along.
 
     // The increment for a gesture that can travel `reach` millimetres, at this
     // zoom. Tied to both: a step fine enough to be worth having on screen, and

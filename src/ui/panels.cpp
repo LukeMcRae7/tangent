@@ -1,7 +1,8 @@
 #include "ui/panels.h"
 #include "ui/command_panel.h"
-#include "ui/icons.h"
+#include "ui/glyph.h"
 #include "ui/theme.h"
+#include "ui/widgets.h"
 
 #include "core/palette.h"
 #include "geom/brep.h"
@@ -9,732 +10,734 @@
 #include "imgui.h"
 #include "imgui_internal.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 
 namespace tg {
 namespace {
 
-inline ImVec4 im(Rgb c, float a = 1.0f) {
-    return ImVec4(static_cast<float>(c.r), static_cast<float>(c.g),
-                  static_cast<float>(c.b), a);
-}
+using ui::im;
+using ui::u32;
 
-const ImVec4 kAccent(palette::kBrand.r, palette::kBrand.g, palette::kBrand.b, 1.0f);
-const ImVec4 kDim(palette::kTextDim.r, palette::kTextDim.g, palette::kTextDim.b, 1.0f);
+constexpr const char* kDegree = "\xC2\xB0";
 
 // Which picture stands for a shape, and for a step of a history.
-Icon iconFor(PrimitiveKind kind) {
+Glyph glyphFor(PrimitiveKind kind) {
     switch (kind) {
-        case PrimitiveKind::Cylinder: return Icon::Cylinder;
-        case PrimitiveKind::Sphere:   return Icon::Sphere;
-        case PrimitiveKind::Cone:     return Icon::Cone;
-        case PrimitiveKind::Torus:    return Icon::Torus;
-        default:                      return Icon::Box;
+        case PrimitiveKind::Cylinder: return Glyph::Cylinder;
+        case PrimitiveKind::Sphere:   return Glyph::Sphere;
+        case PrimitiveKind::Cone:     return Glyph::Cone;
+        case PrimitiveKind::Torus:    return Glyph::Torus;
+        case PrimitiveKind::Plane:    return Glyph::Plane;
+        default:                      return Glyph::Box;
     }
 }
 
-Icon iconFor(const Feature& f) {
+Glyph glyphFor(const Feature& f) {
     switch (f.kind) {
-        case FeatureKind::Primitive: return iconFor(f.primitive.kind);
-        case FeatureKind::Extrude:   return Icon::Extrude;
-        case FeatureKind::ExtrudeProfile: return Icon::Extrude;
-        case FeatureKind::Bevel:     return Icon::Fillet;
-        case FeatureKind::Shell:      return Icon::Shell;
-        case FeatureKind::FaceRotate: return Icon::Chamfer;
-        case FeatureKind::FaceScale:  return Icon::Cone;
-        case FeatureKind::Divide:     return Icon::Inset;
+        case FeatureKind::Primitive:      return glyphFor(f.primitive.kind);
+        case FeatureKind::Extrude:        return f.mergeFlush ? Glyph::PushPull : Glyph::Extrude;
+        case FeatureKind::ExtrudeProfile: return Glyph::Extrude;
+        case FeatureKind::Bevel:          return f.chamfer ? Glyph::Chamfer : Glyph::Fillet;
+        case FeatureKind::Shell:          return Glyph::Shell;
+        case FeatureKind::FaceRotate:     return Glyph::RotateFace;
+        case FeatureKind::FaceScale:      return Glyph::ScaleFace;
+        case FeatureKind::Divide:         return Glyph::Divide;
+        case FeatureKind::Merge:          return Glyph::Merge;
         case FeatureKind::Pattern:
-            return f.patternMode == PatternMode::Mirror ? Icon::Difference
-                                                        : Icon::Intersection;
-        case FeatureKind::Inset:     return Icon::Inset;
+            return f.patternMode == PatternMode::Mirror ? Glyph::Mirror : Glyph::Pattern;
+        case FeatureKind::Inset:          return Glyph::Inset;
         case FeatureKind::Boolean:
-            return f.booleanOp == BooleanOp::Union        ? Icon::Union
-                 : f.booleanOp == BooleanOp::Intersection ? Icon::Intersection
-                                                          : Icon::Difference;
-        default: return Icon::Box;
+            return f.booleanOp == BooleanOp::Union        ? Glyph::Union
+                 : f.booleanOp == BooleanOp::Intersection ? Glyph::Intersect
+                                                          : Glyph::Difference;
+        case FeatureKind::Sketch:         return Glyph::Sketch;
+        case FeatureKind::BaseMesh:       return Glyph::Mesh;
+        case FeatureKind::Reduce:         return Glyph::Reduce;
+        case FeatureKind::VertexEdit:     return Glyph::Move;
     }
+    return Glyph::Box;
 }
 
-void sectionLabel(const char* text) {
-    ImGui::PushStyleColor(ImGuiCol_Text, kDim);
-    ImGui::SeparatorText(text);
-    ImGui::PopStyleColor();
+// What an object is, for the outliner's three lists.
+enum class ObjectKind { Body, Sketch, Mesh };
+
+ObjectKind kindOf(const SceneObject& o) {
+    if (!o.body.empty() && o.body.isMesh()) return ObjectKind::Mesh;
+    if (o.body.empty() && !o.features.empty() && o.features.front().kind == FeatureKind::Sketch)
+        return ObjectKind::Sketch;
+    return ObjectKind::Body;
 }
 
-// Labelled row with the field stretched to the panel width; used everywhere so
-// the inspector columns line up regardless of label length.
-// Geometry is double, so these bind ImGui's double scalar path rather than
-// round-tripping through float and quietly losing digits in the fields the
-// user types exact dimensions into.
-// Three fields, tinted by axis.
-//
-// A row of three identical boxes says nothing about which is which, and the
-// answer is needed on every glance: X, Y and Z are the same colours here as
-// they are on the grid and the transform gizmo, so the mapping is learned once.
-// The tint is on the field's background rather than on its text, which stays
-// legible.
-bool labeledDrag3(const char* label, Vec3& v, float speed, const char* fmt) {
-    static const ImVec4 kAxisTint[3] = {
-        ImVec4(0.46f, 0.20f, 0.17f, 0.55f),
-        ImVec4(0.24f, 0.38f, 0.17f, 0.55f),
-        ImVec4(0.18f, 0.29f, 0.47f, 0.55f),
-    };
-    ImGui::PushID(label);
-    ImGui::AlignTextToFramePadding();
-    ImGui::TextUnformatted(label);
-    ImGui::SameLine(78.0f);
-
-    const ImGuiStyle& st = ImGui::GetStyle();
-    const float avail = ImGui::GetContentRegionAvail().x;
-    const float each = (avail - st.ItemInnerSpacing.x * 2.0f) / 3.0f;
-
-    bool changed = false;
-    for (int i = 0; i < 3; ++i) {
-        if (i) ImGui::SameLine(0.0f, st.ItemInnerSpacing.x);
-        ImGui::PushID(i);
-        ImGui::PushStyleColor(ImGuiCol_FrameBg, kAxisTint[i]);
-        ImGui::SetNextItemWidth(each);
-        changed |= ImGui::DragScalar("##v", ImGuiDataType_Double, &(&v.x)[i], speed,
-                                     nullptr, nullptr, fmt);
-        ImGui::PopStyleColor();
-        ImGui::PopID();
+Glyph glyphFor(ObjectKind k) {
+    switch (k) {
+        case ObjectKind::Sketch: return Glyph::Sketch;
+        case ObjectKind::Mesh:   return Glyph::Mesh;
+        default:                 return Glyph::Body;
     }
-    ImGui::PopID();
-    return changed;
-}
-
-bool labeledDrag(const char* label, Real& v, float speed, Real lo, Real hi,
-                 const char* fmt = "%.2f mm") {
-    ImGui::PushID(label);
-    ImGui::TextUnformatted(label);
-    ImGui::SameLine(78.0f);
-    ImGui::SetNextItemWidth(-1.0f);
-    const bool changed = ImGui::DragScalarN("##v", ImGuiDataType_Double, &v, 1,
-                                            speed, &lo, &hi, fmt);
-    ImGui::PopID();
-    return changed;
-}
-
-bool labeledInt(const char* label, int& v, int lo, int hi) {
-    ImGui::PushID(label);
-    ImGui::TextUnformatted(label);
-    ImGui::SameLine(78.0f);
-    ImGui::SetNextItemWidth(-1.0f);
-    bool changed = ImGui::DragInt("##v", &v, 0.25f, lo, hi);
-    if (changed) v = v < lo ? lo : (v > hi ? hi : v);
-    ImGui::PopID();
-    return changed;
 }
 
 // Parametric controls for whichever primitive the object was created from.
-// Editing any of these regenerates the mesh, which is the first real piece of
+// Editing any of these regenerates the body, which is the first real piece of
 // the parametric workflow.
 bool drawPrimitiveParams(SceneObject& obj) {
+    using ui::labelledInt;
+    using ui::labelledNumber;
     bool changed = false;
     switch (obj.spec.kind) {
         case PrimitiveKind::Box:
-            changed |= labeledDrag("Width",  obj.spec.box.width,  0.1f, 0.01f, 10000.0f);
-            changed |= labeledDrag("Depth",  obj.spec.box.depth,  0.1f, 0.01f, 10000.0f);
-            changed |= labeledDrag("Height", obj.spec.box.height, 0.1f, 0.01f, 10000.0f);
+            changed |= labelledNumber("Width",  obj.spec.box.width,  0.1f, 0.01f, 10000.0f);
+            changed |= labelledNumber("Depth",  obj.spec.box.depth,  0.1f, 0.01f, 10000.0f);
+            changed |= labelledNumber("Height", obj.spec.box.height, 0.1f, 0.01f, 10000.0f);
             break;
         case PrimitiveKind::Cylinder:
-            changed |= labeledDrag("Radius", obj.spec.cylinder.radius, 0.1f, 0.01f, 10000.0f);
-            changed |= labeledDrag("Height", obj.spec.cylinder.height, 0.1f, 0.01f, 10000.0f);
-            changed |= labeledInt ("Sides",  obj.spec.cylinder.segments, 3, 512);
+            changed |= labelledNumber("Radius", obj.spec.cylinder.radius, 0.1f, 0.01f, 10000.0f);
+            changed |= labelledNumber("Height", obj.spec.cylinder.height, 0.1f, 0.01f, 10000.0f);
+            changed |= labelledInt   ("Sides",  obj.spec.cylinder.segments, 3, 512);
             break;
         case PrimitiveKind::Sphere:
-            changed |= labeledDrag("Radius",   obj.spec.sphere.radius, 0.1f, 0.01f, 10000.0f);
-            changed |= labeledInt ("Segments", obj.spec.sphere.segments, 3, 512);
-            changed |= labeledInt ("Rings",    obj.spec.sphere.rings, 2, 256);
+            changed |= labelledNumber("Radius",   obj.spec.sphere.radius, 0.1f, 0.01f, 10000.0f);
+            changed |= labelledInt   ("Segments", obj.spec.sphere.segments, 3, 512);
+            changed |= labelledInt   ("Rings",    obj.spec.sphere.rings, 2, 256);
             break;
         case PrimitiveKind::Cone:
-            changed |= labeledDrag("Base R",  obj.spec.cone.bottomRadius, 0.1f, 0.01f, 10000.0f);
-            changed |= labeledDrag("Top R",   obj.spec.cone.topRadius, 0.1f, 0.0f, 10000.0f);
-            changed |= labeledDrag("Height",  obj.spec.cone.height, 0.1f, 0.01f, 10000.0f);
-            changed |= labeledInt ("Sides",   obj.spec.cone.segments, 3, 512);
+            changed |= labelledNumber("Base R",  obj.spec.cone.bottomRadius, 0.1f, 0.01f, 10000.0f);
+            changed |= labelledNumber("Top R",   obj.spec.cone.topRadius, 0.1f, 0.0f, 10000.0f);
+            changed |= labelledNumber("Height",  obj.spec.cone.height, 0.1f, 0.01f, 10000.0f);
+            changed |= labelledInt   ("Sides",   obj.spec.cone.segments, 3, 512);
             break;
         case PrimitiveKind::Torus:
-            changed |= labeledDrag("Major R", obj.spec.torus.majorRadius, 0.1f, 0.02f, 10000.0f);
-            changed |= labeledDrag("Minor R", obj.spec.torus.minorRadius, 0.1f, 0.01f, 10000.0f);
-            changed |= labeledInt ("Major",   obj.spec.torus.majorSegments, 3, 512);
-            changed |= labeledInt ("Minor",   obj.spec.torus.minorSegments, 3, 256);
+            changed |= labelledNumber("Major R", obj.spec.torus.majorRadius, 0.1f, 0.02f, 10000.0f);
+            changed |= labelledNumber("Minor R", obj.spec.torus.minorRadius, 0.1f, 0.01f, 10000.0f);
+            changed |= labelledInt   ("Major",   obj.spec.torus.majorSegments, 3, 512);
+            changed |= labelledInt   ("Minor",   obj.spec.torus.minorSegments, 3, 256);
             // The generator rejects a minor radius that would self-intersect,
             // so clamp here instead of letting the rebuild silently no-op.
             if (obj.spec.torus.minorRadius >= obj.spec.torus.majorRadius)
                 obj.spec.torus.minorRadius = obj.spec.torus.majorRadius * 0.98f;
             break;
         case PrimitiveKind::Plane:
-            changed |= labeledDrag("Width", obj.spec.plane.width, 0.1f, 0.01f, 10000.0f);
-            changed |= labeledDrag("Depth", obj.spec.plane.depth, 0.1f, 0.01f, 10000.0f);
+            changed |= labelledNumber("Width", obj.spec.plane.width, 0.1f, 0.01f, 10000.0f);
+            changed |= labelledNumber("Depth", obj.spec.plane.depth, 0.1f, 0.01f, 10000.0f);
             break;
         case PrimitiveKind::Custom:
-            ImGui::TextColored(kDim, "Edited mesh - no parameters");
+            ImGui::TextColored(im(palette::kTextDim), "Edited mesh: no parameters");
             break;
     }
     return changed;
 }
 
-} // namespace
+// ---- outliner rows ----------------------------------------------------------
 
-// ---------------------------------------------------------------------------
-void drawAddMenuItems(UiContext& ctx) {
-    struct Entry { const char* label; PrimitiveKind kind; };
-    static const Entry kEntries[] = {
-        {"Box",      PrimitiveKind::Box},
-        {"Cylinder", PrimitiveKind::Cylinder},
-        {"Sphere",   PrimitiveKind::Sphere},
-        {"Cone",     PrimitiveKind::Cone},
-        {"Torus",    PrimitiveKind::Torus},
-        {"Plane",    PrimitiveKind::Plane},
-    };
-    for (const Entry& e : kEntries) {
-        if (ImGui::MenuItem(e.label)) {
-            ctx.actions.addRequested = true;
-            ctx.actions.addKind = e.kind;
-        }
+// A collapsible heading: "Bodies  2".
+bool sectionHeader(const char* name, size_t count) {
+    ImGui::PushID(name);
+    ImGuiStorage* store = ImGui::GetStateStorage();
+    const ImGuiID key = ImGui::GetID("open");
+    bool open = store->GetBool(key, true);
+
+    const float h = ImGui::GetTextLineHeight() + 8.0f;
+    const float w = ImGui::GetContentRegionAvail().x;
+    const ImVec2 at = ImGui::GetCursorScreenPos();
+    if (ImGui::InvisibleButton("##hdr", ImVec2(w, h))) { open = !open; store->SetBool(key, open); }
+    const bool hovered = ImGui::IsItemHovered();
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    drawGlyph(dl, open ? Glyph::ChevronDown : Glyph::ChevronRight, ImVec2(at.x + 7.0f, at.y + h * 0.5f),
+              11.0f, u32(hovered ? palette::kText : palette::kTextDim), 1.3f);
+    pushFont(FontWeight::SemiBold, uiFonts().size * 0.95f);
+    dl->AddText(ImVec2(at.x + 18.0f, at.y + (h - ImGui::GetTextLineHeight()) * 0.5f),
+                u32(palette::kText), name);
+    const float nameW = ImGui::CalcTextSize(name).x;
+    ImGui::PopFont();
+    if (count > 0) {
+        char n[16];
+        std::snprintf(n, sizeof n, "%zu", count);
+        pushFont(FontWeight::Regular, uiFonts().size * 0.82f);
+        dl->AddText(ImVec2(at.x + 18.0f + nameW + 8.0f, at.y + (h - ImGui::GetTextLineHeight()) * 0.5f + 1.0f),
+                    u32(palette::kTextFaint), n);
+        ImGui::PopFont();
     }
-    ImGui::Separator();
-    if (ImGui::MenuItem("Sketch", "Shift+S", false, brep::available()))
-        ctx.actions.sketch = true;
-    ImGui::TextColored(kDim, brep::available() ? "  lines, circles and arcs, kept and sized"
-                                               : "  needs the exact kernel");
+    ImGui::PopID();
+    return open;
 }
 
-void drawMenuBar(UiContext& ctx) {
-    if (!ImGui::BeginMainMenuBar()) return;
+void objectRow(UiContext& ctx, Scene& scene, SceneObject& obj, Glyph glyph) {
+    ImGui::PushID(static_cast<int>(obj.id));
+    const float h = 26.0f;
+    const float eyeW = 22.0f;
+    const float w = ImGui::GetContentRegionAvail().x;
+    const ImVec2 at = ImGui::GetCursorScreenPos();
 
-    ImGui::PushStyleColor(ImGuiCol_Text, kAccent);
-    // Lowercase wordmark: the identity is friendly and unfussy, not a
-    // shouty enterprise logotype.
-    ImGui::TextUnformatted("tangent");
-    ImGui::PopStyleColor();
-    ImGui::Spacing();
+    const bool clicked = ImGui::InvisibleButton("##row", ImVec2(std::max(10.0f, w - eyeW - 4.0f), h));
+    const bool hovered = ImGui::IsItemHovered();
+    if (clicked) {
+        const bool additive = ImGui::GetIO().KeyShift || ImGui::GetIO().KeyCtrl;
+        if (additive) scene.toggleSelect(obj.id);
+        else          scene.select(obj.id);
+    }
+    if (hovered && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) ctx.actions.frameSelected = true;
 
-    if (ImGui::BeginMenu("File")) {
-        if (ImGui::MenuItem("New", "Ctrl+N"))          ctx.actions.newProject = true;
-        if (ImGui::MenuItem("Open...", "Ctrl+O"))      ctx.actions.openProject = true;
-        if (ImGui::MenuItem("Save", "Ctrl+S"))         ctx.actions.saveProject = true;
-        if (ImGui::MenuItem("Save As..."))             ctx.actions.saveProjectAs = true;
-        ImGui::Separator();
-        if (ImGui::MenuItem("Import STEP...")) ctx.actions.importStep = true;
-        ImGui::TextColored(kDim, "  brings in the surfaces, not a mesh of them");
-        if (ImGui::MenuItem("Import Mesh...")) ctx.actions.importMesh = true;
-        ImGui::TextColored(kDim, "  .stl or .obj, as triangles");
-        ImGui::Separator();
-        if (ImGui::MenuItem("Export STEP...")) ctx.actions.exportStep = true;
-        ImGui::TextColored(kDim, "  exact; what another CAD package wants");
-        if (ImGui::MenuItem("Export 3MF...", "Ctrl+Shift+E")) ctx.actions.export3mf = true;
-        ImGui::TextColored(kDim, "  for a slicer: millimetres, each part named");
-        if (ImGui::MenuItem("Export STL...", "Ctrl+E")) ctx.actions.exportStl = true;
-        ImGui::TextColored(kDim, "  loose triangles; what every slicer reads");
-        ImGui::Separator();
-        if (ImGui::MenuItem("Quit", "Ctrl+Q")) ctx.actions.quit = true;
-        ImGui::EndMenu();
+    const bool selected = scene.isSelected(obj.id);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 lo(at.x, at.y), hi(at.x + w, at.y + h);
+    if (selected) {
+        dl->AddRectFilled(lo, hi, u32(palette::kRaised), 5.0f);
+        dl->AddRectFilled(ImVec2(lo.x, lo.y + 5.0f), ImVec2(lo.x + 2.5f, hi.y - 5.0f), u32(palette::kBrand), 2.0f);
+    } else if (hovered) {
+        dl->AddRectFilled(lo, hi, u32(palette::kHover, 0.5f), 5.0f);
     }
 
-    if (ImGui::BeginMenu("Edit")) {
-        if (ImGui::MenuItem("Undo", "Ctrl+Z", false, ctx.canUndo)) ctx.actions.undo = true;
-        if (ImGui::MenuItem("Redo", "Ctrl+Shift+Z", false, ctx.canRedo)) ctx.actions.redo = true;
-        ImGui::Separator();
-        const bool has = !ctx.scene->selection().empty();
-        if (ImGui::MenuItem("Duplicate", "Shift+D", false, has))
-            ctx.actions.duplicateSelected = true;
-        if (ImGui::MenuItem("Delete", "X", false, has))
-            ctx.actions.deleteSelected = true;
-        ImGui::Separator();
-        if (ImGui::MenuItem("Select All", "A")) ctx.scene->selectAll();
-        if (ImGui::MenuItem("Deselect All", "Alt+A")) ctx.scene->clearSelection();
-        ImGui::EndMenu();
-    }
+    const float alpha = obj.visible ? 1.0f : 0.45f;
+    drawGlyph(dl, glyph, ImVec2(at.x + 18.0f, at.y + h * 0.5f), 16.0f, u32(palette::kBrand, alpha), 1.4f);
+    pushFont(selected ? FontWeight::Medium : FontWeight::Regular);
+    dl->AddText(ImVec2(at.x + 34.0f, at.y + (h - ImGui::GetTextLineHeight()) * 0.5f),
+                u32(palette::kText, alpha), obj.name.c_str());
+    ImGui::PopFont();
 
-    if (ImGui::BeginMenu("Add")) { drawAddMenuItems(ctx); ImGui::EndMenu(); }
+    ImGui::SameLine(w - eyeW + 2.0f);
+    ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (h - (15.0f + 6.0f)) * 0.5f);
+    bool visible = obj.visible;
+    if (ui::eyeToggle("vis", visible, 15.0f)) obj.visible = visible;
 
-    if (ImGui::BeginMenu("Modify")) {
-        const bool hasFaces = !ctx.scene->elementSelection().empty();
-        const size_t selFaces = ctx.scene->selectedFaces(ctx.scene->contextObject()).size();
-        const size_t selEdges = ctx.scene->selectedEdges(ctx.scene->contextObject()).size();
-        const bool hasObject = ctx.scene->contextObject() != kNoObject;
-
-        // Everything that acts on a face. These had a key and a toolbar button
-        // and no menu entry, which meant the only way to find out they existed
-        // was to read the source.
-        if (ImGui::MenuItem("Move Face (Push / Pull)", "G", false, selFaces > 0))
-            ctx.actions.pushPull = true;
-        if (ImGui::MenuItem("Extrude Faces", "E", false, hasFaces))
-            ctx.actions.extrude = true;
-        ImGui::TextColored(kDim, "  Shift+E cuts inward");
-        if (ImGui::MenuItem("Rotate Face", "R", false, selFaces > 0))
-            ctx.actions.rotateFace = true;
-        if (ImGui::MenuItem("Scale Face", "S", false, selFaces > 0))
-            ctx.actions.scaleFace = true;
-        ImGui::SetNextItemWidth(140.0f);
-        ImGui::DragScalarN("Inset", ImGuiDataType_Double, &ctx.view->insetAmount, 1,
-                           0.05f, nullptr, nullptr, "%.2f mm");
-        if (ImGui::MenuItem("Inset Face", nullptr, false, selFaces > 0))
-            ctx.actions.inset = true;
-        ImGui::TextColored(kDim, "  a smaller face inside the one selected");
-        ImGui::Separator();
-        if (ImGui::MenuItem("Divide Across an Edge", "K", false, selEdges > 0))
-            ctx.actions.divide = true;
-        if (ImGui::MenuItem("Merge Faces", nullptr, false, hasObject))
-            ctx.actions.mergeFaces = true;
-        ImGui::Separator();
-        {
-            // Only offered where it would do something. A body that is already
-            // exact has nothing to convert, and a menu item that greys out with
-            // no explanation is a worse answer than one that says why.
-            const SceneObject* o = ctx.scene->find(ctx.scene->contextObject());
-            const bool isMesh = o && !o->body.empty() && o->body.isMesh();
-            if (ImGui::MenuItem("Reduce Mesh...", nullptr, false, isMesh))
-                ctx.actions.reduceMesh = true;
-            if (isMesh)
-                ImGui::TextColored(kDim, "  fewer triangles, within a tolerance");
-            if (ImGui::MenuItem("Convert to Solid", nullptr, false, isMesh))
-                ctx.actions.convertToSolid = true;
-            if (isMesh)
-                ImGui::TextColored(kDim, "  sews the triangles and merges flat ones");
-            else if (o)
-                ImGui::TextColored(kDim, "  this body is already exact");
-            else
-                ImGui::TextColored(kDim, "  for an imported mesh");
+    // The sketches it holds, under it: each with its own eye, and a
+    // double-click to go back into it. A sketch is a thing in the model that
+    // outlives being extruded, so it belongs here and not only in the history.
+    if (glyph != Glyph::Sketch) {
+        for (Feature& f : obj.features) {
+            if (f.kind != FeatureKind::Sketch) continue;
+            ImGui::PushID(static_cast<int>(f.uid));
+            const ImVec2 sat = ImGui::GetCursorScreenPos();
+            const float sh = 22.0f;
+            const bool sclicked = ImGui::InvisibleButton("##sk", ImVec2(std::max(10.0f, w - eyeW - 4.0f), sh));
+            const bool shover = ImGui::IsItemHovered();
+            if (shover) dl->AddRectFilled(ImVec2(sat.x, sat.y), ImVec2(sat.x + w, sat.y + sh),
+                                          u32(palette::kHover, 0.5f), 5.0f);
+            if (sclicked && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                ctx.actions.editSketchObject = obj.id;
+                ctx.actions.editSketchUid = f.uid;
+            }
+            if (shover)
+                ImGui::SetTooltip("Double-click to edit it%s",
+                                  f.sketchFreedoms == 0 ? "  (fully constrained)" : "");
+            const float salpha = f.sketchShown ? 0.85f : 0.4f;
+            drawGlyph(dl, Glyph::Sketch, ImVec2(sat.x + 36.0f, sat.y + sh * 0.5f), 13.0f,
+                      u32(palette::kBrand, salpha), 1.3f);
+            char label[64];
+            std::snprintf(label, sizeof label, "Sketch  %zu entit%s", f.sketch.entities.size(),
+                          f.sketch.entities.size() == 1 ? "y" : "ies");
+            pushFont(FontWeight::Regular, uiFonts().size * 0.92f);
+            dl->AddText(ImVec2(sat.x + 50.0f, sat.y + (sh - ImGui::GetTextLineHeight()) * 0.5f),
+                        u32(palette::kTextDim, f.sketchShown ? 1.0f : 0.6f), label);
+            ImGui::PopFont();
+            ImGui::SameLine(w - eyeW + 2.0f);
+            ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (sh - (13.0f + 6.0f)) * 0.5f);
+            bool shown = f.sketchShown;
+            // Display only, so the chain is not re-run: nothing it builds
+            // depends on whether the drawing is on the screen.
+            if (ui::eyeToggle("shown", shown, 13.0f)) f.sketchShown = shown;
+            ImGui::PopID();
         }
-        ImGui::Separator();
-        if (ImGui::MenuItem("Pattern...", "P", false, hasObject))
-            ctx.actions.pattern = true;
-        if (ImGui::MenuItem("Mirror...", "M", false, hasObject))
-            ctx.actions.mirror = true;
-        ImGui::Separator();
-        const size_t edgeCount = ctx.scene->selectedEdges(ctx.scene->contextObject()).size();
-        const size_t faceCount = ctx.scene->selectedFaces(ctx.scene->contextObject()).size();
-        const bool canFillet = (edgeCount > 0 || faceCount > 0);
-        if (ImGui::MenuItem("Fillet Selected Edges / Faces", "F", false, canFillet))
-            ctx.actions.fillet = true;
-        if (edgeCount > 0)
-            ImGui::TextColored(kDim, "  %zu edge%s selected", edgeCount,
-                               edgeCount == 1 ? "" : "s");
-        else if (faceCount > 0)
-            ImGui::TextColored(kDim, "  %zu face%s selected (boundary edges)", faceCount,
-                               faceCount == 1 ? "" : "s");
-        else
-            ImGui::TextColored(kDim, "  click an edge or face in viewport first");
-
-        if (ImGui::MenuItem("Round All Edges", "Ctrl+B", false,
-                            ctx.scene->contextObject() != kNoObject))
-            ctx.actions.bevel = true;
-        ImGui::TextColored(kDim, "  every edge of the body at once");
-
-        ImGui::Separator();
-        ImGui::SetNextItemWidth(140.0f);
-        ImGui::DragScalarN("Wall", ImGuiDataType_Double, &ctx.view->shellThickness, 1,
-                           0.05f, nullptr, nullptr, "%.2f mm");
-        if (ImGui::MenuItem("Shell (Hollow Out)", nullptr, false,
-                            ctx.scene->contextObject() != kNoObject))
-            ctx.actions.shell = true;
-        if (faceCount > 0)
-            ImGui::TextColored(kDim, "  %zu selected face%s left open", faceCount,
-                               faceCount == 1 ? "" : "s");
-        else
-            ImGui::TextColored(kDim, "  no faces selected: a sealed cavity");
-        ImGui::EndMenu();
     }
-
-    if (ImGui::BeginMenu("Combine")) {
-        const size_t n = ctx.scene->selection().size();
-        const bool pair = n == 2;
-
-        if (ImGui::MenuItem("Union", "Ctrl+Shift+U", false, pair)) {
-            ctx.actions.booleanRequested = true;
-            ctx.actions.booleanOp = BooleanOp::Union;
-        }
-        if (ImGui::MenuItem("Difference", "Ctrl+Shift+D", false, pair)) {
-            ctx.actions.booleanRequested = true;
-            ctx.actions.booleanOp = BooleanOp::Difference;
-        }
-        if (ImGui::MenuItem("Intersect", "Ctrl+Shift+I", false, pair)) {
-            ctx.actions.booleanRequested = true;
-            ctx.actions.booleanOp = BooleanOp::Intersection;
-        }
-        if (!pair)
-            ImGui::TextColored(kDim, "  Select two objects (%zu selected)", n);
-        else
-            ImGui::TextColored(kDim, "  First selected is kept, second is the tool");
-
-        ImGui::Separator();
-        if (ImGui::MenuItem("Split Body", nullptr, false,
-                            ctx.scene->contextObject() != kNoObject))
-            ctx.actions.split = true;
-        ImGui::TextColored(kDim, "  Splits by face plane, tool plane, or shells");
-        ImGui::EndMenu();
-    }
-
-    if (ImGui::BeginMenu("Measure")) {
-        ImGui::MenuItem("Measure", "D", ctx.measuring);
-        ImGui::Separator();
-        ImGui::TextColored(kDim, "Click one entity for its own size,");
-        ImGui::TextColored(kDim, "two for the distance between them.");
-        ImGui::TextColored(kDim, "Distances are true minimums.");
-        ImGui::EndMenu();
-    }
-
-    if (ImGui::BeginMenu("Transform")) {
-        const bool has = !ctx.scene->selection().empty();
-        ImGui::MenuItem("Move", "G", false, has);
-        ImGui::MenuItem("Rotate", "R", false, has);
-        ImGui::TextColored(kDim, "  with a face selected these move the face");
-        ImGui::MenuItem("Scale", "S", false, has);
-        ImGui::Separator();
-        ImGui::TextColored(kDim, "During a transform:");
-        ImGui::TextColored(kDim, "  X / Y / Z      constrain to an axis");
-        ImGui::TextColored(kDim, "  Shift + axis   constrain to a plane");
-        ImGui::TextColored(kDim, "  type a number  exact value");
-        ImGui::TextColored(kDim, "  Ctrl           snap to increments");
-        ImGui::EndMenu();
-    }
-
-    if (ImGui::BeginMenu("View")) {
-        if (ImGui::MenuItem("Frame Selected", "Numpad .")) ctx.actions.frameSelected = true;
-        if (ImGui::MenuItem("Frame All", "Home"))          ctx.actions.frameAll = true;
-        ImGui::Separator();
-        if (ImGui::MenuItem("Front",  "Numpad 1"))       ctx.camera->setStandardView(StandardView::Front);
-        if (ImGui::MenuItem("Back",   "Ctrl+Numpad 1"))  ctx.camera->setStandardView(StandardView::Back);
-        if (ImGui::MenuItem("Right",  "Numpad 3"))       ctx.camera->setStandardView(StandardView::Right);
-        if (ImGui::MenuItem("Left",   "Ctrl+Numpad 3"))  ctx.camera->setStandardView(StandardView::Left);
-        if (ImGui::MenuItem("Top",    "Numpad 7"))       ctx.camera->setStandardView(StandardView::Top);
-        if (ImGui::MenuItem("Bottom", "Ctrl+Numpad 7"))  ctx.camera->setStandardView(StandardView::Bottom);
-        ImGui::Separator();
-        bool ortho = ctx.camera->orthographic;
-        if (ImGui::MenuItem("Orthographic", "Numpad 5", &ortho))
-            ctx.camera->setOrthographic(ortho);
-        ImGui::Separator();
-        ImGui::MenuItem("Invert Orbit X", nullptr, &ctx.camera->invertOrbitX);
-        ImGui::MenuItem("Invert Orbit Y", nullptr, &ctx.camera->invertOrbitY);
-        ImGui::Separator();
-        ImGui::MenuItem("Grid",           nullptr, &ctx.view->showGrid);
-        ImGui::MenuItem("Wireframe",      "Z",     &ctx.view->showWireframe);
-        ImGui::MenuItem("Selection Box",  nullptr, &ctx.view->showSelectionBox);
-        ImGui::MenuItem("Print Problems", nullptr, &ctx.view->showPrintIssues);
-        ImGui::TextColored(kDim, "  red: thinner than the nozzle can lay");
-        ImGui::MenuItem("Backface Cull",  nullptr, &ctx.view->backfaceCulling);
-        ImGui::EndMenu();
-    }
-
-    // Right-aligned frame timing.
-    char timing[64];
-    std::snprintf(timing, sizeof(timing), "%.1f fps   %.2f ms",
-                  ctx.stats.frameMs > 0.0f ? 1000.0f / ctx.stats.frameMs : 0.0f,
-                  ctx.stats.frameMs);
-    const float tw = ImGui::CalcTextSize(timing).x;
-    ImGui::SameLine(ImGui::GetWindowWidth() - tw - 16.0f);
-    ImGui::TextColored(kDim, "%s", timing);
-
-    ImGui::EndMainMenuBar();
+    ImGui::PopID();
 }
 
-// ---------------------------------------------------------------------------
-float drawToolbar(UiContext& ctx) {
-    const Scene& scene = *ctx.scene;
-    const ObjectId ctxObj = scene.contextObject();
-    const bool hasObject = ctxObj != kNoObject;
-    const bool pair = scene.selection().size() == 2;
-    const size_t edges = scene.selectedEdges(ctxObj).size();
-    const size_t faces = scene.selectedFaces(ctxObj).size();
+// ---- history ------------------------------------------------------------------
 
-    // Sized so the baked icons are read rather than guessed at: below about
-    // twenty pixels a filleted cube and a chamfered one are the same picture.
-    const float icon = 24.0f;
-    const ImGuiStyle& st = ImGui::GetStyle();
-    const float height = icon + st.FramePadding.y * 4.0f + st.ItemSpacing.y;
-
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10.0f, 5.0f));
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4.0f, 4.0f));
-    ImGui::BeginChild("##toolbar", ImVec2(0.0f, height), ImGuiChildFlags_None,
-                      ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-
-    // One button for all five shapes.
-    //
-    // Which shape you start from is a choice made once at the beginning of a
-    // part; the operations beside it are used over and over. Giving them equal
-    // room on the bar made the row read as ten things of equal weight, and put
-    // the five that matter further from the hand.
-    struct Shape { Icon icon; PrimitiveKind kind; const char* name; };
-    static const Shape kShapes[] = {
-        {Icon::Box,      PrimitiveKind::Box,      "Box"},
-        {Icon::Cylinder, PrimitiveKind::Cylinder, "Cylinder"},
-        {Icon::Sphere,   PrimitiveKind::Sphere,   "Sphere"},
-        {Icon::Cone,     PrimitiveKind::Cone,     "Cone"},
-        {Icon::Torus,    PrimitiveKind::Torus,    "Torus"},
-    };
-    // The last one used, so the button keeps its face and the common case is
-    // the same picture every time.
-    static int lastShape = 0;
-
-    if (iconButton(kShapes[lastShape].icon, "create", icon, "Create object  (Shift+A)"))
-        ImGui::OpenPopup("##createobject");
-
-    // A corner mark, so it reads as a button that opens rather than one that
-    // acts. Drawn over the button just laid out.
-    {
-        const ImVec2 lo = ImGui::GetItemRectMin(), hi = ImGui::GetItemRectMax();
-        const float d = 4.5f;
-        ImGui::GetWindowDrawList()->AddTriangleFilled(
-            ImVec2(hi.x - 2.0f, hi.y - 2.0f), ImVec2(hi.x - 2.0f - d, hi.y - 2.0f),
-            ImVec2(hi.x - 2.0f, hi.y - 2.0f - d),
-            ImGui::GetColorU32(ImGuiCol_Text, 0.65f));
-        (void)lo;
+// The editable parameters of one step, under its row.
+void featureDetails(UiContext& ctx, SceneObject& obj, Feature& f, bool& changed) {
+    using ui::labelledInt;
+    using ui::labelledNumber;
+    const ImVec4 dim = im(palette::kTextDim);
+    switch (f.kind) {
+    case FeatureKind::Primitive:
+        ImGui::TextColored(dim, "Its dimensions are under Shape, above");
+        break;
+    case FeatureKind::Merge:
+        ImGui::TextColored(dim, "Drops every division that does not define the shape");
+        break;
+    case FeatureKind::FaceScale: {
+        Real pct = (f.scale - 1.0) * 100.0;
+        if (labelledNumber("Change", pct, 0.5f, -95.0f, 1000.0f, "%.1f %%")) {
+            f.scale = 1.0 + pct / 100.0;
+            changed = true;
+        }
+        ImGui::TextColored(dim, "%.3g x its size", f.scale);
+        break;
     }
-
-    if (ImGui::BeginPopup("##createobject")) {
-        ImGui::TextDisabled("Create object");
-        ImGui::Separator();
-        const float line = ImGui::GetTextLineHeight();
-        for (int i = 0; i < static_cast<int>(sizeof kShapes / sizeof kShapes[0]); ++i) {
-            ImGui::PushID(i);
-            iconImage(kShapes[i].icon, line);
-            ImGui::SameLine();
-            if (ImGui::Selectable(kShapes[i].name)) {
-                ctx.actions.addRequested = true;
-                ctx.actions.addKind = kShapes[i].kind;
-                lastShape = i;
+    case FeatureKind::FaceRotate: {
+        Real deg = degrees(f.angle);
+        if (labelledNumber("Angle", deg, 0.2f, -89.0f, 89.0f, "%.1f deg")) {
+            f.angle = radians(deg);
+            changed = true;
+        }
+        ImGui::TextColored(dim, "about %.2f, %.2f, %.2f", f.axisPoint.x, f.axisPoint.y, f.axisPoint.z);
+        break;
+    }
+    case FeatureKind::Reduce: {
+        // Applied when a field is finished with, not on every frame of a
+        // drag: a reduction takes seconds on a large mesh.
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextColored(dim, "Within");
+        ImGui::SameLine(ui::labelColumn());
+        ImGui::SetNextItemWidth(-1.0f);
+        double tol = f.reduceTolerance;
+        ImGui::InputDouble("##rtol", &tol, 0.0, 0.0, "%.3f mm");
+        if (ImGui::IsItemDeactivatedAfterEdit() && tol > 0.0 && tol != f.reduceTolerance) {
+            f.reduceTolerance = tol;
+            changed = true;
+        }
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextColored(dim, "Stop at");
+        ImGui::SameLine(ui::labelColumn());
+        ImGui::SetNextItemWidth(-1.0f);
+        int target = f.reduceTarget;
+        ImGui::InputInt("##rtarget", &target, 0, 0);
+        if (ImGui::IsItemDeactivatedAfterEdit() && target >= 0 && target != f.reduceTarget) {
+            f.reduceTarget = target;
+            changed = true;
+        }
+        bool loosen = f.reduceLoosen;
+        if (f.reduceTarget > 0 && ImGui::Checkbox("Loosen to reach it", &loosen)) {
+            f.reduceLoosen = loosen;
+            changed = true;
+        }
+        ImGui::TextColored(dim, "%s", f.reduceTarget == 0
+                                          ? "0: as few triangles as the tolerance allows"
+                                          : f.reduceLoosen
+                                          ? "the tolerance loosens only as far as the count needs"
+                                          : "triangles, or the tolerance, whichever comes first");
+        break;
+    }
+    case FeatureKind::Sketch: {
+        // The drawing itself is edited where it was drawn, on its plane.
+        if (ui::quietButton("Edit Sketch")) {
+            ctx.actions.editSketchObject = obj.id;
+            ctx.actions.editSketchUid = f.uid;
+        }
+        // The numbers that size it. Changing one re-solves the sketch and
+        // re-runs everything built from it -- the reason a sketch is kept in
+        // the history rather than consumed.
+        bool hasDimensions = false;
+        for (SketchConstraint& k : f.sketch.constraints) {
+            if (!isDimension(k.rule)) continue;
+            hasDimensions = true;
+            ImGui::PushID(static_cast<int>(k.id));
+            char label[32];
+            if (k.rule == SketchRule::Angle) {
+                std::snprintf(label, sizeof label, "Angle #%u", k.id);
+                Real deg = degrees(k.value);
+                if (labelledNumber(label, deg, 0.2f, 0.0f, 360.0f, "%.1f deg")) {
+                    k.value = radians(deg);
+                    changed = true;
+                }
+            } else {
+                std::snprintf(label, sizeof label, "%s #%u",
+                              k.rule == SketchRule::Radius ? "Radius" : "Distance", k.id);
+                changed |= labelledNumber(label, k.value, 0.1f, 0.001f, 100000.0f);
             }
             ImGui::PopID();
         }
-        ImGui::EndPopup();
+        if (!hasDimensions) ImGui::TextColored(dim, "No dimensions: its size is what was drawn");
+        ImGui::TextColored(f.sketchFreedoms == 0 ? im(palette::kValid) : im(palette::kInfo), "%s",
+                           f.sketchFreedoms == 0 ? "fully constrained"
+                                                 : "not fully constrained: some of it can still move");
+        break;
     }
-    ImGui::SameLine();
-
-    // A sketch begins a part as much as a shape does, so it sits beside the
-    // shapes. In words: there is no baked picture of one, and a borrowed
-    // picture of something else would say the wrong thing.
-    ImGui::BeginDisabled(!brep::available());
-    if (ImGui::Button("Sketch", ImVec2(0.0f, icon + st.FramePadding.y * 2.0f)))
-        ctx.actions.sketch = true;
-    ImGui::EndDisabled();
-    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-        ImGui::SetTooltip(brep::available()
-                              ? "Sketch  (Shift+S): lines, circles and arcs on a plane, then extrude"
-                              : "Sketching needs the exact kernel, which this build does not have");
-
-    auto gap = [&] {
-        ImGui::SameLine(0.0f, 10.0f);
-        const ImVec2 p = ImGui::GetCursorScreenPos();
-        ImGui::GetWindowDrawList()->AddLine(
-            ImVec2(p.x, p.y + 3.0f), ImVec2(p.x, p.y + icon + st.FramePadding.y * 2.0f - 3.0f),
-            ImGui::GetColorU32(ImGuiCol_Separator));
-        ImGui::SameLine(0.0f, 10.0f);
-    };
-    gap();
-
-    // Named operands, not just the verb. A boolean is the one operation where
-    // which body survives is decided by selection order, and a tooltip that
-    // says "Difference" leaves the user to remember the rule; one that says
-    // "Bracket minus Bore" does not.
-    const char* firstName = "the first";
-    const char* secondName = "the second";
-    if (pair) {
-        if (const SceneObject* a2 = scene.find(scene.selection()[0])) firstName = a2->name.c_str();
-        if (const SceneObject* b2 = scene.find(scene.selection()[1])) secondName = b2->name.c_str();
-    }
-    auto combine = [&](Icon ic, BooleanOp op, const char* name, const char* joiner) {
-        char tip[192];
-        if (pair) std::snprintf(tip, sizeof tip, "%s:  %s %s %s", name, firstName, joiner, secondName);
-        else      std::snprintf(tip, sizeof tip, "%s - select two objects (%zu selected)",
-                                name, scene.selection().size());
-        if (iconButton(ic, name, icon, tip, false, pair)) {
-            ctx.actions.booleanRequested = true;
-            ctx.actions.booleanOp = op;
+    case FeatureKind::ExtrudeProfile:
+    case FeatureKind::Extrude: {
+        changed |= labelledNumber("Distance", f.distance, 0.1f, -10000.0f, 10000.0f);
+        static const char* const kOps[] = {"Auto", "Join", "Cut", "Intersect"};
+        int op = static_cast<int>(f.extrudeOp);
+        if (op < 0 || op > 3) op = 0;
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextColored(dim, "Operation");
+        ImGui::SameLine(ui::labelColumn());
+        for (int i = 0; i < 4; ++i) {
+            if (i) ImGui::SameLine(0.0f, 3.0f);
+            if (ui::pillButton(kOps[i], op == i) && op != i) {
+                f.extrudeOp = static_cast<ExtrudeOp>(i);
+                changed = true;
+            }
         }
-        ImGui::SameLine();
-    };
-    combine(Icon::Union,        BooleanOp::Union,        "Union",     "+");
-    combine(Icon::Difference,   BooleanOp::Difference,   "Difference", "minus");
-    combine(Icon::Intersection, BooleanOp::Intersection, "Intersect", "with");
-    gap();
-
-    // The modifiers each want something different selected, and saying which
-    // in the tooltip is the difference between a greyed-out button that
-    // teaches and one that just refuses.
-    if (iconButton(Icon::Fillet, "Fillet", icon,
-                   edges || faces ? "Fillet the selected edges (F)"
-                                  : "Fillet - select an edge or a face first",
-                   false, edges || faces))
-        ctx.actions.fillet = true;
-    ImGui::SameLine();
-
-    if (iconButton(Icon::Chamfer, "Bevel", icon,
-                   hasObject ? "Bevel every edge (Ctrl+B)"
-                             : "Bevel - select an object first",
-                   false, hasObject))
-        ctx.actions.bevel = true;
-    ImGui::SameLine();
-
-    if (iconButton(Icon::Shell, "Shell", icon,
-                   hasObject ? "Shell - selected faces are left open"
-                             : "Shell - select an object first",
-                   false, hasObject))
-        ctx.actions.shell = true;
-    ImGui::SameLine();
-
-    if (iconButton(Icon::Extrude, "PushPull", icon,
-                   faces ? "Move face: the body follows  (G)"
-                         : "Move face - select a face first",
-                   false, faces > 0))
-        ctx.actions.pushPull = true;
-    ImGui::SameLine();
-
-    if (iconButton(Icon::Union, "Extrude", icon,
-                   faces ? "Extrude: grow a boss off the face, outline kept  (E)"
-                         : "Extrude - select a face first",
-                   false, faces > 0))
-        ctx.actions.extrude = true;
-    ImGui::SameLine();
-
-    if (iconButton(Icon::Chamfer, "RotateFace", icon,
-                   faces ? "Rotate face: tip it about an edge  (R)"
-                         : "Rotate face - select one first",
-                   false, faces > 0))
-        ctx.actions.rotateFace = true;
-    ImGui::SameLine();
-
-    // A cone, because a tapered solid is what scaling a face makes, and
-    // because the divide beside it already has the inset.
-    if (iconButton(Icon::Cone, "ScaleFace", icon,
-                   faces ? "Scale face: grow or shrink it in its own plane  (S)"
-                         : "Scale face - select one first",
-                   false, faces > 0))
-        ctx.actions.scaleFace = true;
-    ImGui::SameLine();
-
-    if (iconButton(Icon::Inset, "Divide", icon,
-                   edges ? "Divide the faces along an edge  (K)"
-                         : "Divide - select an edge for the cut to run across",
-                   false, edges > 0))
-        ctx.actions.divide = true;
-    ImGui::SameLine();
-
-    // The opposite of divide, and the reason it is its own button: an
-    // operation that tidied up after itself would take these with it.
-    // A pattern of the last cut, or of the body. Which one it will be is
-    // decided when the gesture starts, and said in its panel.
-    if (iconButton(Icon::Intersection, "Pattern", icon,
-                   hasObject ? "Pattern: repeat in a row or around an axis  (P)"
-                             : "Pattern - select an object first",
-                   false, hasObject))
-        ctx.actions.pattern = true;
-    ImGui::SameLine();
-
-    if (iconButton(Icon::Difference, "Mirror", icon,
-                   hasObject ? "Mirror: reflect across a plane  (M)"
-                             : "Mirror - select an object first",
-                   false, hasObject))
-        ctx.actions.mirror = true;
-    ImGui::SameLine();
-
-    if (iconButton(Icon::Union, "MergeFaces", icon,
-                   hasObject ? "Merge faces: drop every division that does not "
-                               "define the shape"
-                             : "Merge faces - select an object first",
-                   false, hasObject))
-        ctx.actions.mergeFaces = true;
-
-    ImGui::EndChild();
-    ImGui::PopStyleVar(2);
-    return height;
+        if (f.kind == FeatureKind::Extrude) ImGui::TextColored(dim, "%s", f.faces.describe("face").c_str());
+        break;
+    }
+    case FeatureKind::Pattern: {
+        static const char* const kLayouts[] = {"Row", "Ring", "Mirror"};
+        int layout = static_cast<int>(f.patternMode);
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextColored(dim, "Layout");
+        ImGui::SameLine(ui::labelColumn());
+        for (int i = 0; i < 3; ++i) {
+            if (i) ImGui::SameLine(0.0f, 3.0f);
+            if (ui::pillButton(kLayouts[i], layout == i) && layout != i) {
+                f.patternMode = static_cast<PatternMode>(i);
+                changed = true;
+            }
+        }
+        if (f.patternMode != PatternMode::Mirror) {
+            int n = f.patternCount;
+            if (labelledInt("Copies", n, 2, 256)) { f.patternCount = n; changed = true; }
+            if (f.patternMode == PatternMode::Linear) {
+                changed |= labelledNumber("Spacing", f.distance, 0.1f, 0.05f, 10000.0f, "%.2f mm");
+            } else {
+                Real deg = degrees(f.angle);
+                if (labelledNumber("Turn", deg, 0.25f, -360.0f, 360.0f, "%.1f deg")) {
+                    f.angle = radians(deg);
+                    changed = true;
+                }
+                ImGui::SameLine();
+                if (ui::pillButton("Full turn", false)) {
+                    f.angle = radians(360.0 / (f.patternCount < 2 ? 2 : f.patternCount));
+                    changed = true;
+                }
+            }
+        }
+        // Which way it goes, as the axis it was built on rather than as
+        // three numbers: a pattern is nearly always along one of them.
+        static const char* const kAxes[] = {"X", "Y", "Z"};
+        int axis = std::fabs(f.axisDir.x) >= std::fabs(f.axisDir.y) &&
+                           std::fabs(f.axisDir.x) >= std::fabs(f.axisDir.z) ? 0
+                 : std::fabs(f.axisDir.y) >= std::fabs(f.axisDir.z)         ? 1 : 2;
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextColored(dim, "%s", f.patternMode == PatternMode::Mirror ? "Plane" : "Axis");
+        ImGui::SameLine(ui::labelColumn());
+        for (int i = 0; i < 3; ++i) {
+            if (i) ImGui::SameLine(0.0f, 3.0f);
+            if (ui::pillButton(kAxes[i], axis == i) && axis != i) {
+                f.axisDir = Vec3{i == 0 ? 1.0 : 0.0, i == 1 ? 1.0 : 0.0, i == 2 ? 1.0 : 0.0};
+                changed = true;
+            }
+        }
+        ImGui::TextColored(dim, "%s", f.bakedBody.empty() ? "Repeats the body" : "Repeats the cut it replaced");
+        break;
+    }
+    case FeatureKind::Divide:
+        ImGui::TextColored(dim, "Cuts at %.2f, %.2f, %.2f", f.axisPoint.x, f.axisPoint.y, f.axisPoint.z);
+        ImGui::TextColored(dim, "The body stays whole; the faces divide");
+        break;
+    case FeatureKind::Inset:
+        changed |= labelledNumber("Amount", f.amount, 0.05f, 0.01f, 10000.0f);
+        break;
+    case FeatureKind::Shell:
+        changed |= labelledNumber("Wall", f.thickness, 0.05f, 0.01f, 10000.0f);
+        ImGui::TextColored(dim, "%s", f.faces.empty() ? "sealed: no face left open"
+                                                      : f.faces.describe("face").c_str());
+        break;
+    case FeatureKind::Bevel: {
+        // A segment count is a mesh idea: an exact fillet is a surface rather
+        // than an approximation of one. Shown only where it still does something.
+        const bool isMesh = obj.body.isMesh();
+        if (labelledNumber(f.chamfer ? "Distance" : "Radius", f.width, 0.05f, 0.01f, 10000.0f)) {
+            // Editing the feature radius restates every edge's, which is
+            // what a user dragging one number expects.
+            f.radii.assign(f.edges.count(), f.width);
+            changed = true;
+        }
+        if (isMesh) changed |= labelledInt("Segments", f.segments, 1, 32);
+        ImGui::TextColored(dim, "%s", f.edges.describe("edge").c_str());
+        break;
+    }
+    case FeatureKind::Boolean: {
+        // The tool body is baked into the feature, so its shape is not
+        // editable here -- but which way it combines is.
+        static const char* const kOps[] = {"Join", "Cut", "Intersect"};
+        int op = static_cast<int>(f.booleanOp);
+        if (op < 0 || op > 2) op = 0;
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextColored(dim, "Operation");
+        ImGui::SameLine(ui::labelColumn());
+        for (int i = 0; i < 3; ++i) {
+            if (i) ImGui::SameLine(0.0f, 3.0f);
+            if (ui::pillButton(kOps[i], op == i) && op != i) {
+                f.booleanOp = static_cast<BooleanOp>(i);
+                changed = true;
+            }
+        }
+        ImGui::TextColored(dim, "Tool body: %d faces", f.bakedBody.faceCount());
+        break;
+    }
+    case FeatureKind::BaseMesh:
+        ImGui::TextColored(dim, "Imported geometry, %d faces", f.bakedBody.faceCount());
+        ImGui::TextColored(dim, "Not parametric: convert it to a solid to edit it");
+        break;
+    case FeatureKind::VertexEdit:
+        ImGui::TextColored(dim, "Free-form edit of %zu vertices", f.verts.size());
+        break;
+    }
 }
 
-// ---------------------------------------------------------------------------
-void drawOutliner(UiContext& ctx) {
-    if (!ImGui::Begin("Outliner")) { ImGui::End(); return; }
+void drawHistorySection(UiContext& ctx, SceneObject& obj) {
+    const std::vector<Feature> before = obj.features;
+    bool changed = false;
+    ImGuiStorage* store = ImGui::GetStateStorage();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
 
-    Scene& scene = *ctx.scene;
-    if (scene.objectCount() == 0) {
-        ImGui::TextColored(kDim, "Empty scene");
-        ImGui::Spacing();
-        ImGui::TextColored(kDim, "Shift+A to add an object");
+    // The last step is where the model stands: it is what the viewport shows
+    // and what the next operation builds on.
+    size_t current = obj.features.empty() ? 0 : obj.features.size() - 1;
+    for (size_t i = obj.features.size(); i-- > 0;) {
+        if (obj.features[i].enabled) { current = i; break; }
     }
 
-    for (const auto& obj : scene.objects()) {
-        ImGui::PushID(static_cast<int>(obj->id));
+    for (size_t i = 0; i < obj.features.size(); ++i) {
+        Feature& f = obj.features[i];
+        ImGui::PushID(static_cast<int>(f.uid ? f.uid : i + 1));
+        const ImGuiID openKey = ImGui::GetID("open");
+        bool open = store->GetBool(openKey, false);
 
-        // Visibility toggle, then the shape, then the selectable name row.
-        bool visible = obj->visible;
-        if (ImGui::Checkbox("##vis", &visible)) obj->visible = visible;
-        ImGui::SameLine();
+        const float h = 26.0f;
+        const float w = ImGui::GetContentRegionAvail().x;
+        const float rightW = 46.0f;      // the enable dot and the close
+        const ImVec2 at = ImGui::GetCursorScreenPos();
+        const bool clicked = ImGui::InvisibleButton("##row", ImVec2(std::max(10.0f, w - rightW), h));
+        const bool hovered = ImGui::IsItemHovered();
+        if (clicked) { open = !open; store->SetBool(openKey, open); }
 
-        const float line = ImGui::GetTextLineHeight();
-        ImGui::AlignTextToFramePadding();
-        iconImage(iconFor(obj->spec.kind), line, visible ? 1.0f : 0.35f);
-        ImGui::SameLine();
+        const bool isCurrent = i == current;
+        const ImVec2 lo(at.x, at.y), hi(at.x + w, at.y + h);
+        if (isCurrent)     dl->AddRectFilled(lo, hi, u32(palette::kRaised), 5.0f);
+        else if (hovered)  dl->AddRectFilled(lo, hi, u32(palette::kHover, 0.5f), 5.0f);
 
-        const bool selected = scene.isSelected(obj->id);
-        if (ImGui::Selectable(obj->name.c_str(), selected,
-                              ImGuiSelectableFlags_AllowDoubleClick)) {
-            const bool additive = ImGui::GetIO().KeyShift || ImGui::GetIO().KeyCtrl;
-            if (additive) scene.toggleSelect(obj->id);
-            else          scene.select(obj->id);
-            if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
-                ctx.actions.frameSelected = true;
+        const float alpha = f.enabled ? 1.0f : 0.45f;
+        drawGlyph(dl, open ? Glyph::ChevronDown : Glyph::ChevronRight, ImVec2(at.x + 8.0f, at.y + h * 0.5f),
+                  10.0f, u32(palette::kTextFaint), 1.2f);
+        drawGlyph(dl, glyphFor(f), ImVec2(at.x + 24.0f, at.y + h * 0.5f), 15.0f,
+                  u32(f.errored ? palette::kBrand : palette::kTextDim, alpha), 1.3f);
+
+        // The name, and what is special about it beside the name. Clipped
+        // short of the row's own controls: a long summary ends under them
+        // rather than running through them.
+        const float textRight = hi.x - rightW - 4.0f;
+        const std::string summary = f.summary();
+        dl->PushClipRect(ImVec2(at.x, at.y), ImVec2(textRight, hi.y), true);
+        pushFont(isCurrent ? FontWeight::Medium : FontWeight::Regular);
+        dl->AddText(ImVec2(at.x + 40.0f, at.y + (h - ImGui::GetTextLineHeight()) * 0.5f),
+                    u32(palette::kText, alpha), summary.c_str());
+        const float textW = ImGui::CalcTextSize(summary.c_str()).x;
+        ImGui::PopFont();
+        dl->PopClipRect();
+
+        const float tagX = at.x + 40.0f + textW + 8.0f;
+        auto rowTag = [&](const char* text, Rgb col) {
+            pushFont(FontWeight::Medium, uiFonts().size * 0.8f);
+            const float need = ImGui::CalcTextSize(text).x + 12.0f;
+            ImGui::PopFont();
+            if (tagX + need > textRight) return;      // no room: the row says it by its look
+            ImGui::SetCursorScreenPos(ImVec2(tagX, at.y + (h - ImGui::GetFrameHeight()) * 0.5f));
+            ui::tag(text, col, false);
+        };
+        if (f.errored)       rowTag("failed", palette::kBrand);
+        else if (!f.enabled) rowTag("off", palette::kTextDim);
+        else if (isCurrent)  rowTag("current", palette::kTextDim);
+        if (hovered) {
+            if (f.errored) ImGui::SetTooltip("%s", f.error.c_str());
+            else if (textW > textRight - (at.x + 40.0f)) ImGui::SetTooltip("%s", summary.c_str());
         }
 
-        // The kind, but only when it is not already the name. Every new object
-        // is called after its shape, so the default row used to read "Box Box".
-        // A part that began as a sketch is not a mesh, whatever its spec says.
-        const bool sketched = !obj->features.empty() &&
-                              obj->features.front().kind == FeatureKind::Sketch;
-        const char* kind = sketched ? "Sketched" : primitiveName(obj->spec.kind);
-        if (obj->name != kind) {
-            ImGui::SameLine();
-            ImGui::TextColored(kDim, "%s", kind);
+        // The enable dot, then the close. Both live at the right of the row
+        // and show up when it is being looked at.
+        if (hovered || isCurrent || !f.enabled || ImGui::IsMouseHoveringRect(ImVec2(hi.x - rightW, lo.y), hi)) {
+            ImGui::SetCursorScreenPos(ImVec2(hi.x - rightW + 2.0f, at.y + 3.0f));
+            const bool tog = ImGui::InvisibleButton("##on", ImVec2(20.0f, 20.0f));
+            const ImVec2 c(hi.x - rightW + 12.0f, at.y + h * 0.5f);
+            if (f.enabled) dl->AddCircleFilled(c, 4.0f, u32(palette::kValid));
+            else           dl->AddCircle(c, 4.0f, u32(palette::kTextDim), 0, 1.4f);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", f.enabled ? "On. Click to skip this step." : "Skipped. Click to run it.");
+            if (tog) { f.enabled = !f.enabled; changed = true; }
+
+            // The base primitive is what the chain starts from, so it cannot
+            // be removed without leaving the rest with nothing to act on.
+            if (f.kind != FeatureKind::Primitive) {
+                ImGui::SetCursorScreenPos(ImVec2(hi.x - 22.0f, at.y + (h - 19.0f) * 0.5f));
+                if (ui::closeButton("del", 12.0f)) {
+                    obj.features.erase(obj.features.begin() + static_cast<long>(i));
+                    changed = true;
+                    ImGui::PopID();
+                    break;
+                }
+                ui::hoverTip("Remove this step");
+            }
+        }
+        ImGui::SetCursorScreenPos(ImVec2(at.x, at.y + h + 2.0f));
+
+        if (open) {
+            ImGui::Indent(14.0f);
+            ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8.0f, 4.0f));
+            featureDetails(ctx, obj, f, changed);
+            ImGui::PopStyleVar();
+            ImGui::Unindent(14.0f);
+            ImGui::Dummy(ImVec2(0, 4));
         }
         ImGui::PopID();
     }
 
+    if (changed) {
+        ctx.actions.featuresEdited = obj.id;
+        ctx.actions.featuresBefore = before;
+    }
+}
+
+} // namespace
+
+// -----------------------------------------------------------------------------
+void drawAddMenuItems(UiContext& ctx) {
+    struct Entry { Glyph glyph; const char* label; PrimitiveKind kind; };
+    static const Entry kEntries[] = {
+        {Glyph::Box,      "Box",      PrimitiveKind::Box},
+        {Glyph::Cylinder, "Cylinder", PrimitiveKind::Cylinder},
+        {Glyph::Sphere,   "Sphere",   PrimitiveKind::Sphere},
+        {Glyph::Cone,     "Cone",     PrimitiveKind::Cone},
+        {Glyph::Torus,    "Torus",    PrimitiveKind::Torus},
+        {Glyph::Plane,    "Plane",    PrimitiveKind::Plane},
+    };
+    for (const Entry& e : kEntries) {
+        if (ui::menuEntry(e.glyph, e.label)) {
+            ctx.actions.addRequested = true;
+            ctx.actions.addKind = e.kind;
+        }
+    }
+    ui::menuGap();
+    if (ui::menuEntry(Glyph::Sketch, "Sketch", "Shift+S", brep::available())) ctx.actions.sketch = true;
+    ui::menuNote(brep::available() ? "lines, circles and arcs, kept and sized"
+                                   : "needs the exact kernel");
+}
+
+// -----------------------------------------------------------------------------
+void drawOutliner(UiContext& ctx) {
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8.0f, 10.0f));
+    if (!ImGui::Begin("Outliner##v2", nullptr, ImGuiWindowFlags_NoCollapse)) {
+        ImGui::End();
+        ImGui::PopStyleVar();
+        return;
+    }
+    ImGui::PopStyleVar();
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4.0f, 2.0f));
+
+    Scene& scene = *ctx.scene;
+    if (scene.objectCount() == 0) {
+        ImGui::Dummy(ImVec2(0, 6));
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 8.0f);
+        ImGui::TextColored(im(palette::kTextDim), "Nothing here yet");
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 8.0f);
+        pushFont(FontWeight::Regular, uiFonts().size * 0.88f);
+        ImGui::TextColored(im(palette::kTextFaint), "Shift+A adds a shape");
+        ImGui::PopFont();
+    }
+
+    struct Section { const char* name; ObjectKind kind; };
+    static const Section kSections[3] = {
+        {"Bodies", ObjectKind::Body}, {"Sketches", ObjectKind::Sketch}, {"Meshes", ObjectKind::Mesh}};
+    for (const Section& s : kSections) {
+        if (scene.objectCount() == 0) break;
+        std::vector<SceneObject*> members;
+        for (const auto& obj : scene.objects())
+            if (kindOf(*obj) == s.kind) members.push_back(obj.get());
+        if (!sectionHeader(s.name, members.size())) continue;
+        for (SceneObject* obj : members) objectRow(ctx, scene, *obj, glyphFor(s.kind));
+        ImGui::Dummy(ImVec2(0, 6));
+    }
+
+    ImGui::PopStyleVar();
     ImGui::End();
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 void drawInspector(UiContext& ctx) {
-    if (!ImGui::Begin("Inspector")) { ImGui::End(); return; }
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12.0f, 10.0f));
+    if (!ImGui::Begin("Inspector##v2", nullptr, ImGuiWindowFlags_NoCollapse)) {
+        ImGui::End();
+        ImGui::PopStyleVar();
+        return;
+    }
+    ImGui::PopStyleVar();
 
     Scene& scene = *ctx.scene;
     SceneObject* obj = scene.find(scene.contextObject());
     if (!obj) {
-        ImGui::TextColored(kDim, "Nothing selected");
+        ImGui::Dummy(ImVec2(0, 6));
+        ImGui::TextColored(im(palette::kTextDim), "Nothing selected");
+        pushFont(FontWeight::Regular, uiFonts().size * 0.88f);
+        ImGui::TextColored(im(palette::kTextFaint), "Click a body, or a row on the left");
+        ImGui::PopFont();
         ImGui::End();
         return;
     }
 
     // Snapshot before any widget runs, so a changed value can be paired with
     // what it replaced and pushed onto the undo stack.
-    const Transform  transformBefore = obj->transform;
+    const Transform transformBefore = obj->transform;
     const PrimitiveSpec specBefore = obj->spec;
 
-    // Name.
-    char nameBuf[128];
-    std::snprintf(nameBuf, sizeof(nameBuf), "%s", obj->name.c_str());
-    ImGui::SetNextItemWidth(-1.0f);
-    if (ImGui::InputText("##name", nameBuf, sizeof(nameBuf))) obj->name = nameBuf;
+    // ---- the name, with what it is beside it -------------------------------
+    {
+        const float box = ImGui::GetFrameHeight();
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        const ImVec2 at = ImGui::GetCursorScreenPos();
+        dl->AddRectFilled(at, ImVec2(at.x + box, at.y + box), u32(palette::kBrand), 6.0f);
+        drawGlyph(dl, glyphFor(kindOf(*obj)), ImVec2(at.x + box * 0.5f, at.y + box * 0.5f), box * 0.7f,
+                  IM_COL32(255, 255, 255, 255), 1.5f);
+        ImGui::Dummy(ImVec2(box, box));
+        ImGui::SameLine(0.0f, 8.0f);
+        char nameBuf[128];
+        std::snprintf(nameBuf, sizeof nameBuf, "%s", obj->name.c_str());
+        ImGui::SetNextItemWidth(-1.0f);
+        pushFont(FontWeight::SemiBold);
+        ImGui::PushStyleColor(ImGuiCol_FrameBg, im(palette::kField));
+        if (ImGui::InputText("##name", nameBuf, sizeof nameBuf)) obj->name = nameBuf;
+        ImGui::PopStyleColor();
+        ImGui::PopFont();
+    }
 
-    sectionLabel("TRANSFORM");
-    labeledDrag3("Position", obj->transform.position, 0.1f, "%.2f");
+    // The body of the panel scrolls; the numbers at the foot do not.
+    const float footerH = 46.0f;
+    ImGui::BeginChild("##inspectorbody", ImVec2(0.0f, -footerH), ImGuiChildFlags_None,
+                      ImGuiWindowFlags_NoBackground);
+
+    // ---- transform -----------------------------------------------------------
+    {
+        // The title, with a way back to where it started small at its right.
+        ImGui::Dummy(ImVec2(0, 4));
+        pushFont(FontWeight::SemiBold, uiFonts().size);
+        ImGui::TextColored(im(palette::kText), "Transform");
+        ImGui::PopFont();
+        pushFont(FontWeight::Regular, uiFonts().size * 0.82f);
+        const float w = ImGui::CalcTextSize("Reset").x + 12.0f;
+        ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - w);
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
+        ImGui::PushStyleColor(ImGuiCol_Text, im(palette::kTextDim));
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6.0f, 1.0f));
+        if (ImGui::Button("Reset")) obj->transform = Transform{};
+        ImGui::PopStyleVar();
+        ImGui::PopStyleColor(2);
+        ImGui::PopFont();
+        ui::hoverTip("Back to the origin, unturned, at full size");
+        ImGui::Dummy(ImVec2(0, 1));
+    }
+    ui::fieldHeader("Position", "mm");
+    ui::axisFields("pos", obj->transform.position, 0.1f, "%.1f");
 
     // Euler angles are a display convention only; the transform stores a
     // quaternion, so the conversion round-trips through it on every edit.
+    ui::fieldHeader("Rotation", kDegree);
     Vec3 euler = toEuler(obj->transform.rotation);
     euler = {degrees(euler.x), degrees(euler.y), degrees(euler.z)};
-    if (labeledDrag3("Rotation", euler, 0.5f, "%.1f")) {
+    if (ui::axisFields("rot", euler, 0.5f, "%.1f")) {
         obj->transform.rotation = normalize(Quat::fromEuler(
             {radians(euler.x), radians(euler.y), radians(euler.z)}));
     }
+    ui::fieldHeader("Scale", "x");
+    ui::axisFields("scale", obj->transform.scale, 0.01f, "%.2f");
 
-    labeledDrag3("Scale", obj->transform.scale, 0.01f, "%.3f");
-    if (ImGui::SmallButton("Reset Transform")) obj->transform = Transform{};
-
-    sectionLabel("GEOMETRY");
-    if (!obj->features.empty() && obj->features.front().kind == FeatureKind::Sketch) {
-        ImGui::TextColored(kDim, "Sized by its sketch: open it in the History");
-    } else if (drawPrimitiveParams(*obj)) {
-        ctx.actions.rebuildObject = obj->id;
-        ctx.actions.specBefore = specBefore;
+    ui::fieldHeader("Bounds", "mm");
+    {
+        const AABB b = obj->localBounds;
+        Vec3 size = b.valid() ? b.size() : Vec3{};
+        size = {size.x * obj->transform.scale.x, size.y * obj->transform.scale.y,
+                size.z * obj->transform.scale.z};
+        ui::axisFields("bounds", size, 0.0f, "%.1f", /*readOnly=*/true);
     }
 
     // Any transform field that moved becomes one undo entry per drag.
@@ -749,390 +752,173 @@ void drawInspector(UiContext& ctx) {
         ctx.actions.transformBefore = transformBefore;
     }
 
-    sectionLabel("STATISTICS");
-    const AABB b = obj->localBounds;
-    const Vec3 size = b.valid() ? b.size() : Vec3{};
-    ImGui::TextColored(kDim, "Size    %.2f x %.2f x %.2f mm", size.x, size.y, size.z);
+    // ---- shape -----------------------------------------------------------------
+    const bool sketched = !obj->features.empty() && obj->features.front().kind == FeatureKind::Sketch;
+    const bool imported = !obj->features.empty() && obj->features.front().kind == FeatureKind::BaseMesh;
+    if (!sketched && !imported) {
+        ui::sectionTitle("Shape");
+        if (drawPrimitiveParams(*obj)) {
+            ctx.actions.rebuildObject = obj->id;
+            ctx.actions.specBefore = specBefore;
+        }
+    }
 
-    // Volume lived under a PRINTABILITY heading that reported whether the body
-    // was a watertight solid. On an exact body it always is -- the kernel
-    // guarantees it and an edit that would break it is refused before it lands
-    // -- so the heading spent its time saying "ready to print" about a part
-    // with nothing checked against a printer. What a printer will actually
-    // struggle with is drawn on the model instead; see app/printability.h.
-    if (obj->healthVersion == obj->meshVersion)
-        ImGui::TextColored(kDim, "Volume  %.2f cm3", obj->health.volume / 1000.0);
-    ImGui::TextColored(kDim, "Verts   %d", obj->body.vertexCount());
-    ImGui::TextColored(kDim, "Faces   %d", obj->body.faceCount());
-    ImGui::TextColored(kDim, "Tris    %zu", obj->render.triangles.size() / 3);
+    // ---- history -----------------------------------------------------------------
+    ui::sectionTitle("History");
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4.0f, 2.0f));
+    drawHistorySection(ctx, *obj);
+    ImGui::PopStyleVar();
+    ImGui::Dummy(ImVec2(0, 8));
+    ImGui::EndChild();
+
+    // ---- the numbers, at the foot ------------------------------------------------
+    {
+        const ImVec2 at = ImGui::GetCursorScreenPos();
+        const float w = ImGui::GetContentRegionAvail().x;
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        dl->AddLine(ImVec2(at.x, at.y), ImVec2(at.x + w, at.y), u32(palette::kBorder));
+
+        struct Stat { const char* label; char value[32]; };
+        Stat stats[3] = {{"Volume", ""}, {"Vertices", ""}, {"Faces", ""}};
+        if (obj->healthVersion == obj->meshVersion)
+            std::snprintf(stats[0].value, sizeof stats[0].value, "%.1f cm\xC2\xB3", obj->health.volume / 1000.0);
+        else
+            std::snprintf(stats[0].value, sizeof stats[0].value, "...");
+        std::snprintf(stats[1].value, sizeof stats[1].value, "%d", obj->body.vertexCount());
+        std::snprintf(stats[2].value, sizeof stats[2].value, "%d", obj->body.faceCount());
+
+        const float col = w / 3.0f;
+        for (int i = 0; i < 3; ++i) {
+            const float x = at.x + col * static_cast<float>(i);
+            pushFont(FontWeight::Regular, uiFonts().size * 0.78f);
+            dl->AddText(ImVec2(x, at.y + 8.0f), u32(palette::kTextDim), stats[i].label);
+            ImGui::PopFont();
+            pushFont(FontWeight::SemiBold, uiFonts().size * 0.95f);
+            dl->AddText(ImVec2(x, at.y + 22.0f), u32(palette::kText), stats[i].value);
+            ImGui::PopFont();
+        }
+        ImGui::Dummy(ImVec2(w, footerH));
+    }
 
     ImGui::End();
 }
 
-// ---------------------------------------------------------------------------
-void drawHistory(UiContext& ctx) {
-    if (!ImGui::Begin("History")) { ImGui::End(); return; }
+// -----------------------------------------------------------------------------
+void drawViewportOverlays(UiContext& ctx, float x, float y, float w, float h) {
+    ImDrawList* dl = ImGui::GetBackgroundDrawList();
+    const ImVec2 origin = ImGui::GetMainViewport()->Pos;
+    const float x0 = origin.x + x, y0 = origin.y + y;
+    float nextY = y0 + 14.0f;
 
-    Scene& scene = *ctx.scene;
-    SceneObject* obj = scene.find(scene.contextObject());
-    if (!obj) {
-        ImGui::TextColored(kDim, "Select an object to see its history");
-        ImGui::End();
-        return;
+    // What the tool is doing, at the top left, where the eye starts.
+    if (!ctx.toolStatus.empty()) {
+        pushFont(FontWeight::Medium, uiFonts().size * 0.9f);
+        const float maxW = std::max(200.0f, w * 0.6f);
+        const ImVec2 ts = ImGui::CalcTextSize(ctx.toolStatus.c_str(), nullptr, false, maxW);
+        const ImVec2 lo(x0 + 14.0f, nextY);
+        const ImVec2 hi(lo.x + ts.x + 24.0f, lo.y + ts.y + 12.0f);
+        dl->AddRectFilled(lo, hi, u32(palette::kCommand, 0.92f), 6.0f);
+        dl->AddRectFilled(ImVec2(lo.x, lo.y + 6.0f), ImVec2(lo.x + 3.0f, hi.y - 6.0f), u32(palette::kBrand), 2.0f);
+        dl->AddText(nullptr, 0.0f, ImVec2(lo.x + 14.0f, lo.y + 6.0f), u32(palette::kText),
+                    ctx.toolStatus.c_str(), nullptr, maxW);
+        ImGui::PopFont();
+        nextY = hi.y + 8.0f;
     }
 
-    const std::vector<Feature> before = obj->features;
-    bool changed = false;
-
-    for (size_t i = 0; i < obj->features.size(); ++i) {
-        Feature& f = obj->features[i];
-        ImGui::PushID(static_cast<int>(i));
-
-        bool enabled = f.enabled;
-        if (ImGui::Checkbox("##on", &enabled)) { f.enabled = enabled; changed = true; }
-        ImGui::SameLine();
-
-        // The operation, as a picture. A chain of ten steps is read down this
-        // column rather than along the summaries, which is the whole reason
-        // for an icon here rather than a word.
-        ImGui::AlignTextToFramePadding();
-        iconImage(iconFor(f), ImGui::GetTextLineHeight(),
-                  f.errored ? 0.4f : (f.enabled ? 1.0f : 0.35f));
-        ImGui::SameLine();
-
-        const bool open = ImGui::TreeNodeEx("##row", ImGuiTreeNodeFlags_SpanAvailWidth,
-                                            "%s", f.summary().c_str());
-        if (f.errored) {
-            ImGui::SameLine();
-            ImGui::TextColored(kAccent, "  failed: %s", f.error.c_str());
-        } else if (!f.enabled) {
-            ImGui::SameLine();
-            ImGui::TextColored(kDim, "  off");
+    // A notice: something refused, or something done that ought to be said.
+    // It fades, because a message that stays is a message that stops being read.
+    if (!ctx.notice.empty()) {
+        const float alpha = std::clamp(1.0f - (ctx.noticeAge - 3.0f) / 0.8f, 0.0f, 1.0f);
+        if (alpha > 0.0f) {
+            pushFont(FontWeight::Medium, uiFonts().size * 0.92f);
+            const float maxW = std::max(240.0f, w * 0.5f);
+            const ImVec2 ts = ImGui::CalcTextSize(ctx.notice.c_str(), nullptr, false, maxW);
+            const float bw = ts.x + 30.0f, bh = ts.y + 14.0f;
+            const ImVec2 lo(x0 + (w - bw) * 0.5f, nextY);
+            const ImVec2 hi(lo.x + bw, lo.y + bh);
+            dl->AddRectFilled(lo, hi, u32(palette::kCommand, 0.96f * alpha), 8.0f);
+            dl->AddRect(lo, hi, u32(palette::kBrand, 0.6f * alpha), 8.0f);
+            dl->AddRectFilled(ImVec2(lo.x, lo.y + 7.0f), ImVec2(lo.x + 3.0f, hi.y - 7.0f),
+                              u32(palette::kBrand, alpha), 2.0f);
+            dl->AddText(nullptr, 0.0f, ImVec2(lo.x + 16.0f, lo.y + 7.0f), u32(palette::kText, alpha),
+                        ctx.notice.c_str(), nullptr, maxW);
+            ImGui::PopFont();
         }
+    }
 
-        if (open) {
-            switch (f.kind) {
-            case FeatureKind::Primitive:
-                ImGui::TextColored(kDim, "Edit dimensions in the Inspector");
-                break;
-            case FeatureKind::Merge:
-                ImGui::TextColored(kDim, "Drops every division that does not");
-                ImGui::TextColored(kDim, "define the shape.");
-                break;
-            case FeatureKind::FaceScale: {
-                Real pct = (f.scale - 1.0) * 100.0;
-                if (labeledDrag("Change", pct, 0.5f, -95.0f, 1000.0f, "%.1f %%")) {
-                    f.scale = 1.0 + pct / 100.0;
-                    changed = true;
-                }
-                ImGui::TextColored(kDim, "%.3g x its size", f.scale);
-                break;
-            }
-            case FeatureKind::FaceRotate: {
-                Real deg = degrees(f.angle);
-                if (labeledDrag("Angle", deg, 0.2f, -89.0f, 89.0f, "%.1f deg")) {
-                    f.angle = radians(deg);
-                    changed = true;
-                }
-                ImGui::TextColored(kDim, "about %.2f, %.2f, %.2f",
-                                   f.axisPoint.x, f.axisPoint.y, f.axisPoint.z);
-                break;
-            }
-            case FeatureKind::Reduce: {
-                // Applied when a field is finished with, not on every frame of
-                // a drag: a reduction takes seconds on a large mesh, and
-                // re-running it per frame would freeze the editor under the
-                // pointer.
-                ImGui::AlignTextToFramePadding();
-                ImGui::TextUnformatted("Within");
-                ImGui::SameLine();
-                ImGui::SetNextItemWidth(-1.0f);
-                double tol = f.reduceTolerance;
-                ImGui::InputDouble("##rtol", &tol, 0.0, 0.0, "%.3f mm");
-                if (ImGui::IsItemDeactivatedAfterEdit() && tol > 0.0 && tol != f.reduceTolerance) {
-                    f.reduceTolerance = tol;
-                    changed = true;
-                }
-
-                ImGui::AlignTextToFramePadding();
-                ImGui::TextUnformatted("Stop at");
-                ImGui::SameLine();
-                ImGui::SetNextItemWidth(-1.0f);
-                int target = f.reduceTarget;
-                ImGui::InputInt("##rtarget", &target, 0, 0);
-                if (ImGui::IsItemDeactivatedAfterEdit() && target >= 0 && target != f.reduceTarget) {
-                    f.reduceTarget = target;
-                    changed = true;
-                }
-                bool loosen = f.reduceLoosen;
-                if (f.reduceTarget > 0 && ImGui::Checkbox("Loosen to reach it", &loosen)) {
-                    f.reduceLoosen = loosen;
-                    changed = true;
-                }
-                ImGui::TextColored(kDim, "%s", f.reduceTarget == 0
-                                               ? "0: as few triangles as the tolerance allows"
-                                               : f.reduceLoosen
-                                               ? "the tolerance loosens only as far as the count needs"
-                                               : "triangles, or the tolerance, whichever comes first");
-                break;
-            }
-            case FeatureKind::Sketch: {
-                // The drawing itself is edited where it was drawn, on its plane.
-                if (ImGui::SmallButton("Edit Sketch")) {
-                    ctx.actions.editSketchObject = obj->id;
-                    ctx.actions.editSketchUid = f.uid;
-                }
-                // The numbers that size it. Changing one re-solves the sketch
-                // and re-runs everything built from it -- the reason a sketch
-                // is kept in the history rather than consumed. Labelled with
-                // the same #id a conflict is reported by, so a sketch that
-                // will not solve can be traced to the rows to look at.
-                bool hasDimensions = false;
-                for (SketchConstraint& k : f.sketch.constraints) {
-                    if (!isDimension(k.rule)) continue;
-                    hasDimensions = true;
-                    ImGui::PushID(static_cast<int>(k.id));
-                    char label[32];
-                    if (k.rule == SketchRule::Angle) {
-                        std::snprintf(label, sizeof label, "Angle #%u", k.id);
-                        Real deg = degrees(k.value);
-                        if (labeledDrag(label, deg, 0.2f, 0.0f, 360.0f, "%.1f deg")) {
-                            k.value = radians(deg);
-                            changed = true;
-                        }
-                    } else {
-                        std::snprintf(label, sizeof label, "%s #%u",
-                                      k.rule == SketchRule::Radius ? "Radius" : "Distance", k.id);
-                        changed |= labeledDrag(label, k.value, 0.1f, 0.001f, 100000.0f);
-                    }
-                    ImGui::PopID();
-                }
-                if (!hasDimensions)
-                    ImGui::TextColored(kDim, "no dimensions: its size is what was drawn");
-                ImGui::TextColored(kDim, "%s", f.sketchFreedoms == 0
-                                                   ? "fully constrained"
-                                                   : "not fully constrained: some of it can still move");
-                break;
-            }
-            case FeatureKind::ExtrudeProfile: {
-                changed |= labeledDrag("Distance", f.distance, 0.1f, -10000.0f, 10000.0f);
-                const char* const opNames[] = {"Auto", "Join", "Cut", "Intersect"};
-                int currentOp = static_cast<int>(f.extrudeOp);
-                if (currentOp > 3) currentOp = 0;
-                ImGui::AlignTextToFramePadding();
-                ImGui::TextUnformatted("Operation");
-                ImGui::SameLine();
-                if (ImGui::Combo("##ExtrudeProfileOp", &currentOp, opNames, 4)) {
-                    f.extrudeOp = static_cast<ExtrudeOp>(currentOp);
-                    changed = true;
-                }
-                break;
-            }
-            case FeatureKind::Pattern: {
-                // Everything the pattern panel offers, offered again -- a
-                // pattern made three steps ago is still a count and a spacing,
-                // and the panel that made it is long gone.
-                const char* const layouts[] = {"Row", "Ring", "Mirror"};
-                int layout = static_cast<int>(f.patternMode);
-                ImGui::AlignTextToFramePadding();
-                ImGui::TextUnformatted("Layout");
-                ImGui::SameLine();
-                ImGui::SetNextItemWidth(-1.0f);
-                if (ImGui::Combo("##playout", &layout, layouts, 3)) {
-                    f.patternMode = static_cast<PatternMode>(layout);
-                    changed = true;
-                }
-
-                if (f.patternMode != PatternMode::Mirror) {
-                    int n = f.patternCount;
-                    ImGui::AlignTextToFramePadding();
-                    ImGui::TextUnformatted("Copies");
-                    ImGui::SameLine();
-                    ImGui::SetNextItemWidth(-1.0f);
-                    if (ImGui::DragInt("##pcount", &n, 0.1f, 2, 256)) {
-                        f.patternCount = n < 2 ? 2 : (n > 256 ? 256 : n);
-                        changed = true;
-                    }
-                    if (f.patternMode == PatternMode::Linear) {
-                        changed |= labeledDrag("Spacing", f.distance, 0.1f, 0.05f,
-                                               10000.0f, "%.2f mm");
-                    } else {
-                        Real deg = degrees(f.angle);
-                        if (labeledDrag("Turn", deg, 0.25f, -360.0f, 360.0f, "%.1f deg")) {
-                            f.angle = radians(deg);
-                            changed = true;
-                        }
-                        ImGui::SameLine();
-                        if (ImGui::SmallButton("Full turn")) {
-                            f.angle = radians(360.0 / (f.patternCount < 2 ? 2 : f.patternCount));
-                            changed = true;
-                        }
-                    }
-                }
-
-                // Which way it goes, as the axis it was built on rather than as
-                // three numbers: a pattern is nearly always along one of them.
-                const char* const axes[] = {"X", "Y", "Z"};
-                int axis = std::fabs(f.axisDir.x) >= std::fabs(f.axisDir.y) &&
-                                   std::fabs(f.axisDir.x) >= std::fabs(f.axisDir.z) ? 0
-                         : std::fabs(f.axisDir.y) >= std::fabs(f.axisDir.z)         ? 1
-                                                                                    : 2;
-                ImGui::AlignTextToFramePadding();
-                ImGui::TextUnformatted(f.patternMode == PatternMode::Mirror ? "Plane"
-                                                                            : "Axis");
-                ImGui::SameLine();
-                ImGui::SetNextItemWidth(-1.0f);
-                if (ImGui::Combo("##paxis", &axis, axes, 3)) {
-                    f.axisDir = Vec3{axis == 0 ? 1.0 : 0.0, axis == 1 ? 1.0 : 0.0,
-                                     axis == 2 ? 1.0 : 0.0};
-                    changed = true;
-                }
-
-                ImGui::TextColored(kDim, "%s",
-                                   f.bakedBody.empty() ? "Repeats the body."
-                                                       : "Repeats the cut it replaced.");
-                break;
-            }
-            case FeatureKind::Divide:
-                ImGui::TextColored(kDim, "Cuts at %.2f, %.2f, %.2f",
-                                   f.axisPoint.x, f.axisPoint.y, f.axisPoint.z);
-                ImGui::TextColored(kDim, "The body stays whole; the faces divide.");
-                break;
-            case FeatureKind::Extrude: {
-                changed |= labeledDrag("Distance", f.distance, 0.1f, -10000.0f, 10000.0f);
-                const char* const opNames[] = {"Auto", "Join", "Cut", "Intersect"};
-                int currentOp = static_cast<int>(f.extrudeOp);
-                if (currentOp > 3) currentOp = 0;
-                ImGui::AlignTextToFramePadding();
-                ImGui::TextUnformatted("Operation");
-                ImGui::SameLine();
-                if (ImGui::Combo("##ExtrudeOp", &currentOp, opNames, 4)) {
-                    f.extrudeOp = static_cast<ExtrudeOp>(currentOp);
-                    changed = true;
-                }
-                ImGui::TextColored(kDim, "%s", f.faces.describe("face").c_str());
-                break;
-            }
-            case FeatureKind::Inset:
-                changed |= labeledDrag("Amount", f.amount, 0.05f, 0.01f, 10000.0f);
-                break;
-            case FeatureKind::Shell:
-                changed |= labeledDrag("Wall", f.thickness, 0.05f, 0.01f, 10000.0f);
-                ImGui::TextColored(kDim, "%s", f.faces.empty()
-                                                   ? "sealed: no face left open"
-                                                   : f.faces.describe("face").c_str());
-                break;
-            case FeatureKind::Bevel: {
-                // A segment count is a mesh idea: an exact fillet is a surface
-                // rather than an approximation of one, and the kernel ignores
-                // the number outright. Shown only where it still does something.
-                const bool isMesh = obj->body.isMesh();
-                const bool wasChamfer = f.segments == 1;
-                if (labeledDrag("Radius", f.width, 0.05f, 0.01f, 10000.0f)) {
-                    // Editing the feature radius restates every edge's, which
-                    // is what a user dragging one number expects. Per-edge
-                    // radii come from picking edges one at a time.
-                    f.radii.assign(f.edges.count(), f.width);
-                    changed = true;
-                }
-                if (isMesh) {
-                    changed |= labeledInt("Segments", f.segments, 1, 32);
-                    if (wasChamfer != (f.segments == 1))
-                        ImGui::TextColored(kDim, f.segments == 1 ? "flat cut" : "rounded");
-                }
-                ImGui::TextColored(kDim, "%s", f.edges.describe("edge").c_str());
-                break;
-            }
-            case FeatureKind::Boolean: {
-                // The tool body is baked into the feature, so its shape is not
-                // editable here -- but which way it combines is, and redoing a
-                // cut from scratch because it should have been a join is the
-                // sort of thing a history exists to avoid.
-                const char* const opNames[] = {"Union", "Difference", "Intersection"};
-                int currentOp = static_cast<int>(f.booleanOp);
-                if (currentOp < 0 || currentOp > 2) currentOp = 0;
-                ImGui::AlignTextToFramePadding();
-                ImGui::TextUnformatted("Operation");
-                ImGui::SameLine();
-                if (ImGui::Combo("##BooleanOp", &currentOp, opNames, 3)) {
-                    f.booleanOp = static_cast<BooleanOp>(currentOp);
-                    changed = true;
-                }
-                ImGui::TextColored(kDim, "Tool body: %d faces", f.bakedBody.faceCount());
-                break;
-            }
-            case FeatureKind::BaseMesh:
-                ImGui::TextColored(kDim, "Imported geometry, %d faces", f.bakedBody.faceCount());
-                ImGui::TextColored(kDim, "Not parametric: edit it with the mesh tools");
-                break;
-            case FeatureKind::VertexEdit:
-                ImGui::TextColored(kDim, "Free-form edit of %zu vertices",
-                                   f.verts.size());
-                break;
-            }
-
-            // The base primitive is what the chain starts from, so it cannot be
-            // removed without leaving the rest with nothing to act on.
-            if (f.kind != FeatureKind::Primitive) {
-                if (ImGui::SmallButton("Delete")) {
-                    obj->features.erase(obj->features.begin() + static_cast<long>(i));
-                    changed = true;
-                    ImGui::TreePop();
-                    ImGui::PopID();
-                    break;
-                }
-            }
-            ImGui::TreePop();
+    // The scene's numbers, small, at the bottom right.
+    {
+        const Scene& scene = *ctx.scene;
+        char line[160];
+        int n = std::snprintf(line, sizeof line, "%zu object%s", scene.objectCount(),
+                              scene.objectCount() == 1 ? "" : "s");
+        if (!scene.elementSelection().empty()) {
+            const ElementRef& e = scene.elementSelection().front();
+            n += std::snprintf(line + n, sizeof line - n, "   %zu %s%s selected",
+                               scene.elementSelection().size(), elementKindName(e.kind),
+                               scene.elementSelection().size() == 1 ? "" : "s");
+        } else if (!scene.selection().empty()) {
+            n += std::snprintf(line + n, sizeof line - n, "   %zu selected", scene.selection().size());
         }
-        ImGui::PopID();
+        n += std::snprintf(line + n, sizeof line - n, "   %zu tris", ctx.stats.triangles);
+        const char* solid = nullptr;
+        Rgb solidCol = palette::kTextFaint;
+        if (const SceneObject* o = scene.find(scene.contextObject())) {
+            if (o->healthVersion != o->meshVersion) solid = "checking";
+            else if (o->health.solid()) { solid = "solid"; solidCol = palette::kValid; }
+            else { solid = "not solid"; solidCol = palette::kBrand; }
+        }
+        pushFont(FontWeight::Regular, uiFonts().size * 0.82f);
+        const ImVec2 ts = ImGui::CalcTextSize(line);
+        float rx = x0 + w - 16.0f;
+        const float ry = y0 + h - ts.y - 12.0f;
+        if (solid) {
+            const ImVec2 ss = ImGui::CalcTextSize(solid);
+            rx -= ss.x;
+            dl->AddText(ImVec2(rx, ry), u32(solidCol, 0.95f), solid);
+            rx -= 14.0f;
+        }
+        dl->AddText(ImVec2(rx - ts.x, ry), u32(palette::kTextFaint), line);
+        ImGui::PopFont();
     }
-
-    if (changed) {
-        ctx.actions.featuresEdited = obj->id;
-        ctx.actions.featuresBefore = before;
-    }
-
-    ImGui::Spacing();
-    ImGui::TextColored(kDim, "%zu feature%s", obj->features.size(),
-                       obj->features.size() == 1 ? "" : "s");
-    ImGui::End();
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 void drawMeasurePanel(UiContext& ctx) {
     if (!ctx.measuring) return;
 
-    ImGuiViewport* vp = ImGui::GetMainViewport();
     // The same box every other operation runs in. A measurement is a reading
     // rather than a change, so it has no commit -- but a panel that looks
     // different for no reason is a panel the user has to learn twice.
-    if (!ui::beginCommand("##measure", "Measure", Icon::Count,
-                          vp->WorkPos.x + 16.0f, vp->WorkPos.y + 56.0f))
-        return;
+    if (!ui::beginCommand("##measure", "Measure", Glyph::Measure)) return;
 
     const MeasureResult& m = ctx.measurement;
     auto value = [](const char* label, const char* fmt, double v, bool lead) {
         ui::commandRow(label);
-        if (lead) ImGui::TextColored(kAccent, fmt, v);
-        else      ImGui::Text(fmt, v);
+        ImGui::AlignTextToFramePadding();
+        if (lead) {
+            pushFont(FontWeight::SemiBold);
+            ImGui::TextColored(im(palette::kBrand), fmt, v);
+            ImGui::PopFont();
+        } else {
+            ImGui::Text(fmt, v);
+        }
     };
 
     if (!m.valid) {
         ui::commandHint("Click a vertex, edge or face. Click a second to measure between them.");
     } else {
-        // A round thing leads with what it is. On an exact body the diameter is
-        // a fact about the geometry rather than a measurement taken across it,
-        // and it is the number someone is after.
         if (m.hasDiameter) {
             value("Diameter",  "%.4f mm", m.diameter, true);
             value("Radius",    "%.4f mm", m.diameter * 0.5, false);
             ui::commandRow("Centre");
+            ImGui::AlignTextToFramePadding();
             ImGui::Text("%.3f, %.3f, %.3f", m.centre.x, m.centre.y, m.centre.z);
         }
         if (m.hasLength)
             value(m.hasDiameter ? "Around" : "Length", "%.4f mm", m.length, true);
         if (m.hasArea) {
-            value("Area",      "%.4f mm2", m.area, true);
+            value("Area",      "%.4f mm\xC2\xB2", m.area, true);
             value("Perimeter", "%.4f mm",  m.perimeter, false);
         }
         if (ctx.measurePicks == 2 || m.hasLength) {
@@ -1141,83 +927,11 @@ void drawMeasurePanel(UiContext& ctx) {
             value("dY", "%.4f mm", m.delta.y, false);
             value("dZ", "%.4f mm", m.delta.z, false);
         }
-        if (m.hasAngle) value("Angle", "%.3f deg", m.angleDeg, true);
-
-        ui::commandHint("Esc clears   D exits");
+        if (m.hasAngle) value("Angle", "%.3f\xC2\xB0", m.angleDeg, true);
+        ui::commandHint("Esc clears the picks. D leaves the tool.");
     }
+    if (ui::commandFooter(nullptr, true, "Done") < 0) ctx.actions.toggleMeasure = true;
     ui::endCommand();
-}
-
-// ---------------------------------------------------------------------------
-void drawStatusBar(UiContext& ctx) {
-    ImGuiViewport* vp = ImGui::GetMainViewport();
-    const float h = ImGui::GetFrameHeight();
-
-    ImGui::SetNextWindowPos(ImVec2(vp->Pos.x, vp->Pos.y + vp->Size.y - h));
-    ImGui::SetNextWindowSize(ImVec2(vp->Size.x, h));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10, 3));
-
-    const ImGuiWindowFlags flags =
-        ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
-        ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoDocking |
-        ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNav;
-
-    if (ImGui::Begin("##statusbar", nullptr, flags)) {
-        if (!ctx.notice.empty() && ctx.toolStatus.empty()) {
-            ImGui::TextColored(kAccent, "%s", ctx.notice.c_str());
-            ImGui::End();
-            ImGui::PopStyleVar(2);
-            return;
-        }
-        if (!ctx.toolStatus.empty()) {
-            // While a modal transform runs, the readout is the only thing that
-            // matters -- show it in the accent colour and drop the scene stats.
-            ImGui::TextColored(kAccent, "%s", ctx.toolStatus.c_str());
-            const char* keys = "X/Y/Z axis   Shift+axis plane   type a number   "
-                               "Ctrl free (snap is on)   Enter confirm   Esc cancel";
-            const float kw = ImGui::CalcTextSize(keys).x;
-            ImGui::SameLine(ImGui::GetWindowWidth() - kw - 14.0f);
-            ImGui::TextColored(kDim, "%s", keys);
-            ImGui::End();
-            ImGui::PopStyleVar(2);
-            return;
-        }
-
-        const Scene& scene = *ctx.scene;
-        ImGui::TextColored(kDim, "%zu object%s", scene.objectCount(),
-                           scene.objectCount() == 1 ? "" : "s");
-        ImGui::SameLine(0, 18);
-        if (!scene.elementSelection().empty()) {
-            const ElementRef& e = scene.elementSelection().front();
-            ImGui::TextColored(kAccent, "%zu %s%s selected",
-                               scene.elementSelection().size(),
-                               elementKindName(e.kind),
-                               scene.elementSelection().size() == 1 ? "" : "s");
-        } else {
-            ImGui::TextColored(kDim, "%zu selected", scene.selection().size());
-        }
-        ImGui::SameLine(0, 18);
-        ImGui::TextColored(kDim, "%zu tris", ctx.stats.triangles);
-        if (const SceneObject* ctxObj = scene.find(scene.contextObject())) {
-            ImGui::SameLine(0, 18);
-            if (ctxObj->healthVersion != ctxObj->meshVersion)
-                ImGui::TextColored(kDim, "checking");
-            else if (ctxObj->health.solid())
-                ImGui::TextColored(im(palette::kValid), "solid");
-            else
-                ImGui::TextColored(kAccent, "not solid");
-        }
-        ImGui::SameLine(0, 18);
-        ImGui::TextColored(kDim, "mm");
-
-        const char* hint = "click edge/face   Ctrl+click object   G/R/S transform   E extrude   Ctrl snap";
-        const float tw = ImGui::CalcTextSize(hint).x;
-        ImGui::SameLine(ImGui::GetWindowWidth() - tw - 14.0f);
-        ImGui::TextColored(kDim, "%s", hint);
-    }
-    ImGui::End();
-    ImGui::PopStyleVar(2);
 }
 
 } // namespace tg

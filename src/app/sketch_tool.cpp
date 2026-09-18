@@ -5,7 +5,7 @@
 #include "core/palette.h"
 #include "geom/brep.h"
 #include "ui/command_panel.h"
-#include "ui/icons.h"
+#include "ui/widgets.h"
 
 #include <imgui.h>
 
@@ -18,6 +18,7 @@ namespace tg {
 
 const char* sketchModeName(SketchMode mode) {
     switch (mode) {
+        case SketchMode::Select:    return "Select";
         case SketchMode::Line:      return "Line";
         case SketchMode::Rectangle: return "Rectangle";
         case SketchMode::Circle:    return "Circle";
@@ -34,7 +35,14 @@ constexpr Real kLockDegrees = 3.0;
 constexpr Real kPointPickPx = 10.0;
 constexpr Real kEntityPickPx = 7.0;
 
-const ImVec4 kAccentIm(0.20f, 0.60f, 0.95f, 1.0f);
+const ImVec4 kAccentIm(palette::kBrand.r, palette::kBrand.g, palette::kBrand.b, 1.0f);
+
+// Blue for what can still move, green for what cannot. The same two words a
+// person would use, and the same way round as every other sketcher.
+constexpr Vec4 kFree(0.38f, 0.66f, 0.95f, 0.95f);
+constexpr Vec4 kFixed(0.42f, 0.85f, 0.55f, 0.95f);
+const ImVec4 kFreeIm(palette::kInfo.r, palette::kInfo.g, palette::kInfo.b, 1.0f);
+const ImVec4 kFixedIm(palette::kValid.r, palette::kValid.g, palette::kValid.b, 1.0f);
 
 // The same axes the create tool puts on a plane, so a sketch and a profile
 // drawn on the same face agree about which way is x.
@@ -175,6 +183,11 @@ SketchPlane SketchTool::planeToWorld(const SketchPlane& local, const Mat4& model
 // ---------------------------------------------------------------------------
 
 void SketchTool::resetDrawing() {
+    // Before the sketch goes: the solver behind a drag is built on this one.
+    drag_.reset();
+    dragBefore_ = Sketch{};
+    dragPoint_ = dragEntity_ = dragDim_ = kNoSketchId;
+    dragMoved_ = false;
     sketch_ = Sketch{};
     solved_ = SketchSolve{};
     solved_.solved = true;
@@ -238,6 +251,9 @@ bool SketchTool::startEdit(const Scene& scene, ObjectId object, ElementId sketch
     solved_ = solveNow();
     refreshRegions();
     stage_ = SketchStage::Draw;
+    // Editing a sketch that already exists is mostly moving and resizing what
+    // is in it, so that is the tool it opens with.
+    mode_ = SketchMode::Select;
     squareUp(camera);
     return true;
 }
@@ -406,6 +422,7 @@ Vec2 SketchTool::previewEnd() const {
         }
         if (hoverPoint_ != kNoSketchId) return cursor_;
         return s + dir * length(clicks_[1] - s);
+    case SketchMode::Select:
     case SketchMode::Dimension:
         break;
     }
@@ -450,8 +467,91 @@ void SketchTool::clickAt(Vec2 uv) {
 }
 
 // One click's worth of drawing, at the cursor as it was last aimed.
+// ---------------------------------------------------------------------------
+// Dragging
+// ---------------------------------------------------------------------------
+
+bool SketchTool::beginDrag(SketchId point) {
+    if (stage_ != SketchStage::Draw || drag_ || !sketch_.point(point)) return false;
+    dragBefore_ = sketch_;
+    drag_ = std::make_unique<SketchSolver>(sketch_);
+    if (!drag_->beginDrag(point)) {
+        drag_.reset();
+        return false;
+    }
+    dragPoint_ = point;
+    dragEntity_ = dragDim_ = kNoSketchId;
+    dragMoved_ = false;
+    return true;
+}
+
+bool SketchTool::beginRadiusDrag(SketchId entity) {
+    const SketchEntity* e = sketch_.entity(entity);
+    if (stage_ != SketchStage::Draw || drag_ || !e) return false;
+    if (e->curve != SketchCurve::Circle && e->curve != SketchCurve::Arc) return false;
+    dragBefore_ = sketch_;
+    drag_ = std::make_unique<SketchSolver>(sketch_);
+
+    // A circle drawn here carries its radius as a dimension, which is what
+    // holds it still -- so pulling on the rim drives that number rather than
+    // being refused by it. The number in the panel moves with the pointer, and
+    // what the sketch says about itself stays true.
+    dragDim_ = kNoSketchId;
+    const SketchId dim = existingDimension(entity);
+    const SketchConstraint* k = sketch_.constraint(dim);
+    if (k && k->rule == SketchRule::Radius) {
+        dragDim_ = dim;
+        activeDim_ = dim;
+    } else if (!drag_->beginRadiusDrag(entity)) {
+        drag_.reset();
+        return false;
+    }
+    dragEntity_ = entity;
+    dragPoint_ = kNoSketchId;
+    dragMoved_ = false;
+    return true;
+}
+
+bool SketchTool::dragTo(Vec2 at) {
+    if (!drag_) return false;
+    bool moved = false;
+    if (dragPoint_ != kNoSketchId) {
+        moved = drag_->dragTo(at);
+    } else if (const SketchEntity* e = sketch_.entity(dragEntity_)) {
+        const SketchPoint* centre = sketch_.point(e->a);
+        const Real r = centre ? length(at - centre->at) : 0.0;
+        if (!centre || r < 1e-6) {
+            moved = false;
+        } else if (dragDim_ != kNoSketchId) {
+            moved = drag_->setDimension(dragDim_, r) && drag_->solve().solved;
+        } else {
+            moved = drag_->dragRadiusTo(r);
+        }
+    }
+    if (moved) dragMoved_ = true;
+    return moved;
+}
+
+void SketchTool::endDrag() {
+    if (!drag_) return;
+    drag_->endDrag();
+    drag_.reset();
+    dragPoint_ = dragEntity_ = kNoSketchId;
+    dragDim_ = kNoSketchId;
+    // One drag is one step back, and only if it actually moved something: a
+    // click that missed everything must not fill the undo history.
+    if (dragMoved_) {
+        solved_ = solveNow();
+        history_.push_back(std::move(dragBefore_));
+        refreshRegions();
+    }
+    dragBefore_ = Sketch{};
+    dragMoved_ = false;
+}
+
 bool SketchTool::commitPending() {
-    if (stage_ != SketchStage::Draw || mode_ == SketchMode::Dimension || !cursorValid_)
+    if (stage_ != SketchStage::Draw || mode_ == SketchMode::Dimension ||
+        mode_ == SketchMode::Select || !cursorValid_)
         return false;
     escapeArmed_ = false;
 
@@ -532,6 +632,7 @@ bool SketchTool::commitPending() {
         clearPending();
         return settle(std::move(before), "That arc");
     }
+    case SketchMode::Select:
     case SketchMode::Dimension:
         break;
     }
@@ -541,7 +642,8 @@ bool SketchTool::commitPending() {
 bool SketchTool::typeKey(int key) {
     enum class Target { None, Size, Dimension, Depth } target = Target::None;
     if (stage_ == SketchStage::Depth) target = Target::Depth;
-    else if (stage_ == SketchStage::Draw && mode_ == SketchMode::Dimension && activeDim_ != kNoSketchId)
+    else if (stage_ == SketchStage::Draw && activeDim_ != kNoSketchId &&
+             (mode_ == SketchMode::Dimension || mode_ == SketchMode::Select))
         target = Target::Dimension;
     else if (stage_ == SketchStage::Draw && !clicks_.empty() &&
              !(mode_ == SketchMode::Arc && clicks_.size() == 2))
@@ -585,22 +687,29 @@ bool SketchTool::typeKey(int key) {
     return true;
 }
 
-SketchId SketchTool::dimensionEntity(SketchId entity) {
+SketchId SketchTool::existingDimension(SketchId entity) const {
     const SketchEntity* e = sketch_.entity(entity);
-    if (!e || stage_ != SketchStage::Draw) return kNoSketchId;
-
-    // A size already given is the one to edit, not a second one to add.
+    if (!e) return kNoSketchId;
     for (const SketchConstraint& k : sketch_.constraints) {
         const bool same =
             (e->curve == SketchCurve::Line && k.rule == SketchRule::Distance &&
              ((k.first == e->a && k.second == e->b) || (k.first == e->b && k.second == e->a))) ||
             ((e->curve == SketchCurve::Circle || e->curve == SketchCurve::Arc) &&
              k.rule == SketchRule::Radius && k.first == e->id);
-        if (same) {
-            activeDim_ = k.id;
-            typed_.clear();
-            return k.id;
-        }
+        if (same) return k.id;
+    }
+    return kNoSketchId;
+}
+
+SketchId SketchTool::dimensionEntity(SketchId entity) {
+    const SketchEntity* e = sketch_.entity(entity);
+    if (!e || stage_ != SketchStage::Draw) return kNoSketchId;
+
+    // A size already given is the one to edit, not a second one to add.
+    if (const SketchId have = existingDimension(entity); have != kNoSketchId) {
+        activeDim_ = have;
+        typed_.clear();
+        return have;
     }
 
     Sketch before = sketch_;
@@ -723,6 +832,7 @@ bool SketchTool::undoEdit() {
 
 bool SketchTool::beginExtrude(Camera* camera) {
     if (stage_ != SketchStage::Draw) return false;
+    endDrag();
     clearPending();
     refreshRegions();
     if (regions_.empty()) {
@@ -776,6 +886,7 @@ bool SketchTool::finish(Scene& scene, Camera& camera, UndoStack& undo, bool extr
     if (stage_ != SketchStage::Draw && stage_ != SketchStage::Regions &&
         stage_ != SketchStage::Depth)
         return false;
+    endDrag();
     clearPending();
     if (sketch_.empty()) {
         error_ = "The sketch is empty";
@@ -783,10 +894,6 @@ bool SketchTool::finish(Scene& scene, Camera& camera, UndoStack& undo, bool extr
     }
     if (!solved_.solved) {
         error_ = "The sketch does not solve: " + solved_.reason;
-        return false;
-    }
-    if (!extrude && !canFinishWithoutExtrude()) {
-        error_ = "A sketch on its own is not a part yet: extrude a region of it, or draw it on a face";
         return false;
     }
     if (extrude) {
@@ -820,8 +927,12 @@ bool SketchTool::finish(Scene& scene, Camera& camera, UndoStack& undo, bool extr
                     swept.expand(plane_.toWorld(p) + plane_.normal * depth_);
                 }
             }
-            for (const auto& o : scene.objects())
+            for (const auto& o : scene.objects()) {
+                // Something to cut into means something with a body: another
+                // sketch lying in the way is not material.
+                if (o->body.empty()) continue;
                 if (swept.overlaps(o->worldBounds(), 1e-4)) { target = o->id; break; }
+            }
             if (target == kNoObject) {
                 error_ = "Nothing there to cut into";
                 return false;
@@ -848,17 +959,21 @@ bool SketchTool::finish(Scene& scene, Camera& camera, UndoStack& undo, bool extr
     };
 
     if (target == kNoObject) {
-        // A part of its own: the sketch where it was drawn, and the regions
-        // swept out of it.
+        // An object of its own: the sketch where it was drawn, and the regions
+        // swept out of it. With nothing swept it is a sketch and nothing else,
+        // which is a perfectly good thing for the outliner to hold until
+        // something is built from it.
         std::vector<Feature> chain;
         Feature s;
         s.kind = FeatureKind::Sketch;
         s.uid = scene.takeFeatureUid();
         s.sketch = sketch_;
+        // Once a solid stands where the sketch is, the drawing is scaffolding.
+        s.sketchShown = !extrude;
         chain.push_back(s);
         for (SketchId key : chosen_) chain.push_back(sweep(s.uid, key, ExtrudeOp::Join));
         std::string why;
-        const ObjectId id = scene.addFeatureChain(std::move(chain), "Part", &why);
+        const ObjectId id = scene.addFeatureChain(std::move(chain), extrude ? "Part" : "Sketch", &why);
         if (id == kNoObject) {
             error_ = "Extrude failed: " + (why.empty() ? std::string("no solid came out of it") : why);
             return false;
@@ -871,7 +986,9 @@ bool SketchTool::finish(Scene& scene, Camera& camera, UndoStack& undo, bool extr
             error_ = "The part this sketch belongs to is gone";
             return false;
         }
-        if (obj->body.isMesh()) {
+        // An object with no body yet is a sketch waiting to be built from, not
+        // a mesh: Body calls itself a mesh until a kernel shape is put in it.
+        if (!obj->body.empty() && obj->body.isMesh()) {
             error_ = "Sketching onto a mesh needs a solid: Modify > Convert to Solid first";
             return false;
         }
@@ -892,11 +1009,15 @@ bool SketchTool::finish(Scene& scene, Camera& camera, UndoStack& undo, bool extr
             }
             it->sketch = std::move(local);
             sketchUid = editUid_;
+            // Sweeping from it turns the drawing off, the way finishing a new
+            // one does: what is on the screen afterwards is the solid.
+            if (extrude) it->sketchShown = false;
         } else {
             Feature s;
             s.kind = FeatureKind::Sketch;
             s.uid = scene.takeFeatureUid();
             s.sketch = std::move(local);
+            s.sketchShown = !extrude;
             sketchUid = s.uid;
             chain.push_back(std::move(s));
         }
@@ -1010,6 +1131,21 @@ void SketchTool::update(const Scene& scene, const Camera& camera, Vec2 mousePx, 
     cursorValid_ = unproject(camera, mousePx, raw);
 
     if (stage_ == SketchStage::Draw) {
+        // A drag owns the pointer while it lasts: the solver decides where the
+        // geometry goes, so there is nothing to hover and nothing to snap to
+        // except the grid the drag is being read off.
+        if (drag_) {
+            if (!cursorValid_) return;
+            Vec2 at = raw;
+            if (snap) {
+                const Real step = static_cast<Real>(camera.snapStep(plane_.toWorld(raw)));
+                if (step > 0.0) at = {std::round(at.x / step) * step, std::round(at.y / step) * step};
+            }
+            cursor_ = at;
+            dragTo(at);
+            return;
+        }
+
         hoverPoint_ = hoverEntity_ = kNoSketchId;
         snap_ = PlaneSnap{};
         lock_ = Lock::None;
@@ -1117,7 +1253,20 @@ void SketchTool::handleMouseDown(Scene& scene, Camera& camera, UndoStack& undo) 
         setPlane(plane_, hoveredChoice_ == PlaneChoice::Face ? faceObject_ : kNoObject, &camera);
         break;
     case SketchStage::Draw:
-        if (mode_ == SketchMode::Dimension) {
+        if (mode_ == SketchMode::Select) {
+            // Take hold of whatever is under the pointer: a point moves, the
+            // rim of a circle or an arc resizes it. Clicking a line picks the
+            // number that sizes it, if it has one, so it can be typed over.
+            if (hoverPoint_ != kNoSketchId) {
+                beginDrag(hoverPoint_);
+            } else if (const SketchEntity* e = sketch_.entity(hoverEntity_)) {
+                if (e->curve == SketchCurve::Circle || e->curve == SketchCurve::Arc)
+                    beginRadiusDrag(e->id);
+                activeDim_ = existingDimension(e->id);
+            } else {
+                activeDim_ = kNoSketchId;
+            }
+        } else if (mode_ == SketchMode::Dimension) {
             if (hoverEntity_ != kNoSketchId) dimensionEntity(hoverEntity_);
             else activeDim_ = kNoSketchId;
         } else {
@@ -1135,7 +1284,15 @@ void SketchTool::handleMouseDown(Scene& scene, Camera& camera, UndoStack& undo) 
     }
 }
 
+void SketchTool::handleMouseUp() {
+    endDrag();
+}
+
 void SketchTool::handleRightClick(Camera& camera) {
+    // A drag let go of by the other button still ends where it stands: the
+    // constraints decided every position it passed through, so there is no
+    // half-applied state to take back.
+    endDrag();
     switch (stage_) {
     case SketchStage::Draw:
         clearPending();
@@ -1159,6 +1316,9 @@ bool SketchTool::handleKey(int key, bool shift, bool ctrl, Scene& scene, Camera&
                            UndoStack& undo) {
     (void)shift;
     if (stage_ == SketchStage::None) return false;
+    // Anything typed ends a drag where it stands, so no key can edit the sketch
+    // out from under the solver holding it.
+    endDrag();
 
     if (key == 27) {
         if (!typed_.empty()) {
@@ -1207,12 +1367,14 @@ bool SketchTool::handleKey(int key, bool shift, bool ctrl, Scene& scene, Camera&
     case SketchStage::Draw:
         if (ctrl && key == 'Z') { undoEdit(); return true; }
         if (ctrl) return false;
+        if (key == 'S') { setMode(SketchMode::Select); return true; }
         if (key == 'L') { setMode(SketchMode::Line); return true; }
         if (key == 'R') { setMode(SketchMode::Rectangle); return true; }
         if (key == 'C') { setMode(SketchMode::Circle); return true; }
         if (key == 'A') { setMode(SketchMode::Arc); return true; }
         if (key == 'D') { setMode(SketchMode::Dimension); return true; }
         if (key == 'Q') { toggleConstruction(hoverEntity_); return true; }
+        if (key == 'K') { finish(scene, camera, undo, false); return true; }
         if (key == 127 || key == 'X') { deleteEntity(hoverEntity_); return true; }
         if (key == 13) {
             if (mode_ == SketchMode::Dimension && activeDim_ != kNoSketchId && !typed_.empty()) {
@@ -1261,6 +1423,22 @@ bool SketchTool::handleKey(int key, bool shift, bool ctrl, Scene& scene, Camera&
 // ---------------------------------------------------------------------------
 // Drawing it
 // ---------------------------------------------------------------------------
+
+// Whether a disagreement runs through this entity: either it is named by a
+// conflicting constraint, or one of its points is.
+bool SketchTool::inConflict(const SketchEntity& e) const {
+    if (solved_.conflicting.empty()) return false;
+    for (SketchId id : solved_.conflicting) {
+        const SketchConstraint* k = sketch_.constraint(id);
+        if (!k) continue;
+        for (SketchId named : {k->first, k->second}) {
+            if (named == kNoSketchId) continue;
+            if (named == e.id) return true;
+            if (named == e.a || named == e.b || named == e.c || named == e.d) return true;
+        }
+    }
+    return false;
+}
 
 void SketchTool::drawOverlay(const Scene& scene, const Camera& camera, Renderer& renderer) const {
     if (stage_ == SketchStage::None) return;
@@ -1343,11 +1521,16 @@ void SketchTool::drawOverlay(const Scene& scene, const Camera& camera, Renderer&
             hatchRegion(renderer, sketch_, r, plane_, 14.0 * mmPerPx, Vec4{0.20f, 0.60f, 0.95f, 0.16f});
     }
 
-    // The geometry itself.
+    // The geometry itself, in the colour of what is still free to move: blue
+    // for geometry a dimension could still shift, green for geometry that is
+    // pinned down, and the brand red for geometry a disagreement runs through.
+    // Editing a sketch is largely deciding which of those you are looking at.
     for (const SketchEntity& e : sketch_.entities) {
         const std::vector<Vec2> pts = sketchEntityPoints(sketch_, e);
         const bool hovered = stage_ == SketchStage::Draw && hoverEntity_ == e.id;
-        Vec4 col = e.construction ? Vec4{0.65f, 0.7f, 0.78f, 0.8f} : brand;
+        Vec4 col = contains(solved_.freeEntities, e.id) ? kFree : kFixed;
+        if (inConflict(e)) col = brand;
+        if (e.construction) col = Vec4{col.x * 0.75f, col.y * 0.75f, col.z * 0.8f, 0.75f};
         if (hovered) col = lit;
         for (size_t i = 0; i + 1 < pts.size(); ++i) {
             const Vec3 a = plane_.toWorld(pts[i]), b = plane_.toWorld(pts[i + 1]);
@@ -1358,9 +1541,10 @@ void SketchTool::drawOverlay(const Scene& scene, const Camera& camera, Renderer&
     if (stage_ == SketchStage::Draw) {
         for (const SketchPoint& p : sketch_.points) {
             const Vec3 at = plane_.toWorld(p.at);
-            const bool on = hoverPoint_ == p.id;
+            const bool on = hoverPoint_ == p.id || dragPoint_ == p.id;
+            const bool free = contains(solved_.freePoints, p.id);
             overlay::disc(renderer, at, overlay::frameAt(camera, at), on ? 4.5 : 2.6,
-                          on ? lit : Vec4{0.95f, 0.95f, 0.97f, 0.95f});
+                          on ? lit : (free ? kFree : kFixed));
         }
     }
 
@@ -1422,6 +1606,7 @@ void SketchTool::drawOverlay(const Scene& scene, const Camera& camera, Renderer&
                 }
             }
             break;
+        case SketchMode::Select:
         case SketchMode::Dimension:
             break;
         }
@@ -1462,7 +1647,27 @@ void SketchTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& fi
     if (stage_ == SketchStage::None) return;
 
     const char* title = editing() ? "Edit Sketch" : "Sketch";
-    if (!ui::beginCommand("##sketch", title, Icon::Count, hudX_, hudY_)) return;
+    if (!ui::beginCommand("##sketch", title, Glyph::Sketch)) return;
+
+    // A number pulled on the panel goes in the way the keyboard would have put
+    // it, one character at a time, so the two cannot disagree about what a
+    // number means at this step.
+    // How far a bar reaches: the view's own height, which is what the sketch
+    // is being drawn in and does not move while the bar is pulled.
+    const double extent = niceStepAbove(static_cast<double>(camera.orthoHeight()) * 0.5);
+
+    auto pulled = [&](const ui::NumberEdit& e, int field) {
+        if (e.dragged) {
+            char b[48];
+            std::snprintf(b, sizeof b, "%.6g", e.value);
+            typed_.clear();
+            typedField_ = field;
+            for (const char* p = b; *p; ++p) typeKey(*p);
+        } else if (e.clicked) {
+            typedField_ = field;
+            typed_.clear();
+        }
+    };
 
     int footer = 0;
     switch (stage_) {
@@ -1479,26 +1684,21 @@ void SketchTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& fi
     }
 
     case SketchStage::Draw: {
-        struct ModeButton { SketchMode mode; const char* label; const char* tip; };
-        static const ModeButton kModes[] = {
-            {SketchMode::Line,      "Line",   "Line  (L): click point to point; Enter ends the chain"},
-            {SketchMode::Rectangle, "Rect",   "Rectangle  (R): two opposite corners"},
-            {SketchMode::Circle,    "Circle", "Circle  (C): centre, then a point on the rim"},
-            {SketchMode::Arc,       "Arc",    "Arc  (A): centre, start, end"},
-            {SketchMode::Dimension, "Dimension", "Dimension  (D): click a line or a circle to size it"},
+        static const SketchMode kModeOf[6] = {
+            SketchMode::Select, SketchMode::Line, SketchMode::Rectangle,
+            SketchMode::Circle, SketchMode::Arc,  SketchMode::Dimension};
+        static const ui::Choice kModes[6] = {
+            {Glyph::Select,    "Select", "S", "Drag a point, or a rim, and the constraints hold  (S)"},
+            {Glyph::Line,      "Line",   "L", "Click point to point; Enter ends the chain  (L)"},
+            {Glyph::Rect,      "Rect",   "R", "Two opposite corners  (R)"},
+            {Glyph::Circle,    "Circle", "C", "Centre, then a point on the rim  (C)"},
+            {Glyph::Arc,       "Arc",    "A", "Centre, start, end  (A)"},
+            {Glyph::Dimension, "Size",   "D", "Click a line or a circle to size it  (D)"},
         };
-        // Two rows: the panel is narrow, and a row that runs off its edge
-        // hides the last tool in it.
-        for (size_t i = 0; i < sizeof kModes / sizeof kModes[0]; ++i) {
-            if (i == 0) ui::commandRow("Draw");
-            else if (i == 3) ui::commandRow("");
-            else ImGui::SameLine(0.0f, 4.0f);
-            const bool on = mode_ == kModes[i].mode;
-            if (on) ImGui::PushStyleColor(ImGuiCol_Button, kAccentIm);
-            if (ImGui::SmallButton(kModes[i].label)) setMode(kModes[i].mode);
-            if (on) ImGui::PopStyleColor();
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", kModes[i].tip);
-        }
+        int on = 0;
+        for (int i = 0; i < 6; ++i) if (kModeOf[i] == mode_) on = i;
+        const int pick = ui::commandChoices("", kModes, 6, on);
+        if (pick >= 0) setMode(kModeOf[pick]);
 
         // The size of what is being drawn, the way the create tool shows it.
         if (!clicks_.empty() && !(mode_ == SketchMode::Arc && clicks_.size() == 2)) {
@@ -1507,28 +1707,58 @@ void SketchTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& fi
                 const Real vals[2] = {std::fabs(e.x - s.x), std::fabs(e.y - s.y)};
                 const char* names[2] = {"Width", "Height"};
                 for (int f = 0; f < 2; ++f)
-                    if (ui::commandNumber(names[f], vals[f], "mm", fixed_[f],
-                                          f == typedField_ && !typed_.empty(), typed_.c_str())) {
-                        typedField_ = f;
-                        typed_.clear();
-                    }
+                    pulled(ui::commandNumber(names[f], vals[f], "mm", fixed_[f],
+                                             f == typedField_ && !typed_.empty(), typed_.c_str(),
+                                             0.0, std::max(extent, vals[f])), f);
             } else {
-                ui::commandNumber(mode_ == SketchMode::Line ? "Length" : "Radius", length(e - s), "mm",
-                                  fixed_[0], !typed_.empty(), typed_.c_str());
+                const Real v = length(e - s);
+                pulled(ui::commandNumber(mode_ == SketchMode::Line ? "Length" : "Radius", v, "mm",
+                                         fixed_[0], !typed_.empty(), typed_.c_str(),
+                                         0.0, std::max(extent, v)), 0);
             }
         }
 
-        char state[160];
-        if (!solved_.solved)
-            std::snprintf(state, sizeof state, "does not solve");
-        else if (sketch_.empty())
-            std::snprintf(state, sizeof state, "empty");
-        else if (solved_.freedoms == 0)
-            std::snprintf(state, sizeof state, "fully constrained");
-        else
-            std::snprintf(state, sizeof state, "%d %s free", solved_.freedoms,
-                          solved_.freedoms == 1 ? "freedom" : "freedoms");
-        ui::commandValue("State", state);
+        // What the two colours in the viewport mean, said in the colours
+        // themselves: a legend in grey text would need reading twice.
+        ui::commandRow("State");
+        if (sketch_.empty()) {
+            ImGui::TextUnformatted("empty");
+        } else if (solved_.freedoms == 0 && solved_.solved) {
+            ImGui::TextColored(kFixedIm, "fully constrained");
+        } else {
+            ImGui::TextColored(kFreeIm, "%d %s free", solved_.freedoms,
+                               solved_.freedoms == 1 ? "freedom" : "freedoms");
+            if (!solved_.freeEntities.empty()) {
+                ImGui::SameLine(0.0f, 6.0f);
+                ImGui::TextDisabled("(%zu of %zu)", solved_.freeEntities.size(),
+                                    sketch_.entities.size());
+            }
+        }
+
+        // A disagreement, named. "Over-constrained" is not something a person
+        // can act on; "the length and the radius disagree" is.
+        if (!solved_.conflicting.empty()) {
+            ui::commandRow("Disagree");
+            std::string names;
+            for (SketchId id : solved_.conflicting) {
+                const SketchConstraint* k = sketch_.constraint(id);
+                if (!names.empty()) names += " and ";
+                names += std::string(k ? sketchRuleName(k->rule) : "constraint") + " #" +
+                         std::to_string(id);
+            }
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.35f, 0.25f, 1.0f));
+            ImGui::TextWrapped("%s cannot both hold", names.c_str());
+            ImGui::PopStyleColor();
+        } else if (!solved_.redundant.empty()) {
+            ui::commandRow("Repeated");
+            std::string names;
+            for (SketchId id : solved_.redundant) {
+                if (!names.empty()) names += ", ";
+                names += "#" + std::to_string(id);
+            }
+            ImGui::TextDisabled("%s say what the rest already does", names.c_str());
+        }
+
         char regions[64];
         std::snprintf(regions, sizeof regions, "%zu closed", regions_.size());
         ui::commandValue("Regions", regions);
@@ -1545,14 +1775,18 @@ void SketchTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& fi
             ui::commandRow(label);
             ImGui::PushID(static_cast<int>(k.id));
             const bool active = activeDim_ == k.id;
-            if (active) ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.20f, 0.40f, 0.62f, 0.55f));
+            const bool bad = contains(solved_.conflicting, k.id);
+            const bool repeated = contains(solved_.redundant, k.id);
+            if (bad)           ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.55f, 0.16f, 0.10f, 0.65f));
+            else if (repeated) ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.45f, 0.35f, 0.10f, 0.55f));
+            else if (active)   ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.20f, 0.40f, 0.62f, 0.55f));
             double v = k.rule == SketchRule::Angle ? k.value * kRad2Deg : k.value;
             ImGui::SetNextItemWidth(-1.0f);
             ImGui::InputDouble("##dim", &v, 0.0, 0.0,
                                k.rule == SketchRule::Angle ? "%.2f deg" : "%.3f mm");
             const SketchId kid = k.id;
             const SketchRule rule = k.rule;
-            if (active) ImGui::PopStyleColor();
+            if (bad || repeated || active) ImGui::PopStyleColor();
             if (ImGui::IsItemActivated()) activeDim_ = kid;
             const bool edited = ImGui::IsItemDeactivatedAfterEdit();
             ImGui::PopID();
@@ -1566,6 +1800,7 @@ void SketchTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& fi
 
         const char* hint = "";
         switch (mode_) {
+            case SketchMode::Select:    hint = "Drag a point, or the rim of a circle, and the constraints hold it."; break;
             case SketchMode::Line:      hint = "Click point to point. End on a point to close the loop; Enter ends the chain."; break;
             case SketchMode::Rectangle: hint = "Click two opposite corners. Type to fix a side, Tab for the other."; break;
             case SketchMode::Circle:    hint = "Click the centre, then the rim. Type a radius."; break;
@@ -1578,17 +1813,21 @@ void SketchTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& fi
         ui::commandHint("Hover and press X to delete, Q for construction.  Ctrl+Z steps back.");
 
         if (editing()) {
-            if (ImGui::SmallButton("Extrude a region  (E)")) beginExtrude(&camera);
-            footer = ui::commandFooter("Done  (Enter)", !sketch_.empty() && solved_.solved);
+            if (ui::quietButton("Extrude a region")) beginExtrude(&camera);
+            ui::hoverTip("Sweep one of the closed regions into the part  (E)");
+            footer = ui::commandFooter("Done", !sketch_.empty() && solved_.solved);
         } else {
-            if (faceObject_ != kNoObject && ImGui::SmallButton("Keep the sketch only")) {
+            // A sketch is worth keeping before anything is built from it: it
+            // becomes its own item in the outliner, to extrude whenever.
+            if (ui::quietButton(faceObject_ != kNoObject ? "Keep the sketch only" : "Keep as a sketch")) {
                 if (finish(scene, camera, undo, false)) {
                     finished = true;
                     ui::endCommand();
                     return;
                 }
             }
-            footer = ui::commandFooter("Extrude  (E)", !regions_.empty());
+            ui::hoverTip("Keep the drawing without building anything from it  (K)");
+            footer = ui::commandFooter("Extrude", !regions_.empty());
         }
         break;
     }
@@ -1598,31 +1837,30 @@ void SketchTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& fi
         std::snprintf(chosen, sizeof chosen, "%zu of %zu", chosen_.size(), regions_.size());
         ui::commandValue("Regions", chosen);
         ui::commandHint("Click a region to add it or take it out.");
-        footer = ui::commandFooter("Next  (Enter)", !chosen_.empty(), "Back  (Esc)");
+        footer = ui::commandFooter("Next", !chosen_.empty(), "Back");
         break;
     }
 
     case SketchStage::Depth: {
-        if (ui::commandNumber("Depth", depth_, "mm", depthTyped_, !typed_.empty(), typed_.c_str()))
-            typed_.clear();
-        const float ic = ImGui::GetTextLineHeight() * 1.4f;
-        ui::commandRow("Operation");
         {
-            const bool on = op_ == CreateOp::Auto;
-            if (on) ImGui::PushStyleColor(ImGuiCol_Button, kAccentIm);
-            if (ImGui::Button("Auto")) op_ = CreateOp::Auto;
-            if (on) ImGui::PopStyleColor();
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Join when pulled out, cut when pushed in  (A)");
+            const double span = std::max(extent, std::fabs(depth_));
+            pulled(ui::commandNumber("Depth", depth_, "mm", depthTyped_, !typed_.empty(),
+                                     typed_.c_str(), -span, span, true), 0);
         }
-        ImGui::SameLine();
-        if (iconButton(Icon::Union, "join", ic, "Join  (J)", op_ == CreateOp::Join)) op_ = CreateOp::Join;
-        ImGui::SameLine();
-        if (iconButton(Icon::Difference, "cut", ic, "Cut  (D)", op_ == CreateOp::Cut)) op_ = CreateOp::Cut;
-        if (!editing()) {
-            ImGui::SameLine();
-            if (iconButton(Icon::Box, "newbody", ic, "New body  (N)", op_ == CreateOp::NewBody))
-                op_ = CreateOp::NewBody;
+        {
+            static const ui::Choice kOps[4] = {
+                {Glyph::PushPull,   "Auto", "A", "Join when pulled out, cut when pushed in  (A)"},
+                {Glyph::Union,      "Join", "J", "Add the material to the part  (J)"},
+                {Glyph::Difference, "Cut",  "D", "Take the material out of the part  (D)"},
+                {Glyph::NewBody,    "New",  "N", "A body of its own  (N)"},
+            };
+            const int on = op_ == CreateOp::Auto ? 0 : op_ == CreateOp::Join ? 1
+                         : op_ == CreateOp::Cut  ? 2 : 3;
+            const int pick = ui::commandChoices("Operation", kOps, editing() ? 3 : 4, on);
+            if (pick == 0) op_ = CreateOp::Auto;
+            if (pick == 1) op_ = CreateOp::Join;
+            if (pick == 2) op_ = CreateOp::Cut;
+            if (pick == 3) op_ = CreateOp::NewBody;
         }
         const CreateOp shown = resolvedOp();
         const SceneObject* target = scene.find(editing() ? editObject_ : faceObject_);
@@ -1634,10 +1872,10 @@ void SketchTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& fi
                           shown == CreateOp::Cut ? "from" : "onto",
                           target ? target->name.c_str() : "whatever it passes through");
         ui::commandRow("Result");
-        ImGui::TextColored(shown == CreateOp::Cut ? ImVec4(0.95f, 0.35f, 0.25f, 1.0f) : kAccentIm,
-                           "%s", result);
-        ui::commandHint("Move to set the depth, or type one.  A negative depth cuts.");
-        footer = ui::commandFooter("Finish  (Enter)", true, "Back  (Esc)");
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextColored(shown == CreateOp::Cut ? kAccentIm : kFixedIm, "%s", result);
+        ui::commandHint("Move to set the depth, drag the bar, or type one.  A negative depth cuts.");
+        footer = ui::commandFooter("Finish", true, "Back");
         break;
     }
 

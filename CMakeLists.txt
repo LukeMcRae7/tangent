@@ -197,9 +197,15 @@ add_executable(tangent
   src/render/lod.cpp
   src/ui/theme.cpp
   src/ui/panels.cpp
+  src/ui/topbar.cpp
+  src/ui/widgets.cpp
+  src/ui/glyph.cpp
+  src/ui/png.cpp
+  src/ui/drag_guide.cpp
   src/ui/view_cube.cpp
   src/ui/icons.cpp
   src/ui/command_panel.cpp
+  src/app/app_panels.cpp
 )
 target_include_directories(tangent PRIVATE src)
 
@@ -303,7 +309,7 @@ add_test(NAME io COMMAND test_io)
 add_executable(test_create_tool tests/test_create_tool.cpp
   src/app/create_tool.cpp src/app/camera.cpp src/app/undo.cpp src/app/snap.cpp
   src/app/plane_snap.cpp src/app/snap_overlay.cpp src/app/overlay_shapes.cpp
-  src/ui/icons.cpp src/ui/command_panel.cpp
+  src/ui/icons.cpp src/ui/command_panel.cpp src/ui/widgets.cpp src/ui/glyph.cpp src/ui/theme.cpp
   src/scene/scene.cpp src/scene/feature.cpp
   src/mesh/health.cpp ${TANGENT_GEOM} src/mesh/halfedge.cpp src/mesh/primitives.cpp
   src/render/renderer.cpp src/render/shader.cpp src/render/gpu_mesh.cpp)
@@ -315,7 +321,7 @@ add_test(NAME create_tool COMMAND test_create_tool)
 add_executable(test_sketch_tool tests/test_sketch_tool.cpp
   src/app/sketch_tool.cpp src/app/create_tool.cpp src/app/camera.cpp src/app/undo.cpp
   src/app/snap.cpp src/app/plane_snap.cpp src/app/snap_overlay.cpp src/app/overlay_shapes.cpp
-  src/ui/icons.cpp src/ui/command_panel.cpp
+  src/ui/icons.cpp src/ui/command_panel.cpp src/ui/widgets.cpp src/ui/glyph.cpp src/ui/theme.cpp
   src/scene/scene.cpp src/scene/feature.cpp
   src/mesh/health.cpp ${TANGENT_GEOM} src/mesh/halfedge.cpp src/mesh/primitives.cpp
   src/render/renderer.cpp src/render/shader.cpp src/render/gpu_mesh.cpp)
@@ -449,12 +455,13 @@ add_test(NAME icons COMMAND test_icons ${CMAKE_SOURCE_DIR}/assets/icons)
 
 add_executable(test_view_cube tests/test_view_cube.cpp
   src/ui/view_cube.cpp src/ui/panels.cpp src/ui/theme.cpp src/ui/icons.cpp src/ui/command_panel.cpp
+  src/ui/topbar.cpp src/ui/widgets.cpp src/ui/glyph.cpp src/ui/png.cpp
   src/app/camera.cpp src/app/measure.cpp
   src/scene/scene.cpp src/scene/feature.cpp src/mesh/health.cpp
   ${TANGENT_GEOM} src/mesh/halfedge.cpp src/mesh/primitives.cpp
   src/render/renderer.cpp src/render/shader.cpp src/render/gpu_mesh.cpp)
 target_include_directories(test_view_cube PRIVATE src ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/backends)
-target_link_libraries(test_view_cube PRIVATE imgui tangent_epoxy)
+target_link_libraries(test_view_cube PRIVATE imgui tangent_epoxy ZLIB::ZLIB)
 target_compile_options(test_view_cube PRIVATE ${TANGENT_WARNINGS})
 add_test(NAME view_cube COMMAND test_view_cube)
 

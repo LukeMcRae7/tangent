@@ -41,6 +41,16 @@ public:
     // Renders `frames` and exits; used to smoke-test startup non-interactively.
     void setSmokeTest(int frames) { smokeFrames_ = frames; }
 
+    // Keeps the operating system's own title bar and borders instead of the
+    // bar the application draws. For a desktop that cannot move or resize a
+    // window from inside it, or for anyone who prefers the system's frame.
+    void setNativeFrame() { nativeFrame_ = true; }
+
+    // Where a point of the window is, for the window manager: a handle to
+    // drag the window by, an edge to resize it from, or an ordinary spot. Only
+    // consulted when the application draws its own frame.
+    int frameHitTest(int x, int y) const;
+
     // Places the camera explicitly. Makes captures reproducible, which is what
     // lets grid behaviour be compared across viewing angles.
     void setCamera(float yawDeg, float pitchDeg, float dist) {
@@ -259,6 +269,9 @@ private:
     void drawReadout(const std::string& text, float px, float py, bool emphasise);
     void drawMeasureLabel();
     void drawTransformReadout();
+
+    // The arrows the gestures are pulled along, drawn on the screen.
+    void drawDragGuides();
 
     // File handling. There is no native dialog to call on Wayland without
     // taking a dependency, so the prompt is an in-app path field.
@@ -788,6 +801,7 @@ private:
     void beginAddPrimitivePrompt(PrimitiveKind kind);
     void beginSketch();
     void beginEditSketch(ObjectId object, ElementId sketchUid);
+    void drawSceneSketches();
 
     bool justFinishedModal_ = false;
 
@@ -903,6 +917,13 @@ private:
 
     // True while a middle-drag navigation gesture is in progress.
     bool  navigating_ = false;
+
+    // The window's frame: the system's, or the bar the application draws.
+    // `hitFrame_` is the bar as it was last drawn, kept apart from the one
+    // being drawn so the window manager's question can be answered at any
+    // moment.
+    bool       nativeFrame_ = false;
+    FrameState hitFrame_;
 
     void captureFramebuffer(int width, int height) const;
     std::string screenshotPath_;

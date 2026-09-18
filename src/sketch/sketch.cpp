@@ -14,9 +14,7 @@ bool isDimension(SketchRule rule) {
     return rule == SketchRule::Distance || rule == SketchRule::Radius || rule == SketchRule::Angle;
 }
 
-namespace {
-
-const char* ruleName(SketchRule rule) {
+const char* sketchRuleName(SketchRule rule) {
     switch (rule) {
         case SketchRule::Coincident:    return "coincident";
         case SketchRule::Horizontal:    return "horizontal";
@@ -33,6 +31,11 @@ const char* ruleName(SketchRule rule) {
     }
     return "constraint";
 }
+
+namespace {
+
+// The name this file has always used internally.
+const char* ruleName(SketchRule rule) { return sketchRuleName(rule); }
 
 template <class T>
 auto findById(std::vector<T>& v, SketchId id) {
@@ -166,6 +169,14 @@ struct SketchSolver::Impl {
     std::string buildError;
     int freedoms = 0;
     std::vector<SketchId> conflicting, redundant;
+    std::vector<SketchId> freePoints, freeEntities;
+
+    // The pull a drag applies, and what it is pulling. Its target lives in
+    // `store` like everything else, but is not among the unknowns: the solver
+    // reads it and never moves it.
+    GCS::Point dragTarget;
+    double* dragRadius = nullptr;
+    bool dragActive = false;
 
     explicit Impl(Sketch& s) : sketch(s) { build(); }
 
@@ -285,6 +296,35 @@ void SketchSolver::Impl::build() {
     };
     keep(bad, conflicting);
     keep(again, redundant);
+
+    // Which parameters the solver could not pin down. Everything is free when
+    // nothing constrains anything, which is the state a sketch starts in and
+    // the one planegcs reports as an empty diagnosis rather than as a list.
+    std::unordered_set<const double*> loose;
+    if (sys.isEmptyDiagnoseMatrix()) {
+        for (const double* p : unknowns) loose.insert(p);
+    } else {
+        GCS::VEC_pD dependent;
+        sys.getDependentParams(dependent);
+        loose.insert(dependent.begin(), dependent.end());
+    }
+
+    for (const SketchPoint& p : sketch.points) {
+        const GCS::Point* g = P(p.id);
+        if (g && (loose.count(g->x) || loose.count(g->y))) freePoints.push_back(p.id);
+    }
+    for (const SketchEntity& e : sketch.entities) {
+        bool free = false;
+        for (SketchId p : {e.a, e.b, e.c, e.d})
+            if (p != kNoSketchId &&
+                std::find(freePoints.begin(), freePoints.end(), p) != freePoints.end())
+                free = true;
+        if (const GCS::Circle* c = C(e.id)) free = free || loose.count(c->rad) > 0;
+        if (const GCS::Arc* a = A(e.id))
+            free = free || loose.count(a->rad) || loose.count(a->startAngle) ||
+                   loose.count(a->endAngle);
+        if (free) freeEntities.push_back(e.id);
+    }
 }
 
 bool SketchSolver::Impl::addConstraint(const SketchConstraint& k) {
@@ -421,6 +461,8 @@ SketchSolve SketchSolver::solve() {
     out.freedoms = m.freedoms;
     out.conflicting = m.conflicting;
     out.redundant = m.redundant;
+    out.freePoints = m.freePoints;
+    out.freeEntities = m.freeEntities;
 
     if (!m.buildError.empty()) {
         out.reason = m.buildError;
@@ -454,6 +496,75 @@ bool SketchSolver::setDimension(SketchId constraint, Real value) {
     *it->second = value;
     if (SketchConstraint* k = impl_->sketch.constraint(constraint)) k->value = value;
     return true;
+}
+
+bool SketchSolver::dragging() const { return impl_->dragActive; }
+
+bool SketchSolver::beginDrag(SketchId point) {
+    Impl& m = *impl_;
+    if (!m.buildError.empty() || m.dragActive) return false;
+    GCS::Point* p = m.P(point);
+    if (!p) return false;
+    // One pair of doubles for the life of the solver: the target is written
+    // over on every drag rather than allocated again.
+    if (!m.dragTarget.x) {
+        m.dragTarget.x = m.fixed(*p->x);
+        m.dragTarget.y = m.fixed(*p->y);
+    } else {
+        *m.dragTarget.x = *p->x;
+        *m.dragTarget.y = *p->y;
+    }
+    m.sys.addConstraintP2PCoincident(*p, m.dragTarget, GCS::DefaultTemporaryConstraint);
+    m.sys.initSolution();
+    m.dragActive = true;
+    return true;
+}
+
+bool SketchSolver::beginRadiusDrag(SketchId entity) {
+    Impl& m = *impl_;
+    if (!m.buildError.empty() || m.dragActive) return false;
+    GCS::Circle* c = m.C(entity);
+    GCS::Arc* a = m.A(entity);
+    if (!c && !a) return false;
+    const double now = c ? *c->rad : *a->rad;
+    if (!m.dragRadius) m.dragRadius = m.fixed(now);
+    else               *m.dragRadius = now;
+    if (c) m.sys.addConstraintCircleRadius(*c, m.dragRadius, GCS::DefaultTemporaryConstraint);
+    else   m.sys.addConstraintArcRadius(*a, m.dragRadius, GCS::DefaultTemporaryConstraint);
+    m.sys.initSolution();
+    m.dragActive = true;
+    return true;
+}
+
+bool SketchSolver::dragTo(Vec2 at) {
+    Impl& m = *impl_;
+    if (!m.dragActive || !m.dragTarget.x) return false;
+    *m.dragTarget.x = at.x;
+    *m.dragTarget.y = at.y;
+    // Coarse: a drag is judged by eye, and is followed by a full solve when it
+    // is let go of.
+    if (m.sys.solve(false, GCS::DogLeg) != GCS::Success) return false;
+    m.sys.applySolution();
+    m.readBack();
+    return true;
+}
+
+bool SketchSolver::dragRadiusTo(Real radius) {
+    Impl& m = *impl_;
+    if (!m.dragActive || !m.dragRadius) return false;
+    *m.dragRadius = std::max(radius, 1e-6);
+    if (m.sys.solve(false, GCS::DogLeg) != GCS::Success) return false;
+    m.sys.applySolution();
+    m.readBack();
+    return true;
+}
+
+void SketchSolver::endDrag() {
+    Impl& m = *impl_;
+    if (!m.dragActive) return;
+    m.sys.clearByTag(GCS::DefaultTemporaryConstraint);
+    m.sys.initSolution();
+    m.dragActive = false;
 }
 
 SketchSolve solveSketch(Sketch& sketch) {

@@ -255,6 +255,149 @@ void testSizes() {
     }
 }
 
+void testEditMode() {
+    std::printf("--- edit mode ---\n");
+    {
+        // Dragging: what is free moves, and the constraints decide how far.
+        SketchTool tool;
+        tool.start();
+        tool.setPlane(topPlane(), kNoObject, nullptr);
+        tool.setMode(SketchMode::Line);
+        tool.clickAt({0, 0});
+        tool.clickAt({30, 0});
+        tool.clickAt({10, 20});
+        tool.clickAt({0, 0});
+
+        tool.setMode(SketchMode::Select);
+        const SketchId apex = tool.sketch().entities[1].b;
+        check(tool.beginDrag(apex), "a point can be dragged");
+        check(tool.dragging(), "and the tool says so");
+        check(tool.dragTo({14, 26}), "it moves with the pointer");
+        const SketchPoint* p = tool.sketch().point(apex);
+        check(p && near(p->at.x, 14.0, 1e-4) && near(p->at.y, 26.0, 1e-4),
+              "to where the pointer is, nothing holding it back");
+        tool.handleMouseUp();
+        check(!tool.dragging(), "letting go ends the drag");
+        check(tool.regions().size() == 1 && tool.regions()[0].area > 180.0,
+              "and the region it bounds is remeasured");
+
+        check(tool.undoEdit(), "one drag is one step back");
+        const SketchPoint* back = tool.sketch().point(apex);
+        check(back && near(back->at.x, 10.0, 1e-6) && near(back->at.y, 20.0, 1e-6),
+              "which puts the point back where it was");
+
+        // A line held level stays level while it is dragged: the constraint is
+        // what holds, not the position it happened to be drawn at.
+        const SketchEntity base = tool.sketch().entities[0];
+        tool.beginDrag(base.b);
+        tool.dragTo({45, 12});
+        tool.handleMouseUp();
+        const SketchPoint* from = tool.sketch().point(base.a);
+        const SketchPoint* to = tool.sketch().point(base.b);
+        check(from && to && near(from->at.y, to->at.y, 1e-6),
+              "a level line is still level after a drag that pulled off it");
+        check(to && near(to->at.x, 45.0, 1e-3), "and the end followed the pointer along it");
+    }
+
+    {
+        // Colours: what has freedom left, and what has none.
+        SketchTool tool;
+        tool.start();
+        tool.setPlane(topPlane(), kNoObject, nullptr);
+        drawRectangle(tool, {0, 0}, {40, 25});
+        check(tool.solveState().freeEntities.empty(),
+              "a dimensioned rectangle has nothing left free");
+        tool.setMode(SketchMode::Line);
+        tool.clickAt({50, 50});
+        tool.clickAt({70, 60});
+        tool.clearPending();
+        check(tool.solveState().freeEntities.size() == 1,
+              "a line drawn with no dimensions is the one free thing");
+        check(tool.solveState().freePoints.size() == 2, "on two free points");
+    }
+
+    {
+        // A conflict cannot be drawn here, but one can be arrived at: the tool
+        // refuses the edit and names what disagrees.
+        SketchTool tool;
+        tool.start();
+        tool.setPlane(topPlane(), kNoObject, nullptr);
+        drawRectangle(tool, {0, 0}, {40, 25});
+        tool.setMode(SketchMode::Dimension);
+        check(tool.dimensionEntity(tool.sketch().entities[2].id) == kNoSketchId,
+              "a second length for the same side is refused");
+        const std::string why = tool.takeError();
+        check(why.find("already") != std::string::npos, "saying it is already decided: " + why);
+        check(tool.solveState().solved && tool.solveState().conflicting.empty(),
+              "and the sketch is left solving");
+    }
+
+    {
+        // Dragging the rim of a dimensioned circle drives the dimension.
+        SketchTool tool;
+        tool.start();
+        tool.setPlane(topPlane(), kNoObject, nullptr);
+        drawCircle(tool, {0, 0}, 5);
+        const SketchId circle = tool.sketch().entities[0].id;
+        const SketchId radius = findRule(tool.sketch(), SketchRule::Radius)->id;
+        tool.setMode(SketchMode::Select);
+        check(tool.beginRadiusDrag(circle), "its rim can be taken hold of");
+        check(tool.dragTo({12, 0}), "and pulled out");
+        tool.handleMouseUp();
+        check(near(tool.sketch().entity(circle)->radius, 12.0, 1e-4), "the circle follows");
+        check(near(tool.sketch().constraint(radius)->value, 12.0, 1e-4),
+              "and its radius dimension is what moved");
+        check(tool.solveState().freedoms == 0, "so it is still fully constrained");
+    }
+}
+
+void testSketchObjects() {
+    std::printf("--- a sketch of its own in the scene ---\n");
+    Scene scene;
+    UndoStack undo;
+    Camera camera;
+
+    SketchTool tool;
+    tool.start();
+    tool.setPlane(topPlane(), kNoObject, nullptr);
+    drawRectangle(tool, {0, 0}, {40, 25});
+    check(tool.finish(scene, camera, undo, false), "a sketch is kept without extruding it");
+    check(scene.objectCount() == 1, "as an object of its own");
+
+    const SceneObject* o = scene.objects().front().get();
+    const ObjectId id = o->id;
+    check(o->name == "Sketch", "called what it is");
+    check(o->features.size() == 1 && o->features[0].kind == FeatureKind::Sketch,
+          "holding just the sketch");
+    check(o->features[0].sketchShown, "which is drawn, since nothing else stands there");
+    check(o->body.empty(), "and it has no body yet");
+    check(scene.reevaluate(id), "its history re-runs happily with no solid in it");
+
+    check(undo.undo(scene) && scene.objectCount() == 0, "undo takes it away");
+    check(undo.redo(scene) && scene.objectCount() == 1, "redo brings it back");
+
+    if (!brep::available()) {
+        std::printf("  exact kernel not built; extruding the sketch is not tested\n");
+        return;
+    }
+
+    // Later, that sketch becomes a part: re-opened, swept, and the drawing put
+    // away now that there is a solid standing where it was.
+    const ElementId uid = scene.find(id)->features[0].uid;
+    SketchTool again;
+    check(again.startEdit(scene, id, uid, camera), "the sketch re-opens from the scene");
+    check(again.mode() == SketchMode::Select, "in the tool that moves things");
+    check(again.beginExtrude() && again.beginDepth(), "and can be extruded");
+    again.setDepth(6.0);
+    const bool swept = again.finish(scene, camera, undo, true);
+    check(swept, "into the same object: " + again.takeError());
+
+    const SceneObject* part = scene.find(id);
+    check(part->features.size() == 2, "the sketch and the sweep");
+    check(!part->features[0].sketchShown, "the drawing is put away once a solid stands there");
+    check(near(part->body.health(false).volume, 40.0 * 25.0 * 6.0, 1e-6), "40 x 25 x 6");
+}
+
 void testExtruding() {
     std::printf("--- extruding ---\n");
     if (!brep::available()) {
@@ -386,6 +529,8 @@ void testExtruding() {
 int main() {
     testDrawing();
     testSizes();
+    testEditMode();
+    testSketchObjects();
     testExtruding();
     std::printf("[sketch tool] %s (%d checks, %d failures)\n",
                 gFailures == 0 ? "ALL PASS" : "FAILED", gChecks, gFailures);

@@ -34,6 +34,7 @@
 #include "scene/scene.h"
 #include "sketch/sketch.h"
 
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -41,7 +42,9 @@ namespace tg {
 
 enum class SketchStage { None, SelectPlane, Draw, Regions, Depth };
 
-enum class SketchMode { Line, Rectangle, Circle, Arc, Dimension };
+// Select comes first because it is what editing a sketch that already exists is
+// mostly made of: taking hold of something and moving it.
+enum class SketchMode { Select, Line, Rectangle, Circle, Arc, Dimension };
 
 const char* sketchModeName(SketchMode mode);
 
@@ -87,6 +90,19 @@ public:
     void clearPending();
     bool pending() const { return !clicks_.empty(); }
 
+    // ---- Dragging -----------------------------------------------------------
+    //
+    // Takes hold of a point, or of the rim of a circle or an arc, and moves it
+    // as far as the constraints allow: a point held level with another slides
+    // along that line, and a fully constrained sketch does not move at all.
+    // The solver is built once here and re-solved on every move.
+    bool beginDrag(SketchId point);
+    bool beginRadiusDrag(SketchId entity);
+    bool dragTo(Vec2 at);
+    void endDrag();
+    bool dragging() const { return drag_ != nullptr; }
+    SketchId draggedPoint() const { return dragPoint_; }
+
     // Types one character into the size of what is being drawn, or of the
     // dimension picked in Dimension mode. Digits, '.', '-', backspace (8) and
     // tab (9, next field). False for anything else.
@@ -130,13 +146,14 @@ public:
     CreateOp resolvedOp() const;
 
     // Commits what was drawn: the sketch, and an Extrude Profile for each chosen
-    // region when `extrude` is set. Without a region the sketch is only kept
-    // when there is a part to keep it in -- one drawn on a face, or one being
-    // edited -- since a sketch on its own is not yet an object.
+    // region when `extrude` is set. Without one it is kept as a sketch -- in the
+    // part it was drawn on, or, drawn on a plane of its own, as its own object
+    // in the outliner, to be extruded whenever.
     bool finish(Scene& scene, Camera& camera, UndoStack& undo, bool extrude);
-    bool canFinishWithoutExtrude() const { return editing() || faceObject_ != kNoObject; }
 
     bool editing() const { return editObject_ != kNoObject; }
+    ObjectId editingObject() const { return editObject_; }
+    ElementId editingUid() const { return editUid_; }
 
     // Why the last step refused, or empty. Reading it clears it.
     std::string takeError() { std::string e; e.swap(error_); return e; }
@@ -144,6 +161,7 @@ public:
     // ---- Per frame ----------------------------------------------------------
     void update(const Scene& scene, const Camera& camera, Vec2 mousePx, bool snap);
     void handleMouseDown(Scene& scene, Camera& camera, UndoStack& undo);
+    void handleMouseUp();
     void handleRightClick(Camera& camera);
 
     // Keys as characters: letters upper-case, 27 escape, 13 enter, 8 backspace,
@@ -199,6 +217,17 @@ private:
     Real fixedValue_[2] = {0, 0};
     SketchId activeDim_ = kNoSketchId;
 
+    // A drag in progress: the solver it is running on, what is held, and the
+    // sketch as it was when the drag started -- one drag is one step back.
+    std::unique_ptr<SketchSolver> drag_;
+    Sketch dragBefore_;
+    SketchId dragPoint_ = kNoSketchId;
+    SketchId dragEntity_ = kNoSketchId;
+    // Set when what is being dragged is held by a dimension, so the drag drives
+    // that number instead of pulling against it.
+    SketchId dragDim_ = kNoSketchId;
+    bool dragMoved_ = false;
+
     std::vector<SketchId> chosen_;
     Real depth_ = 10.0;
     Real depthBase_ = 10.0;
@@ -218,6 +247,11 @@ private:
     void refreshRegions();
 
     SketchId pointAt(Vec2 uv, SketchId reuse);
+
+    // The dimension already sizing an entity -- a line's length, a circle's
+    // radius -- or kNoSketchId.
+    SketchId existingDimension(SketchId entity) const;
+    bool inConflict(const SketchEntity& entity) const;
     SketchId nearestPoint(Vec2 uv, Real radius) const;
     Vec2 pointUV(SketchId id) const;
 

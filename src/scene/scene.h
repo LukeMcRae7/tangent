@@ -84,6 +84,17 @@ struct SceneObject {
         // The backend chose the tolerance, so the view has not had its say yet.
         renderDeviation = 0.0;
         localBounds = body.bounds();
+        // An object that is only a sketch has no body to be measured, but it is
+        // somewhere and it has a size: without this, framing the view on one or
+        // drawing a box round it would have nothing to work from.
+        if (body.empty()) {
+            for (const Feature& f : features) {
+                if (f.kind != FeatureKind::Sketch || !f.sketchShown || !f.enabled) continue;
+                for (const SketchEntity& e : f.sketch.entities)
+                    for (Vec2 p : sketchEntityPoints(f.sketch, e))
+                        localBounds.expand(f.sketch.plane.toWorld(p));
+            }
+        }
         ++meshVersion;
     }
     AABB worldBounds() const;
@@ -156,8 +167,17 @@ public:
     // sketch and a region swept out of it, with no primitive underneath. The
     // chain is evaluated first, and nothing is added unless every step of it
     // succeeds; `error` then says which step did not.
+    //
+    // A chain of nothing but sketches is allowed and leaves the object with no
+    // body: a sketch is a thing in the scene before anything is built from it.
     ObjectId addFeatureChain(std::vector<Feature> features, const std::string& name,
                              std::string* error = nullptr);
+
+    // The same, but the object is kept whatever the chain does. For a file: a
+    // step that no longer evaluates -- a sketch extruded in a build that has no
+    // exact kernel -- is marked and skipped, and dropping the object instead
+    // would lose the work rather than report it.
+    ObjectId addChainAsIs(std::vector<Feature> features, const std::string& name);
     bool     removeObject(ObjectId id);
     ObjectId duplicateObject(ObjectId id);
 

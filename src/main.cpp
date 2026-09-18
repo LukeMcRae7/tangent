@@ -8,7 +8,9 @@ int main(int argc, char** argv) {
     tg::Application app;
 
     for (int i = 1; i < argc; ++i) {
-        if (std::strcmp(argv[i], "--smoke-test") == 0) {
+        if (std::strcmp(argv[i], "--native-frame") == 0) {
+            app.setNativeFrame();
+        } else if (std::strcmp(argv[i], "--smoke-test") == 0) {
             const int frames = (i + 1 < argc) ? std::atoi(argv[i + 1]) : 3;
             app.setSmokeTest(frames > 0 ? frames : 3);
         } else if (std::strcmp(argv[i], "--screenshot") == 0 && i + 1 < argc) {
@@ -98,6 +100,7 @@ int main(int argc, char** argv) {
             std::printf("tangent - 3D modelling for print design\n"
                         "  --smoke-test [frames]   render N frames and exit\n"
                         "  --screenshot <out.ppm>  capture the window to a PPM\n"
+                        "  --native-frame          the system's title bar instead of the app's\n"
                         "  --camera y,p,d          place the camera (degrees, mm)\n"
                         "  --empty                 start with an empty scene\n"
                         "  --grid-probe y0,y1,n    sweep yaw, printing viewport luminance\n");

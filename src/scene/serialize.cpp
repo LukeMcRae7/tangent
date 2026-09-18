@@ -1,5 +1,6 @@
 #include "scene/serialize.h"
 
+#include <algorithm>
 #include <cstring>
 #include <fstream>
 #include <vector>
@@ -334,6 +335,7 @@ void writeFeature(Writer& w, const Feature& f) {
     writeSketch(w, f.sketch);
     w.u64(f.sketchUid);
     w.u32(f.profileKey);
+    w.u8(f.sketchShown ? 1 : 0);
 }
 
 // `version` is the file's, not this build's: a project written before bodies
@@ -439,6 +441,9 @@ bool readFeature(Reader& r, Feature& f, uint32_t version) {
         f.sketchUid = r.u64();
         f.profileKey = r.u32();
     }
+    // A sketch in a version 12 file was drawn but never stood on its own, so
+    // there was nothing to hide it from: shown is what it was.
+    if (version >= 13) f.sketchShown = r.u8() != 0;
     return !r.bad;
 }
 
@@ -547,15 +552,33 @@ ProjectResult loadProject(Scene& scene, const std::string& path) {
         }
         if (r.bad) { res.error = "truncated file"; return res; }
 
+        // Before version 13 a sketch could not be shown or hidden, because a
+        // sketch could not stand on its own: every one of them was drawn in
+        // order to sweep something. So one that was swept is scaffolding and
+        // starts hidden, and one that nothing was built from starts shown --
+        // which is what saving those same files from here would now record.
+        if (version < 13) {
+            for (Feature& f : chain) {
+                if (f.kind != FeatureKind::Sketch) continue;
+                f.sketchShown = std::none_of(chain.begin(), chain.end(), [&](const Feature& g) {
+                    return g.kind == FeatureKind::ExtrudeProfile && g.sketchUid == f.uid;
+                });
+            }
+        }
+
         // An object that came from a file -- a STEP import, a mesh, a piece of a
         // split -- has no primitive to start from: its chain begins with the
         // geometry itself. Starting every object from a primitive refused
         // these outright, so a project holding one saved and then would not
         // open.
         const bool fromGeometry = !chain.empty() && chain.front().kind == FeatureKind::BaseMesh;
-        const ObjectId newId = fromGeometry
-            ? loaded.addImportedBody(chain.front().bakedBody, name)
-            : loaded.addPrimitive(spec.kind, spec, t.position);
+        // A part that starts from a sketch has no primitive to fall back on:
+        // the chain itself is the object, so it is built from the chain.
+        const bool fromSketch = !chain.empty() && chain.front().kind == FeatureKind::Sketch;
+        ObjectId newId = kNoObject;
+        if (fromSketch)        newId = loaded.addChainAsIs(chain, name);
+        else if (fromGeometry) newId = loaded.addImportedBody(chain.front().bakedBody, name);
+        else                   newId = loaded.addPrimitive(spec.kind, spec, t.position);
         if (newId == kNoObject) { res.error = "object '" + name + "' failed to build"; return res; }
 
         SceneObject* o = loaded.find(newId);

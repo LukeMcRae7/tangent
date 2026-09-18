@@ -241,6 +241,13 @@ struct Feature {
     ElementId sketchUid = 0;
     SketchId  profileKey = kNoSketchId;
 
+    // Sketch: whether its geometry is drawn in the viewport. A sketch stays in
+    // the outliner once something has been built from it, but showing every
+    // sketch of a finished part would bury the part in its own scaffolding, so
+    // extruding one turns its drawing off. Display only: it changes nothing
+    // about what the chain builds.
+    bool sketchShown = true;
+
     // VertexEdit: a free-form drag, recorded as explicit offsets. Not
     // parametric in any meaningful sense, but it has to live in the chain so
     // that re-evaluating an earlier feature does not discard it.

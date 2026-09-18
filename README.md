@@ -89,8 +89,34 @@ part. Either way an exact body is tessellated to a tolerance you set rather
 than whatever the viewport happened to be drawing.
 
 Either way, tangent rejects non-manifold edges, open surfaces, and other
-invalid results that a slicer would also reject. The status bar indicates
-`solid` or `not solid`, and the Inspector says which kernel a body is made of.
+invalid results that a slicer would also reject. The corner of the viewport
+says `solid` or `not solid` for the body in hand.
+
+### The interface
+
+One dark surface with the model lit in the middle of it. Along the top, the
+tools in four groups -- File, Create, Modify, Inspect -- each a row of pictures
+with its name under it; the name opens the group's full menu, with every
+command and its key. The outliner down the left lists bodies, sketches and
+meshes with an eye to hide each; the inspector down the right holds the
+selected thing's name, transform, shape and history, with its volume, vertex
+and face counts at the foot.
+
+A running operation gets a panel at the bottom of the viewport: its name,
+one bar per number (pull the bar, pull the arrow in the viewport, or type),
+the choices among modes as a row of tiles with their keys, and Finish and
+Cancel. The arrow the value is pulled along is drawn on the screen, where the
+value is measured, so its head sits under the pointer.
+
+The application draws its own window frame: the bar along the top drags the
+window, double-clicking it maximises, and its right-hand end holds the
+window's own buttons. `--native-frame` (or `TANGENT_NATIVE_FRAME=1`) keeps
+the system's title bar and borders instead, for a desktop that cannot move
+or resize a window from inside it.
+
+The face is Space Grotesk, bundled in `assets/fonts` under the SIL Open Font
+License, so the interface looks the same on every platform. `TANGENT_FONT`
+names a different file, or `default` for ImGui's built-in bitmap face.
 
 ### Conventions
 
@@ -99,8 +125,8 @@ invalid results that a slicer would also reject. The status bar indicates
 - The grid subdivides by powers of ten as you zoom, down to 0.1 mm.
 - **Snapping is on by default**, and Ctrl releases it. A part is designed in
   round numbers; free positioning is the exception. The increment is relative
-  to the viewport zoom such that you can make more precise edits when zoomed closer. It is shown in
-  the status bar while you drag.
+  to the viewport zoom such that you can make more precise edits when zoomed closer. The ticks
+  along the arrow show it while you drag.
 - **An edit either produces valid geometry or it does not happen.** A drag that
   would make the model self-intersect is refused and reverted.
 - Numeric entry is always available during any transform.
