@@ -120,6 +120,9 @@ public:
     void setRoundAllDemo() { roundAllDemo_ = true; }
     void setAutoExtrude(float mm) { autoExtrude_ = true; autoExtrudeMm_ = mm; }
     void setShellDemo(float wallMm) { shellDemo_ = wallMm; }
+    void setInsetDemo(float mm) { insetDemo_ = mm; }
+    // 1 cuts through the middle, 2 moves the plane, 3 cuts by another axis.
+    void setSplitDemo(int step) { splitDemo_ = step; }
 
     // Shell, then extrude what is left of the face that was opened -- the
     // sequence that crashed. Kept because it crossed three subsystems that had
@@ -625,6 +628,11 @@ private:
     // Points the gesture along a world axis instead of the face's own normal,
     // or back at the normal when the same key is pressed twice.
     void setFaceAxis(int axis);
+    // The way a face move goes, in the body's own space: the axis the panel
+    // locked, or a zero vector for the face's own normal. The preview, the
+    // swept tool and the feature all have to be given the same answer, or what
+    // is shown is not what is built.
+    Vec3 faceAlongLocal(const SceneObject& obj) const;
 
     // Re-finds the faces the gesture began on in whatever the preview last
     // built, and leaves them selected. Without it the highlight wanders onto
@@ -906,6 +914,79 @@ private:
     void drawPatternPanel();
 
     void mergeSelected();
+    // Inset and Shell. Neither is a gesture: the faces say where, and the one
+    // number is the operation. They are made as soon as they are asked for and
+    // stay adjustable in their panel until Done, so the number is chosen by
+    // looking at the result rather than typed into a menu beforehand.
+    struct AmountToolState {
+        ObjectId objectId = kNoObject;
+        std::vector<FaceId> faces;          // inset: what to inset; shell: what to open
+        Real amount = 1.0;
+        Body before;
+        std::vector<Feature> chainBefore;
+        std::string typedValue;
+        bool active = false;                // only while it is being made
+
+        void reset() {
+            objectId = kNoObject;
+            faces.clear();
+            before = Body();
+            chainBefore.clear();
+            typedValue.clear();
+            active = false;
+        }
+    };
+    // Split: what to cut with, and where. It used to decide for itself from
+    // what happened to be selected -- a face's plane, a second body's, or the
+    // pieces it was already in, and a cut through the middle when none of
+    // those applied -- with no way to see which it had chosen or to move it.
+    struct SplitToolState {
+        enum class By { Face, Tool, X, Y, Z, Pieces };
+        ObjectId objectId = kNoObject;
+        ObjectId toolObject = kNoObject;   // a second selected body, whose plane can cut
+        FaceId   face = kInvalid;          // a selected face, whose plane can cut
+        By       by = By::Z;
+        Real     offset = 0.0;             // where along the normal, in world
+        int      pieces = 0;               // what the last cut made
+        bool     canPieces = false;        // it is already in more than one piece
+        Body before;
+        std::vector<Feature> chainBefore;
+        std::string typedValue;
+        bool active = false;
+
+        void reset() {
+            objectId = toolObject = kNoObject;
+            face = kInvalid;
+            by = By::Z;
+            offset = 0.0;
+            pieces = 0;
+            canPieces = false;
+            before = Body();
+            chainBefore.clear();
+            typedValue.clear();
+            active = false;
+        }
+    };
+    SplitToolState splitTool_;
+    void beginSplit();
+    void commitSplit();
+    void drawSplitPanel();
+    // Where the cut goes, in the body's own space: false when that choice has
+    // nothing to cut with.
+    bool splitPlane(Vec3& point, Vec3& normal) const;
+    // Replaces `id` with the first piece and makes an object of each of the
+    // rest, as one undo entry.
+    bool applySplitPieces(ObjectId id, std::vector<Body> pieces, std::vector<Feature> chainBefore);
+
+    AmountToolState insetTool_;
+    AmountToolState shellTool_;
+    void beginInset();
+    void commitInset();
+    void drawInsetPanel();
+    void beginShell();
+    void commitShell();
+    void drawShellPanel();
+
     void beginDivide();
     void updateDivide(bool snap, bool follow = true);
     void commitDivide();
@@ -970,7 +1051,8 @@ private:
     // panel floating; Fusion and Onshape sidestep it by never confirming on a
     // viewport click in the first place. This is the first of those, because
     // this app does confirm on a click.
-    enum class Settled { None, Fillet, Divide, Face, Pattern, Create, Sketch, Combine };
+    enum class Settled { None, Fillet, Divide, Face, Pattern, Create, Sketch, Combine, Inset, Shell,
+                         Split };
     Settled  settled_ = Settled::None;
     ObjectId settledObject_ = kNoObject;
 
@@ -1124,6 +1206,8 @@ private:
     float       filletDemo_ = 0.0f;     // radius in mm; 0 means do not
     float       shellExtrudeDemo_ = 0.0f;
     bool        shellFilletDemo_ = false;
+    int         splitDemo_ = 0;
+    float       insetDemo_ = 0.0f;      // distance in mm; 0 means do not
     float       shellDemo_ = 0.0f;      // wall in mm; 0 means do not
     bool        holdTransform_ = false;
 

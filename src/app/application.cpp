@@ -794,7 +794,95 @@ bool Application::init() {
             if (dot(scene_.find(id)->body.faceNormal(f), Vec3{0, 0, 1}) > 0.99)
                 scene_.selectElement({id, ElementKind::Face, f}, true);
         view_.shellThickness = shellDemo_;
-        shellActiveObject();
+        beginShell();
+        const Real firstWall = scene_.find(id)->body.health(false).volume;
+        // And adjusted in the panel, which is the half of it a menu number
+        // could never do: the same operation again at another wall.
+        shellTool_.amount = shellDemo_ * 2.0;
+        recommitSettled();
+        std::fprintf(stderr, "[shell-demo] %.2f mm wall: %.1f mm3; %.2f mm wall: %.1f mm3; %zu features\n",
+                     static_cast<double>(shellDemo_), firstWall, static_cast<double>(shellDemo_) * 2.0,
+                     scene_.find(id)->body.health(false).volume, scene_.find(id)->features.size());
+        if (!notice_.empty()) std::fprintf(stderr, "[app] %s\n", notice_.c_str());
+        scene_.select(id);
+    }
+
+    // The split dialog: cut where it would have cut anyway, then moved.
+    if (splitDemo_ > 0 && !scene_.objects().empty()) {
+        const ObjectId id = scene_.objects().front()->id;
+        scene_.select(id);
+        beginSplit();
+        auto volumes = [&] {
+            std::string text;
+            for (const auto& o : scene_.objects()) {
+                char b[48];
+                std::snprintf(b, sizeof b, "%s%.0f", text.empty() ? "" : " + ",
+                              o->body.health(false).volume);
+                text += b;
+            }
+            return text;
+        };
+        std::fprintf(stderr, "[split-demo] through the middle: %zu bodies, %s mm3\n",
+                     scene_.objects().size(), volumes().c_str());
+        if (splitDemo_ >= 2) {
+            // Moved off centre, which is the half a menu could not do.
+            splitTool_.offset = 5.0;
+            recommitSettled();
+            std::fprintf(stderr, "[split-demo] moved to z = 5: %zu bodies, %s mm3\n",
+                         scene_.objects().size(), volumes().c_str());
+        }
+        if (splitDemo_ >= 3) {
+            splitTool_.by = SplitToolState::By::X;
+            splitTool_.offset = 0.0;
+            recommitSettled();
+            std::fprintf(stderr, "[split-demo] cut by x instead: %zu bodies, %s mm3\n",
+                         scene_.objects().size(), volumes().c_str());
+        }
+        if (!notice_.empty()) std::fprintf(stderr, "[app] %s\n", notice_.c_str());
+    }
+
+    // The inset dialog, driven the same way: made from the menu's action, then
+    // adjusted to another distance.
+    if (insetDemo_ > 0.0f && !scene_.objects().empty()) {
+        const ObjectId id = scene_.objects().front()->id;
+        std::vector<FaceId> faces;
+        scene_.find(id)->body.allFaces(faces);
+        for (FaceId f : faces)
+            if (dot(scene_.find(id)->body.faceNormal(f), Vec3{0, 0, 1}) > 0.99)
+                scene_.selectElement({id, ElementKind::Face, f}, true);
+        view_.insetAmount = insetDemo_;
+        // What the top is now made of says the distance took: an inset of d
+        // off a w x w top leaves (w - 2d) squared inside a ring of the rest.
+        auto innerTop = [&] {
+            const SceneObject* o = scene_.find(id);
+            std::vector<FaceId> fs;
+            o->body.allFaces(fs);
+            // The ring left around an inset is one face with a square hole in
+            // it -- eight edges -- and the face inside it has four. Their
+            // areas swap as the distance grows past a quarter of the side, so
+            // it is the edge count that tells them apart, not the size.
+            Real inner = 0;
+            for (FaceId f : fs) {
+                if (dot(o->body.faceNormal(f), Vec3{0, 0, 1}) < 0.99) continue;
+                std::vector<EdgeId> es;
+                o->body.faceEdges(f, es);
+                if (es.size() == 4) inner = o->body.faceArea(f);
+            }
+            char b[32];
+            std::snprintf(b, sizeof b, "%.1f", inner);
+            return std::string(b);
+        };
+        beginInset();
+        const int firstFaces = scene_.find(id)->body.faceCount();
+        const std::string firstArea = innerTop();
+        insetTool_.amount = insetDemo_ * 2.0;
+        recommitSettled();
+        std::fprintf(stderr,
+                     "[inset-demo] %.2f mm: %d faces, inner %s mm2; %.2f mm: %d faces, inner %s mm2; "
+                     "%zu features\n",
+                     static_cast<double>(insetDemo_), firstFaces, firstArea.c_str(),
+                     static_cast<double>(insetDemo_) * 2.0, scene_.find(id)->body.faceCount(),
+                     innerTop().c_str(), scene_.find(id)->features.size());
         if (!notice_.empty()) std::fprintf(stderr, "[app] %s\n", notice_.c_str());
         scene_.select(id);
     }
@@ -2376,6 +2464,122 @@ void Application::convertSelectedToSolid() {
     setNotice(buf);
 }
 
+// Inset: the faces it runs in from, and how far. Made at once with the last
+// distance used, then adjusted in its panel -- which is the number a person
+// can only choose by seeing it.
+void Application::beginInset() {
+    dismissSettled();
+    if (tool_.active() || createTool_.active() || sketchTool_.active() || editToolActive()) {
+        setNotice("Finish the current operation first");
+        return;
+    }
+    const ObjectId id = scene_.contextObject();
+    SceneObject* obj = scene_.find(id);
+    if (!obj) { setNotice("Select an object first"); return; }
+    if (refuseMeshEdit(*obj, "Insetting a face")) return;
+
+    const std::vector<FaceId> faces = scene_.selectedFaces(id);
+    if (faces.empty()) { setNotice("Select a face to inset"); return; }
+
+    insetTool_.reset();
+    insetTool_.objectId = id;
+    insetTool_.faces = faces;
+    insetTool_.amount = view_.insetAmount > 0.0 ? view_.insetAmount : 1.0;
+    insetTool_.before = obj->body;
+    insetTool_.chainBefore = obj->features;
+    insetTool_.active = true;
+    preEditSolid_ = obj->healthVersion == obj->geometryVersion && obj->health.solid();
+    commitInset();
+}
+
+void Application::commitInset() {
+    if (!insetTool_.active) return;
+    const ObjectId id = insetTool_.objectId;
+    insetTool_.active = false;
+    SceneObject* obj = scene_.find(id);
+    if (!obj) return;
+
+    std::vector<Feature> chainBefore = insetTool_.chainBefore;
+    obj->features = insetTool_.chainBefore;
+    obj->body = insetTool_.before;
+
+    Feature f;
+    f.kind = FeatureKind::Inset;
+    f.amount = insetTool_.amount;
+    f.faces = nameFaces(insetTool_.before, insetTool_.faces);
+
+    std::string why;
+    if (scene_.addFeature(id, std::move(f), &why) && editKeepsSolid(id)) {
+        view_.insetAmount = insetTool_.amount;      // where the next one starts
+        undo_.push(std::make_unique<FeatureCommand>(id, std::move(chainBefore), obj->features,
+                                                    "Inset"),
+                   /*merge=*/recommitting_);
+        settleCommand(Settled::Inset, id);
+    } else {
+        obj->features = std::move(chainBefore);
+        obj->body = insetTool_.before;
+        obj->refreshDerived();
+        setNotice(why.empty() ? "The inset could not be made" : "Inset refused: " + why);
+    }
+}
+
+// Shell: how thick the wall is, and which faces are left open. The faces are
+// whatever was selected when it started; none is a sealed cavity, which the
+// panel says plainly.
+void Application::beginShell() {
+    dismissSettled();
+    if (tool_.active() || createTool_.active() || sketchTool_.active() || editToolActive()) {
+        setNotice("Finish the current operation first");
+        return;
+    }
+    const ObjectId id = scene_.contextObject();
+    SceneObject* obj = scene_.find(id);
+    if (!obj) { setNotice("Select an object first"); return; }
+    if (refuseMeshEdit(*obj, "Shelling")) return;
+    if (obj->body.empty()) { setNotice("That object has no body to shell"); return; }
+
+    shellTool_.reset();
+    shellTool_.objectId = id;
+    shellTool_.faces = scene_.selectedFaces(id);
+    shellTool_.amount = view_.shellThickness > 0.0 ? view_.shellThickness : 2.0;
+    shellTool_.before = obj->body;
+    shellTool_.chainBefore = obj->features;
+    shellTool_.active = true;
+    preEditSolid_ = obj->healthVersion == obj->geometryVersion && obj->health.solid();
+    commitShell();
+}
+
+void Application::commitShell() {
+    if (!shellTool_.active) return;
+    const ObjectId id = shellTool_.objectId;
+    shellTool_.active = false;
+    SceneObject* obj = scene_.find(id);
+    if (!obj) return;
+
+    std::vector<Feature> chainBefore = shellTool_.chainBefore;
+    obj->features = shellTool_.chainBefore;
+    obj->body = shellTool_.before;
+
+    Feature f;
+    f.kind = FeatureKind::Shell;
+    f.thickness = shellTool_.amount;
+    if (!shellTool_.faces.empty()) f.faces = nameFaces(shellTool_.before, shellTool_.faces);
+
+    std::string why;
+    if (scene_.addFeature(id, std::move(f), &why) && editKeepsSolid(id)) {
+        view_.shellThickness = shellTool_.amount;
+        undo_.push(std::make_unique<FeatureCommand>(id, std::move(chainBefore), obj->features,
+                                                    "Shell"),
+                   /*merge=*/recommitting_);
+        settleCommand(Settled::Shell, id);
+    } else {
+        obj->features = std::move(chainBefore);
+        obj->body = shellTool_.before;
+        obj->refreshDerived();
+        setNotice(why.empty() ? "The shell could not be built" : "Shell refused: " + why);
+    }
+}
+
 void Application::insetSelectedFaces() {
     dismissSettled();
     const ObjectId target = scene_.contextObject();
@@ -2653,6 +2857,11 @@ void Application::beginFaceMove(FaceOp op) {
 // Pressing the same key twice returns to the normal, which is the behaviour
 // every axis constraint in the program already has: a modifier you cannot take
 // off is a mode, and modes are what this is trying not to be.
+Vec3 Application::faceAlongLocal(const SceneObject& obj) const {
+    if (faceTool_.lockedAxis < 0) return Vec3{};
+    return normalize(transformVector(inverse(obj.modelMatrix()), faceTool_.direction));
+}
+
 void Application::setFaceAxis(int axis) {
     if (!faceTool_.active) return;
     const SceneObject* obj = scene_.find(faceTool_.objectId);
@@ -2837,13 +3046,16 @@ void Application::updateFaceMove(bool snap, bool follow) {
             return;
         }
         const ExtrudeOp how = faceTool_.choice.op;
-        faceTool_.preview.request(faceTool_.before, [faces, want, how](Body& b) {
-            return extrudeFaces(b, faces, want, nullptr, 7002, how, nullptr, false);
+        const Vec3 along = faceAlongLocal(*obj);
+        faceTool_.preview.request(faceTool_.before, [faces, want, how, along](Body& b) {
+            return extrudeFaces(b, faces, want, nullptr, 7002, how, nullptr, false, along);
         });
     } else {
         // The sign is the operation. Out adds, in cuts; there is nothing else
-        // a moved face can mean.
-        const Vec3 along = faceTool_.direction;
+        // a moved face can mean. The way it goes is in the body's own space,
+        // which is where the faces are: `direction` is in the world, and on a
+        // body that has been turned the two are not the same.
+        const Vec3 along = faceAlongLocal(*obj);
         faceTool_.preview.request(faceTool_.before, [faces, want, along](Body& b) {
             return extrudeFaces(b, faces, want, nullptr, 7002, ExtrudeOp::Auto, nullptr,
                                 true, along);
@@ -2866,7 +3078,7 @@ void Application::refreshFaceReach() {
             // Swept in the body's own space -- along its normal, or along the
             // axis a key chose -- and carried out into the world.
             const Mat4 model = obj->modelMatrix();
-            const Vec3 along = ft.lockedAxis >= 0 ? transformVector(inverse(model), ft.direction) : Vec3{};
+            const Vec3 along = faceAlongLocal(*obj);
             Body swept;
             if (sweepFaces(ft.before, ft.faces, ft.value, along, 7003, swept) && swept.transform(model)) {
                 ft.tool = std::move(swept);
@@ -2978,7 +3190,10 @@ void Application::commitFaceMove() {
                 f.distance = faceTool_.value;
                 f.extrudeOp = extrudeOp;
                 f.mergeFlush = false;
-                f.axisDir = faceTool_.direction;
+                // In the body's own space, and only when an axis was chosen:
+                // otherwise it goes the way the face faces.
+                f.alongAxis = faceTool_.lockedAxis >= 0;
+                if (f.alongAxis) f.axisDir = faceAlongLocal(*obj);
                 f.faces = nameFaces(faceTool_.before, faceTool_.faces);
                 if (!scene_.addFeature(id, std::move(f), &why) || !editKeepsSolid(id)) {
                     putBack(why.empty() ? "" : "Refused: " + why, "The face could not be extruded");
@@ -3015,7 +3230,8 @@ void Application::commitFaceMove() {
             f.distance = faceTool_.value;
             f.extrudeOp = ExtrudeOp::Auto;
             f.mergeFlush = true;
-            f.axisDir = faceTool_.direction;
+            f.alongAxis = faceTool_.lockedAxis >= 0;
+            if (f.alongAxis) f.axisDir = faceAlongLocal(*obj);
         }
         f.faces = nameFaces(faceTool_.before, faceTool_.faces);
 
@@ -3175,8 +3391,10 @@ void Application::recommitSettled() {
     // their own undo entry back and making the operation again from the
     // restored scene. Only ever their own: if anything has been done since,
     // the panel is put away instead.
+    // A split makes bodies of its own, so adjusting it means taking the whole
+    // thing back -- the objects it made included -- and splitting again.
     if (kind == Settled::Face || kind == Settled::Create || kind == Settled::Sketch ||
-        kind == Settled::Combine) {
+        kind == Settled::Combine || kind == Settled::Split) {
         if (undo_.revision() != settledRevision_ || !undo_.undo(scene_)) {
             dismissSettled();
             return;
@@ -3200,6 +3418,11 @@ void Application::recommitSettled() {
             case Settled::Combine:
                 ok = commitCombine();
                 break;
+            case Settled::Split:
+                splitTool_.active = true;
+                commitSplit();
+                ok = splitTool_.pieces >= 2;
+                break;
             default:
                 break;
         }
@@ -3216,6 +3439,8 @@ void Application::recommitSettled() {
         case Settled::Fillet:  filletTool_.active = true;  commitFillet();   break;
         case Settled::Divide:  divideTool_.active = true;  commitDivide();   break;
         case Settled::Pattern: patternTool_.active = true; commitPattern();  break;
+        case Settled::Inset:   insetTool_.active = true;   commitInset();    break;
+        case Settled::Shell:   shellTool_.active = true;   commitShell();    break;
         default:               break;
     }
     recommitting_ = false;
@@ -5789,6 +6014,161 @@ void Application::abortCombine() {
     combineTool_.reset();
 }
 
+// Split: the plane to cut with, chosen rather than guessed, and where it sits.
+void Application::beginSplit() {
+    dismissSettled();
+    if (tool_.active() || createTool_.active() || sketchTool_.active() || editToolActive()) {
+        setNotice("Finish the current operation first");
+        return;
+    }
+    const ObjectId id = scene_.contextObject();
+    SceneObject* obj = scene_.find(id);
+    if (!obj || obj->body.empty()) { setNotice("Select an object to split"); return; }
+
+    splitTool_.reset();
+    splitTool_.objectId = id;
+    splitTool_.before = obj->body;
+    splitTool_.chainBefore = obj->features;
+
+    // What this body offers: a selected face's plane, a second selected body's,
+    // and whether it is already in more than one piece.
+    const std::vector<FaceId> faces = scene_.selectedFaces(id);
+    if (!faces.empty() && obj->body.hasFace(faces.front())) splitTool_.face = faces.front();
+    for (ObjectId other : scene_.selection())
+        if (other != id && scene_.find(other)) splitTool_.toolObject = other;
+    std::vector<Body> already;
+    splitTool_.canPieces = splitBodies(obj->body, already) >= 2;
+
+    // The one it would have chosen for itself, which is the one most likely
+    // wanted: a face if one is picked, a tool body if one is, the pieces if it
+    // is in pieces, and otherwise straight through the middle.
+    splitTool_.by = splitTool_.face != kInvalid  ? SplitToolState::By::Face
+                  : splitTool_.toolObject != kNoObject ? SplitToolState::By::Tool
+                  : splitTool_.canPieces         ? SplitToolState::By::Pieces
+                                                 : SplitToolState::By::Z;
+    const AABB b = obj->body.bounds();
+    splitTool_.offset = b.valid() ? b.center().z : 0.0;
+    splitTool_.active = true;
+    preEditSolid_ = obj->healthVersion == obj->geometryVersion && obj->health.solid();
+    commitSplit();
+}
+
+bool Application::splitPlane(Vec3& point, Vec3& normal) const {
+    const SceneObject* obj = scene_.find(splitTool_.objectId);
+    if (!obj) return false;
+    const Body& body = splitTool_.before;
+    switch (splitTool_.by) {
+    case SplitToolState::By::Face: {
+        if (splitTool_.face == kInvalid || !body.hasFace(splitTool_.face)) return false;
+        std::vector<VertexId> fv;
+        body.faceVertices(splitTool_.face, fv);
+        if (fv.empty()) return false;
+        normal = body.faceNormal(splitTool_.face);
+        point = body.vertexPosition(fv.front()) + normal * splitTool_.offset;
+        return true;
+    }
+    case SplitToolState::By::Tool: {
+        const SceneObject* tool = scene_.find(splitTool_.toolObject);
+        if (!tool) return false;
+        // The tool's own plane -- its z through its middle -- brought into the
+        // body's space, which is where the cut happens.
+        const Mat4 toLocal = inverse(obj->modelMatrix()) * tool->modelMatrix();
+        normal = normalize(transformVector(normalMatrix(toLocal), Vec3{0, 0, 1}));
+        point = transformPoint(toLocal, tool->body.bounds().center()) + normal * splitTool_.offset;
+        return true;
+    }
+    case SplitToolState::By::X:
+    case SplitToolState::By::Y:
+    case SplitToolState::By::Z: {
+        const int axis = splitTool_.by == SplitToolState::By::X   ? 0
+                       : splitTool_.by == SplitToolState::By::Y ? 1 : 2;
+        normal = Vec3{};
+        (&normal.x)[axis] = 1.0;
+        point = Vec3{};
+        (&point.x)[axis] = splitTool_.offset;
+        return true;
+    }
+    case SplitToolState::By::Pieces:
+        return false;
+    }
+    return false;
+}
+
+bool Application::applySplitPieces(ObjectId id, std::vector<Body> pieces,
+                                   std::vector<Feature> chainBefore) {
+    SceneObject* obj = scene_.find(id);
+    if (!obj || pieces.size() < 2) return false;
+
+    // The first piece takes the object's place; the rest become objects of
+    // their own beside it. A split is where a history ends: what comes out is
+    // geometry, not the steps that made it.
+    std::vector<Feature> chain;
+    Feature base;
+    base.kind = FeatureKind::BaseMesh;
+    base.backend = pieces.front().isMesh() ? Backend::Mesh : Backend::Brep;
+    base.bakedBody = pieces.front();
+    chain.push_back(std::move(base));
+    obj->features = std::move(chain);
+    scene_.reevaluate(id);
+
+    std::vector<ObjectId> created;
+    for (size_t i = 1; i < pieces.size(); ++i) {
+        const ObjectId copy = scene_.duplicateObject(id);
+        if (copy == kNoObject) continue;
+        SceneObject* piece = scene_.find(copy);
+        piece->name = obj->name + "  (" + std::to_string(i + 1) + ")";
+        piece->features.front().bakedBody = pieces[i];
+        scene_.reevaluate(copy);
+        created.push_back(copy);
+    }
+
+    std::vector<std::unique_ptr<Command>> parts;
+    parts.push_back(std::make_unique<FeatureCommand>(id, std::move(chainBefore), obj->features,
+                                                     "Split Body"));
+    if (!created.empty()) parts.push_back(ExistenceCommand::forCreate(scene_, created));
+    undo_.push(std::make_unique<CompositeCommand>(std::move(parts), "Split Body"),
+               /*merge=*/recommitting_);
+    return true;
+}
+
+void Application::commitSplit() {
+    if (!splitTool_.active) return;
+    const ObjectId id = splitTool_.objectId;
+    splitTool_.active = false;
+    SceneObject* obj = scene_.find(id);
+    if (!obj) return;
+
+    std::vector<Feature> chainBefore = splitTool_.chainBefore;
+    obj->features = splitTool_.chainBefore;
+    obj->body = splitTool_.before;
+    scene_.reevaluate(id);
+
+    std::vector<Body> pieces;
+    if (splitTool_.by == SplitToolState::By::Pieces) {
+        splitBodies(splitTool_.before, pieces);
+    } else {
+        Vec3 point{}, normal{};
+        Body a, b;
+        if (splitPlane(point, normal) && splitByPlane(splitTool_.before, point, normal, a, b)) {
+            pieces.push_back(std::move(a));
+            pieces.push_back(std::move(b));
+        }
+    }
+
+    if (pieces.size() < 2 || !applySplitPieces(id, pieces, std::move(chainBefore))) {
+        obj->features = splitTool_.chainBefore;
+        obj->body = splitTool_.before;
+        obj->refreshDerived();
+        splitTool_.pieces = 0;
+        setNotice(splitTool_.by == SplitToolState::By::Pieces
+                      ? "That body is all one piece"
+                      : "The plane does not cut this body");
+        return;
+    }
+    splitTool_.pieces = static_cast<int>(pieces.size());
+    settleCommand(Settled::Split, id);
+}
+
 void Application::splitActiveObject() {
     const ObjectId id = scene_.contextObject();
     SceneObject* obj = scene_.find(id);
@@ -6542,10 +6922,10 @@ void Application::applyActions() {
     if (a.mirror) beginPattern(PatternMode::Mirror);
     if (a.mergeFaces) mergeSelected();
     if (a.bevel)   roundAllEdges();
-    if (a.split)   splitActiveObject();
+    if (a.split)   beginSplit();
     if (a.fillet)  beginFillet();
-    if (a.shell)   shellActiveObject();
-    if (a.inset)   insetSelectedFaces();
+    if (a.shell)   beginShell();
+    if (a.inset)   beginInset();
     if (a.booleanRequested) beginCombine(a.booleanOp);
 
     if (a.rebuildObject != kNoObject) {
@@ -6708,6 +7088,9 @@ void Application::buildUi() {
     drawFilletPanel();
     drawFacePanel();
     drawDividePanel();
+    drawInsetPanel();
+    drawShellPanel();
+    drawSplitPanel();
     drawPatternPanel();
     drawReducePanel();
 

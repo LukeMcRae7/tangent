@@ -347,6 +347,8 @@ void writeFeature(Writer& w, const Feature& f) {
     // v15: the regions after the first, for an extrusion of several.
     w.u32(static_cast<uint32_t>(f.profileKeys.size() > 1 ? f.profileKeys.size() - 1 : 0));
     for (size_t i = 1; i < f.profileKeys.size(); ++i) w.u32(f.profileKeys[i]);
+    // v16: whether a face was pulled along an axis rather than its own normal.
+    w.u8(f.alongAxis ? 1 : 0);
 }
 
 // `version` is the file's, not this build's: a project written before bodies
@@ -472,6 +474,8 @@ bool readFeature(Reader& r, Feature& f, uint32_t version) {
         if (more > 1000000u) return false;
         for (uint32_t i = 0; i < more && !r.bad; ++i) f.profileKeys.push_back(r.u32());
     }
+    // Before this, an extrusion always went along the face's own normal.
+    if (version >= 16) f.alongAxis = r.u8() != 0;
     return !r.bad;
 }
 

@@ -253,18 +253,44 @@ void Application::drawFacePanel() {
     // otherwise -- for a rotate, which way round it turns. A scale goes every
     // way at once, so there is nothing to point.
     if (!scale) {
-        static const ui::Choice kAlong[4] = {
+        // An axis that lies in the face sweeps nothing, and one square to it
+        // turns the face in its own plane, which is no turn at all. Those are
+        // shown dimmed rather than offered and then refused.
+        Vec3 normal{};
+        if (const SceneObject* fo = scene_.find(faceTool_.objectId)) {
+            const Mat4 nm = normalMatrix(fo->modelMatrix());
+            for (FaceId f : faceTool_.faces)
+                if (faceTool_.before.hasFace(f))
+                    normal += normalize(transformVector(nm, faceTool_.before.faceNormal(f)));
+        }
+        if (lengthSq(normal) > 1e-12) normal = normalize(normal);
+        auto axisWorks = [&](int axis) {
+            if (lengthSq(normal) < 1e-12) return true;
+            Vec3 a{};
+            (&a.x)[axis] = 1.0;
+            const Real d = std::fabs(dot(a, normal));
+            return rotate ? d < 0.999 : d > 0.02;
+        };
+        ui::Choice kAlong[4] = {
             {Glyph::Count, "Normal", nullptr, "Straight out of the face"},
             {Glyph::Count, "X", "X", "Along the world X axis"},
             {Glyph::Count, "Y", "Y", "Along the world Y axis"},
             {Glyph::Count, "Z", "Z", "Along the world Z axis"},
         };
-        static const ui::Choice kPivot[4] = {
+        ui::Choice kPivot[4] = {
             {Glyph::Count, "Edge", nullptr, "About the edge nearest the pointer"},
             {Glyph::Count, "X", "X", "About the world X axis"},
             {Glyph::Count, "Y", "Y", "About the world Y axis"},
             {Glyph::Count, "Z", "Z", "About the world Z axis"},
         };
+        for (int axis = 0; axis < 3; ++axis) {
+            const bool works = axisWorks(axis);
+            kAlong[axis + 1].enabled = works;
+            kPivot[axis + 1].enabled = works;
+            if (works) continue;
+            kAlong[axis + 1].tip = "That axis lies along the face: it would sweep nothing";
+            kPivot[axis + 1].tip = "That axis is square to the face: it would turn it in its own plane";
+        }
         const int pick = ui::commandChoices(rotate ? "Pivot" : "Along", rotate ? kPivot : kAlong, 4,
                                             faceTool_.lockedAxis + 1, /*compact=*/true);
         if (pick >= 0 && pick - 1 != faceTool_.lockedAxis) setFaceAxis(pick - 1);
@@ -298,9 +324,11 @@ void Application::drawFacePanel() {
                                "%s", cutting ? "takes material away" : "adds material");
     }
 
-    // Only when it has actually run into something. Until the material meets
-    // another body there is no decision to make.
-    if (!rotate && !extrude && faceTool_.meets != kNoObject) {
+    // Only when it has actually run into something, and only for a push or
+    // pull: that is the one this choice is acted on for. A scale that runs
+    // into another body leaves it alone, and offering to join or cut there
+    // would be offering something that does not happen.
+    if (faceTool_.op == FaceOp::Move && faceTool_.meets != kNoObject) {
         const SceneObject* other = scene_.find(faceTool_.meets);
         char meets[96];
         std::snprintf(meets, sizeof meets, "Meets %s", other ? other->name.c_str() : "another body");
@@ -612,6 +640,196 @@ void Application::drawPatternPanel() {
     }
     if (footer > 0)      commitPattern();
     else if (footer < 0) abortPattern();
+}
+
+// Inset, and Shell. Neither has a gesture behind it: the operation is one
+// number, made as soon as it is asked for and adjusted here until Done. That
+// is the difference between choosing a wall thickness and guessing one.
+void Application::drawInsetPanel() {
+    if (!settledIs(Settled::Inset)) return;
+    const double was = insetTool_.amount;
+
+    if (!ui::beginCommand("##inset", "Inset Face", Glyph::Inset,
+                          objectName(scene_, insetTool_.objectId)))
+        return;
+
+    // How far in it can go: an inset runs in from every edge of the face, so
+    // half the face's smallest side is the most that leaves anything.
+    double most = 10.0;
+    if (const SceneObject* o = scene_.find(insetTool_.objectId)) {
+        const AABB b = o->localBounds;
+        if (b.valid()) most = std::max(0.1, std::min({b.size().x, b.size().y, b.size().z}) * 0.5);
+    }
+    const ui::NumberEdit v = ui::commandNumber("Distance", insetTool_.amount, "mm",
+                                               !insetTool_.typedValue.empty(),
+                                               !insetTool_.typedValue.empty(),
+                                               insetTool_.typedValue.c_str(), 0.05,
+                                               std::max(most, insetTool_.amount));
+    applyBar(v, /*active=*/false, insetTool_.typedValue,
+             [&](double x) { insetTool_.amount = std::max(x, 0.01); }, [] {});
+
+    char sel[64];
+    std::snprintf(sel, sizeof sel, "%zu face%s", insetTool_.faces.size(),
+                  insetTool_.faces.size() == 1 ? "" : "s");
+    ui::commandValue("Selection", sel);
+
+    ui::commandApplied("Inset");
+    ui::commandHint("A ring inside the face, the same distance in from every edge of it. "
+                    "What is left inside is a face of its own, to push or pull.");
+
+    const int footer = ui::commandFooter("Done", true, nullptr);
+    ui::endCommand();
+    if (footer > 0)                            dismissSettled();
+    else if (insetTool_.amount != was)         recommitSettled();
+}
+
+void Application::drawShellPanel() {
+    if (!settledIs(Settled::Shell)) return;
+    const double was = shellTool_.amount;
+
+    if (!ui::beginCommand("##shell", "Shell", Glyph::Shell,
+                          objectName(scene_, shellTool_.objectId)))
+        return;
+
+    // A wall cannot be thicker than half the thinnest way through the body.
+    double most = 20.0;
+    if (const SceneObject* o = scene_.find(shellTool_.objectId)) {
+        const AABB b = o->localBounds;
+        if (b.valid()) most = std::max(0.1, std::min({b.size().x, b.size().y, b.size().z}) * 0.5);
+    }
+    const ui::NumberEdit v = ui::commandNumber("Wall", shellTool_.amount, "mm",
+                                               !shellTool_.typedValue.empty(),
+                                               !shellTool_.typedValue.empty(),
+                                               shellTool_.typedValue.c_str(), 0.05,
+                                               std::max(most, shellTool_.amount));
+    applyBar(v, /*active=*/false, shellTool_.typedValue,
+             [&](double x) { shellTool_.amount = std::max(x, 0.01); }, [] {});
+
+    // What it opens. Chosen before it started, so this says what was taken
+    // rather than offering a choice that is no longer there to make.
+    ui::commandRow("Open");
+    ImGui::AlignTextToFramePadding();
+    if (shellTool_.faces.empty())
+        ImGui::TextColored(ui::im(palette::kTextDim), "nothing: a sealed cavity");
+    else
+        ImGui::Text("%zu face%s", shellTool_.faces.size(), shellTool_.faces.size() == 1 ? "" : "s");
+
+    // What it comes to at the nozzle, which is the reason the number matters
+    // on a printed part: a wall is a whole number of lines or it is not the
+    // wall you asked for.
+    {
+        const PrintProfile profile;
+        char walls[64];
+        std::snprintf(walls, sizeof walls, "%.1f lines of %.2f mm",
+                      shellTool_.amount / profile.nozzleMm, static_cast<double>(profile.nozzleMm));
+        ui::commandValue("Prints as", walls);
+        if (shellTool_.amount < profile.minWallMm) {
+            ui::commandRow("");
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextColored(ui::im(palette::kBrand), "thinner than %.2f mm prints badly",
+                               static_cast<double>(profile.minWallMm));
+        }
+    }
+
+    ui::commandApplied("Shell");
+    ui::commandHint(shellTool_.faces.empty()
+                        ? "Hollowed out and closed. Select a face before shelling to leave it open."
+                        : "Hollowed out, with the faces that were selected left open.");
+
+    const int footer = ui::commandFooter("Done", true, nullptr);
+    ui::endCommand();
+    if (footer > 0)                     dismissSettled();
+    else if (shellTool_.amount != was)  recommitSettled();
+}
+
+// Split: what the cut is made with, and where it sits. Every answer it used to
+// pick for itself is a choice here, and the ones this body cannot offer are
+// shown dimmed rather than left out.
+void Application::drawSplitPanel() {
+    if (!settledIs(Settled::Split)) return;
+    const auto was = std::make_pair(static_cast<int>(splitTool_.by), splitTool_.offset);
+
+    if (!ui::beginCommand("##split", "Split Body", Glyph::Split,
+                          objectName(scene_, splitTool_.objectId)))
+        return;
+
+    using By = SplitToolState::By;
+    ui::Choice kBy[6] = {
+        {Glyph::Count, "Face",   nullptr, "The plane of the selected face"},
+        {Glyph::Count, "Tool",   nullptr, "The plane of the other selected body"},
+        {Glyph::Count, "X",      nullptr, "A plane square to X"},
+        {Glyph::Count, "Y",      nullptr, "A plane square to Y"},
+        {Glyph::Count, "Z",      nullptr, "A plane square to Z"},
+        {Glyph::Count, "Pieces", nullptr, "Take the loose pieces apart, cutting nothing"},
+    };
+    kBy[0].enabled = splitTool_.face != kInvalid;
+    kBy[1].enabled = splitTool_.toolObject != kNoObject;
+    kBy[5].enabled = splitTool_.canPieces;
+    if (!kBy[0].enabled) kBy[0].tip = "No face is selected on this body";
+    if (!kBy[1].enabled) kBy[1].tip = "Select a second body to cut with its plane";
+    if (!kBy[5].enabled) kBy[5].tip = "This body is all one piece";
+
+    const int on = static_cast<int>(splitTool_.by);
+    const int pick = ui::commandChoices("Cut by", kBy, 6, on, /*compact=*/true);
+    if (pick >= 0 && pick != on) {
+        splitTool_.by = static_cast<By>(pick);
+        // A plane square to an axis starts through the middle of the body;
+        // one taken from a face or a tool starts on it.
+        const SceneObject* o = scene_.find(splitTool_.objectId);
+        const AABB b = o ? splitTool_.before.bounds() : AABB{};
+        if (splitTool_.by == By::X || splitTool_.by == By::Y || splitTool_.by == By::Z) {
+            const int axis = static_cast<int>(splitTool_.by) - 2;
+            const Vec3 centre = b.valid() ? b.center() : Vec3{};
+            splitTool_.offset = centre[axis];
+        } else {
+            splitTool_.offset = 0.0;
+        }
+        splitTool_.typedValue.clear();
+    }
+
+    // Where the plane sits: a coordinate for an axis plane, and how far off
+    // the face or the tool for those.
+    if (splitTool_.by != By::Pieces) {
+        const AABB b = splitTool_.before.bounds();
+        double lo = -50.0, hi = 50.0;
+        if (b.valid()) {
+            const int axis = splitTool_.by == By::X ? 0 : splitTool_.by == By::Y ? 1 : 2;
+            if (splitTool_.by == By::X || splitTool_.by == By::Y || splitTool_.by == By::Z) {
+                lo = (&b.min.x)[axis];
+                hi = (&b.max.x)[axis];
+            } else {
+                const Real reach = length(b.size());
+                lo = -reach;
+                hi = reach;
+            }
+        }
+        const bool onAxis = splitTool_.by == By::X || splitTool_.by == By::Y || splitTool_.by == By::Z;
+        const ui::NumberEdit v = ui::commandNumber(onAxis ? "Plane at" : "Offset", splitTool_.offset,
+                                                   "mm", !splitTool_.typedValue.empty(),
+                                                   !splitTool_.typedValue.empty(),
+                                                   splitTool_.typedValue.c_str(),
+                                                   std::min(lo, splitTool_.offset),
+                                                   std::max(hi, splitTool_.offset),
+                                                   /*signedRange=*/true);
+        applyBar(v, /*active=*/false, splitTool_.typedValue,
+                 [&](double x) { splitTool_.offset = x; }, [] {});
+    }
+
+    char result[64];
+    std::snprintf(result, sizeof result, "%d bodies", splitTool_.pieces);
+    ui::commandValue("Result", splitTool_.pieces >= 2 ? result : "nothing cut");
+
+    ui::commandApplied("Split");
+    ui::commandHint(splitTool_.by == By::Pieces
+                        ? "The body was already in separate pieces; each is its own body now."
+                        : "The pieces keep the geometry, not the steps that made it: a split is "
+                          "where a history ends.");
+
+    const int footer = ui::commandFooter("Done", true, nullptr);
+    ui::endCommand();
+    if (footer > 0) dismissSettled();
+    else if (was != std::make_pair(static_cast<int>(splitTool_.by), splitTool_.offset))
+        recommitSettled();
 }
 
 void Application::drawDividePanel() {

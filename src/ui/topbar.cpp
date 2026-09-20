@@ -124,15 +124,8 @@ void modifyMenu(UiContext& ctx) {
     menuNote("keeps its outline; Shift+E starts it as a cut");
     if (menuEntry(Glyph::RotateFace, "Rotate Face", "R", selFaces > 0)) ctx.actions.rotateFace = true;
     if (menuEntry(Glyph::ScaleFace, "Scale Face", "S", selFaces > 0)) ctx.actions.scaleFace = true;
-    if (menuEntry(Glyph::Inset, "Inset Face", nullptr, selFaces > 0)) ctx.actions.inset = true;
-    {
-        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 34.0f);
-        ImGui::SetNextItemWidth(120.0f);
-        ImGui::DragScalarN("##inset", ImGuiDataType_Double, &ctx.view->insetAmount, 1, 0.05f,
-                           nullptr, nullptr, "%.2f mm");
-        ImGui::SameLine();
-        ImGui::TextColored(im(palette::kTextFaint), "in from its edge");
-    }
+    if (menuEntry(Glyph::Inset, "Inset Face...", nullptr, selFaces > 0)) ctx.actions.inset = true;
+    menuNote("a ring in from its edges; the distance is set in the dialog");
 
     menuHeader("Edges");
     if (menuEntry(Glyph::Fillet, "Fillet / Chamfer", "F", selEdges > 0 || selFaces > 0)) ctx.actions.fillet = true;
@@ -144,20 +137,13 @@ void modifyMenu(UiContext& ctx) {
     menuNote("drops every division that does not define the shape");
 
     menuHeader("Whole body");
-    if (menuEntry(Glyph::Shell, "Shell", nullptr, hasObject)) ctx.actions.shell = true;
-    {
-        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 34.0f);
-        ImGui::SetNextItemWidth(120.0f);
-        ImGui::DragScalarN("##wall", ImGuiDataType_Double, &ctx.view->shellThickness, 1, 0.05f,
-                           nullptr, nullptr, "%.2f mm");
-        ImGui::SameLine();
-        ImGui::TextColored(im(palette::kTextFaint),
-                           selFaces > 0 ? "wall; selected faces left open" : "wall; sealed, no face open");
-    }
+    if (menuEntry(Glyph::Shell, "Shell...", nullptr, hasObject)) ctx.actions.shell = true;
+    menuNote(selFaces > 0 ? "hollowed out, the selected faces left open"
+                          : "hollowed out and sealed; select a face first to leave it open");
     if (menuEntry(Glyph::Pattern, "Pattern...", "P", hasObject)) ctx.actions.pattern = true;
     if (menuEntry(Glyph::Mirror,  "Mirror...",  "M", hasObject)) ctx.actions.mirror = true;
-    if (menuEntry(Glyph::Split,   "Split Body", nullptr, hasObject)) ctx.actions.split = true;
-    menuNote("by a face's plane, a tool plane, or into its shells");
+    if (menuEntry(Glyph::Split,   "Split Body...", nullptr, hasObject)) ctx.actions.split = true;
+    menuNote("by a face, another body's plane, or an axis; or into its loose pieces");
 
     // Each opens the Combine dialog with that operation chosen: a target and
     // any number of tools, picked there or from what is selected.

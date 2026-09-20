@@ -55,6 +55,68 @@ int main() {
         std::printf("[features] base chain ok\n");
     }
 
+    // ---- A face pulled along an axis goes that way, not its own way --------
+    if (exact) {
+        // The panel offers X / Y / Z for a push or a pull, for the case the
+        // option is there for: a slanted face pulled straight up rather than
+        // out the way it faces. The feature has to carry it -- it used to be
+        // stored and then ignored, so what was built was not what was shown.
+        Scene s;
+        const ObjectId id = s.addPrimitive(PrimitiveKind::Box);   // 20 cube
+        SceneObject* o = s.find(id);
+
+        // Tip the top face over, so its own way and straight up differ.
+        Feature tip;
+        tip.kind = FeatureKind::FaceRotate;
+        tip.faces = nameFaces(o->body, {faceFacing(o->body, {0, 0, 1})});
+        tip.angle = radians(20.0);
+        tip.axisPoint = Vec3{0, -10, 10};
+        tip.axisDir = Vec3{1, 0, 0};
+        check(s.addFeature(id, tip), "the top tipped over 20 degrees");
+        const Real tipped = volumeOf(o->body);
+
+        Feature f;
+        f.kind = FeatureKind::Extrude;
+        f.faces = nameFaces(o->body, {faceFacing(o->body, {0, 0, 1})});
+        f.distance = 10.0f;
+        f.mergeFlush = true;
+        f.alongAxis = true;
+        f.axisDir = Vec3{0, 0, 1};
+        check(s.addFeature(id, f), "the slanted face pulled straight up");
+
+        // A face swept along a direction adds its area times how far it goes
+        // that way: here 20 x 20 of footprint, 10 up, whatever the slant.
+        check(near(static_cast<float>(volumeOf(o->body) - tipped), 4000.0f, 1.0f),
+              "4000 mm3 more, got " + std::to_string(volumeOf(o->body) - tipped));
+
+        // The same feature without the flag goes the way the face faces, which
+        // is what every file written before version 16 means.
+        Scene s2;
+        const ObjectId id2 = s2.addPrimitive(PrimitiveKind::Box);
+        SceneObject* o2 = s2.find(id2);
+        Feature g;
+        g.kind = FeatureKind::Extrude;
+        g.faces = nameFaces(o2->body, {faceFacing(o2->body, {0, 0, 1})});
+        g.distance = 10.0f;
+        g.mergeFlush = true;
+        g.axisDir = Vec3{1, 0, 0};     // set, but not asked for
+        check(s2.addFeature(id2, g), "the same pull without the flag");
+        check(near(static_cast<float>(o2->body.bounds().max.z), 20.0f, 1e-3f),
+              "went straight up, as it always did");
+
+        // And an axis lying in the face's own plane sweeps nothing: it is
+        // refused rather than quietly going some other way.
+        Feature h;
+        h.kind = FeatureKind::Extrude;
+        h.faces = nameFaces(o2->body, {faceFacing(o2->body, {0, 0, 1})});
+        h.distance = 10.0f;
+        h.mergeFlush = true;
+        h.alongAxis = true;
+        h.axisDir = Vec3{1, 0, 0};     // along the top face, not out of it
+        check(!s2.addFeature(id2, h), "sideways along the face itself is refused");
+        std::printf("[features] pulled along an axis ok\n");
+    }
+
     // ---- Editing the base re-applies everything after it -------------------
     if (exact) {
         Scene s;

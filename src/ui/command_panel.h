@@ -77,6 +77,10 @@ struct Choice {
     const char* label;
     const char* key;      // "D", or null
     const char* tip;
+    // A choice that would do nothing here is shown, dimmed, and cannot be
+    // picked: which of them those are is part of what the panel says, and
+    // leaving one out instead would move the others about as things change.
+    bool        enabled = true;
 };
 int commandChoices(const char* label, const Choice* choices, int count, int active,
                    bool compact = false);

@@ -161,6 +161,14 @@ struct Feature {
     Vec3 axisPoint{0, 0, 0};
     Vec3 axisDir{0, 0, 1};
 
+    // Extrude and Push / Pull: whether `axisDir` is the way it goes, in the
+    // body's own space, rather than the face's own normal. A face pulled along
+    // a world axis is a thing people ask for -- a boss that stands up straight
+    // off a slanted face -- and the panel offers it. Off by default, and in a
+    // file written before version 16 it is off, so an extrusion made then goes
+    // the way it always went.
+    bool alongAxis = false;
+
     // Shell: the wall left behind, measured inward. `faces` holds the faces to
     // open, and may be empty -- that is a sealed cavity, which is a thing
     // someone may want and a thing a printer will want a drain hole in.

@@ -102,6 +102,10 @@ int main(int argc, char** argv) {
             app.setShellFilletDemo(true);
         } else if (std::strcmp(argv[i], "--shell-extrude-demo") == 0 && i + 1 < argc) {
             app.setShellExtrudeDemo(static_cast<float>(std::atof(argv[++i])));
+        } else if (std::strcmp(argv[i], "--split-demo") == 0 && i + 1 < argc) {
+            app.setSplitDemo(std::atoi(argv[++i]));
+        } else if (std::strcmp(argv[i], "--inset-demo") == 0 && i + 1 < argc) {
+            app.setInsetDemo(static_cast<float>(std::atof(argv[++i])));
         } else if (std::strcmp(argv[i], "--shell-demo") == 0 && i + 1 < argc) {
             app.setShellDemo(static_cast<float>(std::atof(argv[++i])));
         } else if (std::strcmp(argv[i], "--measure-demo") == 0) {

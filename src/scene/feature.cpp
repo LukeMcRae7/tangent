@@ -36,6 +36,19 @@ const char* featureKindName(FeatureKind k) {
     return "Feature";
 }
 
+namespace {
+// " along X" when a face was pulled along an axis rather than its own normal,
+// and nothing at all when it went the way the face faces.
+const char* axisWord(const Feature& f) {
+    if (!f.alongAxis) return "";
+    const Vec3 d = f.axisDir;
+    if (std::fabs(d.x) > 0.9) return " along X";
+    if (std::fabs(d.y) > 0.9) return " along Y";
+    if (std::fabs(d.z) > 0.9) return " along Z";
+    return " along an axis";
+}
+} // namespace
+
 PatternSpec Feature::pattern() const {
     PatternSpec s;
     s.mode = patternMode;
@@ -117,14 +130,16 @@ std::string Feature::summary() const {
             // extrude names its operation, a step from before "Auto" was
             // dropped the one its direction made it.
             if (mergeFlush) {
-                std::snprintf(buf, sizeof(buf), "Push / Pull  %.2f mm  (%s)",
-                              static_cast<double>(distance), faces.describe("face").c_str());
+                std::snprintf(buf, sizeof(buf), "Push / Pull  %.2f mm%s  (%s)",
+                              static_cast<double>(distance), axisWord(*this),
+                              faces.describe("face").c_str());
             } else {
                 const ExtrudeOp shown = extrudeOp == ExtrudeOp::Auto
                                             ? (distance < 0.0 ? ExtrudeOp::Cut : ExtrudeOp::Join)
                                             : extrudeOp;
-                std::snprintf(buf, sizeof(buf), "Extrude %s  %.2f mm  (%s)", extrudeOpName(shown),
-                              static_cast<double>(distance), faces.describe("face").c_str());
+                std::snprintf(buf, sizeof(buf), "Extrude %s  %.2f mm%s  (%s)", extrudeOpName(shown),
+                              static_cast<double>(distance), axisWord(*this),
+                              faces.describe("face").c_str());
             }
             break;
         case FeatureKind::Inset:
@@ -416,7 +431,7 @@ bool evaluateFrom(std::vector<Feature>& features, size_t from,
             else {
                 std::string why;
                 if (!extrudeFaces(body, scratchFaces, f.distance, nullptr, f.uid, f.extrudeOp,
-                                  &why, f.mergeFlush))
+                                  &why, f.mergeFlush, f.alongAxis ? f.axisDir : Vec3{}))
                     fail(why.empty() ? "extrude failed" : why.c_str());
             }
             break;

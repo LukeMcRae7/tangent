@@ -221,7 +221,8 @@ int commandChoices(const char* label, const Choice* choices, int count, int acti
         for (int i = 0; i < count; ++i) {
             if (i) ImGui::SameLine(0.0f, 4.0f);
             ImGui::PushID(i);
-            if (pillButton(choices[i].label, i == active)) clicked = i;
+            if (pillButton(choices[i].label, i == active, ImVec2(0, 0), choices[i].enabled))
+                clicked = i;
             hoverTip(choices[i].tip);
             ImGui::PopID();
         }
@@ -245,16 +246,19 @@ int commandChoices(const char* label, const Choice* choices, int count, int acti
     for (int i = 0; i < count; ++i) {
         if (i) ImGui::SameLine(0.0f, gap);
         ImGui::PushID(i);
+        const bool live = choices[i].enabled;
         const ImVec2 at = ImGui::GetCursorScreenPos();
-        const bool pressed = ImGui::InvisibleButton("##tile", ImVec2(each, tileH));
+        const bool pressed = ImGui::InvisibleButton("##tile", ImVec2(each, tileH)) && live;
         const bool hovered = ImGui::IsItemHovered();
         const bool on = i == active;
         if (pressed) clicked = i;
 
         const ImVec2 hi(at.x + each, at.y + tileH);
         dl->AddRectFilled(at, hi, on ? u32(palette::kBrand)
-                                     : hovered ? u32(palette::kHover) : u32(palette::kRaised), 7.0f);
-        const ImU32 fg = on ? IM_COL32(255, 255, 255, 255) : u32(palette::kText);
+                                     : hovered && live ? u32(palette::kHover) : u32(palette::kRaised), 7.0f);
+        const ImU32 fg = on      ? IM_COL32(255, 255, 255, 255)
+                       : live    ? u32(palette::kText)
+                                 : u32(palette::kTextFaint);
         drawGlyph(dl, choices[i].glyph, ImVec2(at.x + each * 0.5f, at.y + 22.0f), 24.0f, fg);
 
         pushFont(FontWeight::Medium, uiFonts().size * 0.92f);
@@ -270,7 +274,9 @@ int commandChoices(const char* label, const Choice* choices, int count, int acti
         dl->AddText(ImVec2(x0, y0), fg, choices[i].label);
         if (keyW > 0.0f)
             dl->AddText(ImVec2(x0 + ls.x + 7.0f, y0),
-                        on ? IM_COL32(255, 255, 255, 190) : u32(palette::kTextDim), choices[i].key);
+                        on ? IM_COL32(255, 255, 255, 190)
+                           : live ? u32(palette::kTextDim) : u32(palette::kTextFaint),
+                        choices[i].key);
         ImGui::PopFont();
         hoverTip(choices[i].tip);
         ImGui::PopID();
