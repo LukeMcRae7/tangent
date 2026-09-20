@@ -71,18 +71,18 @@ void fileMenu(UiContext& ctx) {
     if (menuEntry(Glyph::Save, "Save As...", nullptr))  ctx.actions.saveProjectAs = true;
     menuGap();
     if (menuEntry(Glyph::Import, "Import STEP...")) ctx.actions.importStep = true;
-    menuNote("the surfaces themselves, not a mesh of them");
+    menuNote("Reads a STEP file as exact surfaces, not as a mesh of them, so its faces can be filleted and bored.");
     if (menuEntry(Glyph::Mesh, "Import Mesh...")) ctx.actions.importMesh = true;
-    menuNote(".stl or .obj, as triangles");
+    menuNote("Reads an .stl or .obj as triangles. A mesh can be moved, measured and exported; Convert to Solid makes it editable.");
     if (menuEntry(Glyph::Sketch, "Import SVG...")) ctx.actions.importSvg = true;
-    menuNote("outlines, into a sketch on a plane or a face");
+    menuNote("Puts an SVG's outlines into a sketch, on a plane or on a face, at the size the file says.");
     menuGap();
     if (menuEntry(Glyph::Export, "Export STEP...")) ctx.actions.exportStep = true;
-    menuNote("exact; what another CAD package wants");
+    menuNote("Exact surfaces: what another CAD package wants.");
     if (menuEntry(Glyph::Export, "Export 3MF...", "Ctrl+Shift+E")) ctx.actions.export3mf = true;
-    menuNote("for a slicer: millimetres, each part named");
+    menuNote("For a slicer: millimetres, each part kept separate and named, every mesh closed.");
     if (menuEntry(Glyph::Export, "Export STL...", "Ctrl+E")) ctx.actions.exportStl = true;
-    menuNote("loose triangles; what every slicer reads");
+    menuNote("Loose triangles: what every slicer reads. One file, or one per part.");
     menuGap();
     if (menuEntry(Glyph::Undo, "Undo", "Ctrl+Z", ctx.canUndo)) ctx.actions.undo = true;
     if (menuEntry(Glyph::Redo, "Redo", "Ctrl+Shift+Z", ctx.canRedo)) ctx.actions.redo = true;
@@ -114,40 +114,50 @@ void modifyMenu(UiContext& ctx) {
 
     menuHeader("Body");
     if (menuEntry(Glyph::Move,   "Move",   "G", hasSel)) ctx.actions.moveObject = true;
+    menuNote("Moves the whole body; with a face selected it pushes that face instead.");
     if (menuEntry(Glyph::Rotate, "Rotate", "R", hasSel)) ctx.actions.rotateObject = true;
+    menuNote("Turns the whole body; with a face selected it tips that face instead.");
     if (menuEntry(Glyph::Scale,  "Scale",  "S", hasSel)) ctx.actions.scaleObject = true;
-    menuNote("with a face selected these move the face instead");
+    menuNote("Stretches the whole body; with a face selected it grows that face instead.");
 
     menuHeader("Face");
     if (menuEntry(Glyph::PushPull, "Push / Pull Face", "G", selFaces > 0)) ctx.actions.pushPull = true;
+    menuNote("Moves the face and lets the body around it stretch to follow.");
     if (menuEntry(Glyph::Extrude, "Extrude Face", "E", selFaces > 0)) ctx.actions.extrude = true;
-    menuNote("keeps its outline; Shift+E starts it as a cut");
+    menuNote("Raises a boss that keeps its own outline, so it can be pointed at afterwards. Shift+E starts it as a cut.");
     if (menuEntry(Glyph::RotateFace, "Rotate Face", "R", selFaces > 0)) ctx.actions.rotateFace = true;
+    menuNote("Tips the face about one of its own edges; the faces around it follow.");
     if (menuEntry(Glyph::ScaleFace, "Scale Face", "S", selFaces > 0)) ctx.actions.scaleFace = true;
+    menuNote("Grows or shrinks the face in its own plane, keeping it where it stands.");
     if (menuEntry(Glyph::Inset, "Inset Face...", nullptr, selFaces > 0)) ctx.actions.inset = true;
-    menuNote("a ring in from its edges; the distance is set in the dialog");
+    menuNote("Cuts a ring inside the face, the same distance in from every edge. What is left inside is a face of its own.");
     if (menuEntry(Glyph::Hole, "Hole...", "H", hasObject)) ctx.actions.hole = true;
-    menuNote("point at the face it goes into; sized for a screw, not typed in millimetres");
+    menuNote("Point at the face it goes into and click. Chosen by the screw it takes, not typed in millimetres.");
     if (menuEntry(Glyph::Draft, "Draft...", nullptr, selFaces > 0)) ctx.actions.draft = true;
-    menuNote("leans the selected walls off the bed, so nothing prints over nothing");
+    menuNote("Leans the selected walls away from the way the part comes off the bed, so nothing prints out over nothing.");
 
     menuHeader("Edges");
     if (menuEntry(Glyph::Fillet, "Fillet / Chamfer", "F", selEdges > 0 || selFaces > 0)) ctx.actions.fillet = true;
-    menuNote(selEdges > 0 ? "the selected edges" : selFaces > 0 ? "the edges around the selected faces"
-                                                                 : "select an edge or a face first");
+    menuNote(selEdges > 0   ? "Rounds or cuts the selected edges. The panel finds the largest radius that builds."
+             : selFaces > 0 ? "Rounds every edge around the selected faces."
+                            : "Select an edge or a face first.");
     if (menuEntry(Glyph::Fillet, "Round All Edges", "Ctrl+B", hasObject)) ctx.actions.bevel = true;
+    menuNote("Opens the fillet with every edge of the body picked.");
     if (menuEntry(Glyph::Divide, "Divide Across an Edge", "K", selEdges > 0)) ctx.actions.divide = true;
+    menuNote("Cuts a line across the body without cutting it in two, making a face that can be moved.");
     if (menuEntry(Glyph::Merge, "Merge Faces", nullptr, hasObject)) ctx.actions.mergeFaces = true;
-    menuNote("drops every division that does not define the shape");
+    menuNote("Drops every division that does not define the shape, leaving one face where there were several.");
 
     menuHeader("Whole body");
     if (menuEntry(Glyph::Shell, "Shell...", nullptr, hasObject)) ctx.actions.shell = true;
-    menuNote(selFaces > 0 ? "hollowed out, the selected faces left open"
-                          : "hollowed out and sealed; select a face first to leave it open");
+    menuNote(selFaces > 0 ? "Hollows the body out, leaving the selected faces open."
+                          : "Hollows the body out and seals it. Select a face first to leave that side open.");
     if (menuEntry(Glyph::Pattern, "Pattern...", "P", hasObject)) ctx.actions.pattern = true;
+    menuNote("Repeats the body, or the last thing cut into it, in a row or around an axis.");
     if (menuEntry(Glyph::Mirror,  "Mirror...",  "M", hasObject)) ctx.actions.mirror = true;
+    menuNote("Reflects it across a plane through the body.");
     if (menuEntry(Glyph::Split,   "Split Body...", nullptr, hasObject)) ctx.actions.split = true;
-    menuNote("by a face, another body's plane, or an axis; or into its loose pieces");
+    menuNote("Cuts the body in two on a face, another body's plane or an axis -- or takes its loose pieces apart.");
 
     // Each opens the Combine dialog with that operation chosen: a target and
     // any number of tools, picked there or from what is selected.
@@ -155,32 +165,35 @@ void modifyMenu(UiContext& ctx) {
     if (menuEntry(Glyph::Union, "Join...", "Ctrl+Shift+U")) {
         ctx.actions.booleanRequested = true; ctx.actions.booleanOp = BooleanOp::Union;
     }
+    menuNote("Makes one body of them all.");
     if (menuEntry(Glyph::Difference, "Cut...", "Ctrl+Shift+D")) {
         ctx.actions.booleanRequested = true; ctx.actions.booleanOp = BooleanOp::Difference;
     }
+    menuNote("Takes the tools away from the target.");
     if (menuEntry(Glyph::Intersect, "Intersect...", "Ctrl+Shift+I")) {
         ctx.actions.booleanRequested = true; ctx.actions.booleanOp = BooleanOp::Intersection;
     }
-    menuNote(hasSel ? "the first selected is the target, the rest are tools"
-                    : "then click the target and the tools");
+    menuNote(hasSel ? "Keeps only what they share. The first body selected is the target; the rest are tools."
+                    : "Keeps only what they share. Click the target, then the tools.");
 
     const SceneObject* o = scene.find(ctxObj);
     const bool isMesh = o && !o->body.empty() && o->body.isMesh();
     menuHeader("Mesh");
     if (menuEntry(Glyph::Reduce, "Reduce Mesh...", nullptr, isMesh)) ctx.actions.reduceMesh = true;
+    menuNote("Fewer triangles, within a tolerance you set, so a scan can be converted and worked on.");
     if (menuEntry(Glyph::Convert, "Convert to Solid", nullptr, isMesh)) ctx.actions.convertToSolid = true;
-    menuNote(isMesh ? "sews the triangles and merges the flat ones"
-             : o    ? "this body is already exact"
-                    : "for an imported mesh");
+    menuNote(isMesh ? "Sews the triangles into surfaces and merges the flat ones, so the body can be edited."
+             : o    ? "This body is already exact."
+                    : "For an imported mesh.");
 }
 
 void inspectMenu(UiContext& ctx) {
     using namespace ui;
     if (menuEntry(Glyph::Measure, "Measure", "D", true, ctx.measuring)) ctx.actions.toggleMeasure = true;
-    menuNote("one thing for its size, two for the distance between");
+    menuNote("Click one thing for its own size, two for the distance between them.");
     menuGap();
     menuToggle(Glyph::Alert, "Print Problems", &ctx.view->showPrintIssues);
-    menuNote("red: thinner than the nozzle can lay");
+    menuNote("Draws the walls thinner than the nozzle can lay in red, on the part itself.");
     menuToggle(Glyph::Grid, "Grid", &ctx.view->showGrid);
     menuToggle(Glyph::Wire, "Wireframe", &ctx.view->showWireframe, "Z");
     menuToggle(Glyph::Bounds, "Selection Box", &ctx.view->showSelectionBox);
@@ -197,7 +210,7 @@ void inspectMenu(UiContext& ctx) {
     char timing[64];
     std::snprintf(timing, sizeof timing, "%.1f fps   %.2f ms",
                   ctx.stats.frameMs > 0.0f ? 1000.0f / ctx.stats.frameMs : 0.0f, ctx.stats.frameMs);
-    menuNote(timing);
+    menuStat(timing);
 }
 
 // The caption under a group, which is also the handle of its menu.

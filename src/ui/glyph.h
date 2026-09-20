@@ -31,7 +31,7 @@ enum class Glyph {
     Measure, Alert, Check, Eye, EyeOff, Grid, Wire, Backface, Bounds,
     FrameSelected, FrameAll, Orthographic, Orbit,
     // Chrome
-    ChevronDown, ChevronRight, ChevronUp, Close, Minimize, Maximize, Restore,
+    ChevronDown, ChevronRight, ChevronUp, Close, Minimize, Maximize, Restore, Help,
     Undo, Redo, Plus, Duplicate, SelectAll, Dot, Clock, Lock, Trash,
     // Outliner
     Body, Mesh,

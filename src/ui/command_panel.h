@@ -85,16 +85,19 @@ struct Choice {
 int commandChoices(const char* label, const Choice* choices, int count, int active,
                    bool compact = false);
 
-// One dim line of guidance, at the foot of the rows.
+// What the operation would say if asked: what it does, what the keys are, what
+// it is for. It is not drawn in the panel -- it goes behind the ? in the
+// panel's top right corner and comes out on hover. Several calls stack up into
+// one tooltip, in the order they were made.
 void commandHint(const char* text);
 
 // Says the operation has already been applied and the panel is now adjusting
-// it rather than building it.
+// it rather than building it. Two words; the rest goes behind the ?.
 void commandApplied(const char* what);
 
-// The other answer: it was asked for and the kernel would not. Said here, in
-// the panel that asked, so the number can be changed rather than the whole
-// operation started again.
+// The other answer: it was asked for and the kernel would not. The reason is
+// said in the panel that asked -- it is the one thing the user has to read --
+// and what to do about it goes behind the ?.
 void commandRefused(const char* why);
 
 // The commit and the cancel. Returns 1 for commit, -1 for cancel, 0 for

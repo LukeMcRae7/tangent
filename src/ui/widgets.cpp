@@ -318,6 +318,24 @@ bool menuToggle(Glyph g, const char* label, bool* value, const char* shortcut) {
 }
 
 void menuNote(const char* text) {
+    // What the entry above does, for whoever has not met it -- on hover, not
+    // under it. A menu of twenty commands each with a grey line beneath it is
+    // twice as tall as it needs to be and reads as a wall.
+    //
+    // Not hoverTip: that one steps aside while a popup is open, which is
+    // exactly when a menu entry is being pointed at.
+    if (!text || !*text) return;
+    if (!ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) return;
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12.0f, 10.0f));
+    ImGui::BeginTooltip();
+    ImGui::PushTextWrapPos(ImGui::GetFontSize() * 20.0f);
+    ImGui::TextUnformatted(text);
+    ImGui::PopTextWrapPos();
+    ImGui::EndTooltip();
+    ImGui::PopStyleVar();
+}
+
+void menuStat(const char* text) {
     pushFont(FontWeight::Regular, uiFonts().size * 0.86f);
     ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 34.0f);
     ImGui::TextColored(im(palette::kTextFaint), "%s", text);

@@ -773,6 +773,9 @@ void drawOutliner(UiContext& ctx) {
         std::vector<SceneObject*> members;
         for (const auto& obj : scene.objects())
             if (kindOf(*obj) == s.kind) members.push_back(obj.get());
+        // A heading over nothing is a promise of something that is not there.
+        // The section appears when the first one of its kind does.
+        if (members.empty()) continue;
         if (!sectionHeader(s.name, members.size())) continue;
         for (SceneObject* obj : members) objectRow(ctx, scene, *obj, glyphFor(s.kind));
         ImGui::Dummy(ImVec2(0, 6));

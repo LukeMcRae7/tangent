@@ -52,7 +52,13 @@ void menuHeader(const char* text);
 bool menuEntry(Glyph g, const char* label, const char* shortcut = nullptr,
                bool enabled = true, bool selected = false);
 bool menuToggle(Glyph g, const char* label, bool* value, const char* shortcut = nullptr);
+// What the entry just submitted is for, shown on hover rather than under it.
+// Called straight after the menuEntry or menuToggle it belongs to.
 void menuNote(const char* text);
+
+// A line of text in a menu that is data rather than explanation -- the frame
+// rate, a count -- which stays on the page.
+void menuStat(const char* text);
 void menuGap();
 
 // ---- dialogs ------------------------------------------------------------

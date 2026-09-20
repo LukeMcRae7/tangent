@@ -163,6 +163,8 @@ void Application::drawFilletPanel() {
     ui::commandHint(filletTool_.chamfer
         ? "Pull along the arrow, drag the bar, or type a distance."
         : "Pull along the arrow, drag the bar, or type a radius.");
+    if (filletTool_.active)
+        ui::commandHint("R rounds, C cuts flat. Click in the viewport to confirm, Esc to cancel.");
 
     const int footer = settled ? ui::commandFooter("Done", true, nullptr)
                                : ui::commandFooter("Finish");
@@ -346,6 +348,12 @@ void Application::drawFacePanel() {
         if (pick == 2) { faceTool_.combineWithMeet = true; faceTool_.meetOp = BooleanOp::Difference; }
     }
 
+    if (faceTool_.active)
+        ui::commandHint(extrude
+            ? "Move to set it, or type a number. J joins, D cuts, I intersects, N makes a new "
+              "body. Click in the viewport to confirm, Esc to cancel."
+            : "Move to set it, or type a number. X / Y / Z work along an axis. Click in the "
+              "viewport to confirm, Esc to cancel.");
     ui::commandHint(scale
         ? "Pull out from the middle of the face to grow it, in to shrink it. The faces around it slant to follow."
         : rotate
@@ -664,6 +672,9 @@ void Application::drawPatternPanel() {
     }
 
     if (settled) ui::commandApplied(mirror ? "Mirror" : "Pattern");
+    if (patternTool_.active)
+        ui::commandHint("Move to set the spacing, or type it. Click in the viewport to confirm, "
+                        "Esc to cancel.");
     ui::commandHint(mirror
         ? (patternTool_.useTool
                ? "The last cut is reflected across the plane and made again."
@@ -1215,6 +1226,9 @@ void Application::drawDividePanel() {
     if (settled) ui::commandApplied("Divide");
     ui::commandHint("The cut runs square across the edge you chose and slides along it. "
                     "The body stays whole.");
+    if (divideTool_.active)
+        ui::commandHint("Move to slide it, or type a distance. Click in the viewport to "
+                        "confirm, Esc to cancel.");
 
     const int footer = settled ? ui::commandFooter("Done", true, nullptr)
                                : ui::commandFooter("Finish");
@@ -1317,6 +1331,7 @@ void Application::drawReducePanel() {
     ui::commandHint("Flat faces reduce to almost nothing; curved ones as far as the tolerance "
                     "allows. Edges, corners and holes stay within the tolerance, and the result "
                     "is measured before it is shown.");
+    ui::commandHint("Type a tolerance and press Enter; Esc cancels.");
 
     const int footer = ui::commandFooter(stale ? "Finish  (wait)" : "Finish", !stale);
     ui::endCommand();

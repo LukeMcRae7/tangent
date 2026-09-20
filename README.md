@@ -133,17 +133,23 @@ that crosses its axis is refused rather than turned through itself.
 
 One dark surface with the model lit in the middle of it. Along the top, the
 tools in four groups -- File, Create, Modify, Inspect -- each a row of pictures
-with its name under it; the name opens the group's full menu, with every
-command and its key. The outliner down the left lists bodies, sketches and
-meshes with an eye to hide each; the inspector down the right holds the
-selected thing's name, transform, shape and history, with its volume, vertex
-and face counts at the foot.
+with its name under it; the name opens the group's full menu, a list of
+commands and their keys, each explaining itself on hover. The outliner down the
+left lists the bodies, sketches and meshes there are, with an eye to hide each;
+the inspector down the right holds the selected thing's name, transform, shape
+and history, with its volume, vertex and face counts at the foot.
 
 A running operation gets a panel at the bottom of the viewport: its name,
 one bar per number (pull the bar, pull the arrow in the viewport, or type),
 the choices among modes as a row of tiles with their keys, and Finish and
 Cancel. The arrow the value is pulled along is drawn on the screen, where the
 value is measured, so its head sits under the pointer.
+
+Nothing in that panel explains itself in prose. What the operation does, and
+what the keys are, is behind the **?** in its top right corner and comes out on
+hover; the panel itself is the numbers and the choices, and the line at the top
+left of the viewport says what the tool is doing and what its value is, and
+nothing else.
 
 The application draws its own window frame: the bar along the top drags the
 window, double-clicking it maximises, and its right-hand end holds the

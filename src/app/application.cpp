@@ -7842,89 +7842,71 @@ int Application::run() {
             char buf[200];
             switch (faceTool_.op) {
             case FaceOp::Rotate:
-                std::snprintf(buf, sizeof buf, "Rotate face  %.1f deg   type a number   Click confirm   Esc cancel",
-                              faceTool_.value);
+                std::snprintf(buf, sizeof buf, "Rotate face  %.1f deg", faceTool_.value);
                 break;
             case FaceOp::Scale:
-                std::snprintf(buf, sizeof buf, "Scale face  %+.1f %%   type a number   Click confirm   Esc cancel",
-                              faceTool_.value);
+                std::snprintf(buf, sizeof buf, "Scale face  %+.1f %%", faceTool_.value);
                 break;
             case FaceOp::Extrude:
-                std::snprintf(buf, sizeof buf,
-                              "Extrude %s  %.2f mm%s   J join  D cut  I intersect  N new body   Click confirm   Esc cancel",
+                std::snprintf(buf, sizeof buf, "Extrude %s  %.2f mm%s",
                               extrudeOpName(faceTool_.choice.op), faceTool_.value,
                               faceTool_.choice.automatic ? " (following the drag)" : "");
                 break;
             case FaceOp::Move:
-                std::snprintf(buf, sizeof buf,
-                              "Push / pull  %.2f mm   X / Y / Z along an axis   type a number   Click confirm   Esc cancel",
-                              faceTool_.value);
+                std::snprintf(buf, sizeof buf, "Push / pull  %.2f mm", faceTool_.value);
                 break;
             }
             ui_.toolStatus = buf;
         } else if (reduceTool_.active) {
             char buf[160];
-            std::snprintf(buf, sizeof buf, "Reduce Mesh  within %.3g mm%s   type a number   Enter confirm   Esc cancel",
+            std::snprintf(buf, sizeof buf, "Reduce Mesh  within %.3g mm%s",
                           static_cast<double>(reduceTool_.tolerance),
                           reduceTool_.preview.busy() ? "   reducing..." : "");
             ui_.toolStatus = buf;
         } else if (patternTool_.active) {
             char buf[160];
             if (patternTool_.mode == PatternMode::Mirror)
-                std::snprintf(buf, sizeof buf,
-                              "Mirror  plane at %.2f mm   X Y Z plane   Click confirm   Esc cancel",
-                              patternTool_.offset);
+                std::snprintf(buf, sizeof buf, "Mirror  plane at %.2f mm", patternTool_.offset);
             else
-                std::snprintf(buf, sizeof buf,
-                              "%s  %d x  %.2f %s apart   Click confirm   Esc cancel",
+                std::snprintf(buf, sizeof buf, "%s  %d x  %.2f %s apart",
                               patternModeName(patternTool_.mode), patternTool_.count,
                               patternTool_.dragged(),
                               patternTool_.mode == PatternMode::Circular ? "deg" : "mm");
             ui_.toolStatus = buf;
         } else if (divideTool_.active) {
             char buf[128];
-            std::snprintf(buf, sizeof buf,
-                          "Divide  %.2f mm along the edge   type a number   Click confirm   Esc cancel",
+            std::snprintf(buf, sizeof buf, "Divide  %.2f mm along the edge",
                           divideTool_.t * length(divideTool_.dir));
             ui_.toolStatus = buf;
         } else if (holeTool_.placing) {
             const HoleCut cut = holeCutNow();
             char buf[160];
-            std::snprintf(buf, sizeof(buf),
-                          "Hole  %s %.2f mm, %s   point at the face it goes into   "
-                          "Click drill   Esc cancel",
+            std::snprintf(buf, sizeof(buf), "Hole  %s %.2f mm, %s",
                           holeTool_.fastener >= 0 ? fastenerAt(holeTool_.fastener).name : "custom",
                           static_cast<double>(cut.diameter),
                           cut.through ? "through" : "to a depth");
             ui_.toolStatus = buf;
         } else if (filletTool_.active) {
             char buf[128];
-            std::snprintf(buf, sizeof(buf), "Fillet  %.2f mm   type a number   Click confirm   Esc cancel",
-                          filletTool_.currentRadius);
+            std::snprintf(buf, sizeof(buf), "Fillet  %.2f mm", filletTool_.currentRadius);
             ui_.toolStatus = buf;
         } else if (sketchTool_.active()) {
             switch (sketchTool_.stage()) {
             case SketchStage::SelectPlane:
-                ui_.toolStatus = "Sketch: click an origin plane or a face  [7 top, 1 front, 3 right]   Esc cancel";
+                ui_.toolStatus = "Sketch: pick a plane or a face";
                 break;
             case SketchStage::Draw:
-                ui_.toolStatus = std::string("Sketch: ") + sketchModeName(sketchTool_.mode()) +
-                                 "   L R C A D tools   X delete   E extrude   Esc cancel";
+                ui_.toolStatus = std::string("Sketch: ") + sketchModeName(sketchTool_.mode());
                 break;
             case SketchStage::Regions:
-                ui_.toolStatus = "Pick the regions to build from   E extrude  R revolve   Esc back";
+                ui_.toolStatus = "Pick the regions to build from";
                 break;
             case SketchStage::Turn:
-                ui_.toolStatus = std::string("Revolve: click a line to turn about it, ") +
-                                 extrudeOpName(sketchTool_.op()) +
-                                 "   F full turn  J join  D cut  I intersect  N new body   "
-                                 "Enter finish   Esc back";
+                ui_.toolStatus = std::string("Revolve  ") + extrudeOpName(sketchTool_.op());
                 break;
             case SketchStage::Depth:
-                ui_.toolStatus = std::string("Extrude: move to set the depth, ") +
-                                 extrudeOpName(sketchTool_.op()) +
-                                 (sketchTool_.opFollowsDrag() ? " (following the drag)" : "") +
-                                 "   J join  D cut  I intersect  N new body   click finish   Esc back";
+                ui_.toolStatus = std::string("Extrude  ") + extrudeOpName(sketchTool_.op()) +
+                                 (sketchTool_.opFollowsDrag() ? " (following the drag)" : "");
                 break;
             case SketchStage::Applied:
             case SketchStage::None:
@@ -7932,17 +7914,16 @@ int Application::run() {
             }
         } else if (createTool_.active()) {
             if (createTool_.stage() == CreateStage::SelectPlane) {
-                ui_.toolStatus = "Select Plane: Click origin tile or object face [1: XZ, 3: YZ, 7: XY] (Esc cancel)";
+                ui_.toolStatus = "Pick a plane or a face";
             } else if (createTool_.stage() == CreateStage::DrawProfile_Pt1) {
-                ui_.toolStatus = "Step 1: Click first point/center on plane (Esc cancel)";
+                ui_.toolStatus = "Click the first point";
             } else if (createTool_.stage() == CreateStage::DrawProfile_Pt2) {
-                ui_.toolStatus = "Step 2: Move mouse to set dimensions, click to confirm (Esc cancel)";
+                ui_.toolStatus = "Move to size it, click to set";
             } else if (createTool_.stage() == CreateStage::AdjustProfile) {
-                ui_.toolStatus = "Adjust: Drag edge handles or corner fillet handles, press Enter/OK to extrude (Esc cancel)";
+                ui_.toolStatus = "Drag a handle to adjust the profile";
             } else if (createTool_.stage() == CreateStage::ExtrudeDepth) {
-                ui_.toolStatus = std::string("Depth: move to set, ") + extrudeOpName(createTool_.op()) +
-                                 (createTool_.opFollowsDrag() ? " (following the drag)" : "") +
-                                 "   J join  D cut  I intersect  N new body   Ctrl free (snap on)   click finish   Esc cancel";
+                ui_.toolStatus = std::string("Depth  ") + extrudeOpName(createTool_.op()) +
+                                 (createTool_.opFollowsDrag() ? " (following the drag)" : "");
             }
             // What the cursor has caught replaces the step's own prompt: it is
             // the more specific thing to say, and a snap nobody is told about
@@ -7955,7 +7936,7 @@ int Application::run() {
                     std::snprintf(buf, sizeof buf, "  (\u00D8 %.3f mm)", hit.radius * 2.0);
                     what += buf;
                 }
-                ui_.toolStatus = what + "   Ctrl for free placement";
+                ui_.toolStatus = what;
             }
         } else if (tool_.active()) {
             ui_.toolStatus = tool_.statusText();
@@ -7975,8 +7956,6 @@ int Application::run() {
         if (measure_.active() && ui_.toolStatus.empty()) {
             const size_t n = measure_.picks().size();
             ui_.toolStatus = n == 0 ? "Measure: click a vertex, edge or face"
-                           : n == 1 ? "Measure: " + measureResult_.summary +
-                                      "   -   click another to measure between them"
                                     : "Measure: " + measureResult_.summary;
         }
         ui_.canUndo = undo_.canUndo();

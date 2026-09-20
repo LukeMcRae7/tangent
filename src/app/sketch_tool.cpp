@@ -2634,7 +2634,7 @@ void SketchTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& fi
                                                 : "Click a line or a circle to size it."; break;
         }
         ui::commandHint(hint);
-        ui::commandHint("Hover and press X to delete, Q for construction.  Ctrl+Z steps back.");
+        ui::commandHint("S select, L line, R rectangle, C circle, A arc, D dimension. Hover and press X to delete, Q for construction; Ctrl+Z steps back. E goes on to pick regions, Esc leaves.");
 
         if (ui::quietButton("Import SVG...")) importRequested_ = true;
         ui::hoverTip("Bring the outlines of an SVG drawing into this sketch");
@@ -2670,7 +2670,7 @@ void SketchTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& fi
         if (ui::quietButton("All")) chooseAllRegions();
         ImGui::SameLine();
         if (ui::quietButton("None")) chooseNoRegions();
-        ui::commandHint("Click a region to add it or take it out.");
+        ui::commandHint("Click a region to add it or take it out. E extrudes them, R turns them about an axis; Esc goes back to drawing.");
 
         // What the regions become. Turning needs an axis they all stay on one
         // side of, which most drawings have and a logo across the origin does
@@ -2734,7 +2734,7 @@ void SketchTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& fi
         if (drawExtrudeChoice(choice_, !editing())) refreshReach(scene);
         const ObjectId toggled = drawReachedBodies(scene, reach_, choice_.op, owner());
         if (toggled != kNoObject) reach_.toggle(toggled);
-        ui::commandHint("Click a line of the drawing to turn about it, or type an angle.");
+        ui::commandHint("Click a line of the drawing to turn about it, or type an angle. F is a full turn; J joins, D cuts, I intersects, N makes a new body. Enter finishes, Esc goes back.");
         footer = ui::commandFooter("Finish", axisClears(), "Back");
         break;
     }
@@ -2784,7 +2784,9 @@ void SketchTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& fi
         ui::commandHint(applied ? (build_ == SketchBuild::Revolve
                                        ? "Change the angle, the operation or the bodies, and it is made again."
                                        : "Change the depth, the operation or the bodies, and it is made again.")
-                                : "Move to set the depth, drag the bar, or type one.  Click a body above to leave it out.");
+                                : "Move to set the depth, drag the bar, or type one. Click a body above to "
+                                  "leave it out. J joins, D cuts, I intersects, N makes a new body; "
+                                  "Enter finishes, Esc goes back.");
         footer = applied ? ui::commandFooter("Done", true, nullptr) : ui::commandFooter("Finish", true, "Back");
         break;
     }

@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <string>
 
 namespace tg::ui {
 namespace {
@@ -26,6 +27,16 @@ Anchor g_anchor;
 ImGuiID g_dragId = 0;
 bool    g_dragMoved = false;
 double  g_dragLo = 0.0, g_dragHi = 0.0;
+
+// What the panel would have said, and where the mark that says it goes.
+//
+// A dialog that explains itself in three lines of grey text is a dialog nobody
+// reads and a viewport nobody can see past. The words are still here -- they
+// are how an operation says what it does to someone who has not met it -- but
+// they live behind the ? in the corner and come out on hover.
+std::string g_help;
+ImVec2      g_helpAt{0, 0};
+constexpr float kHelpSize = 17.0f;
 
 } // namespace
 
@@ -74,6 +85,12 @@ bool beginCommand(const char* id, const char* title, Glyph glyph, const char* co
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const ImVec2 at = ImGui::GetCursorScreenPos();
     const float box = line + 6.0f;
+    // Where the ? goes, taken now while the row is still the full width of the
+    // panel. What it says is collected as the rows are built and drawn at the
+    // end, back up here.
+    g_help.clear();
+    g_helpAt = ImVec2(at.x + ImGui::GetContentRegionAvail().x - kHelpSize,
+                      at.y + (box - kHelpSize) * 0.5f);
     dl->AddRectFilled(at, ImVec2(at.x + box, at.y + box), u32(palette::kBrand), 5.0f);
     drawGlyph(dl, glyph, ImVec2(at.x + box * 0.5f, at.y + box * 0.5f), line * 0.95f,
               IM_COL32(255, 255, 255, 255));
@@ -99,6 +116,33 @@ bool beginCommand(const char* id, const char* title, Glyph glyph, const char* co
 }
 
 void endCommand() {
+    if (!g_help.empty()) {
+        // Back up to the header, and back down again: the mark belongs beside
+        // the title, but what it says is not known until the rows have said
+        // whether they were refused, what they applied, and what they are for.
+        const ImVec2 resume = ImGui::GetCursorScreenPos();
+        ImGui::SetCursorScreenPos(g_helpAt);
+        ImGui::InvisibleButton("##help", ImVec2(kHelpSize, kHelpSize));
+        const bool hot = ImGui::IsItemHovered();
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        drawGlyph(dl, Glyph::Help, ImVec2(g_helpAt.x + kHelpSize * 0.5f, g_helpAt.y + kHelpSize * 0.5f),
+                  kHelpSize, u32(hot ? palette::kText : palette::kTextFaint));
+        if (hot) {
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12.0f, 10.0f));
+            ImGui::BeginTooltip();
+            ImGui::PushTextWrapPos(ImGui::GetFontSize() * 21.0f);
+            ImGui::TextUnformatted(g_help.c_str());
+            ImGui::PopTextWrapPos();
+            ImGui::EndTooltip();
+            ImGui::PopStyleVar();
+        }
+        // Back where the rows left off, with an item of no size: moving the
+        // cursor alone tells ImGui nothing about how big the window is, and it
+        // says so, every frame.
+        ImGui::SetCursorScreenPos(resume);
+        ImGui::Dummy(ImVec2(0, 0));
+        g_help.clear();
+    }
     ImGui::End();
     ImGui::PopStyleColor(2);
     ImGui::PopStyleVar(4);
@@ -288,25 +332,21 @@ int commandChoices(const char* label, const Choice* choices, int count, int acti
 
 void commandHint(const char* text) {
     if (!text || !*text) return;
-    ImGui::Dummy(ImVec2(0, 1));
-    pushFont(FontWeight::Regular, uiFonts().size * 0.9f);
-    ImGui::PushStyleColor(ImGuiCol_Text, im(palette::kTextDim));
-    ImGui::PushTextWrapPos(0.0f);
-    ImGui::TextUnformatted(text);
-    ImGui::PopTextWrapPos();
-    ImGui::PopStyleColor();
-    ImGui::PopFont();
+    if (!g_help.empty()) g_help += "\n\n";
+    g_help += text;
 }
 
 void commandApplied(const char* what) {
+    // Two words and a dot of colour. That it can still be adjusted is what the
+    // ? says; that it has been made is what has to be seen at a glance.
     ImGui::Dummy(ImVec2(0, 1));
     pushFont(FontWeight::Medium, uiFonts().size * 0.9f);
     ImGui::PushStyleColor(ImGuiCol_Text, im(palette::kValid));
-    ImGui::PushTextWrapPos(0.0f);
-    ImGui::Text("%s applied. Change anything here to adjust it.", what);
-    ImGui::PopTextWrapPos();
+    ImGui::Text("%s applied", what);
     ImGui::PopStyleColor();
     ImGui::PopFont();
+    commandHint("It is applied already. Change anything here and it is made again; "
+                "Done closes the panel and keeps it.");
 }
 
 void commandRefused(const char* why) {
@@ -314,10 +354,12 @@ void commandRefused(const char* why) {
     pushFont(FontWeight::Medium, uiFonts().size * 0.9f);
     ImGui::PushStyleColor(ImGuiCol_Text, im(palette::kBrand));
     ImGui::PushTextWrapPos(0.0f);
-    ImGui::Text("Not made: %s. Change it and it is tried again.", why && *why ? why : "the kernel refused");
+    ImGui::Text("Not made: %s", why && *why ? why : "the kernel refused");
     ImGui::PopTextWrapPos();
     ImGui::PopStyleColor();
     ImGui::PopFont();
+    commandHint("Nothing has been made yet. Change what it was refused for and it is "
+                "tried again.");
 }
 
 int commandFooter(const char* commitLabel, bool commitEnabled, const char* cancelLabel) {
