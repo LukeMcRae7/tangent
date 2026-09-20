@@ -92,6 +92,17 @@ Either way, tangent rejects non-manifold edges, open surfaces, and other
 invalid results that a slicer would also reject. The corner of the viewport
 says `solid` or `not solid` for the body in hand.
 
+**Drawings come in as sketches.** File > Import SVG puts an SVG's outlines into
+a sketch on a plane or on the face of a part, at the size the file says it is
+and the right way up, then lets it be sized, moved and turned before anything
+else is drawn. Lines stay lines, circles and circular arcs stay circles and
+arcs (so they can be dimensioned), quadratic curves become the cubics they
+exactly are, and only ellipses are approximated, as every drawing program does.
+Text and images are left out and counted, not silently dropped: convert text to
+paths first. Extruding picks the filled regions -- a letter and not the hole in
+it -- and sweeps them as one step: a drawing of 240 letters is under a second,
+not one boolean per letter.
+
 ### The interface
 
 One dark surface with the model lit in the middle of it. Along the top, the
@@ -118,6 +129,12 @@ The face is Space Grotesk, bundled in `assets/fonts` under the SIL Open Font
 License, so the interface looks the same on every platform. `TANGENT_FONT`
 names a different file, or `default` for ImGui's built-in bitmap face.
 
+The icons are [Tabler Icons](https://tabler.io/icons), bundled as
+`assets/fonts/tabler-icons.ttf` under the MIT License
+(`assets/fonts/tabler-icons-LICENSE.txt`). Each one is chosen by name in
+`src/ui/glyph.cpp`, so a new one is a codepoint from the webfont's
+`tabler-icons.css`.
+
 ### Conventions
 
 - **Millimetres**, **+Z up**
@@ -141,16 +158,17 @@ names a different file, or `default` for ImGui's built-in bitmap face.
 | Click | Select the edge, face or vertex under the cursor |
 | Ctrl + click | Select the whole object (as clicking its outliner row) |
 | Shift + click | Extend either selection |
-| E | Extrude selected faces, then drag to set the height |
+| E | Extrude selected faces, then drag to set the height (Shift + E starts it as a cut) |
+| J / D / I / N | *(while extruding)* join, cut, intersect or a new body — until one is picked the drag decides: out joins, in cuts |
 | F | Fillet the selected edges |
 | Ctrl + B | Bevel all edges of the active object |
-| Ctrl + Shift + U / D / I | Union / difference / intersect the two selected objects |
+| Ctrl + Shift + U / D / I | Combine, set to join / cut / intersect: the first selected body is the target, the rest are tools |
 | D | Measure — one entity for its own size, two for the distance between |
 | Numpad 1 / 3 / 7 | Front / Right / Top (Ctrl for opposite) |
 | Numpad 4 / 6 / 8 / 2 | Orbit in 15° steps |
 | Numpad 5 | Perspective / orthographic |
 | Numpad . / Home | Frame selection / frame all |
-| G / R / S | Move / rotate / scale — the object, or the selected faces/edges/vertices |
+| G / R / S | Move / rotate / scale — the object, or the selected faces/edges/vertices. An object's move, turn or scale is a step in its history |
 | X / Y / Z | *(during a transform)* constrain to an axis |
 | Shift + X/Y/Z | *(during a transform)* constrain to a plane |
 | type a number | *(during a transform)* exact value |
@@ -175,6 +193,7 @@ src/core/     math and colour palette (header only)
 src/geom/     bodies, the exact kernel behind them, and every modelling operation
 src/mesh/     half-edge meshes: primitives, import, reduction, printability checks
 src/scene/    scene graph, feature history, selection, ray picking
+src/sketch/   constrained 2D sketches, their regions, and SVG import
 src/render/   shader and buffer wrappers, viewport renderer
 src/app/      SDL3 shell, orbit camera, input dispatch, transform tool, undo
 src/ui/       theme and panels

@@ -7,6 +7,7 @@
 #include "mesh/decimate.h"
 #include "geom/kernel_guard.h"
 #include "app/create_tool.h"
+#include "app/extrude_ops.h"
 #include "app/sketch_tool.h"
 #include "app/file_dialog.h"
 #include "app/printability.h"
@@ -22,6 +23,7 @@
 
 #include <atomic>
 #include <future>
+#include <functional>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -97,7 +99,21 @@ public:
     void setFileDemo(int mode) { fileDemo_ = mode; }
     void setHeadlessExport(const std::string& p) { headlessExport_ = p; }
     void setHeadlessExport3mf(const std::string& p) { headlessExport3mf_ = p; }
+    // Opens the Combine dialog on the startup box and a cylinder through it:
+    // 0 join, 1 cut, 2 intersect. 3 to 5 the same, finished, so the applied
+    // panel shows.
     void setBooleanDemo(int op) { booleanDemo_ = op; }
+
+    // The reported case and what came of it: a cylinder stretched from the
+    // inspector and cut from the box, then the box moved, turned and scaled --
+    // every one of them a row in its history.
+    void setHistoryDemo() { historyDemo_ = true; }
+
+    // A second box beside the startup box with its top in the same plane, and
+    // the place where the two tops overlap clicked `clicks` times: each click
+    // takes the next of the coplanar faces, and the one selected is drawn in
+    // front.
+    void setCoplanarDemo(int clicks) { coplanarDemo_ = clicks; }
     void setFilletEdgesDemo(int edges) { filletEdgesDemo_ = true; filletDemoEdges_ = edges; }
     // Round All Edges on the startup box, committed at 2mm, then the same
     // command on a mesh, which has to refuse and say how to get past it.
@@ -124,6 +140,13 @@ public:
     // a line half-drawn, 2 choosing regions, 3 setting the depth, 4 the part it
     // made, re-opened for editing.
     void setSketchDemo(int step) { sketchDemo_ = step; }
+    // An SVG onto the top plane: 1 placed in the sketch, 2 its filled regions
+    // picked, 3 extruded 3 mm, 4 cut 3 mm into a plate under it, 5 with the
+    // busiest face of the result selected -- what the highlight costs to draw.
+    void setSvgDemo(const std::string& path, int step) { svgDemo_ = path; svgDemoStep_ = step; }
+    // Print where each frame went, every `frames` frames. For finding a stall,
+    // and for showing one is gone.
+    void setFrameProbe(int frames);
 
     // Drives the create tool to a given step so the handles and the dimension
     // row can be looked at: 1 adjusting a profile, 2 rounding a corner,
@@ -193,6 +216,12 @@ private:
     Vec2 mouseOverride_{-1.0, -1.0};
     int  snapDemo_ = 0;
     int  sketchDemo_ = 0;
+    std::string svgDemo_;
+    int  svgDemoStep_ = 1;
+    int  svgDemoFrames_ = 0;
+    double svgDemoOverlayMs_ = 0.0;
+    double svgDemoUpdateMs_ = 0.0;
+    double svgDemoOverlaySum_ = 0.0;
     int  profileDemo_ = 0;
     bool profileDemoDone_ = false;
     bool filletOpen_ = false;
@@ -238,6 +267,51 @@ private:
     std::vector<std::future<PrintJobResult>> retiredPrintJobs_;
     void retirePrintJob(ObjectId id);
 
+    // Checking the body is closed and does not cross itself, off the frame
+    // thread: a fifth of a second on a part of a few thousand faces, which on
+    // the frame thread is a hitch after every edit. The panel says "checking"
+    // until the answer lands.
+    struct HealthJob {
+        uint32_t geometryVersion = 0;
+        std::future<MeshHealth> result;
+    };
+    std::unordered_map<ObjectId, HealthJob> healthJobs_;
+    std::vector<std::future<MeshHealth>> retiredHealthJobs_;
+    void stepHealthCheck();
+
+    // What the selection highlight draws, in each body's own space: the tinted
+    // triangles of a selected face and the lines along its edges. Gathering it
+    // asks the kernel for a polyline per edge and searches the body's triangles
+    // per face -- on a face with two thousand edges that was seconds a frame,
+    // so it is gathered when the selection, the geometry or the zoom changes
+    // and drawn from here until one of them does.
+    struct Highlight {
+        ObjectId object = kNoObject;
+        std::vector<Vec3> lines;   // pairs
+        std::vector<Vec3> tris;    // triples
+    };
+    std::vector<Highlight> highlights_;
+    uint64_t highlightKey_ = 0;
+    void refreshHighlights();
+
+    // Drawing a body finer, off the frame thread, for the same reason. Meshing
+    // a body of a few thousand faces is hundreds of milliseconds: done on the
+    // frame thread, every step of a zoom froze the view for half a second.
+    // The body keeps the triangles it has until the finer ones arrive.
+    struct MeshJobResult {
+        RenderMesh mesh;
+        Real deviation = 0.0;
+    };
+    struct MeshJob {
+        uint32_t geometryVersion = 0;
+        Real deviation = 0.0;
+        std::future<MeshJobResult> result;
+    };
+    std::unordered_map<ObjectId, MeshJob> meshJobs_;
+    std::vector<std::future<MeshJobResult>> retiredMeshJobs_;
+    // Collects finished ones and starts what the view now wants.
+    void stepTessellation();
+
     // Pure: everything it reads is passed in, which is what lets it run on a
     // worker against a snapshot while the scene carries on changing.
     static PrintJobResult runPrintCheck(const Body& body, const RenderMesh& rm,
@@ -277,7 +351,7 @@ private:
     // taking a dependency, so the prompt is an in-app path field.
     // The values are what --file-prompt takes, so a new mode goes at the end.
     enum class FileMode { None, Open, Save, ExportStl, ExportStep, ImportStep,
-                          ImportMesh, Export3mf };
+                          ImportMesh, Export3mf, ImportSvg };
 
     // Turns the selected mesh body into an exact one. Its own command rather
     // than something the import does on its own: a mesh that will not convert
@@ -501,6 +575,15 @@ private:
         BooleanOp meetOp = BooleanOp::Union;
         bool      combineWithMeet = false;
 
+        // Extrude only: what it does, and to which bodies -- see
+        // app/extrude_ops.h. The swept solid is kept, in the world, for the
+        // bodies it reaches and for drawing when it is not part of this body.
+        ExtrudeChoice choice;
+        ExtrudeReach  reach;
+        std::string   toolKey;
+        Body          tool;
+        RenderMesh    toolMesh;
+
         Body before;
         std::vector<Feature> chainBefore;
         std::string typedValue;
@@ -522,6 +605,11 @@ private:
             meets = kNoObject;
             meetOp = BooleanOp::Union;
             combineWithMeet = false;
+            choice.reset();
+            reach.clear();
+            toolKey.clear();
+            tool = Body();
+            toolMesh.clear();
             axis = DragAxis{};
             direction = hingePoint = hingeDir = Vec3{};
             lockedAxis = -1;
@@ -546,6 +634,66 @@ private:
     void commitFaceMove();
     void abortFaceMove();
     void drawFacePanel();
+
+    // ---- Combining bodies -----------------------------------------------------
+    //
+    // Fusion's Combine: one body to keep -- the target -- and any number of
+    // tools, joined to it, cut from it, or intersected with it. It opens on
+    // whatever is selected, the first body picked as the target, and bodies
+    // clicked in the view while it is open go in or come out as tools. Each
+    // tool is its own step in the target's history, so the history says what
+    // cut what; the tools go unless Keep Tools says they stay.
+    struct CombineToolState {
+        bool active = false;
+        ObjectId target = kNoObject;
+        std::vector<ObjectId> tools;
+        std::vector<std::string> toolNames;      // for the panel once they are gone
+        std::string targetName;
+        BooleanOp op = BooleanOp::Union;
+        bool keepTools = false;
+
+        // The target as it was, so the preview can be shown on it and put back.
+        Body before;
+        std::vector<Feature> chainBefore;
+        std::vector<ObjectId> hidden;            // tools hidden while the result is shown
+        std::string previewKey;
+        std::string previewError;
+        AsyncBuild preview;
+
+        void reset() {
+            preview.cancel();
+            active = false;
+            target = kNoObject;
+            tools.clear();
+            toolNames.clear();
+            targetName.clear();
+            op = BooleanOp::Union;
+            keepTools = false;
+            before = Body();
+            chainBefore.clear();
+            hidden.clear();
+            previewKey.clear();
+            previewError.clear();
+        }
+    };
+    CombineToolState combineTool_;
+
+    void beginCombine(BooleanOp op);
+    void updateCombine();
+    // Adds a body as a tool, or takes it out; the first body clicked with no
+    // target becomes the target.
+    void toggleCombineBody(ObjectId id);
+    void setCombineTarget(ObjectId id);
+    // Makes the combine from the tool's current state. False, with a notice,
+    // when any of it cannot be built -- in which case nothing has changed.
+    bool commitCombine();
+    void finishCombine();
+    void abortCombine();
+    void drawCombinePanel();
+    // Puts the target back as it was before the preview, and the tools back
+    // in view.
+    void restoreCombinePreview();
+    void drawCombineOverlay();
 
     // ---- Dividing a face ---------------------------------------------------
     //
@@ -800,6 +948,10 @@ private:
 
     void beginAddPrimitivePrompt(PrimitiveKind kind);
     void beginSketch();
+    // Import SVG: asks for a file. Into the sketch being drawn when there is
+    // one; otherwise a new sketch, whose plane is chosen before it lands.
+    void beginImportSvg();
+    void importSvg(const std::string& path);
     void beginEditSketch(ObjectId object, ElementId sketchUid);
     void drawSceneSketches();
 
@@ -818,7 +970,7 @@ private:
     // panel floating; Fusion and Onshape sidestep it by never confirming on a
     // viewport click in the first place. This is the first of those, because
     // this app does confirm on a click.
-    enum class Settled { None, Fillet, Divide, Face, Pattern };
+    enum class Settled { None, Fillet, Divide, Face, Pattern, Create, Sketch, Combine };
     Settled  settled_ = Settled::None;
     ObjectId settledObject_ = kNoObject;
 
@@ -836,6 +988,21 @@ private:
     // that chain is the same length as the one that succeeded.
     size_t settleSerial_ = 0;
 
+    // The undo stack as the settled operation left it. The panels that act on
+    // more than one body adjust by taking their own undo entry back and making
+    // the operation again; this is how they know that entry is still the top
+    // one, and not something done since.
+    size_t settledRevision_ = 0;
+
+    // Keeps settled_ in step with the create and sketch tools, which say for
+    // themselves when they have been applied and when they are done.
+    void syncToolSettled();
+
+    // The face extrude's swept solid, and the bodies it reaches, for its value
+    // now. Drawn when it is not simply part of the body it came from.
+    void refreshFaceReach();
+    void drawFaceToolOverlay();
+
     // Applies the panel's current values again, over the top of the last
     // application rather than after it.
     void recommitSettled();
@@ -848,9 +1015,6 @@ private:
 
     bool settledIs(Settled k) const { return settled_ == k; }
 
-    // Combines the two selected objects. The first selected is kept and
-    // becomes the result; the second is consumed as the tool.
-    void applyBoolean(BooleanOp op);
 
     // Breaks the active object into its separate bodies or splits by a plane/face.
     void splitActiveObject();
@@ -872,6 +1036,17 @@ private:
     // ground plane is the build plate, so parts belong on it rather than
     // centred through it -- which also stops the grid drawing across them.
     void placeOnBuildPlate(ObjectId id);
+
+    // Picking. See handleViewportClick.
+    size_t nextInCycle(size_t count, bool additive, const std::function<bool(size_t)>& isSelected) const;
+    void sayWhichOfCoincident(size_t at, size_t count, ObjectId on, const char* what);
+    void pickWholeObject(ObjectId id, bool additive);
+
+    // The inspector's transform fields, as Move, Rotate and Scale steps.
+    void recordInspectorTransform(ObjectId id, const Transform& before);
+    void bakePendingScale();
+    void resetObjectTransform(ObjectId id);
+    ObjectId pendingScale_ = kNoObject;
 
     SDL_Window* window_  = nullptr;
     void*       glCtx_   = nullptr;
@@ -937,6 +1112,10 @@ private:
     std::string headlessExport_;
     std::string headlessExport3mf_;
     int         booleanDemo_ = -1;
+    bool        historyDemo_ = false;
+    int         coplanarDemo_ = 0;
+    bool        coplanarDemoDone_ = false;
+    void stepCoplanarDemo();
     bool        filletEdgesDemo_ = false;
     bool        roundAllDemo_ = false;
     int         filletDemoEdges_ = 1;

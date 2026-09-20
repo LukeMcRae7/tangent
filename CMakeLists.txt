@@ -83,7 +83,9 @@ add_library(imgui STATIC
 target_include_directories(imgui PUBLIC
   ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/backends)
 target_link_libraries(imgui PUBLIC SDL3::SDL3)
-target_compile_definitions(imgui PUBLIC IMGUI_DEFINE_MATH_OPERATORS)
+target_compile_definitions(imgui PUBLIC IMGUI_DEFINE_MATH_OPERATORS
+  # Some Tabler icons sit above U+FFFF.
+  IMGUI_USE_WCHAR32)
 
 # ---- planegcs: FreeCAD's 2D constraint solver, vendored ----------------------
 # The sketch's solver. Its sources are FreeCAD's, unmodified, in FreeCAD's own
@@ -164,6 +166,7 @@ endif()
 
 set(TANGENT_GEOM src/geom/body.cpp src/geom/operations.cpp
                  src/geom/kernel_guard.cpp src/mesh/decimate.cpp src/sketch/sketch.cpp
+                 src/sketch/svg.cpp
                  ${TANGENT_BREP_SRC})
 
 add_executable(tangent
@@ -171,7 +174,7 @@ add_executable(tangent
   src/app/application.cpp
   src/app/camera.cpp
   src/app/transform_tool.cpp
-  src/app/create_tool.cpp
+  src/app/create_tool.cpp src/app/extrude_ops.cpp
   src/app/sketch_tool.cpp
   src/app/measure.cpp
   src/app/snap.cpp
@@ -307,7 +310,7 @@ target_compile_options(test_io PRIVATE ${TANGENT_WARNINGS})
 add_test(NAME io COMMAND test_io)
 
 add_executable(test_create_tool tests/test_create_tool.cpp
-  src/app/create_tool.cpp src/app/camera.cpp src/app/undo.cpp src/app/snap.cpp
+  src/app/create_tool.cpp src/app/extrude_ops.cpp src/app/camera.cpp src/app/undo.cpp src/app/snap.cpp
   src/app/plane_snap.cpp src/app/snap_overlay.cpp src/app/overlay_shapes.cpp
   src/ui/icons.cpp src/ui/command_panel.cpp src/ui/widgets.cpp src/ui/glyph.cpp src/ui/theme.cpp
   src/scene/scene.cpp src/scene/feature.cpp
@@ -319,7 +322,7 @@ target_compile_options(test_create_tool PRIVATE ${TANGENT_WARNINGS_LOOSE})
 add_test(NAME create_tool COMMAND test_create_tool)
 
 add_executable(test_sketch_tool tests/test_sketch_tool.cpp
-  src/app/sketch_tool.cpp src/app/create_tool.cpp src/app/camera.cpp src/app/undo.cpp
+  src/app/sketch_tool.cpp src/app/create_tool.cpp src/app/extrude_ops.cpp src/app/camera.cpp src/app/undo.cpp
   src/app/snap.cpp src/app/plane_snap.cpp src/app/snap_overlay.cpp src/app/overlay_shapes.cpp
   src/ui/icons.cpp src/ui/command_panel.cpp src/ui/widgets.cpp src/ui/glyph.cpp src/ui/theme.cpp
   src/scene/scene.cpp src/scene/feature.cpp
@@ -404,6 +407,14 @@ target_include_directories(test_sketch PRIVATE src)
 target_compile_options(test_sketch PRIVATE ${TANGENT_WARNINGS})
 add_test(NAME sketch COMMAND test_sketch)
 
+# SVG into a sketch: sizes, curves, closing, and what a large one costs.
+add_executable(test_svg tests/test_svg.cpp
+  src/mesh/health.cpp ${TANGENT_GEOM}
+  src/mesh/halfedge.cpp src/mesh/primitives.cpp)
+target_include_directories(test_svg PRIVATE src)
+target_compile_options(test_svg PRIVATE ${TANGENT_WARNINGS})
+add_test(NAME svg COMMAND test_svg)
+
 add_executable(test_bvh tests/test_bvh.cpp)
 target_include_directories(test_bvh PRIVATE src)
 target_compile_options(test_bvh PRIVATE ${TANGENT_WARNINGS})
@@ -452,6 +463,12 @@ target_include_directories(test_icons PRIVATE src tools ${imgui_SOURCE_DIR})
 target_link_libraries(test_icons PRIVATE imgui tangent_epoxy)
 target_compile_options(test_icons PRIVATE ${TANGENT_WARNINGS})
 add_test(NAME icons COMMAND test_icons ${CMAKE_SOURCE_DIR}/assets/icons)
+
+add_executable(test_glyphs tests/test_glyphs.cpp src/ui/glyph.cpp)
+target_include_directories(test_glyphs PRIVATE src ${imgui_SOURCE_DIR})
+target_link_libraries(test_glyphs PRIVATE imgui)
+target_compile_options(test_glyphs PRIVATE ${TANGENT_WARNINGS})
+add_test(NAME glyphs COMMAND test_glyphs ${CMAKE_SOURCE_DIR}/assets/fonts)
 
 add_executable(test_view_cube tests/test_view_cube.cpp
   src/ui/view_cube.cpp src/ui/panels.cpp src/ui/theme.cpp src/ui/icons.cpp src/ui/command_panel.cpp
@@ -502,6 +519,14 @@ add_executable(bake_icons EXCLUDE_FROM_ALL tools/bake_icons.cpp tools/icon_raste
   src/mesh/halfedge.cpp src/mesh/primitives.cpp)
 target_include_directories(bake_icons PRIVATE src tools)
 target_compile_options(bake_icons PRIVATE ${TANGENT_WARNINGS})
+
+# Not a test: what an SVG becomes and whether it extrudes, and where not.
+# Run it on a drawing that will not extrude.
+add_executable(svg_check EXCLUDE_FROM_ALL tools/svg_check.cpp
+  src/mesh/health.cpp ${TANGENT_GEOM}
+  src/mesh/halfedge.cpp src/mesh/primitives.cpp)
+target_include_directories(svg_check PRIVATE src)
+target_compile_options(svg_check PRIVATE ${TANGENT_WARNINGS})
 
 # Not a test: a stopwatch for the heavy paths. Run it by hand.
 add_executable(bench EXCLUDE_FROM_ALL tests/bench.cpp

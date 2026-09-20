@@ -610,7 +610,9 @@ int main() {
         Scene s;
         const ObjectId id = s.addPrimitive(PrimitiveKind::Box);
         s.find(id)->name = "Bracket";
-        s.find(id)->transform.position = {5, 6, 7};
+        // Moved the way a user moves it: a step in its history, which has to
+        // come back from the file and put the object back where it was.
+        check(s.recordMove(id, {5, 6, 7}), "moved");
 
         // A chain with something of every interesting kind in it.
         //

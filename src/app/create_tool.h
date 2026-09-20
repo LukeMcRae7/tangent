@@ -1,6 +1,7 @@
 #pragma once
 
 #include "app/camera.h"
+#include "app/extrude_ops.h"
 #include "app/plane_snap.h"
 #include "app/snap.h"
 #include "app/undo.h"
@@ -21,23 +22,11 @@ enum class CreateStage {
     DrawProfile_Pt1,   // 2. Head-on orthographic: Click Corner 1 / Center point
     DrawProfile_Pt2,   // 3. Head-on orthographic: Move mouse to Corner 2 / Radius -> Click to commit
     AdjustProfile,     // 4. Return to perspective: Drag edges/corners, adjust fillet radius, [OK] button
-    ExtrudeDepth       // 5. Perspective: Mouse movement sets depth (positive = solid/join, negative = boolean cut)
+    ExtrudeDepth,      // 5. Perspective: Mouse movement sets depth (positive = solid/join, negative = boolean cut)
+    Applied            // 6. Done, and adjustable from the panel until Done is pressed
 };
 
 enum class PlaneChoice { None, XY, XZ, YZ, Face };
-
-// What the new solid does to the body it was drawn on.
-//
-// Only meaningful when the profile was drawn on an object's face; on an origin
-// plane there is nothing to combine with and the result is always a new body.
-enum class CreateOp {
-    Auto = 0,   // join when pushed out of the face, cut when pushed into it
-    Join,       // union with the body, whichever way the depth goes
-    Cut,        // subtract from the body, whichever way the depth goes
-    NewBody,    // leave the body alone and add a separate one
-};
-
-const char* createOpName(CreateOp op);
 
 struct SavedCamera {
     Vec3 target{0.0f, 0.0f, 0.0f};
@@ -51,7 +40,10 @@ class CreateTool {
 public:
     CreateTool() = default;
 
-    bool active() const { return stage_ != CreateStage::None; }
+    // Drawing or extruding: the tool has the viewport. Once applied it no
+    // longer does -- the result is in the scene and the panel only adjusts it.
+    bool active() const { return stage_ != CreateStage::None && stage_ != CreateStage::Applied; }
+    bool applied() const { return stage_ == CreateStage::Applied; }
     CreateStage stage() const { return stage_; }
     PrimitiveKind kind() const { return kind_; }
 
@@ -151,11 +143,27 @@ public:
     Vec2 profileMax() const { return pt2_; }
     bool rounding() const { return isFilleting_; }
 
-    // What the solid will do to the body it was drawn on. `Auto` resolves to
-    // Join or Cut from the sign of the depth; resolvedOp() reports which.
-    CreateOp op() const { return op_; }
-    void setOp(CreateOp op) { op_ = op; }
-    CreateOp resolvedOp() const;
+    // What the solid does to the bodies it reaches. Until one is picked the
+    // depth decides -- see ExtrudeChoice -- and op() says what it decided.
+    ExtrudeOp op() const {
+        ExtrudeChoice c = choice_;
+        c.follow(extrudeDepth_, faceObject_ != kNoObject);
+        return c.op;
+    }
+    bool opFollowsDrag() const { return choice_.automatic; }
+    void setOp(ExtrudeOp op) { choice_.pick(op); }
+
+    // The bodies the extrusion reaches, and which of them it acts on.
+    const ExtrudeReach& reach() const { return reach_; }
+    void toggleBody(ObjectId id) { reach_.toggle(id); }
+    void refreshReach(const Scene& scene);
+
+    // Once applied: whether the panel has changed something since, so the
+    // application can take the extrusion back and make it again as it now
+    // stands. Reading it clears it.
+    bool takeAdjusted() { const bool a = adjusted_; adjusted_ = false; return a; }
+    bool recommit(Scene& scene, Camera& camera, UndoStack& undo);
+    void dismissApplied() { if (stage_ == CreateStage::Applied) stage_ = CreateStage::None; }
 
     // True when the profile was drawn on an object's face, so there is a body
     // to combine with and the choice means anything.
@@ -236,7 +244,15 @@ private:
     Vec2 filletRefUV_{0, 0};
     std::vector<int> activeFilletCorners_;
 
-    CreateOp op_ = CreateOp::Auto;
+    ExtrudeChoice choice_;
+    ExtrudeReach reach_;
+    bool adjusted_ = false;
+    std::string reachToolKey_;           // the tool reachTool_ was built for
+    Body reachTool_;
+
+    // Makes the extrusion as the tool now stands: what finishCreation does,
+    // and what an adjustment does again.
+    bool commitExtrusion(Scene& scene, UndoStack& undo);
 
     // Extrusion depth (in mm)
     Real extrudeDepth_ = 20.0;

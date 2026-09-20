@@ -1,6 +1,7 @@
 #include "scene/serialize.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <fstream>
 #include <vector>
@@ -334,8 +335,18 @@ void writeFeature(Writer& w, const Feature& f) {
     // v12: a sketch, and which region of which sketch an extrusion sweeps.
     writeSketch(w, f.sketch);
     w.u64(f.sketchUid);
-    w.u32(f.profileKey);
+    w.u32(f.profileKeys.empty() ? kNoSketchId : f.profileKeys.front());
     w.u8(f.sketchShown ? 1 : 0);
+    // v14: where a Move or Rotate took the object, and a Scale's stretch.
+    w.vec3(f.moveBy);
+    w.f64(f.turnBy.x); w.f64(f.turnBy.y); w.f64(f.turnBy.z); w.f64(f.turnBy.w);
+    w.vec3(f.turnAbout);
+    w.vec3(f.scaleBy);
+    w.vec3(f.scaleAbout);
+    w.text(f.toolName);
+    // v15: the regions after the first, for an extrusion of several.
+    w.u32(static_cast<uint32_t>(f.profileKeys.size() > 1 ? f.profileKeys.size() - 1 : 0));
+    for (size_t i = 1; i < f.profileKeys.size(); ++i) w.u32(f.profileKeys[i]);
 }
 
 // `version` is the file's, not this build's: a project written before bodies
@@ -346,7 +357,7 @@ bool readFeature(Reader& r, Feature& f, uint32_t version) {
     const uint32_t kind = r.u32();
     // The last of the enum, not a name from the middle of it: a kind added
     // later would otherwise be rejected by a build that has it.
-    if (kind > static_cast<uint32_t>(FeatureKind::ExtrudeProfile)) return false;
+    if (kind > static_cast<uint32_t>(FeatureKind::Scale)) return false;
     f.kind = static_cast<FeatureKind>(kind);
     f.enabled = r.u8() != 0;
     if (!readSpec(r, f.primitive)) return false;
@@ -439,11 +450,28 @@ bool readFeature(Reader& r, Feature& f, uint32_t version) {
     if (version >= 12) {
         if (!readSketch(r, f.sketch)) return false;
         f.sketchUid = r.u64();
-        f.profileKey = r.u32();
+        const SketchId first = r.u32();
+        f.profileKeys.clear();
+        if (first != kNoSketchId) f.profileKeys.push_back(first);
     }
     // A sketch in a version 12 file was drawn but never stood on its own, so
     // there was nothing to hide it from: shown is what it was.
     if (version >= 13) f.sketchShown = r.u8() != 0;
+    // Older files have no moves, turns or scales in their history: those lived
+    // on the object, and the loader turns them into steps.
+    if (version >= 14) {
+        f.moveBy = r.vec3();
+        f.turnBy.x = r.f64(); f.turnBy.y = r.f64(); f.turnBy.z = r.f64(); f.turnBy.w = r.f64();
+        f.turnAbout = r.vec3();
+        f.scaleBy = r.vec3();
+        f.scaleAbout = r.vec3();
+        f.toolName = r.text();
+    }
+    if (version >= 15) {
+        const uint32_t more = r.u32();
+        if (more > 1000000u) return false;
+        for (uint32_t i = 0; i < more && !r.bad; ++i) f.profileKeys.push_back(r.u32());
+    }
     return !r.bad;
 }
 
@@ -462,10 +490,12 @@ ProjectResult saveProject(const Scene& scene, const std::string& path) {
     for (const auto& obj : scene.objects()) {
         w.u32(obj->id);
         w.text(obj->name);
-        w.vec3(obj->transform.position);
-        w.f64(obj->transform.rotation.x); w.f64(obj->transform.rotation.y);
-        w.f64(obj->transform.rotation.z); w.f64(obj->transform.rotation.w);
-        w.vec3(obj->transform.scale);
+        // Where it was made. Where it is now is that and the moves in its
+        // history, which are written with the rest of the chain.
+        w.vec3(obj->base.position);
+        w.f64(obj->base.rotation.x); w.f64(obj->base.rotation.y);
+        w.f64(obj->base.rotation.z); w.f64(obj->base.rotation.w);
+        w.vec3(Vec3{1, 1, 1});
         w.u8(obj->visible ? 1 : 0);
         writeSpec(w, obj->spec);
 
@@ -581,11 +611,32 @@ ProjectResult loadProject(Scene& scene, const std::string& path) {
         else                   newId = loaded.addPrimitive(spec.kind, spec, t.position);
         if (newId == kNoObject) { res.error = "object '" + name + "' failed to build"; return res; }
 
+        // Before version 14 the transform was where the object was, scale and
+        // all, and nothing in the history moved it. Where it was is where it
+        // was made, then; and a scale -- which the exact kernel never saw, so
+        // that anything baking this body into another got it unscaled --
+        // becomes the step it always should have been, at the end of the
+        // chain where it acted.
+        const bool scaled = std::fabs(t.scale.x - 1.0) > 1e-9 || std::fabs(t.scale.y - 1.0) > 1e-9 ||
+                            std::fabs(t.scale.z - 1.0) > 1e-9;
+        if (scaled && t.scale.x > 0.0 && t.scale.y > 0.0 && t.scale.z > 0.0) {
+            const bool hasBody = std::any_of(chain.begin(), chain.end(), [](const Feature& f) {
+                return f.kind != FeatureKind::Sketch && !isPlacement(f.kind);
+            });
+            if (hasBody) {
+                Feature sc;
+                sc.kind = FeatureKind::Scale;
+                sc.uid = loaded.takeFeatureUid();
+                sc.scaleBy = t.scale;
+                chain.push_back(std::move(sc));
+            }
+        }
+
         SceneObject* o = loaded.find(newId);
         o->name = name;
-        o->transform = t;
         o->visible = visible;
         o->features = std::move(chain);
+        loaded.setBasePlacement(newId, t);
         // Re-runs the recipe. A chain that no longer evaluates leaves the
         // object as its base primitive rather than failing the whole load.
         loaded.reevaluate(newId);

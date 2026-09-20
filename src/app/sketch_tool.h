@@ -28,19 +28,24 @@
 
 #include "app/camera.h"
 #include "app/create_tool.h"
+#include "app/extrude_ops.h"
 #include "app/plane_snap.h"
 #include "app/undo.h"
 #include "render/renderer.h"
 #include "scene/scene.h"
 #include "sketch/sketch.h"
+#include "sketch/svg.h"
 
+#include <chrono>
 #include <memory>
+#include <unordered_map>
 #include <string>
 #include <vector>
 
 namespace tg {
 
-enum class SketchStage { None, SelectPlane, Draw, Regions, Depth };
+// Applied: extruded, and the panel adjusts the extrusion until Done.
+enum class SketchStage { None, SelectPlane, Draw, Regions, Depth, Applied };
 
 // Select comes first because it is what editing a sketch that already exists is
 // mostly made of: taking hold of something and moving it.
@@ -50,7 +55,9 @@ const char* sketchModeName(SketchMode mode);
 
 class SketchTool {
 public:
-    bool active() const { return stage_ != SketchStage::None; }
+    // Drawing or extruding: the tool has the viewport. Once applied it does not.
+    bool active() const { return stage_ != SketchStage::None && stage_ != SketchStage::Applied; }
+    bool applied() const { return stage_ == SketchStage::Applied; }
     SketchStage stage() const { return stage_; }
     SketchMode mode() const { return mode_; }
 
@@ -60,6 +67,43 @@ public:
     // Re-opens the Sketch feature `sketchUid` of `object` for editing, squared
     // up to its plane. False, with an error, if there is no such feature.
     bool startEdit(const Scene& scene, ObjectId object, ElementId sketchUid, Camera& camera);
+
+    // A new sketch with an SVG drawing waiting to go in it: a plane or a face
+    // is chosen first, the way a new sketch starts, and the drawing lands on it
+    // centred, at the size the file gives, to be sized and moved from there.
+    void startImport(SvgDrawing drawing, std::string name);
+
+    // An SVG drawing into the sketch being drawn, centred on the sketch's
+    // origin. What it added stays adjustable -- see placement() -- until
+    // something else is drawn. False, with an error, outside drawing.
+    bool importSvg(SvgDrawing drawing, std::string name);
+
+    // The drawing is waiting for a plane.
+    bool importPending() const { return pendingSvg_.ok; }
+
+    // The panel's Import SVG button was pressed: the application owns the file
+    // chooser, so it asks, and hands what was chosen to importSvg().
+    bool takeImportRequest() { const bool r = importRequested_; importRequested_ = false; return r; }
+
+    // ---- The drawing just imported, while it can still be placed -----------
+    bool placing() const { return !svg_.empty(); }
+    const SvgPlacement& placement() const { return svgPlace_; }
+    const SvgInsert& placed() const { return svg_; }
+    // Moves, sizes or turns it; the sketch is solved again.
+    bool setPlacement(const SvgPlacement& placement);
+    // Turns the view to take in the whole of it.
+    void frameDrawing(Camera& camera);
+    // Which of its colours are ink -- what becomes the part -- parallel to the
+    // drawing's colours. The drawing is outlined again and put back in, where
+    // it was, as the same one step.
+    bool setInkColours(const std::vector<bool>& ink);
+    const SvgDrawing& placedDrawing() const { return svgDrawing_; }
+    // Leaves it where it is, as ordinary sketch geometry.
+    void endPlacing() {
+        svg_ = SvgInsert{};
+        svgDrawing_ = SvgDrawing{};
+        svgBefore_ = Sketch{};
+    }
 
     // Leaves without changing anything.
     void cancel(Camera& camera);
@@ -136,14 +180,38 @@ public:
     const std::vector<SketchProfile>& regions() const { return regions_; }
     const std::vector<SketchId>& chosenRegions() const { return chosen_; }
     void toggleRegion(SketchId key);
+    // Every region; none; or the filled ones -- those inside an even number of
+    // others, the way an SVG fills a letter and leaves its counter open.
+    void chooseAllRegions();
+    void chooseNoRegions() { chosen_.clear(); }
+    void chooseFilledRegions();
 
     // From regions to depth.
     bool beginDepth();
     void setDepth(Real depth) { depth_ = depth; }
     Real depth() const { return depth_; }
-    void setOp(CreateOp op) { op_ = op; }
-    CreateOp op() const { return op_; }
-    CreateOp resolvedOp() const;
+
+    // What the regions do to the bodies they reach. Until one is picked the
+    // depth decides -- see ExtrudeChoice -- and op() says what it decided.
+    ExtrudeOp op() const {
+        ExtrudeChoice c = choice_;
+        c.follow(depth_, owner() != kNoObject);
+        return c.op;
+    }
+    bool opFollowsDrag() const { return choice_.automatic; }
+    void setOp(ExtrudeOp op) { choice_.pick(op); }
+    const ExtrudeReach& reach() const { return reach_; }
+    void toggleBody(ObjectId id) { reach_.toggle(id); }
+    // `now`: measure it whatever it costs, as a commit must. Otherwise a
+    // drawing of hundreds of regions is not swept again on every frame of a
+    // depth drag -- see the .cpp.
+    void refreshReach(const Scene& scene, bool now = false);
+
+    // Once applied, as the create tool: whether the panel changed something,
+    // the extrusion made again as it now stands, and the panel put away.
+    bool takeAdjusted() { const bool a = adjusted_; adjusted_ = false; return a; }
+    bool recommit(Scene& scene, UndoStack& undo);
+    void dismissApplied();
 
     // Commits what was drawn: the sketch, and an Extrude Profile for each chosen
     // region when `extrude` is set. Without one it is kept as a sketch -- in the
@@ -205,6 +273,10 @@ private:
     SketchId hoverPoint_ = kNoSketchId;
     SketchId hoverEntity_ = kNoSketchId;
     SketchId hoverRegion_ = kNoSketchId;
+    // The curve last pointed at, in a drawing with too many curves to show
+    // every handle: its handles stay shown after the pointer leaves the curve,
+    // so they can be reached and taken hold of.
+    SketchId handleCurve_ = kNoSketchId;
     PlaneSnap snap_;
     enum class Lock { None, Horizontal, Vertical } lock_ = Lock::None;
     Real pickMm_ = 0.5;
@@ -232,10 +304,72 @@ private:
     Real depth_ = 10.0;
     Real depthBase_ = 10.0;
     bool depthTyped_ = false;
-    CreateOp op_ = CreateOp::Auto;
+    ExtrudeChoice choice_;
+    ExtrudeReach reach_;
+    bool adjusted_ = false;
+    std::string reachToolKey_;
+    Body reachTool_;
+    double reachBuildMs_ = 0.0;
+    std::chrono::steady_clock::time_point reachBuiltAt_{};
+
+    // The object the sketch belongs to: the one being edited, or the one whose
+    // face it was drawn on. kNoObject for a sketch on a plane of its own.
+    ObjectId owner() const { return editObject_ != kNoObject ? editObject_ : faceObject_; }
+
+    // The chosen regions swept to the depth, in the world.
+    Body sweptRegions(std::string* why) const;
+    bool commitExtrusion(Scene& scene, UndoStack& undo);
 
     bool escapeArmed_ = false;
     std::string error_;
+
+    // An import: waiting for a plane, and once in, what it added and where.
+    SvgDrawing pendingSvg_;
+    std::string pendingSvgName_;
+    SvgInsert svg_;
+    SvgDrawing svgDrawing_;   // as imported, to outline again in other colours
+    Sketch svgBefore_;        // the sketch before it went in
+    SvgPlacement svgPlace_;
+    std::string svgName_;
+    bool importRequested_ = false;
+    void drawPlacementRows();
+
+    // ---- What is drawn, kept between frames -----------------------------------
+    //
+    // An imported drawing is thousands of curves. Sampling each one, and
+    // hatching each region, afresh every frame is what made a large one crawl,
+    // so the results are kept: a curve is sampled again only when its points
+    // move or the zoom changes by half an octave -- and then as finely as its
+    // size on screen needs, not 48 pieces for a letter three pixels high -- and
+    // a region's outline and hatching only when one of its curves changes.
+    struct EntityDraw {
+        SketchId id = kNoSketchId;
+        SketchCurve curve = SketchCurve::Line;
+        Vec2 ctrl[4];
+        Real radius = 0;
+        int bucket = 0;
+        uint32_t version = 0;
+        std::vector<Vec2> line;       // in plane coordinates
+        Vec2 lo, hi;                  // around it
+    };
+    struct RegionDraw {
+        uint64_t signature = 0;
+        std::vector<std::vector<Vec2>> loops;   // outer first, then its holes
+        Vec2 lo, hi;
+        Real fineMm = -1, coarseMm = -1;
+        std::vector<Vec2> fine, coarse;        // hatch strokes, two points each
+    };
+    mutable std::vector<EntityDraw> entityDraw_;
+    mutable std::unordered_map<SketchId, size_t> entityDrawAt_;
+    mutable std::unordered_map<SketchId, RegionDraw> regionDraw_;
+    mutable uint32_t drawVersion_ = 0;
+    mutable int drawBucket_ = 0;
+    mutable Real drawMmPerPx_ = 1.0;
+    void refreshDrawCache(const Camera& camera) const;
+    const EntityDraw* drawOf(SketchId entity) const;
+    const RegionDraw& regionDrawOf(const SketchProfile& region) const;
+    const std::vector<Vec2>& hatchOf(const SketchProfile& region, Real spacingPx, bool fine) const;
+    bool regionHas(const SketchProfile& region, Vec2 uv) const;
 
     float hudX_ = 20.0f, hudY_ = 20.0f;
     float viewX_ = 0.0f, viewY_ = 0.0f;

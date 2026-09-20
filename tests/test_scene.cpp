@@ -213,6 +213,43 @@ int main() {
                                                Vec2{0, 0});
             check(!h.hit(), "a distant miss picks nothing");
         }
+
+        // Faces in one plane fight over the same pixels. A taller box beside
+        // this one, its top at the same height where they overlap, and a copy
+        // of this box left exactly where it is: every face under the cursor
+        // there has to be a candidate, or only one of them can ever be picked.
+        {
+            PrimitiveSpec tall;
+            tall.kind = PrimitiveKind::Box;
+            tall.box.width = tall.box.depth = 10.0;
+            tall.box.height = 20.0;
+            const ObjectId beside = s.addPrimitive(PrimitiveKind::Box, tall, {5, 5, 0});
+            const ObjectId copy = s.duplicateObject(box);
+            const Vec2 px = pixelOf({4, 4, 10});
+            const std::vector<ElementHit> all =
+                s.pickElements(Ray{{4, 4, 200}, {0, 0, -1}}, vp, W, H, px);
+            check(all.size() == 3, "three coplanar top faces under the cursor, three candidates");
+            bool haveBox = false, haveBeside = false, haveCopy = false;
+            for (const ElementHit& h : all) {
+                check(h.ref.kind == ElementKind::Face, "each of them a face");
+                haveBox |= h.ref.object == box;
+                haveBeside |= h.ref.object == beside;
+                haveCopy |= h.ref.object == copy;
+            }
+            check(haveBox && haveBeside && haveCopy, "one from each body");
+            check(s.pickElement(Ray{{4, 4, 200}, {0, 0, -1}}, vp, W, H, px).ref == all.front().ref,
+                  "the single pick is the first candidate");
+            check(s.raycastCoincident(Ray{{4, 4, 200}, {0, 0, -1}}).size() == 3, "and three bodies");
+
+            // Where only the box and its copy are under the cursor, only they
+            // are: a candidate has to be as near as the nearest.
+            const Vec2 px2 = pixelOf({-5, -5, 10});
+            check(s.pickElements(Ray{{-5, -5, 200}, {0, 0, -1}}, vp, W, H, px2).size() == 2,
+                  "away from the taller box, two");
+            s.removeObject(beside);
+            s.removeObject(copy);
+            std::printf("[pick] coplanar faces: %zu candidates\n", all.size());
+        }
         std::printf("[pick] vertex/edge/face priority and generous picking ok\n");
     }
 
@@ -448,6 +485,106 @@ int main() {
         std::printf("[select] divided wall: one click selects 1 piece\n");
     } else {
         std::printf("[select] no exact kernel, so nothing to divide\n");
+    }
+
+    // ---- Moving, turning and scaling are steps in the history ------------
+    {
+        Scene s;
+        const ObjectId id = s.addPrimitive(PrimitiveKind::Box, {}, {10, 0, 0});
+        const size_t root = s.find(id)->features.size();
+
+        // Two nudges are one Move, and the object is where both put it.
+        check(s.recordMove(id, {5, 0, 0}) && s.recordMove(id, {0, 3, 0}), "moved twice");
+        const SceneObject* o = s.find(id);
+        check(o->features.size() == root + 1, "two moves fold into one step");
+        check(near(o->transform.position.x, 15) && near(o->transform.position.y, 3), "and it went there");
+        check(near(o->base.position.x, 10), "where it was made is unchanged");
+
+        // Turned off in the history, the move takes the object back.
+        s.find(id)->features.back().enabled = false;
+        s.reevaluate(id);
+        check(near(s.find(id)->transform.position.x, 10) && near(s.find(id)->transform.position.y, 0),
+              "a move turned off puts the object back");
+        s.find(id)->features.back().enabled = true;
+        s.reevaluate(id);
+
+        // A move folded back to nothing leaves no step behind.
+        check(s.recordMove(id, {-5, -3, 0}), "moved back");
+        check(s.find(id)->features.size() == root, "a move folded to nothing is removed");
+
+        // A turn about a point turns the object and carries it round.
+        check(s.recordRotate(id, Quat::fromAxisAngle({0, 0, 1}, radians(90.0)), {0, 0, 0}), "turned");
+        o = s.find(id);
+        check(near(o->transform.position.x, 0, 1e-4f) && near(o->transform.position.y, 10, 1e-4f),
+              "turned a quarter about the origin, it stands on +Y");
+        check(o->features.back().kind == FeatureKind::Rotate, "as a Rotate step");
+        std::printf("[history] move and rotate are steps; placement follows them\n");
+    }
+
+    if (brep::available()) {
+        // The reported bug: a tool scaled from the side panel went into a
+        // boolean as though it had never been scaled. A scale is now a change
+        // of shape, so what is baked is what is on the screen.
+        Scene s;
+        const ObjectId target = s.addPrimitive(PrimitiveKind::Box);                 // 20mm, centred
+        const ObjectId tool = s.addPrimitive(PrimitiveKind::Box, {}, {10, 0, 0});
+        std::string why;
+        check(s.recordScale(tool, {0.5, 1, 1}, {0, 0, 0}, &why), "tool scaled: " + why);
+        const SceneObject* t = s.find(tool);
+        check(near(t->localBounds.size().x, 10) && near(t->localBounds.size().y, 20),
+              "the tool's shape is half as wide");
+        check(t->transform.scale == Vec3(1, 1, 1), "and the transform carries no scale");
+        check(t->body.faceKind(0) == SurfaceKind::Plane, "a stretched box keeps flat faces");
+
+        Body baked = t->body;
+        baked.transform(inverse(s.find(target)->modelMatrix()) * t->modelMatrix());
+        Feature cut;
+        cut.kind = FeatureKind::Boolean;
+        cut.booleanOp = BooleanOp::Difference;
+        cut.bakedBody = std::move(baked);
+        check(s.addFeature(target, std::move(cut), &why), "cut: " + why);
+        const double vol = s.find(target)->body.health(false).volume;
+        check(std::fabs(vol - 6000.0) < 1e-3, "the cut takes the scaled tool's volume, not the unscaled one");
+        std::printf("[history] scaled tool cuts %.1f mm3 (8000 - 2000)\n", vol);
+
+        // Two scales about the same point fold, and the inspector's number is
+        // their product.
+        check(s.recordScale(tool, {2, 1, 1}, {0, 0, 0}, &why), "scaled back");
+        check(s.find(tool)->features.size() == 1, "a scale folded back to nothing is removed");
+        check(s.recordScale(tool, {1, 1, 3}, {0, 0, 0}, &why), "taller");
+        check(near(scaleOf(s.find(tool)->features).z, 3), "the overall scale reads back");
+
+        // A negative scale is a mirror, and a sketch has nothing to scale.
+        check(!s.recordScale(tool, {-1, 1, 1}, {0, 0, 0}, &why), "a negative scale is refused");
+        std::printf("[history] scale is a step: %s\n", why.c_str());
+    }
+
+    if (brep::available()) {
+        // A round tool stretched into an oval, cut from a box that is then
+        // moved, turned and stretched itself: the sequence that once took the
+        // kernel down, since the oval's edges were more than the exact stretch
+        // knew and the general one faulted on what a boolean leaves behind.
+        Scene s;
+        const ObjectId box = s.addPrimitive(PrimitiveKind::Box, {}, {0, 0, 10});
+        PrimitiveSpec spec;
+        spec.kind = PrimitiveKind::Cylinder;
+        spec.cylinder.radius = 4.0;
+        spec.cylinder.height = 40.0;
+        const ObjectId tool = s.addPrimitive(PrimitiveKind::Cylinder, spec, {0, 0, 10});
+        std::string why;
+        check(s.recordScale(tool, {2.2, 1, 1}, {0, 0, 0}, &why), "the tool is stretched into an oval: " + why);
+        Body baked = s.find(tool)->body;
+        baked.transform(inverse(s.find(box)->modelMatrix()) * s.find(tool)->modelMatrix());
+        Feature cut;
+        cut.kind = FeatureKind::Boolean;
+        cut.booleanOp = BooleanOp::Difference;
+        cut.bakedBody = std::move(baked);
+        check(s.addFeature(box, std::move(cut), &why), "the oval is cut: " + why);
+        s.recordMove(box, {6, 4, 0});
+        s.recordRotate(box, Quat::fromAxisAngle({0, 0, 1}, radians(20.0)), s.find(box)->transform.position);
+        check(s.recordScale(box, {1, 1, 0.6}, {0, 0, 0}, &why), "and the box made shorter: " + why);
+        check(near(s.find(box)->localBounds.size().z, 12.0f, 1e-3f), "twelve tall");
+        std::printf("[history] a cut box with an oval hole stretches: %d faces\n", s.find(box)->body.faceCount());
     }
 
     std::printf("\n%s (%d failures)\n", failures ? "FAILED" : "ALL PASS", failures);

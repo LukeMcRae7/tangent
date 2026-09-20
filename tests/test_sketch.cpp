@@ -570,7 +570,7 @@ int main() {
             f.kind = FeatureKind::ExtrudeProfile;
             f.uid = uid;
             f.sketchUid = sketchUid;
-            f.profileKey = key;
+            f.profileKeys = {key};
             f.distance = distance;
             f.extrudeOp = op;
             return f;
@@ -707,7 +707,7 @@ int main() {
                       "with every entity and constraint");
                 check(near(o->features[0].sketch.constraint(r.width)->value, 30.0),
                       "and the dimensions they were saved with");
-                check(o->features[3].sketchUid == s2 && o->features[3].profileKey == bore,
+                check(o->features[3].sketchUid == s2 && o->features[3].profileKeys == std::vector<SketchId>{bore},
                       "each extrusion still pointing at its sketch and region");
                 check(near(o->body.health(false).volume, volume, 1e-6),
                       "re-evaluating to the same part");

@@ -147,6 +147,52 @@ int main() {
         check(o->meshVersion == versionBefore, "not even a re-upload");
     }
 
+    std::printf("--- what is wanted is said, and doing it is the caller's ---\n");
+    {
+        // Meshing a body of a few thousand faces is hundreds of milliseconds,
+        // so the application does it on a worker and swaps the result in. That
+        // only works if asking what is wanted changes nothing by itself.
+        Scene s;
+        for (int i = 0; i < 5; ++i)
+            addCylinder(s, Backend::Brep, {static_cast<Real>(i) * 40, 0, 0});
+        LodPolicy p;
+        p.budgetPerFrame = 2;
+        const Camera cam = viewAt(80.0f);
+
+        const SceneObject* first = s.objects().front().get();
+        const size_t triangles = first->render.triangles.size();
+        const uint32_t version = first->meshVersion;
+
+        const std::vector<LodWant> wants = tessellationWanted(s, cam, p);
+        check(wants.size() == 2, "two at a time, as the budget says");
+        check(first->render.triangles.size() == triangles && first->meshVersion == version,
+              "and asking meshed nothing");
+        check(tessellationWanted(s, cam, p).size() == 2, "asking again says the same");
+        for (const LodWant& w : wants) check(w.target > 0, "each with a tolerance to mesh to");
+    }
+
+    std::printf("--- drawing a body finer is not a change to the body ---\n");
+    {
+        // The printability check and the solidity report hang off the geometry
+        // version. They cost a fifth of a second each on a heavy body, and a
+        // zoom must not be what pays for them.
+        Scene s;
+        const ObjectId id = addCylinder(s, Backend::Brep);
+        SceneObject* o = s.find(id);
+        const uint32_t geometry = o->geometryVersion;
+        const uint32_t mesh = o->meshVersion;
+
+        LodPolicy p;
+        p.budgetPerFrame = 4;
+        check(refreshTessellation(s, viewAt(30.0f), p) == 1, "redrawn for a closer view");
+        check(o->meshVersion != mesh, "which the renderer has to re-upload");
+        check(o->geometryVersion == geometry, "but the body itself did not change");
+
+        // Editing it does change the body.
+        o->refreshDerived();
+        check(o->geometryVersion != geometry, "an edit does");
+    }
+
     std::printf("\n%s (%d failures)\n", failures ? "FAILED" : "ALL PASS", failures);
     return failures ? 1 : 0;
 }

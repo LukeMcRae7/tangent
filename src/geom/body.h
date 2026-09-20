@@ -23,10 +23,17 @@
 #include "mesh/halfedge.h"
 #include "mesh/health.h"
 
+#include <mutex>
 #include <string>
 #include <vector>
 
 namespace tg {
+
+// The one lock over everything that writes into a shape, or reads one that
+// might be written: meshing writes its triangulation into the shape itself, and
+// every copy of a body points at the same shape. Held for the length of a mesh
+// or a copy, by whichever thread is doing it.
+std::mutex& meshingLock();
 
 // FaceId, EdgeId and VertexId are declared in brep.h, where the backend that
 // numbers them differently also has to see them.
@@ -180,9 +187,14 @@ public:
     // the screen's answer; an export sets its own, because the number a printer
     // cares about and the number a frame budget can afford are not the same
     // number. See TessellationQuality in brep.h.
+    // Meshing writes its triangulation into the shape, which every copy of this
+    // body shares, so it takes the lock that guards that state -- see
+    // meshingLock(). Uncontended it costs nothing; it only ever waits when a
+    // worker is taking its own copy of the same shape at that moment.
     void tessellate(RenderMesh& out, TessellationQuality q = {}) const {
-        if (brep_) brep::tessellate(*brep_, out, q);
-        else       mesh_.buildRenderMesh(out, q.creaseAngleDeg);
+        if (!brep_) { mesh_.buildRenderMesh(out, q.creaseAngleDeg); return; }
+        std::lock_guard<std::mutex> hold(meshingLock());
+        brep::tessellate(*brep_, out, q);
     }
     bool validate(std::string* err = nullptr) const {
         return brep_ ? brep::validate(*brep_, err) : mesh_.validate(err);
@@ -217,10 +229,15 @@ public:
     }
     bool canMoveVertices() const { return !brep_; }
 
-    // Place the whole body somewhere else. Exact on either backend -- a rigid
-    // transform of a plane is a plane, of a cylinder a cylinder -- which is why
-    // it belongs here rather than being done by walking vertices.
-    void transform(const Mat4& m);
+    // Place the whole body somewhere else, or stretch it. Exact on either
+    // backend -- see brep::transformed for what a stretch costs an exact body.
+    // False, leaving the body as it was, for a matrix that would turn it
+    // inside out or flatten it.
+    bool transform(const Mat4& m);
+
+    // Scales about `pivot`, along the body's own axes. Every factor must be
+    // positive: a negative one is a mirror, and mirror() is how to ask.
+    bool scale(Vec3 factors, Vec3 pivot = Vec3{});
 
     // Reflects across a plane. Not transform(reflectionMatrix) -- see
     // brep::mirrored for why that is not the same thing.
@@ -241,6 +258,9 @@ public:
     // another. Anything handed to a worker gets one of these.
     Body detached() const {
         if (!brep_) return *this;          // a mesh is already a value
+        // Reading the shape while another thread meshes it is the race this
+        // exists to prevent, so the copy waits for any meshing to finish.
+        std::lock_guard<std::mutex> hold(meshingLock());
         return Body(brep::detach(*brep_));
     }
 

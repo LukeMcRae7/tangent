@@ -50,6 +50,15 @@ bool extrudeFaces(Body& body, const std::vector<FaceId>& faces, Real distance,
                   ExtrudeOp op = ExtrudeOp::Auto, std::string* reason = nullptr,
                   bool mergeFlush = true, Vec3 along = Vec3{});
 
+// The solid the faces sweep through, on its own: what an extrusion does to the
+// bodies around it is done with this. `along` as for extrudeFaces.
+bool sweepFaces(const Body& body, const std::vector<FaceId>& faces, Real distance, Vec3 along,
+                ElementId salt, Body& out, std::string* reason = nullptr);
+
+// Whether two exact bodies, in the same frame, touch or overlap. A mesh never
+// does: it cannot be combined with anything.
+bool bodiesTouch(const Body& a, const Body& b, Real tol = 1e-6);
+
 // A solid from a closed profile on a plane, swept between two heights along the
 // plane's normal -- what the create tool draws.
 //

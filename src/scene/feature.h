@@ -46,6 +46,9 @@ enum class FeatureKind {
     Reduce,      // fewer triangles for a mesh, within a tolerance
     Sketch,      // constrained 2D geometry on a plane; changes no body itself
     ExtrudeProfile, // a region of a sketch swept into a solid
+    Move,        // puts the object somewhere else; its shape is untouched
+    Rotate,      // turns the object about a point; its shape is untouched
+    Scale,       // stretches the body along its own axes: a change of shape
 
     // New kinds go on the end and nowhere else. The value is what is written
     // to a file, so inserting one in the middle renumbers every kind after it
@@ -234,12 +237,15 @@ struct Feature {
     // constraints describe rather than the one it happened to be drawn as.
     Sketch sketch;
 
-    // ExtrudeProfile: which sketch, and which region of it. The sketch is named
-    // by its feature's uid and the region by its key, neither of which changes
-    // when a step is added before it or a line is added elsewhere in the
-    // sketch. `distance` and `extrudeOp` say how far, and what to do with it.
+    // ExtrudeProfile: which sketch, and which regions of it. The sketch is
+    // named by its feature's uid and each region by its key, neither of which
+    // changes when a step is added before it or a line is added elsewhere in
+    // the sketch. `distance` and `extrudeOp` say how far, and what to do with
+    // them. Several regions are one step, swept together and combined with the
+    // body once: an imported drawing is hundreds of regions, and a step each
+    // was hundreds of booleans.
     ElementId sketchUid = 0;
-    SketchId  profileKey = kNoSketchId;
+    std::vector<SketchId> profileKeys;
 
     // Sketch: whether its geometry is drawn in the viewport. A sketch stays in
     // the outliner once something has been built from it, but showing every
@@ -247,6 +253,29 @@ struct Feature {
     // extruding one turns its drawing off. Display only: it changes nothing
     // about what the chain builds.
     bool sketchShown = true;
+
+    // Move and Rotate: where the object went, in the world. They are history
+    // like everything else -- they can be edited, turned off and removed -- but
+    // what they change is where the object stands rather than what it is, so
+    // the chain leaves the body alone and the scene composes them onto the
+    // placement the object was created at (see SceneObject::base). Turning a
+    // move off puts the object back; the faces and edges after it keep their
+    // names, since nothing about them changed.
+    Vec3 moveBy{0, 0, 0};
+    Quat turnBy{};
+    Vec3 turnAbout{0, 0, 0};
+
+    // Scale: how much along each of the body's own axes, and the point in its
+    // own space that stays where it is. A real change of shape, made by the
+    // kernel -- not a display transform -- so that everything which bakes
+    // this body into something else, a boolean above all, gets the shape that
+    // is on the screen.
+    Vec3 scaleBy{1, 1, 1};
+    Vec3 scaleAbout{0, 0, 0};
+
+    // Boolean: what the tool body was called when it was combined, so the
+    // history can say "Cut  Cylinder" rather than counting its faces.
+    std::string toolName;
 
     // VertexEdit: a free-form drag, recorded as explicit offsets. Not
     // parametric in any meaningful sense, but it has to live in the chain so
@@ -273,6 +302,9 @@ struct Feature {
 // going, so one bad step does not destroy the rest of the model. Returns false
 // only if nothing at all could be produced.
 bool evaluateFeatures(std::vector<Feature>& features, Body& out);
+
+// Whether a step places the object rather than shaping it.
+inline bool isPlacement(FeatureKind k) { return k == FeatureKind::Move || k == FeatureKind::Rotate; }
 
 // Re-runs the chain from `from` onward, reusing `cache[from - 1]` as the
 // starting point. `cache[i]` holds the body as it stood after feature i.

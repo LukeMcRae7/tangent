@@ -39,6 +39,10 @@ int main(int argc, char** argv) {
             app.setPickFace(std::atoi(argv[++i]));
         } else if (std::strcmp(argv[i], "--boolean-demo") == 0 && i + 1 < argc) {
             app.setBooleanDemo(std::atoi(argv[++i]));
+        } else if (std::strcmp(argv[i], "--coplanar-demo") == 0 && i + 1 < argc) {
+            app.setCoplanarDemo(std::atoi(argv[++i]));
+        } else if (std::strcmp(argv[i], "--history-demo") == 0) {
+            app.setHistoryDemo();
         } else if (std::strcmp(argv[i], "--hold-transform") == 0) {
             app.setHoldTransform();
         } else if (std::strcmp(argv[i], "--fillet-demo") == 0 && i + 2 < argc) {
@@ -82,6 +86,14 @@ int main(int argc, char** argv) {
             app.setFilletOpen();
         } else if (std::strcmp(argv[i], "--profile-demo") == 0 && i + 1 < argc) {
             app.setProfileDemo(std::atoi(argv[++i]));
+        } else if (std::strcmp(argv[i], "--frame-probe") == 0 && i + 1 < argc) {
+            app.setFrameProbe(std::atoi(argv[++i]));
+        } else if (std::strcmp(argv[i], "--svg-demo") == 0 && i + 1 < argc) {
+            // --svg-demo drawing.svg [step]
+            const char* file = argv[++i];
+            int step = 1;
+            if (i + 1 < argc && argv[i + 1][0] != '-') step = std::atoi(argv[++i]);
+            app.setSvgDemo(file, step);
         } else if (std::strcmp(argv[i], "--sketch-demo") == 0 && i + 1 < argc) {
             app.setSketchDemo(std::atoi(argv[++i]));
         } else if (std::strcmp(argv[i], "--snap-demo") == 0 && i + 1 < argc) {
@@ -100,6 +112,7 @@ int main(int argc, char** argv) {
             std::printf("tangent - 3D modelling for print design\n"
                         "  --smoke-test [frames]   render N frames and exit\n"
                         "  --screenshot <out.ppm>  capture the window to a PPM\n"
+                        "  --frame-probe <n>       print where every n frames went\n"
                         "  --native-frame          the system's title bar instead of the app's\n"
                         "  --camera y,p,d          place the camera (degrees, mm)\n"
                         "  --empty                 start with an empty scene\n"

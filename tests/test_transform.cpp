@@ -263,11 +263,18 @@ int main() {
         auto cmd = tool.confirm(s);
         check(cmd != nullptr, "confirm yields an undo command");
         check(!tool.active(), "tool ends after confirm");
+        // The move is a step in the history, and where the object stands
+        // follows from it -- a re-evaluation must not put it back.
+        check(s.find(id)->features.back().kind == FeatureKind::Move, "the move is a step in the history");
+        s.reevaluate(id);
+        check(nearV(s.find(id)->transform.position, start + Vec3{0, 0, 12.5f}),
+              "and re-evaluating keeps it where it was put");
 
         UndoStack u;
         u.push(std::move(cmd));
         u.undo(s);
         check(nearV(s.find(id)->transform.position, start), "undo reverts the move");
+        check(s.find(id)->features.size() == 1, "and takes the step away");
         std::printf("[tool] numeric translate ok\n");
     }
 
@@ -345,7 +352,16 @@ int main() {
         check(nearV(s.find(a)->transform.scale, {1, 1, 2}), "axis scale affects only Z");
         check(nearV(s.find(a)->transform.position, {40, 0, 0}),
               "position is unchanged along unscaled axes");
-        tool.cancel(s);
+
+        // Confirmed, the stretch is the body's own shape: the transform goes
+        // back to unscaled and the body is twice as tall.
+        const Real tallBefore = s.find(a)->localBounds.size().z;
+        auto cmd = tool.confirm(s);
+        check(cmd != nullptr, "the scale yields an undo command");
+        check(nearV(s.find(a)->transform.scale, {1, 1, 1}), "the transform carries no scale");
+        check(std::fabs(s.find(a)->localBounds.size().z - tallBefore * 2) < 1e-4,
+              "the body itself is twice as tall");
+        check(s.find(a)->features.back().kind == FeatureKind::Scale, "as a Scale step");
         std::printf("[tool] scale ok\n");
     }
 

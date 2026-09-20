@@ -1,5 +1,7 @@
 #include "render/renderer.h"
 
+#include <algorithm>
+
 #include <epoxy/gl.h>
 
 #include <cstdio>
@@ -286,15 +288,28 @@ void Renderer::render(const Scene& scene, const Camera& camera, const ViewOption
     surfaceShader_.set("uBaseColor", opts.objectColor);
     surfaceShader_.set("uAccent", opts.accentColor);
 
+    // Where two bodies have faces in one plane, the depth buffer cannot tell
+    // them apart and draws a speckle of both. The body holding the selection
+    // is pushed back less than the rest, so it wins: select a face there --
+    // clicking again steps to the next -- and that face is the one shown.
+    std::vector<ObjectId> holding;
+    for (const ElementRef& e : scene.elementSelection())
+        if (std::find(holding.begin(), holding.end(), e.object) == holding.end())
+            holding.push_back(e.object);
+
     for (const auto& obj : scene.objects()) {
         if (!obj->visible) continue;
         const GpuMesh& gpu = syncObject(*obj);
         const Mat4 model = obj->modelMatrix();
+        const bool selected = scene.isSelected(obj->id);
+        const bool inFront = selected ||
+                             std::find(holding.begin(), holding.end(), obj->id) != holding.end();
+        glPolygonOffset(inFront ? 1.0f : 2.0f, inFront ? 1.0f : 3.0f);
 
         surfaceShader_.bind();
         surfaceShader_.set("uModel", model);
         surfaceShader_.set("uNormalMat", normalMatrix(model));
-        surfaceShader_.set("uSelected", scene.isSelected(obj->id) ? 1.0f : 0.0f);
+        surfaceShader_.set("uSelected", selected ? 1.0f : 0.0f);
         gpu.drawTriangles();
     }
 

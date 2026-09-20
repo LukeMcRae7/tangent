@@ -30,9 +30,18 @@ BrepRef filletEdges(const BrepShape&, const std::vector<EdgeId>&, const std::vec
     return {};
 }
 BrepRef extrudeFaces(const BrepRef&, const std::vector<FaceId>&, Real, ElementId,
-                     std::vector<ElementId>*, std::string* reason, bool, Vec3) {
+                     std::vector<ElementId>*, std::string* reason, bool, Vec3, bool) {
     if (reason) *reason = "built without OpenCASCADE";
     return {};
+}
+
+BrepRef sweptFaces(const BrepRef&, const std::vector<FaceId>&, Real, Vec3, ElementId,
+                   std::string* reason) {
+    if (reason) *reason = "built without OpenCASCADE";
+    return {};
+}
+
+bool touches(const BrepShape&, const BrepShape&, Real) { return false;
 }
 BrepRef rotateFaces(const BrepRef&, const std::vector<FaceId>&, Real, Vec3, Vec3,
                     ElementId, std::string* reason) {
@@ -68,6 +77,11 @@ BrepRef shell(const BrepRef&, const std::vector<FaceId>&, Real, ElementId,
 }
 BrepRef sketchSolid(const Sketch&, const SketchProfile&, Real, Real, ElementId,
                     std::string* reason) {
+    if (reason) *reason = "built without OpenCASCADE";
+    return {};
+}
+BrepRef sketchSolids(const Sketch&, const std::vector<SketchProfile>&, const std::vector<SketchId>&,
+                     Real, Real, ElementId, std::string* reason) {
     if (reason) *reason = "built without OpenCASCADE";
     return {};
 }

@@ -123,6 +123,7 @@ bool Application::init() {
     io.IniFilename = "tangent.ini";
 
     loadFonts(resolveAssetDir(), 14.0f);
+    loadGlyphFont(resolveAssetDir() + "/fonts");
     applyDarkTheme();
 
     if (!ImGui_ImplSDL3_InitForOpenGL(window_, glCtx_)) {
@@ -249,7 +250,37 @@ bool Application::init() {
         scene_.clearSelection();
         scene_.select(target);
         scene_.select(tool, true);
-        applyBoolean(static_cast<BooleanOp>(booleanDemo_));
+        // The dialog, open on them, the way the toolbar opens it.
+        beginCombine(static_cast<BooleanOp>(booleanDemo_ % 3));
+        if (booleanDemo_ >= 3) finishCombine();
+    }
+
+    if (historyDemo_ && !scene_.objects().empty()) {
+        const ObjectId box = scene_.objects().front()->id;
+        // A cylinder stretched into an oval from the side panel, then cut from
+        // the box: the hole has to be the oval, not the round it started as.
+        PrimitiveSpec spec;
+        spec.kind = PrimitiveKind::Cylinder;
+        spec.cylinder.radius = 4.0;
+        spec.cylinder.height = 40.0;
+        const ObjectId tool = scene_.addPrimitive(PrimitiveKind::Cylinder, spec, Vec3{0, 0, 10});
+        std::string why;
+        scene_.recordScale(tool, {2.2, 1.0, 1.0}, Vec3{}, &why);
+        scene_.clearSelection();
+        scene_.select(box);
+        scene_.select(tool, true);
+        beginCombine(BooleanOp::Difference);
+        finishCombine();
+        dismissSettled();
+        // And the box moved, turned and made shorter: steps, like the cut.
+        scene_.recordMove(box, {6, 4, 0});
+        const SceneObject* b = scene_.find(box);
+        scene_.recordRotate(box, Quat::fromAxisAngle({0, 0, 1}, radians(20.0)), b->transform.position);
+        scene_.recordScale(box, {1.0, 1.0, 0.6}, Vec3{}, &why);
+        scene_.clearSelection();
+        scene_.select(box);
+        std::fprintf(stderr, "[history-demo] %zu steps, %.1f mm3\n", scene_.find(box)->features.size(),
+                     scene_.find(box)->body.health(false).volume);
     }
 
     if (filletDemo_ > 0.0f && !scene_.objects().empty()) {
@@ -462,6 +493,66 @@ bool Application::init() {
         // The cursor is placed per frame, in stepSnapDemo: the viewport has no
         // size until the first frame has been laid out, so a pixel worked out
         // here would point somewhere else by the time anything was drawn.
+    }
+
+    if (!svgDemo_.empty()) {
+        scene_.clear();
+        camera_.yaw = 0.7f;
+        camera_.pitch = 0.6f;
+        camera_.distance = 150.0f;
+        camera_.target = {0, 0, 0};
+        camera_.snapToGoal();
+        importSvg(svgDemo_);
+        std::fprintf(stderr, "[svg-demo] %s\n", notice_.c_str());
+        // Step 4: a plate under the drawing, which the drawing is cut into.
+        if (svgDemoStep_ >= 4 && sketchTool_.importPending()) {
+            PrimitiveSpec spec;
+            spec.kind = PrimitiveKind::Box;
+            const Real w = 1200.0;
+            spec.box = {w, w, 10.0};
+            const ObjectId plate = scene_.addPrimitive(PrimitiveKind::Box, spec, Vec3{0, 0, -5});
+            std::fprintf(stderr, "[svg-demo] plate %u\n", plate);
+        }
+        sketchTool_.choosePlane(PlaneChoice::XY, camera_);
+        camera_.snapToGoal();
+        std::fprintf(stderr, "[svg-demo] placed: %zu entities, %zu points, %zu regions, %s\n",
+                     sketchTool_.sketch().entities.size(), sketchTool_.sketch().points.size(),
+                     sketchTool_.regions().size(), sketchTool_.solveState().solved ? "solved" : "unsolved");
+        if (svgDemoStep_ >= 2 && sketchTool_.beginExtrude(&camera_)) {
+            camera_.snapToGoal();
+            std::fprintf(stderr, "[svg-demo] %zu of %zu regions picked\n", sketchTool_.chosenRegions().size(),
+                         sketchTool_.regions().size());
+        }
+        if (svgDemoStep_ >= 3 && sketchTool_.beginDepth()) {
+            if (svgDemoStep_ >= 4) sketchTool_.typeKey('-');
+            sketchTool_.typeKey('3');
+            const auto t0 = std::chrono::steady_clock::now();
+            sketchTool_.finish(scene_, camera_, undo_, true);
+            const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+            camera_.snapToGoal();
+            for (const auto& o : scene_.objects())
+                std::fprintf(stderr, "[svg-demo] %s: %d faces, %.3f mm3, extruded in %.0f ms\n", o->name.c_str(),
+                             o->body.faceCount(), o->body.health(false).volume, ms);
+        }
+        // Step 5: the biggest face of it selected, which is what the
+        // selection overlay costs a frame to draw.
+        if (svgDemoStep_ >= 5 && !scene_.objects().empty()) {
+            SceneObject* o = scene_.objects().front().get();
+            std::vector<FaceId> faces;
+            o->body.allFaces(faces);
+            FaceId biggest = kInvalid;
+            size_t most = 0;
+            for (FaceId f : faces) {
+                std::vector<EdgeId> es;
+                o->body.faceEdges(f, es);
+                if (es.size() > most) { most = es.size(); biggest = f; }
+            }
+            if (biggest != kInvalid) {
+                scene_.selectElement({o->id, ElementKind::Face, biggest}, true);
+                std::fprintf(stderr, "[svg-demo] selected a face of %zu edges\n", most);
+            }
+        }
+        if (std::string e = sketchTool_.takeError(); !e.empty()) std::fprintf(stderr, "[svg-demo] %s\n", e.c_str());
     }
 
     if (sketchDemo_ > 0) {
@@ -816,7 +907,7 @@ Vec2 Application::mouseInViewport() const {
 
 bool Application::editToolActive() const {
     return filletTool_.active || faceTool_.active || divideTool_.active || patternTool_.active ||
-           reduceTool_.active;
+           reduceTool_.active || combineTool_.active;
 }
 
 bool Application::refuseMeshEdit(const SceneObject& obj, const char* what) {
@@ -838,7 +929,7 @@ void Application::beginTransform(TransformMode mode) {
     measure_.end();
 
     if (const SceneObject* o = scene_.find(scene_.contextObject()))
-        preEditSolid_ = o->healthVersion == o->meshVersion && o->health.solid();
+        preEditSolid_ = o->healthVersion == o->geometryVersion && o->health.solid();
     else
         preEditSolid_ = false;
 
@@ -882,6 +973,7 @@ void Application::handleViewportMouse() {
     stepFaceStress();
     stepPrintDemo();
     stepPreviewCheck();
+    stepCoplanarDemo();
 
     // Sketching. The same arrangement as the create tool below: the wheel still
     // zooms, and the pointer on the dialog leaves the drawing alone.
@@ -889,7 +981,11 @@ void Application::handleViewportMouse() {
         if (io.MouseWheel != 0.0f && overViewport && !io.WantCaptureMouse)
             camera_.dolly(io.MouseWheel);
         if (!io.WantCaptureMouse) {
+            const auto t0 = std::chrono::steady_clock::now();
             sketchTool_.update(scene_, camera_, mouseInViewport(), !io.KeyCtrl);
+            if (!svgDemo_.empty())
+                svgDemoUpdateMs_ = std::max(svgDemoUpdateMs_, std::chrono::duration<double, std::milli>(
+                                                                  std::chrono::steady_clock::now() - t0).count());
             if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && overViewport) {
                 sketchTool_.handleMouseDown(scene_, camera_, undo_);
                 if (!sketchTool_.active()) justFinishedModal_ = true;
@@ -930,6 +1026,22 @@ void Application::handleViewportMouse() {
             } else if (ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
                 createTool_.handleRightClick(camera_);
                 if (!createTool_.active()) justFinishedModal_ = true;
+            }
+        }
+        return;
+    }
+
+    // Combining: clicking a body puts it in as a tool or takes it out.
+    if (combineTool_.active) {
+        updateCombine();
+        if (!io.WantCaptureMouse && overViewport) {
+            if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                const Vec2 m = mouseInViewport();
+                const RayHit hit = scene_.raycast(camera_.rayThroughPixel(static_cast<float>(m.x),
+                                                                          static_cast<float>(m.y)));
+                if (hit.hit()) toggleCombineBody(hit.object);
+            } else if (ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+                abortCombine();
             }
         }
         return;
@@ -1029,30 +1141,77 @@ void Application::handleViewportClick(bool shift, bool ctrl) {
     }
 
     if (ctrl) {
-        const RayHit hit = scene_.raycast(ray);
-        scene_.clearElementSelection();
-        if (hit.hit()) {
-            if (shift) scene_.toggleSelect(hit.object);
-            else       scene_.select(hit.object);
-        } else if (!shift) {
-            scene_.clearSelection();
+        std::vector<ObjectId> bodies;
+        for (const RayHit& h : scene_.raycastCoincident(ray)) bodies.push_back(h.object);
+        if (bodies.empty()) {
+            if (!shift) {
+                scene_.clearElementSelection();
+                scene_.clearSelection();
+            }
+            return;
         }
+        const size_t at = nextInCycle(bodies.size(), shift,
+                                      [&](size_t i) { return scene_.isSelected(bodies[i]); });
+        pickWholeObject(bodies[at], shift);
+        if (bodies.size() > 1) sayWhichOfCoincident(at, bodies.size(), bodies[at], "bodies");
         return;
     }
 
-    const ElementHit pick = scene_.pickElement(ray, camera_.viewProjection(),
-                                               camera_.viewportW, camera_.viewportH,
-                                               cursor);
-    if (pick.hit()) {
+    const std::vector<ElementHit> picks = scene_.pickElements(ray, camera_.viewProjection(),
+                                                              camera_.viewportW, camera_.viewportH,
+                                                              cursor);
+    if (!picks.empty()) {
+        const size_t at = nextInCycle(picks.size(), shift,
+                                      [&](size_t i) { return scene_.isElementSelected(picks[i].ref); });
         // Picking a sub-element takes the object selection out of play, so a
         // following G/R/S cannot silently move the whole body instead.
         scene_.clearSelection();
-        if (shift) scene_.toggleElement(pick.ref);
-        else       scene_.selectElement(pick.ref);
+        if (shift) scene_.toggleElement(picks[at].ref);
+        else       scene_.selectElement(picks[at].ref);
+        if (picks.size() > 1) {
+            const ElementKind k = picks[at].ref.kind;
+            sayWhichOfCoincident(at, picks.size(), picks[at].ref.object,
+                                 k == ElementKind::Face ? "faces" : k == ElementKind::Edge ? "edges" : "points");
+        }
     } else if (!shift) {
         scene_.clearElementSelection();
         scene_.clearSelection();
     }
+}
+
+// Which of the candidates under the cursor a click takes. Faces of different
+// bodies that lie in one plane fight over the same pixels, so which one the
+// screen shows is no guide to which one is meant -- and only the first could
+// ever be picked. Instead a click takes the one after whichever is selected
+// already, so clicking the same place again steps through them all; with
+// Shift, it adds the first that is not selected yet.
+size_t Application::nextInCycle(size_t count, bool additive,
+                                const std::function<bool(size_t)>& isSelected) const {
+    if (count <= 1) return 0;
+    if (additive) {
+        for (size_t i = 0; i < count; ++i)
+            if (!isSelected(i)) return i;
+        return 0;
+    }
+    for (size_t i = 0; i < count; ++i)
+        if (isSelected(i)) return (i + 1) % count;
+    return 0;
+}
+
+void Application::sayWhichOfCoincident(size_t at, size_t count, ObjectId on, const char* what) {
+    const SceneObject* o = scene_.find(on);
+    char msg[160];
+    std::snprintf(msg, sizeof msg, "%zu of %zu %s here, on %s: click again for the next", at + 1, count,
+                  what, o ? o->name.c_str() : "a body");
+    setNotice(msg);
+}
+
+// The whole body, the way Ctrl+click takes it and a row in the outliner does.
+// Shift adds it or takes it out.
+void Application::pickWholeObject(ObjectId id, bool additive) {
+    scene_.clearElementSelection();
+    if (additive) scene_.toggleSelect(id);
+    else          scene_.select(id);
 }
 
 void Application::drawReadout(const std::string& text, float px, float py,
@@ -1124,13 +1283,160 @@ void Application::retirePrintJob(ObjectId id) {
     printJobs_.erase(it);
 }
 
+// The solidity report, gathered in the background for whichever body the
+// panels are showing. Started once the model has settled: mid-drag the answer
+// is neither interesting nor stable.
+void Application::stepHealthCheck() {
+    retiredHealthJobs_.erase(std::remove_if(retiredHealthJobs_.begin(), retiredHealthJobs_.end(),
+                                            [](std::future<MeshHealth>& f) {
+                                                return f.wait_for(std::chrono::seconds(0)) ==
+                                                       std::future_status::ready;
+                                            }),
+                             retiredHealthJobs_.end());
+
+    for (auto it = healthJobs_.begin(); it != healthJobs_.end();) {
+        SceneObject* o = scene_.find(it->first);
+        if (!o || o->geometryVersion != it->second.geometryVersion) {
+            retiredHealthJobs_.push_back(std::move(it->second.result));
+            it = healthJobs_.erase(it);
+            continue;
+        }
+        if (it->second.result.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
+            ++it;
+            continue;
+        }
+        o->health = it->second.result.get();
+        o->healthVersion = it->second.geometryVersion;
+        it = healthJobs_.erase(it);
+    }
+
+    SceneObject* o = scene_.find(scene_.contextObject());
+    if (!o || o->healthVersion == o->geometryVersion || healthJobs_.count(o->id)) return;
+    // Only once the geometry has settled: during a drag it changes faster
+    // than the check could keep up with, and the answer mid-drag is not
+    // interesting anyway.
+    const bool interacting = tool_.active() || ImGui::IsMouseDown(ImGuiMouseButton_Left);
+    healthIdle_ = interacting ? 0.0f : healthIdle_ + lastDt_;
+    if (healthIdle_ <= 0.25f) return;
+    healthIdle_ = 0.0f;
+    HealthJob job;
+    job.geometryVersion = o->geometryVersion;
+    job.result = std::async(std::launch::async,
+                            [live = o->body]() { return live.detached().health(); });
+    healthJobs_.emplace(o->id, std::move(job));
+}
+
+// One pass of the background meshing: what has come back is taken, and what
+// the view wants next is started.
+void Application::stepTessellation() {
+    retiredMeshJobs_.erase(std::remove_if(retiredMeshJobs_.begin(), retiredMeshJobs_.end(),
+                                          [](std::future<MeshJobResult>& f) {
+                                              return f.wait_for(std::chrono::seconds(0)) ==
+                                                     std::future_status::ready;
+                                          }),
+                           retiredMeshJobs_.end());
+
+    for (auto it = meshJobs_.begin(); it != meshJobs_.end();) {
+        MeshJob& job = it->second;
+        SceneObject* o = scene_.find(it->first);
+        if (!o || o->geometryVersion != job.geometryVersion) {
+            // The body changed while it was being meshed: what comes back is
+            // of something that no longer exists.
+            retiredMeshJobs_.push_back(std::move(job.result));
+            it = meshJobs_.erase(it);
+            continue;
+        }
+        if (job.result.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
+            ++it;
+            continue;
+        }
+        MeshJobResult r = job.result.get();
+        if (!r.mesh.positions.empty()) {
+            o->render = std::move(r.mesh);
+            o->renderDeviation = r.deviation;
+            o->markMeshChanged();
+        }
+        it = meshJobs_.erase(it);
+    }
+
+    // At most a couple in flight: a zoom asks for a finer body every few
+    // frames, and there is no point meshing at a tolerance the view has
+    // already left behind.
+    LodPolicy policy;
+    if (static_cast<int>(meshJobs_.size()) >= policy.budgetPerFrame) return;
+    for (const LodWant& want : tessellationWanted(scene_, camera_, policy)) {
+        if (static_cast<int>(meshJobs_.size()) >= policy.budgetPerFrame) break;
+        if (meshJobs_.count(want.object)) continue;
+        SceneObject* o = scene_.find(want.object);
+        if (!o) continue;
+        MeshJob job;
+        job.geometryVersion = o->geometryVersion;
+        job.deviation = want.target;
+        // The worker takes its own copy of the shape -- meshing writes into
+        // the one on screen -- and both the copy and the meshing are off the
+        // frame thread.
+        job.result = std::async(std::launch::async, [live = o->body, target = want.target]() {
+            MeshJobResult r;
+            TessellationQuality q;
+            q.deviationMm = target;
+            live.detached().tessellate(r.mesh, q);
+            r.deviation = target;
+            return r;
+        });
+        meshJobs_.emplace(want.object, std::move(job));
+    }
+}
+
 void Application::refreshPrintCheck(SceneObject& o, const PrintProfile& profile) {
     PrintJobResult r = runPrintCheck(o.body, o.render, profile);
     o.printCheck = std::move(r.report);
     o.printTriangles = std::move(r.triangles);
-    o.printVersion = o.meshVersion;
+    o.printVersion = o.geometryVersion;
     retirePrintJob(o.id);            // anything still running is now stale
 }
+
+namespace {
+
+// Where a frame goes, when one is not going fast enough. Off unless asked for
+// with --frame-probe: the stages are the ones that have cost real time before
+// -- meshing a body finer, checking it for a printer, gathering the highlight
+// -- and the worst of a run is what a stall shows up as.
+struct FrameProbe {
+    struct Stage { const char* name; double total = 0; double worst = 0; };
+    std::vector<Stage> stages;
+    int frames = 0;
+    int every = 0;
+    std::chrono::steady_clock::time_point mark;
+
+    void begin() { mark = std::chrono::steady_clock::now(); }
+    void end(const char* name) {
+        if (every <= 0) return;
+        const double ms =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - mark).count();
+        for (Stage& st : stages)
+            if (st.name == name) {
+                st.total += ms;
+                st.worst = std::max(st.worst, ms);
+                return;
+            }
+        stages.push_back({name, ms, ms});
+    }
+    void frame() {
+        if (every <= 0 || ++frames < every) return;
+        std::fprintf(stderr, "[frame] over %d frames, ms average/worst:", frames);
+        for (Stage& st : stages) {
+            std::fprintf(stderr, "  %s %.2f/%.2f", st.name, st.total / frames, st.worst);
+            st.total = 0;
+            st.worst = 0;
+        }
+        std::fprintf(stderr, "\n");
+        frames = 0;
+    }
+};
+FrameProbe gProbe;
+} // namespace
+
+void Application::setFrameProbe(int frames) { gProbe.every = std::max(frames, 0); }
 
 void Application::drawPrintIssues() {
     // Let go of stale jobs that have finished. Never waits on one that has not.
@@ -1156,16 +1462,16 @@ void Application::drawPrintIssues() {
         // Worked out once per change of geometry and kept, together with the
         // triangles it flagged -- so a frame costs the flagged triangles and
         // nothing else, however large the body behind them is.
-        if (o->printVersion != o->meshVersion) {
+        if (o->printVersion != o->geometryVersion) {
             auto it = printJobs_.find(o->id);
-            const bool current = it != printJobs_.end() && it->second.meshVersion == o->meshVersion;
+            const bool current = it != printJobs_.end() && it->second.meshVersion == o->geometryVersion;
 
             if (current && it->second.result.wait_for(std::chrono::seconds(0)) ==
                                std::future_status::ready) {
                 PrintJobResult r = it->second.result.get();
                 o->printCheck = std::move(r.report);
                 o->printTriangles = std::move(r.triangles);
-                o->printVersion = o->meshVersion;
+                o->printVersion = o->geometryVersion;
                 printJobs_.erase(it);
             } else if (!current) {
                 // A snapshot, detached: an exact body's triangulation is written
@@ -1175,10 +1481,13 @@ void Application::drawPrintIssues() {
                 // left to finish and be thrown away.
                 if (it != printJobs_.end()) retirePrintJob(o->id);
                 PrintJob job;
-                job.meshVersion = o->meshVersion;
+                job.meshVersion = o->geometryVersion;
+                // The copy is made by the worker, not here: it is a tenth of a
+                // second on a heavy body, and the frame it was made in was a
+                // frame the view stuttered.
                 job.result = std::async(std::launch::async,
-                                        [body = o->body.detached(), rm = o->render]() {
-                                            return runPrintCheck(body, rm, PrintProfile{});
+                                        [live = o->body, rm = o->render]() {
+                                            return runPrintCheck(live.detached(), rm, PrintProfile{});
                                         });
                 printJobs_.emplace(o->id, std::move(job));
             }
@@ -1196,31 +1505,33 @@ void Application::drawPrintIssues() {
     }
 }
 
-void Application::drawSelectionHighlights() {
-    // While a fillet is being dragged, the object's body is the preview -- the
-    // edges that were selected have been rounded away and their handles now
-    // point at whatever inherited the numbers. Highlighting them draws a red
-    // line along an edge nobody chose, which is what made the fillet look like
-    // it was about to act on the wrong one. The preview is the feedback here.
-    if (filletTool_.active) return;
-
-    const Vec4 faceTint = toVec4(palette::kBrand, 0.30f);
-    const Vec4 edgeCol  = toVec4(palette::kBrand, 1.0f);
+// What the highlight is made of, gathered per selection rather than per frame.
+// The kernel is asked for a polyline along each edge and the body's triangles
+// are searched for each face's own, which on a face with a couple of thousand
+// edges is seconds of work: far too much to repeat while nothing has changed.
+void Application::refreshHighlights() {
+    // Everything the shape of the highlight depends on: what is selected, the
+    // geometry it is on, and how fine the edge polylines need to be, which
+    // follows the zoom in half-octave steps.
+    uint64_t key = 1469598103934665603ull;
+    auto mix = [&key](uint64_t v) { key = (key ^ v) * 1099511628211ull; };
+    for (const ElementRef& e : scene_.elementSelection()) {
+        mix(e.object);
+        mix(static_cast<uint64_t>(e.kind));
+        mix(e.index);
+        if (const SceneObject* o = scene_.find(e.object)) mix(o->geometryVersion);
+    }
+    const Real pixel = std::max<Real>(camera_.pixelWorldSize(camera_.target), 1e-9);
+    mix(static_cast<uint64_t>(static_cast<int64_t>(std::lround(std::log2(pixel) * 2.0))));
+    if (key == highlightKey_) return;
+    highlightKey_ = key;
+    highlights_.clear();
 
     for (const ElementRef& e : scene_.elementSelection()) {
         const SceneObject* o = scene_.find(e.object);
         if (!o) continue;
-        const Mat4 model = o->modelMatrix();
-
-        // Nudge toward the eye by a fixed number of pixels' worth of world
-        // distance, so the highlight sits on the surface at any zoom instead of
-        // z-fighting with it.
-        auto lift = [&](Vec3 p) {
-            const Vec3 toEye = camera_.eye() - p;
-            const float len = length(toEye);
-            if (len < 1e-6f) return p;
-            return p + toEye * (camera_.pixelWorldSize(p) * 2.0f / len);
-        };
+        Highlight h;
+        h.object = e.object;
 
         // An edge is drawn along its curve, not across it. A rim's two ends are
         // the same point, or nearly, so the chord between them runs through the
@@ -1229,11 +1540,11 @@ void Application::drawSelectionHighlights() {
         // wireframe underneath it already uses.
         std::vector<Vec3> pts;
         auto outlineEdge = [&](EdgeId edge) {
-            const Vec3 midW = transformPoint(model, o->body.edgeMidpoint(edge));
-            o->body.edgePolyline(edge, camera_.pixelWorldSize(midW) * 0.5, pts);
-            for (size_t k = 1; k < pts.size(); ++k)
-                renderer_.addLine(lift(transformPoint(model, pts[k - 1])),
-                                  lift(transformPoint(model, pts[k])), edgeCol);
+            o->body.edgePolyline(edge, pixel * 0.5, pts);
+            for (size_t k = 1; k < pts.size(); ++k) {
+                h.lines.push_back(pts[k - 1]);
+                h.lines.push_back(pts[k]);
+            }
         };
 
         switch (e.kind) {
@@ -1242,11 +1553,7 @@ void Application::drawSelectionHighlights() {
             const RenderMesh& rm = o->render;
             for (size_t i = 0; i < rm.triangleFace.size(); ++i) {
                 if (rm.triangleFace[i] != e.index) continue;
-                renderer_.addTriangle(
-                    lift(transformPoint(model, rm.positions[rm.triangles[i * 3 + 0]])),
-                    lift(transformPoint(model, rm.positions[rm.triangles[i * 3 + 1]])),
-                    lift(transformPoint(model, rm.positions[rm.triangles[i * 3 + 2]])),
-                    faceTint);
+                for (int k = 0; k < 3; ++k) h.tris.push_back(rm.positions[rm.triangles[i * 3 + k]]);
             }
             // Outline it too, so a face on a busy mesh still reads clearly.
             std::vector<EdgeId> fe;
@@ -1261,23 +1568,60 @@ void Application::drawSelectionHighlights() {
             }
             break;
         }
-        case ElementKind::Edge: {
-            if (!o->body.hasEdge(e.index)) break;
-            outlineEdge(e.index);
+        case ElementKind::Edge:
+            if (o->body.hasEdge(e.index)) outlineEdge(e.index);
             break;
-        }
         case ElementKind::Vertex: {
             if (!o->body.hasVertex(e.index)) break;
-            const Vec3 p = lift(transformPoint(model, o->body.vertexPosition(e.index)));
-            const float s = camera_.pixelWorldSize(p) * 4.0f;
-            renderer_.addLine(p - Vec3{s, 0, 0}, p + Vec3{s, 0, 0}, edgeCol);
-            renderer_.addLine(p - Vec3{0, s, 0}, p + Vec3{0, s, 0}, edgeCol);
-            renderer_.addLine(p - Vec3{0, 0, s}, p + Vec3{0, 0, s}, edgeCol);
+            // A cross, sized here in world units at the zoom it was gathered.
+            const Vec3 p = o->body.vertexPosition(e.index);
+            const Real s = pixel * 4.0;
+            for (int axis = 0; axis < 3; ++axis) {
+                Vec3 d{};
+                d[axis] = s;
+                h.lines.push_back(p - d);
+                h.lines.push_back(p + d);
+            }
             break;
         }
         case ElementKind::None:
             break;
         }
+        if (!h.lines.empty() || !h.tris.empty()) highlights_.push_back(std::move(h));
+    }
+}
+
+void Application::drawSelectionHighlights() {
+    // While a fillet is being dragged, the object's body is the preview -- the
+    // edges that were selected have been rounded away and their handles now
+    // point at whatever inherited the numbers. Highlighting them draws a red
+    // line along an edge nobody chose, which is what made the fillet look like
+    // it was about to act on the wrong one. The preview is the feedback here.
+    if (filletTool_.active) return;
+    refreshHighlights();
+
+    const Vec4 faceTint = toVec4(palette::kBrand, 0.30f);
+    const Vec4 edgeCol  = toVec4(palette::kBrand, 1.0f);
+
+    for (const Highlight& h : highlights_) {
+        const SceneObject* o = scene_.find(h.object);
+        if (!o) continue;
+        const Mat4 model = o->modelMatrix();
+
+        // Nudge toward the eye by a fixed number of pixels' worth of world
+        // distance, so the highlight sits on the surface at any zoom instead of
+        // z-fighting with it.
+        auto lift = [&](Vec3 p) {
+            const Vec3 world = transformPoint(model, p);
+            const Vec3 toEye = camera_.eye() - world;
+            const float len = length(toEye);
+            if (len < 1e-6f) return world;
+            return world + toEye * (camera_.pixelWorldSize(world) * 2.0f / len);
+        };
+        for (size_t i = 0; i + 1 < h.lines.size(); i += 2)
+            renderer_.addLine(lift(h.lines[i]), lift(h.lines[i + 1]), edgeCol);
+        for (size_t i = 0; i + 2 < h.tris.size(); i += 3)
+            renderer_.addTriangle(lift(h.tris[i]), lift(h.tris[i + 1]), lift(h.tris[i + 2]), faceTint);
     }
 }
 
@@ -1359,6 +1703,17 @@ void Application::handleShortcuts() {
         }
     }
 
+    if (combineTool_.active) {
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) { abortCombine(); return; }
+        if (ImGui::IsKeyPressed(ImGuiKey_Enter, false) ||
+            ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false)) { finishCombine(); return; }
+        static const ImGuiKey kKeys[3] = {ImGuiKey_J, ImGuiKey_D, ImGuiKey_I};
+        static const BooleanOp kOps[3] = {BooleanOp::Union, BooleanOp::Difference, BooleanOp::Intersection};
+        for (int i = 0; i < 3; ++i)
+            if (ImGui::IsKeyPressed(kKeys[i], false)) { combineTool_.op = kOps[i]; combineTool_.previewKey.clear(); }
+        return;
+    }
+
     if (faceTool_.active) {
         if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) { abortFaceMove(); return; }
         if (ImGui::IsKeyPressed(ImGuiKey_Enter, false) ||
@@ -1366,6 +1721,18 @@ void Application::handleShortcuts() {
         if (ImGui::IsKeyPressed(ImGuiKey_X, false)) setFaceAxis(0);
         if (ImGui::IsKeyPressed(ImGuiKey_Y, false)) setFaceAxis(1);
         if (ImGui::IsKeyPressed(ImGuiKey_Z, false)) setFaceAxis(2);
+        if (faceTool_.op == FaceOp::Extrude) {
+            // The operation, by the same keys the create tool and a sketch use.
+            static const ImGuiKey kKeys[4] = {ImGuiKey_J, ImGuiKey_D, ImGuiKey_I, ImGuiKey_N};
+            static const ExtrudeOp kOps[4] = {ExtrudeOp::Join, ExtrudeOp::Cut, ExtrudeOp::Intersect,
+                                              ExtrudeOp::NewBody};
+            for (int i = 0; i < 4; ++i)
+                if (ImGui::IsKeyPressed(kKeys[i], false)) {
+                    faceTool_.choice.pick(kOps[i]);
+                    faceTool_.previewValid = false;
+                    refreshFaceReach();
+                }
+        }
         typedInto(faceTool_.typedValue, [&] { updateFaceMove(true); });
         return;
     }
@@ -1601,8 +1968,11 @@ void Application::handleShortcuts() {
         else                          measure_.clearPicks();
     }
 
-    // Mesh edits act on the selected faces. Shift+E cuts inward.
-    if (!ctrl && !alt && ImGui::IsKeyPressed(ImGuiKey_E, false)) ui_.actions.extrude = true;
+    // Mesh edits act on the selected faces. Shift+E starts with Cut picked.
+    if (!ctrl && !alt && ImGui::IsKeyPressed(ImGuiKey_E, false)) {
+        ui_.actions.extrude = true;
+        ui_.actions.extrudeCut = shift;
+    }
     if (!ctrl && !alt && ImGui::IsKeyPressed(ImGuiKey_K, false)) ui_.actions.divide = true;
     if (!ctrl && !alt && !shift && ImGui::IsKeyPressed(ImGuiKey_P, false))
         ui_.actions.pattern = true;
@@ -1657,10 +2027,79 @@ void Application::handleShortcuts() {
 }
 
 // ---------------------------------------------------------------------------
+// Where a new object is made, so not a step in its history: it is the place
+// the history starts from.
 void Application::placeOnBuildPlate(ObjectId id) {
     SceneObject* o = scene_.find(id);
     if (!o || !o->localBounds.valid()) return;
-    o->transform.position.z = -o->localBounds.min.z * o->transform.scale.z;
+    Transform base = o->base;
+    base.position.z = -o->localBounds.min.z;
+    scene_.setBasePlacement(id, base);
+}
+
+// What the inspector's transform fields came to this frame, as history.
+//
+// A position or a rotation is recorded as it happens: it changes where the
+// object stands, not its shape, so there is nothing to build. The steps fold
+// into the one before them, and the undo entries into each other for as long
+// as the drag lasts. A scale is a change of shape and waits for the release.
+void Application::recordInspectorTransform(ObjectId id, const Transform& before) {
+    SceneObject* o = scene_.find(id);
+    if (!o) return;
+    const Transform now = o->transform;
+    const bool moved = now.position != before.position;
+    const bool turned = now.rotation.x != before.rotation.x || now.rotation.y != before.rotation.y ||
+                        now.rotation.z != before.rotation.z || now.rotation.w != before.rotation.w;
+    const bool scaled = now.scale != before.scale;
+    if (scaled) pendingScale_ = id;
+    if (!moved && !turned) return;
+
+    // The step is recorded from where the history had it, not from the field.
+    std::vector<Feature> chainBefore = o->features;
+    o->transform = before;
+    const char* what = moved ? "Move" : "Rotate";
+    if (moved) scene_.recordMove(id, now.position - before.position);
+    // About the object's own origin: the rotation fields turn it where it is.
+    if (turned)
+        scene_.recordRotate(id, normalize(now.rotation * conjugate(before.rotation)), now.position);
+    o->transform.scale = now.scale;            // a scale being dragged stays on show
+    undo_.push(std::make_unique<FeatureCommand>(id, std::move(chainBefore), o->features, what),
+               /*merge=*/true);
+}
+
+void Application::bakePendingScale() {
+    const ObjectId id = pendingScale_;
+    pendingScale_ = kNoObject;
+    SceneObject* o = scene_.find(id);
+    if (!o) return;
+    const Vec3 by = o->transform.scale;
+    o->transform.scale = {1, 1, 1};
+    std::vector<Feature> chainBefore = o->features;
+    std::string why;
+    if (!scene_.recordScale(id, by, Vec3{}, &why)) {
+        scene_.place(*o);
+        setNotice("Not scaled: " + why);
+        return;
+    }
+    undo_.push(std::make_unique<FeatureCommand>(id, std::move(chainBefore), o->features, "Scale"));
+}
+
+// Back where it started: at the origin, unturned, at the size it was made.
+// Recorded like any other move, so it can be undone and seen in the history.
+void Application::resetObjectTransform(ObjectId id) {
+    SceneObject* o = scene_.find(id);
+    if (!o) return;
+    if (pendingScale_ == id) { pendingScale_ = kNoObject; o->transform.scale = {1, 1, 1}; }
+    std::vector<Feature> chainBefore = o->features;
+    const Transform t = o->transform;
+    scene_.recordRotate(id, conjugate(t.rotation), t.position);
+    scene_.recordMove(id, -t.position);
+    const Vec3 made = scaleOf(o->features);
+    std::string why;
+    if (!scene_.recordScale(id, {1.0 / made.x, 1.0 / made.y, 1.0 / made.z}, Vec3{}, &why) && !why.empty())
+        setNotice("Not scaled back: " + why);
+    undo_.push(std::make_unique<FeatureCommand>(id, std::move(chainBefore), o->features,
+                                                "Reset Transform"));
 }
 
 void Application::addPrimitiveAtCursor(PrimitiveKind kind) {
@@ -1688,7 +2127,7 @@ bool Application::editKeepsSolid(ObjectId id) {
 
     const MeshHealth after = obj->body.health();
     obj->health = after;
-    obj->healthVersion = obj->meshVersion;
+    obj->healthVersion = obj->geometryVersion;
 
     // Only refuse an edit that broke something that was previously sound. If
     // the model was already open or self-intersecting, blocking further edits
@@ -1700,6 +2139,7 @@ bool Application::editKeepsSolid(ObjectId id) {
 void Application::commitTransform() {
     justFinishedModal_ = true;
     std::unique_ptr<Command> cmd = tool_.confirm(scene_);
+    if (std::string why = tool_.takeError(); !why.empty()) setNotice(why);
 
     // A free-form drag of vertices is recorded as a feature too. It is not
     // parametric, but it has to live in the chain: otherwise re-evaluating an
@@ -2113,7 +2553,7 @@ void Application::beginFaceMove(FaceOp op) {
     faceTool_.before = obj->body;
     faceTool_.chainBefore = obj->features;
     faceTool_.value = 0.0;
-    preEditSolid_ = obj->healthVersion == obj->meshVersion && obj->health.solid();
+    preEditSolid_ = obj->healthVersion == obj->geometryVersion && obj->health.solid();
 
     const Mat4 model = obj->modelMatrix();
     const Vec2 at = mouseInViewport();
@@ -2306,7 +2746,7 @@ void Application::updateFaceMove(bool snap, bool follow) {
             // every time would be asking a question whose answer is almost
             // always no. What is tested is the ground the faces swept through.
             faceTool_.meets = kNoObject;
-            if (faceTool_.value > 0.0) {
+            if (faceTool_.op == FaceOp::Move && faceTool_.value > 0.0) {
                 const Mat4 model = obj->modelMatrix();
                 AABB swept;
                 for (FaceId f : faceTool_.faces) {
@@ -2383,17 +2823,100 @@ void Application::updateFaceMove(bool snap, bool follow) {
         faceTool_.preview.request(faceTool_.before, [faces, angle, hp, hd](Body& b) {
             return rotateFaces(b, faces, angle, hp, hd, 7001);
         });
+    } else if (faceTool_.op == FaceOp::Extrude) {
+        // What the extrusion does to this body, which is only something when
+        // this body is one it acts on. Anything else it reaches is shown as
+        // the swept solid, drawn over the scene; see drawFaceToolOverlay.
+        faceTool_.choice.follow(want, true);
+        refreshFaceReach();
+        if (!faceTool_.reach.includes(faceTool_.objectId)) {
+            obj->body = faceTool_.before;
+            obj->refreshDerived();
+            faceTool_.requested = want;
+            faceTool_.previewValid = true;
+            return;
+        }
+        const ExtrudeOp how = faceTool_.choice.op;
+        faceTool_.preview.request(faceTool_.before, [faces, want, how](Body& b) {
+            return extrudeFaces(b, faces, want, nullptr, 7002, how, nullptr, false);
+        });
     } else {
         // The sign is the operation. Out adds, in cuts; there is nothing else
         // a moved face can mean.
-        const bool merge = faceTool_.op == FaceOp::Move;
         const Vec3 along = faceTool_.direction;
-        faceTool_.preview.request(faceTool_.before, [faces, want, merge, along](Body& b) {
+        faceTool_.preview.request(faceTool_.before, [faces, want, along](Body& b) {
             return extrudeFaces(b, faces, want, nullptr, 7002, ExtrudeOp::Auto, nullptr,
-                                merge, along);
+                                true, along);
         });
     }
     faceTool_.previewValid = false;
+}
+
+void Application::refreshFaceReach() {
+    FaceToolState& ft = faceTool_;
+    SceneObject* obj = scene_.find(ft.objectId);
+    if (!obj || ft.op != FaceOp::Extrude) return;
+    char key[160];
+    std::snprintf(key, sizeof key, "%.9g|%d|%.6g,%.6g,%.6g", ft.value, ft.lockedAxis, ft.direction.x,
+                  ft.direction.y, ft.direction.z);
+    if (ft.toolKey != key) {
+        ft.tool = Body();
+        ft.toolMesh.clear();
+        if (std::fabs(ft.value) > 1e-6) {
+            // Swept in the body's own space -- along its normal, or along the
+            // axis a key chose -- and carried out into the world.
+            const Mat4 model = obj->modelMatrix();
+            const Vec3 along = ft.lockedAxis >= 0 ? transformVector(inverse(model), ft.direction) : Vec3{};
+            Body swept;
+            if (sweepFaces(ft.before, ft.faces, ft.value, along, 7003, swept) && swept.transform(model)) {
+                ft.tool = std::move(swept);
+                ft.tool.tessellate(ft.toolMesh);
+            }
+        }
+        ft.toolKey = key;
+    }
+    ft.reach.refresh(scene_, ft.tool, ft.objectId, ft.choice.op, ft.value, ft.toolKey);
+}
+
+// The tools, while the combine is open: hidden so the result shows through
+// them, and outlined so it is still plain what they are and where.
+void Application::drawCombineOverlay() {
+    if (!combineTool_.active) return;
+    const bool cuts = combineTool_.op != BooleanOp::Union;
+    const Vec4 edge = cuts ? Vec4{1.0f, 0.45f, 0.3f, 0.85f} : toVec4(palette::kBrand, 0.85f);
+    const Vec4 fill = cuts ? Vec4{0.95f, 0.35f, 0.20f, 0.10f} : toVec4(palette::kBrand, 0.10f);
+    for (ObjectId id : combineTool_.tools) {
+        const SceneObject* o = scene_.find(id);
+        if (!o) continue;
+        const Mat4 model = o->modelMatrix();
+        const RenderMesh& m = o->render;
+        for (size_t i = 0; i + 1 < m.edgeLines.size(); i += 2)
+            renderer_.addLine(transformPoint(model, m.positions[m.edgeLines[i]]),
+                              transformPoint(model, m.positions[m.edgeLines[i + 1]]), edge);
+        for (size_t i = 0; i + 2 < m.triangles.size(); i += 3)
+            renderer_.addTriangle(transformPoint(model, m.positions[m.triangles[i]]),
+                                  transformPoint(model, m.positions[m.triangles[i + 1]]),
+                                  transformPoint(model, m.positions[m.triangles[i + 2]]), fill);
+    }
+}
+
+// The swept solid, where it is not simply this body's own new material: a new
+// body, or the part of an extrusion that acts on other bodies.
+void Application::drawFaceToolOverlay() {
+    const FaceToolState& ft = faceTool_;
+    if (!ft.active || ft.op != FaceOp::Extrude || ft.toolMesh.triangles.empty()) return;
+    const bool ownerOnly = ft.choice.op != ExtrudeOp::NewBody && ft.reach.included().size() == 1 &&
+                           ft.reach.includes(ft.objectId);
+    if (ownerOnly) return;
+    const bool removes = ft.choice.op == ExtrudeOp::Cut || ft.choice.op == ExtrudeOp::Intersect;
+    const Vec4 fill = removes ? Vec4{0.95f, 0.35f, 0.20f, 0.22f} : toVec4(palette::kBrand, 0.22f);
+    const Vec4 edge = removes ? Vec4{1.0f, 0.4f, 0.3f, 0.9f} : toVec4(palette::kBrand, 0.9f);
+    const RenderMesh& m = ft.toolMesh;
+    for (size_t i = 0; i + 2 < m.triangles.size(); i += 3)
+        renderer_.addTriangle(m.positions[m.triangles[i]], m.positions[m.triangles[i + 1]],
+                              m.positions[m.triangles[i + 2]], fill);
+    for (size_t i = 0; i + 1 < m.edgeLines.size(); i += 2)
+        renderer_.addLine(m.positions[m.edgeLines[i]], m.positions[m.edgeLines[i + 1]], edge);
 }
 
 void Application::commitFaceMove() {
@@ -2412,38 +2935,100 @@ void Application::commitFaceMove() {
 
     if (std::fabs(faceTool_.value) < 1e-6) { obj->refreshDerived(); return; }
 
-    Feature f;
-    if (faceTool_.op == FaceOp::Scale) {
-        f.kind = FeatureKind::FaceScale;
-        f.scale = 1.0 + faceTool_.value / 100.0;
-    } else if (faceTool_.op == FaceOp::Rotate) {
-        f.kind = FeatureKind::FaceRotate;
-        f.angle = radians(faceTool_.value);
-        f.axisPoint = faceTool_.hingePoint;
-        f.axisDir = faceTool_.hingeDir;
-    } else {
-        f.kind = FeatureKind::Extrude;
-        f.distance = faceTool_.value;
-        f.extrudeOp = ExtrudeOp::Auto;
-        f.mergeFlush = faceTool_.op == FaceOp::Move;
-        f.axisDir = faceTool_.direction;
-    }
-    f.faces = nameFaces(faceTool_.before, faceTool_.faces);
+    auto putBack = [&](const std::string& why, const char* fallback) {
+        obj->features = chainBefore;
+        obj->body = faceTool_.before;
+        obj->refreshDerived();
+        setNotice(why.empty() ? fallback : why);
+    };
 
+    const ExtrudeOp extrudeOp = faceTool_.choice.op;
     const char* label = faceTool_.op == FaceOp::Rotate    ? "Rotate Face"
                       : faceTool_.op == FaceOp::Scale     ? "Scale Face"
-                      : faceTool_.op == FaceOp::Extrude   ? "Extrude"
-                                                          : "Move Face";
+                      : faceTool_.op == FaceOp::Move      ? "Move Face"
+                      : extrudeOp == ExtrudeOp::Cut       ? "Extrude Cut"
+                      : extrudeOp == ExtrudeOp::Intersect ? "Extrude Intersect"
+                      : extrudeOp == ExtrudeOp::NewBody   ? "Extrude New Body"
+                                                          : "Extrude";
+    std::vector<std::unique_ptr<Command>> parts;
     std::string why;
-    if (scene_.addFeature(id, std::move(f), &why) && editKeepsSolid(id)) {
+
+    if (faceTool_.op == FaceOp::Extrude) {
+        // What it does and to which bodies, measured again now: see
+        // app/extrude_ops.h.
+        refreshFaceReach();
+        const std::vector<ObjectId> bodies = faceTool_.reach.included();
+        const bool ownerActs = faceTool_.reach.includes(id);
+        const bool asNewBody = extrudeOp == ExtrudeOp::NewBody ||
+                               (extrudeOp == ExtrudeOp::Join && bodies.empty());
+        if (asNewBody) {
+            obj->refreshDerived();
+            const ObjectId made = faceTool_.tool.empty() ? kNoObject
+                                : scene_.addBody(faceTool_.tool, Vec3{}, "Extrusion");
+            if (made == kNoObject) { putBack("", "The face could not be swept into a body"); return; }
+            parts.push_back(ExistenceCommand::forCreate(scene_, {made}));
+        } else if (bodies.empty()) {
+            putBack(extrudeOp == ExtrudeOp::Cut ? "Nothing there to cut into" : "Nothing there to intersect with", "");
+            return;
+        } else {
+            ObjectId ownerDone = kNoObject;
+            if (ownerActs) {
+                Feature f;
+                f.kind = FeatureKind::Extrude;
+                f.distance = faceTool_.value;
+                f.extrudeOp = extrudeOp;
+                f.mergeFlush = false;
+                f.axisDir = faceTool_.direction;
+                f.faces = nameFaces(faceTool_.before, faceTool_.faces);
+                if (!scene_.addFeature(id, std::move(f), &why) || !editKeepsSolid(id)) {
+                    putBack(why.empty() ? "" : "Refused: " + why, "The face could not be extruded");
+                    return;
+                }
+                parts.push_back(std::make_unique<FeatureCommand>(id, chainBefore, obj->features, label));
+                ownerDone = id;
+            } else {
+                obj->refreshDerived();
+            }
+            if (!applyExtrude(scene_, faceTool_.tool, extrudeOp, bodies, ownerDone, "Extrude", label, parts,
+                              why)) {
+                unwind(scene_, parts);
+                putBack(why, "The extrusion could not be made");
+                return;
+            }
+            if (parts.empty()) {
+                putBack(std::string(extrudeOpName(extrudeOp)) + " changed nothing: it does not reach into those bodies", "");
+                return;
+            }
+        }
+    } else {
+        Feature f;
+        if (faceTool_.op == FaceOp::Scale) {
+            f.kind = FeatureKind::FaceScale;
+            f.scale = 1.0 + faceTool_.value / 100.0;
+        } else if (faceTool_.op == FaceOp::Rotate) {
+            f.kind = FeatureKind::FaceRotate;
+            f.angle = radians(faceTool_.value);
+            f.axisPoint = faceTool_.hingePoint;
+            f.axisDir = faceTool_.hingeDir;
+        } else {
+            f.kind = FeatureKind::Extrude;
+            f.distance = faceTool_.value;
+            f.extrudeOp = ExtrudeOp::Auto;
+            f.mergeFlush = true;
+            f.axisDir = faceTool_.direction;
+        }
+        f.faces = nameFaces(faceTool_.before, faceTool_.faces);
+
+        if (!scene_.addFeature(id, std::move(f), &why) || !editKeepsSolid(id)) {
+            putBack(why.empty() ? "" : "Refused: " + why, "The face could not be moved");
+            return;
+        }
         // If it grew into another body and the user said to combine, that is
         // one more step on the same chain and one more part of the same undo.
-        std::vector<std::unique_ptr<Command>> parts;
-        parts.push_back(std::make_unique<FeatureCommand>(id, std::move(chainBefore),
-                                                         obj->features, label));
+        parts.push_back(std::make_unique<FeatureCommand>(id, chainBefore, obj->features, label));
 
         const ObjectId meets = faceTool_.meets;
-        if (faceTool_.combineWithMeet && meets != kNoObject) {
+        if (faceTool_.op == FaceOp::Move && faceTool_.combineWithMeet && meets != kNoObject) {
             if (SceneObject* other = scene_.find(meets)) {
                 std::vector<Feature> beforeBool = obj->features;
                 Body baked = other->body;
@@ -2453,11 +3038,11 @@ void Application::commitFaceMove() {
                 b.kind = FeatureKind::Boolean;
                 b.booleanOp = faceTool_.meetOp;
                 b.bakedBody = std::move(baked);
+                b.toolName = other->name;
                 if (scene_.addFeature(id, std::move(b), &why)) {
                     parts.push_back(std::make_unique<FeatureCommand>(
                         id, std::move(beforeBool), obj->features,
                         booleanOpName(faceTool_.meetOp)));
-                    renderer_.forget(meets);
                     parts.push_back(ExistenceCommand::forDelete(scene_, {meets}));
                 } else {
                     setNotice(why.empty() ? "They could not be combined"
@@ -2465,22 +3050,17 @@ void Application::commitFaceMove() {
                 }
             }
         }
-
-        if (parts.size() == 1) {
-            undo_.push(std::move(parts.front()), /*merge=*/recommitting_);
-            settleCommand(Settled::Face, id);
-        } else {
-            // The move ran into another body and absorbed it. That other body
-            // is gone, so there is nothing left to adjust this against and the
-            // panel does not stay.
-            undo_.push(std::make_unique<CompositeCommand>(std::move(parts), label));
-        }
-    } else {
-        obj->features = std::move(chainBefore);
-        obj->body = std::move(faceTool_.before);
-        obj->refreshDerived();
-        setNotice(why.empty() ? "The face could not be moved" : "Refused: " + why);
     }
+
+    // One undo entry, and the panel stays to adjust it: an adjustment takes
+    // this entry back and makes the operation again, whatever else it did --
+    // absorbing another body, cutting three.
+    if (parts.size() == 1) undo_.push(std::move(parts.front()));
+    else                   undo_.push(std::make_unique<CompositeCommand>(std::move(parts), label));
+    // Applied: the value is a number on the panel now, not something being
+    // typed, and showing a cursor in it would say otherwise.
+    faceTool_.typedValue.clear();
+    settleCommand(Settled::Face, id);
 }
 
 void Application::abortFaceMove() {
@@ -2512,7 +3092,7 @@ void Application::mergeSelected() {
 
     const int before = obj->body.faceCount();
     std::vector<Feature> chainBefore = obj->features;
-    preEditSolid_ = obj->healthVersion == obj->meshVersion && obj->health.solid();
+    preEditSolid_ = obj->healthVersion == obj->geometryVersion && obj->health.solid();
 
     Feature f;
     f.kind = FeatureKind::Merge;
@@ -2547,10 +3127,34 @@ void Application::settleCommand(Settled kind, ObjectId id) {
         settledObject_ = id;
     }
     if (const SceneObject* o = scene_.find(id)) settledAfter_ = o->features;
+    settledRevision_ = undo_.revision();
+}
+
+// The create and sketch tools know for themselves when they have been applied
+// and when Done has been pressed; this keeps settled_ -- which everything else
+// that starts an operation puts away -- saying the same thing.
+void Application::syncToolSettled() {
+    if (createTool_.applied() && settled_ != Settled::Create) {
+        dismissSettled();
+        settled_ = Settled::Create;
+        settledRevision_ = undo_.revision();
+    } else if (!createTool_.applied() && settled_ == Settled::Create) {
+        settled_ = Settled::None;
+    }
+    if (sketchTool_.applied() && settled_ != Settled::Sketch) {
+        dismissSettled();
+        settled_ = Settled::Sketch;
+        settledRevision_ = undo_.revision();
+    } else if (!sketchTool_.applied() && settled_ == Settled::Sketch) {
+        settled_ = Settled::None;
+    }
 }
 
 void Application::dismissSettled() {
+    createTool_.dismissApplied();
+    sketchTool_.dismissApplied();
     if (settled_ == Settled::None) return;
+    if (settled_ == Settled::Combine) combineTool_.reset();
     settled_ = Settled::None;
     settledObject_ = kNoObject;
     settledAfter_.clear();
@@ -2567,14 +3171,52 @@ void Application::recommitSettled() {
     const Settled kind = settled_;
     const ObjectId id = settledObject_;
 
+    // The operations that can act on more than one body adjust by taking
+    // their own undo entry back and making the operation again from the
+    // restored scene. Only ever their own: if anything has been done since,
+    // the panel is put away instead.
+    if (kind == Settled::Face || kind == Settled::Create || kind == Settled::Sketch ||
+        kind == Settled::Combine) {
+        if (undo_.revision() != settledRevision_ || !undo_.undo(scene_)) {
+            dismissSettled();
+            return;
+        }
+        const size_t before = settleSerial_;
+        bool ok = false;
+        switch (kind) {
+            case Settled::Face:
+                faceTool_.active = true;
+                commitFaceMove();
+                ok = settleSerial_ != before;
+                break;
+            case Settled::Create:
+                ok = createTool_.recommit(scene_, camera_, undo_);
+                if (!ok) setNotice(createTool_.takeError());
+                break;
+            case Settled::Sketch:
+                ok = sketchTool_.recommit(scene_, undo_);
+                if (!ok) setNotice(sketchTool_.takeError());
+                break;
+            case Settled::Combine:
+                ok = commitCombine();
+                break;
+            default:
+                break;
+        }
+        // A refusal puts back what the panel had made, and the notice says
+        // why the new values were not taken.
+        if (!ok) undo_.redo(scene_);
+        settledRevision_ = undo_.revision();
+        return;
+    }
+
     const size_t applied = settleSerial_;
     recommitting_ = true;
     switch (kind) {
         case Settled::Fillet:  filletTool_.active = true;  commitFillet();   break;
         case Settled::Divide:  divideTool_.active = true;  commitDivide();   break;
-        case Settled::Face:    faceTool_.active = true;    commitFaceMove(); break;
         case Settled::Pattern: patternTool_.active = true; commitPattern();  break;
-        case Settled::None:    break;
+        default:               break;
     }
     recommitting_ = false;
 
@@ -2612,7 +3254,7 @@ void Application::beginPattern(PatternMode mode) {
     patternTool_.mode = mode;
     patternTool_.before = obj->body;
     patternTool_.chainBefore = obj->features;
-    preEditSolid_ = obj->healthVersion == obj->meshVersion && obj->health.solid();
+    preEditSolid_ = obj->healthVersion == obj->geometryVersion && obj->health.solid();
 
     // What the chain ends with decides what there is to repeat. A boolean left
     // a tool behind -- the cylinder that made the hole, the block that made the
@@ -2870,7 +3512,7 @@ void Application::beginDivide() {
     divideTool_.t = 0.5;
     divideTool_.before = obj->body;
     divideTool_.chainBefore = obj->features;
-    preEditSolid_ = obj->healthVersion == obj->meshVersion && obj->health.solid();
+    preEditSolid_ = obj->healthVersion == obj->geometryVersion && obj->health.solid();
 
     divideTool_.axis.origin = transformPoint(model, p);
     divideTool_.axis.direction = normalize(transformVector(model, q - p));
@@ -3167,7 +3809,7 @@ void Application::beginFillet() {
     filletTool_.typedValue.clear();
     planFillet(*obj);
 
-    preEditSolid_ = obj->healthVersion == obj->meshVersion && obj->health.solid();
+    preEditSolid_ = obj->healthVersion == obj->geometryVersion && obj->health.solid();
 
     // The guide is fixed once, now, and does not move again for the rest of
     // the gesture.
@@ -3738,7 +4380,11 @@ void Application::stepStepDemo() {
     base.cylinder = {15, 30, 64};
     const ObjectId id = scene_.addPrimitive(PrimitiveKind::Cylinder, base);
     SceneObject* o = scene_.find(id);
-    o->transform.position = {12, 5, 0};        // off the origin, to prove it travels
+    {
+        Transform at;
+        at.position = {12, 5, 0};              // off the origin, to prove it travels
+        scene_.setBasePlacement(id, at);
+    }
 
     {
         PrimitiveSpec ts;
@@ -4117,6 +4763,31 @@ void Application::stepFaceDemo() {
         return;
     }
 
+    if (faceDemo_ == 13 || faceDemo_ == 14) {
+        // A second box standing above the first, and the top face pulled up
+        // into it: what the extrusion reaches, and what it does to each. 13
+        // leaves the panel open mid-gesture, 14 picks Cut and finishes.
+        const ObjectId above = scene_.addPrimitive(PrimitiveKind::Box, {}, Vec3{0, 6, 38});
+        (void)above;
+        scene_.select(id);
+        scene_.clearElementSelection();
+        scene_.selectElement({id, ElementKind::Face, topFace()}, true);
+        beginFaceMove(FaceOp::Extrude);
+        faceTool_.typedValue = "14";
+        if (faceDemo_ == 14) faceTool_.choice.pick(ExtrudeOp::Cut);
+        updateFaceMove(false);
+        while (faceTool_.preview.busy()) updateFaceMove(false);
+        updateFaceMove(false);
+        std::fprintf(stderr, "[face-demo] extrude reaches %zu bodies, %s\n", faceTool_.reach.bodies().size(),
+                     extrudeOpName(faceTool_.choice.op));
+        if (faceDemo_ == 14) {
+            commitFaceMove();
+            for (const auto& o : scene_.objects())
+                std::fprintf(stderr, "[face-demo] %s: %.1f mm3\n", o->name.c_str(), o->body.health(false).volume);
+        }
+        return;
+    }
+
     if (faceDemo_ == 6) {
         // The same pull, as an extrude: the boss keeps its outline.
         scene_.clearElementSelection();
@@ -4361,6 +5032,37 @@ void Application::stepPreviewCheck() {
         std::fprintf(stderr, "[preview] dismissed: settled=%d\n",
                      (int)(settled_ == Settled::Fillet));
     }
+}
+
+void Application::stepCoplanarDemo() {
+    if (coplanarDemo_ <= 0 || coplanarDemoDone_ || viewRect_.w <= 0) return;
+    if (scene_.objects().empty()) return;
+    coplanarDemoDone_ = true;
+
+    PrimitiveSpec tall;
+    tall.kind = PrimitiveKind::Box;
+    tall.box.width = 14.0;
+    tall.box.depth = 30.0;
+    tall.box.height = 14.0;
+    // Standing on the plate beside the startup box, its top where the box's
+    // top is -- the box is 20 tall, centred on z 10.
+    scene_.addPrimitive(PrimitiveKind::Box, tall, Vec3{8, 4, 13});
+    camera_.yaw = 0.7f;
+    camera_.pitch = 0.75f;
+    camera_.distance = 90.0f;
+    camera_.snapToGoal();
+
+    Vec2 px;
+    if (!camera_.projectToPixel(Vec3{5, 0, 20}, px)) return;
+    mouseOverride_ = px;
+    for (int i = 0; i < coplanarDemo_; ++i) {
+        handleViewportClick(false, false);
+        const ElementRef e = scene_.elementSelection().empty() ? ElementRef{} : scene_.elementSelection().front();
+        const SceneObject* o = scene_.find(e.object);
+        std::fprintf(stderr, "[coplanar-demo] click %d: %s %s\n", i + 1, elementKindName(e.kind),
+                     o ? o->name.c_str() : "nothing");
+    }
+    mouseOverride_ = Vec2{-1, -1};
 }
 
 void Application::stepPrintDemo() {
@@ -4770,6 +5472,66 @@ void Application::beginSketch() {
     sketchTool_.start();
 }
 
+namespace {
+std::string fileStem(const std::string& path);
+} // namespace
+
+void Application::beginImportSvg() {
+    // Into a sketch being drawn, or a new one: either way nothing else may be
+    // running, and a new one needs what a sketch needs.
+    const bool into = sketchTool_.active() && sketchTool_.stage() == SketchStage::Draw;
+    if (!into) {
+        if (tool_.active() || createTool_.active() || sketchTool_.active() || editToolActive()) {
+            setNotice("Finish the current operation first");
+            return;
+        }
+        if (!brep::available()) {
+            setNotice("Sketching needs the exact kernel, which this build does not have");
+            return;
+        }
+    }
+    beginFilePrompt(FileMode::ImportSvg);
+}
+
+void Application::importSvg(const std::string& path) {
+    SvgDrawing d = readSvgFile(path);
+    if (!d.ok) {
+        setNotice(d.error.empty() ? "Import failed" : "Import failed: " + d.error);
+        return;
+    }
+    // What came in, and what did not: text and pictures have no outline to
+    // read, and saying so beats a drawing that is silently missing its words.
+    std::string note = "Imported " + std::to_string(d.entityCount()) + " outline pieces from " +
+                       fileStem(path);
+    if (d.text > 0) note += "; " + std::to_string(d.text) + " text left out (convert it to paths)";
+    if (d.images > 0) note += "; " + std::to_string(d.images) + " images left out";
+    if (d.unreadable > 0) note += "; " + std::to_string(d.unreadable) + " paths stopped part way";
+    // And what was put right, so a drawing that looks different from the file
+    // says why.
+    if (d.background > 0) note += "; the page background left out";
+    if (d.crossings > 0) note += "; " + std::to_string(d.crossings) + " crossing outlines joined up";
+    if (d.covered > 0) note += "; " + std::to_string(d.covered) + " shapes inside filled ones dropped";
+    if (d.unresolved > 0)
+        note += "; " + std::to_string(d.unresolved) + " outlines could not be untangled and may not extrude";
+
+    if (sketchTool_.active() && sketchTool_.stage() == SketchStage::Draw) {
+        if (!sketchTool_.importSvg(std::move(d), fileStem(path))) {
+            setNotice(sketchTool_.takeError());
+            return;
+        }
+        sketchTool_.frameDrawing(camera_);
+    } else {
+        if (tool_.active() || createTool_.active() || sketchTool_.active() || editToolActive()) {
+            setNotice("Finish the current operation first");
+            return;
+        }
+        measure_.end();
+        sketchTool_.startImport(std::move(d), fileStem(path));
+        note += ": pick a plane or a face for it";
+    }
+    setNotice(note);
+}
+
 void Application::beginEditSketch(ObjectId object, ElementId sketchUid) {
     if (tool_.active() || createTool_.active() || sketchTool_.active()) return;
     if (editToolActive()) { setNotice("Finish the current operation first"); return; }
@@ -4827,52 +5589,204 @@ bool Application::extendLastFillet(SceneObject& obj, Real radius) {
     return true;
 }
 
-void Application::applyBoolean(BooleanOp op) {
-    const std::vector<ObjectId>& sel = scene_.selection();
-    if (sel.size() != 2) {
-        setNotice("Select two objects: Ctrl+click one, then Shift+Ctrl+click the other");
+// ---------------------------------------------------------------------------
+// Combining bodies.
+
+void Application::beginCombine(BooleanOp op) {
+    dismissSettled();
+    if (tool_.active() || createTool_.active() || sketchTool_.active() || editToolActive() ||
+        combineTool_.active)
+        return;
+
+    combineTool_.reset();
+    combineTool_.op = op;
+    combineTool_.active = true;
+
+    // The selection, first picked as the target, the rest as tools. A mesh
+    // cannot be combined, and says so rather than silently dropping out.
+    bool refusedMesh = false;
+    for (ObjectId id : scene_.selection()) {
+        const SceneObject* o = scene_.find(id);
+        if (!o || o->body.empty()) continue;
+        if (o->body.isMesh()) { refusedMesh = true; continue; }
+        toggleCombineBody(id);
+    }
+    if (refusedMesh)
+        setNotice("A mesh cannot be combined: Modify > Convert to Solid first");
+    else if (combineTool_.target == kNoObject)
+        setNotice("Click the body to keep, then the bodies to combine with it");
+    scene_.clearElementSelection();
+    updateCombine();
+}
+
+void Application::setCombineTarget(ObjectId id) {
+    CombineToolState& ct = combineTool_;
+    if (id == ct.target) return;
+    restoreCombinePreview();
+    const ObjectId was = ct.target;
+    auto it = std::find(ct.tools.begin(), ct.tools.end(), id);
+    if (it != ct.tools.end()) ct.tools.erase(it);
+    if (was != kNoObject) ct.tools.insert(ct.tools.begin(), was);
+    ct.target = id;
+    SceneObject* o = scene_.find(id);
+    ct.targetName = o ? o->name : "";
+    ct.before = o ? o->body : Body();
+    ct.chainBefore = o ? o->features : std::vector<Feature>{};
+    ct.previewKey.clear();
+}
+
+void Application::toggleCombineBody(ObjectId id) {
+    CombineToolState& ct = combineTool_;
+    const SceneObject* o = scene_.find(id);
+    if (!o || o->body.empty()) return;
+    if (o->body.isMesh()) {
+        setNotice("A mesh cannot be combined: Modify > Convert to Solid first");
         return;
     }
+    if (ct.target == kNoObject) { setCombineTarget(id); return; }
+    if (id == ct.target) return;
+    restoreCombinePreview();
+    auto it = std::find(ct.tools.begin(), ct.tools.end(), id);
+    if (it != ct.tools.end()) ct.tools.erase(it);
+    else                      ct.tools.push_back(id);
+    ct.previewKey.clear();
+}
 
-    // First picked is the target, last picked is the tool. That ordering is
-    // what makes difference mean what the user expects.
-    const ObjectId targetId = sel.front();
-    const ObjectId toolId = sel.back();
-    SceneObject* target = scene_.find(targetId);
-    SceneObject* tool = scene_.find(toolId);
-    if (!target || !tool || targetId == toolId) return;
-    if (refuseMeshEdit(*target, "Combining bodies") || refuseMeshEdit(*tool, "Combining bodies"))
-        return;
+void Application::restoreCombinePreview() {
+    CombineToolState& ct = combineTool_;
+    ct.preview.cancel();
+    if (SceneObject* t = scene_.find(ct.target)) {
+        t->features = ct.chainBefore;
+        t->body = ct.before;
+        t->refreshDerived();
+    }
+    for (ObjectId id : ct.hidden)
+        if (SceneObject* o = scene_.find(id)) o->visible = true;
+    ct.hidden.clear();
+    ct.previewKey.clear();
+}
 
-    // Bake the tool into the target's local space. The two objects have their
-    // own transforms, and the boolean is defined on geometry, so they have to
-    // be brought into one frame first.
-    const Mat4 toLocal = inverse(target->modelMatrix()) * tool->modelMatrix();
-    Body baked = tool->body;
-    baked.transform(toLocal);
+// Shows the result on the target while the dialog is open. The tools are
+// hidden -- a cutter drawn over its own hole hides the hole -- and drawn as
+// outlines instead; see drawCombineOverlay.
+void Application::updateCombine() {
+    CombineToolState& ct = combineTool_;
+    if (!ct.active) return;
+    SceneObject* target = scene_.find(ct.target);
+    if (!target) return;
 
-    Feature f;
-    f.kind = FeatureKind::Boolean;
-    f.booleanOp = op;
-    f.bakedBody = std::move(baked);
-
-    std::vector<Feature> chainBefore = target->features;
-    std::string why;
-    if (!scene_.addFeature(targetId, std::move(f), &why)) {
-        setNotice(std::string(booleanOpName(op)) +
-                  (why.empty() ? " produced no valid solid" : " refused: " + why));
-        return;
+    Body built;
+    bool failed = false;
+    if (ct.preview.take(built, &failed)) {
+        target->body = std::move(built);
+        target->refreshDerived();
+        ct.previewError.clear();
+    } else if (failed) {
+        target->body = ct.before;
+        target->refreshDerived();
+        ct.previewError = "That combination does not make a valid solid";
     }
 
-    // One undo entry covering both halves.
+    std::string key = std::to_string(static_cast<int>(ct.op));
+    for (ObjectId id : ct.tools) key += "|" + std::to_string(id);
+    if (key == ct.previewKey) return;
+    ct.previewKey = key;
+
+    for (ObjectId id : ct.hidden)
+        if (SceneObject* o = scene_.find(id)) o->visible = true;
+    ct.hidden.clear();
+    ct.toolNames.clear();
+    std::vector<Body> baked;
+    for (ObjectId id : ct.tools) {
+        SceneObject* o = scene_.find(id);
+        if (!o) continue;
+        ct.toolNames.push_back(o->name);
+        Body b = o->body;
+        if (!b.transform(inverse(target->modelMatrix()) * o->modelMatrix())) continue;
+        baked.push_back(std::move(b));
+        if (o->visible) { o->visible = false; ct.hidden.push_back(id); }
+    }
+    if (baked.empty()) {
+        ct.preview.cancel();
+        target->body = ct.before;
+        target->refreshDerived();
+        ct.previewError.clear();
+        return;
+    }
+    const BooleanOp op = ct.op;
+    ct.preview.request(ct.before, [baked, op](Body& b) {
+        for (const Body& tool : baked) {
+            Body out;
+            if (!booleanOp(b, tool, op, out, 7301, false, nullptr)) return false;
+            b = std::move(out);
+        }
+        return true;
+    });
+}
+
+bool Application::commitCombine() {
+    CombineToolState& ct = combineTool_;
+    SceneObject* target = scene_.find(ct.target);
+    if (!target) { setNotice("Pick the body to keep"); return false; }
+    if (ct.tools.empty()) { setNotice("Pick at least one body to combine with it"); return false; }
+
+    const char* label = booleanOpName(ct.op);
     std::vector<std::unique_ptr<Command>> parts;
-    parts.push_back(std::make_unique<FeatureCommand>(
-        targetId, std::move(chainBefore), target->features, booleanOpName(op)));
-    renderer_.forget(toolId);
-    parts.push_back(ExistenceCommand::forDelete(scene_, {toolId}));
+    std::vector<Feature> chainBefore = target->features;
+    // A step per tool, so the history says what each one did.
+    for (ObjectId id : ct.tools) {
+        const SceneObject* tool = scene_.find(id);
+        if (!tool) continue;
+        Body baked = tool->body;
+        if (!baked.transform(inverse(target->modelMatrix()) * tool->modelMatrix())) {
+            target->features = chainBefore;
+            scene_.reevaluate(ct.target);
+            setNotice(tool->name + " could not be placed on " + target->name);
+            return false;
+        }
+        Feature f;
+        f.kind = FeatureKind::Boolean;
+        f.booleanOp = ct.op;
+        f.bakedBody = std::move(baked);
+        f.toolName = tool->name;
+        std::string why;
+        if (!scene_.addFeature(ct.target, std::move(f), &why)) {
+            target->features = chainBefore;
+            scene_.reevaluate(ct.target);
+            setNotice(std::string(label) + " with " + tool->name + " refused" +
+                      (why.empty() ? ": no valid solid came out of it" : ": " + why));
+            return false;
+        }
+    }
+    parts.push_back(std::make_unique<FeatureCommand>(ct.target, std::move(chainBefore), target->features,
+                                                     label));
+    if (!ct.keepTools) parts.push_back(ExistenceCommand::forDelete(scene_, ct.tools));
+    undo_.push(std::make_unique<CompositeCommand>(std::move(parts), label));
+    scene_.select(ct.target);
+    ++settleSerial_;
+    return true;
+}
 
-    undo_.push(std::make_unique<CompositeCommand>(std::move(parts), booleanOpName(op)));
-    scene_.select(targetId);
+// Finish: made for real, and the panel stays to adjust it.
+void Application::finishCombine() {
+    CombineToolState& ct = combineTool_;
+    if (!ct.active) return;
+    justFinishedModal_ = true;
+    restoreCombinePreview();
+    if (!commitCombine()) {
+        updateCombine();     // still open: something in it needs changing
+        return;
+    }
+    ct.active = false;
+    ct.before = Body();
+    settleCommand(Settled::Combine, ct.target);
+}
+
+void Application::abortCombine() {
+    if (!combineTool_.active) return;
+    justFinishedModal_ = true;
+    restoreCombinePreview();
+    combineTool_.reset();
 }
 
 void Application::splitActiveObject() {
@@ -5140,6 +6054,8 @@ ChooserSpec chooserFor(int mode) {
                          {"All files", "*"}}};
         case 6: return {K::Save, "Export 3MF",
                         {{"3MF package", "3mf"}, {"All files", "*"}}};
+        case 7: return {K::Open, "Import SVG",
+                        {{"SVG drawing", "svg"}, {"All files", "*"}}};
     }
     // Only reached by a mode added without a line above.
     return {K::Open, "Choose a File", {{"All files", "*"}}};
@@ -5200,7 +6116,8 @@ void Application::beginFilePrompt(FileMode mode) {
         withSuffix("model.3mf", ".3mf");
     } else if (mode == FileMode::ExportStep) {
         withSuffix("model.step", ".step");
-    } else if (mode == FileMode::ImportStep || mode == FileMode::ImportMesh) {
+    } else if (mode == FileMode::ImportStep || mode == FileMode::ImportMesh ||
+               mode == FileMode::ImportSvg) {
         seed = "";                       // there is no sensible guess at a name
     } else if (seed.empty()) {
         seed = "untitled.tangent";
@@ -5258,6 +6175,9 @@ void Application::runFileOperation(FileMode mode, const std::string& path) {
         }
         break;
     }
+    case FileMode::ImportSvg:
+        importSvg(path);
+        break;
     case FileMode::ImportMesh: {
         Body body;
         const MeshImport r = readMesh(path, body);
@@ -5439,6 +6359,7 @@ void Application::drawFilePrompt() {
                       : fileMode_ == FileMode::ExportStep ? "Export STEP"
                       : fileMode_ == FileMode::ImportStep ? "Import STEP"
                       : fileMode_ == FileMode::ImportMesh ? "Import Mesh"
+                      : fileMode_ == FileMode::ImportSvg  ? "Import SVG"
                                                           : "Export STL";
     ImGui::OpenPopup("##fileprompt");
     if (!ui::beginCard("##fileprompt", title, 480.0f)) return;
@@ -5515,9 +6436,10 @@ void Application::applyActions() {
     if (a.addRequested || a.sketch || a.editSketchObject != kNoObject ||
         a.deleteSelected || a.duplicateSelected || a.mergeFaces ||
         a.booleanRequested || a.split || a.shell || a.inset || a.undo || a.redo ||
-        a.importStep || a.importMesh || a.convertToSolid || a.reduceMesh ||
+        a.importStep || a.importMesh || a.importSvg || a.convertToSolid || a.reduceMesh ||
         a.newProject || a.openProject || a.rebuildObject != kNoObject ||
-        a.transformEdited != kNoObject || a.featuresEdited != kNoObject)
+        a.transformEdited != kNoObject || a.resetTransform != kNoObject ||
+        a.featuresEdited != kNoObject)
         dismissSettled();
 
     if (a.quit && confirmDiscard(PendingAction::Quit)) running_ = false;
@@ -5530,6 +6452,7 @@ void Application::applyActions() {
     if (a.exportStep)    beginFilePrompt(FileMode::ExportStep);
     if (a.importStep)    beginFilePrompt(FileMode::ImportStep);
     if (a.importMesh)    beginFilePrompt(FileMode::ImportMesh);
+    if (a.importSvg)     beginImportSvg();
     if (a.convertToSolid) convertSelectedToSolid();
     if (a.reduceMesh) beginReduce();
     if (a.saveProject) {
@@ -5608,7 +6531,10 @@ void Application::applyActions() {
     }
 
     if (a.pushPull)   beginFaceMove(FaceOp::Move);
-    if (a.extrude)    beginFaceMove(FaceOp::Extrude);
+    if (a.extrude) {
+        beginFaceMove(FaceOp::Extrude);
+        if (faceTool_.active && a.extrudeCut) faceTool_.choice.pick(ExtrudeOp::Cut);
+    }
     if (a.rotateFace) beginFaceMove(FaceOp::Rotate);
     if (a.scaleFace)  beginFaceMove(FaceOp::Scale);
     if (a.divide) beginDivide();
@@ -5620,7 +6546,7 @@ void Application::applyActions() {
     if (a.fillet)  beginFillet();
     if (a.shell)   shellActiveObject();
     if (a.inset)   insetSelectedFaces();
-    if (a.booleanRequested) applyBoolean(a.booleanOp);
+    if (a.booleanRequested) beginCombine(a.booleanOp);
 
     if (a.rebuildObject != kNoObject) {
         SceneObject* o = scene_.find(a.rebuildObject);
@@ -5641,15 +6567,29 @@ void Application::applyActions() {
         }
     }
 
-    if (a.transformEdited != kNoObject) {
-        SceneObject* o = scene_.find(a.transformEdited);
-        if (o) {
-            std::vector<TransformCommand::Entry> e{
-                {a.transformEdited, a.transformBefore, o->transform}};
-            undo_.push(std::make_unique<TransformCommand>(std::move(e), "Transform"),
-                       /*merge=*/true);
+    // A row in the outliner, clicked: what Ctrl+clicking the body does --
+    // including, while Combine is open, putting it in or taking it out.
+    if (a.pickObject != kNoObject) {
+        if (combineTool_.active) {
+            toggleCombineBody(a.pickObject);
+        } else {
+            dismissSettled();
+            pickWholeObject(a.pickObject, a.pickObjectAdditive);
         }
+        // The click left the outliner holding the keyboard, and shortcuts stand
+        // aside for a focused window -- so G, R, S and the rest did nothing to
+        // the body just picked. Hand the keys back to the model, the way a
+        // click in the viewport leaves them.
+        ImGui::SetWindowFocus(nullptr);
     }
+
+    if (a.transformEdited != kNoObject) recordInspectorTransform(a.transformEdited, a.transformBefore);
+    if (a.resetTransform != kNoObject) resetObjectTransform(a.resetTransform);
+    // A scale dragged in the inspector is shown until it is let go of, and
+    // then made.
+    if (pendingScale_ != kNoObject && !ImGui::IsMouseDown(ImGuiMouseButton_Left) &&
+        !ImGui::IsAnyItemActive())
+        bakePendingScale();
 
     // A released mouse button ends any inspector drag, so the next one starts
     // its own undo entry.
@@ -5701,6 +6641,7 @@ void Application::buildUi() {
 
     drawTopBar(ui_);
 
+
     const ImGuiID dockId = ImGui::GetID("TangentDock2");
     // PassthruCentralNode leaves the central node unpainted, so the GL scene
     // drawn underneath shows through instead of needing a render target.
@@ -5750,8 +6691,11 @@ void Application::buildUi() {
     ui::setCommandAnchor(viewRect_.x, viewRect_.y, viewRect_.w, viewRect_.h);
 
     drawOutliner(ui_);
+
     drawInspector(ui_);
+
     drawViewportOverlays(ui_, viewRect_.x, viewRect_.y, viewRect_.w, viewRect_.h);
+
     // The cube carries the view's name and its projection: it is where the
     // eye already goes to find out which way it is looking.
     drawViewCube(ui_, viewRect_.x, viewRect_.y, viewRect_.w, viewRect_.h);
@@ -5766,17 +6710,23 @@ void Application::buildUi() {
     drawDividePanel();
     drawPatternPanel();
     drawReducePanel();
-    if (sketchTool_.active()) {
+
+    if (sketchTool_.active() || sketchTool_.applied()) {
         sketchTool_.setViewportOrigin(viewRect_.x, viewRect_.y);
         bool finished = false;
         sketchTool_.drawHud(scene_, camera_, undo_, finished);
         if (finished) justFinishedModal_ = true;
+        if (sketchTool_.takeImportRequest()) beginFilePrompt(FileMode::ImportSvg);
     }
-    if (createTool_.active()) {
+    if (createTool_.active() || createTool_.applied()) {
         bool finished = false;
         createTool_.drawHud(scene_, camera_, undo_, finished);
         if (finished) justFinishedModal_ = true;
     }
+    drawCombinePanel();
+    syncToolSettled();
+    if (createTool_.applied() && createTool_.takeAdjusted()) recommitSettled();
+    if (sketchTool_.applied() && sketchTool_.takeAdjusted()) recommitSettled();
 
     if (openAddMenu_) {
         ImGui::OpenPopup("##addmenu");
@@ -5986,18 +6936,7 @@ int Application::run() {
         // Self-intersection testing costs hundreds of milliseconds on a heavy
         // mesh; running it per frame during a drag would make editing
         // unusable, and the answer mid-drag is not interesting anyway.
-        if (SceneObject* ctxObj = scene_.find(scene_.contextObject())) {
-            if (ctxObj->healthVersion != ctxObj->meshVersion) {
-                const bool interacting = tool_.active() ||
-                                         ImGui::IsMouseDown(ImGuiMouseButton_Left);
-                healthIdle_ = interacting ? 0.0f : healthIdle_ + lastDt_;
-                if (healthIdle_ > 0.25f) {
-                    ctxObj->health = ctxObj->body.health();
-                    ctxObj->healthVersion = ctxObj->meshVersion;
-                    healthIdle_ = 0.0f;
-                }
-            }
-        }
+        stepHealthCheck();
 
         noticeAge_ += lastDt_;
         if (noticeAge_ > 4.0f) notice_.clear();
@@ -6011,12 +6950,28 @@ int Application::run() {
         ui_.measurePicks = measure_.picks().size();
 
         if (faceTool_.active) {
-            char buf[160];
-            std::snprintf(buf, sizeof buf,
-                          faceTool_.op == FaceOp::Rotate
-                              ? "Rotate face  %.1f deg   type a number   Click confirm   Esc cancel"
-                              : "Push / pull  %.2f mm   A auto  J join  D cut   type a number   Click confirm   Esc cancel",
-                          faceTool_.value);
+            char buf[200];
+            switch (faceTool_.op) {
+            case FaceOp::Rotate:
+                std::snprintf(buf, sizeof buf, "Rotate face  %.1f deg   type a number   Click confirm   Esc cancel",
+                              faceTool_.value);
+                break;
+            case FaceOp::Scale:
+                std::snprintf(buf, sizeof buf, "Scale face  %+.1f %%   type a number   Click confirm   Esc cancel",
+                              faceTool_.value);
+                break;
+            case FaceOp::Extrude:
+                std::snprintf(buf, sizeof buf,
+                              "Extrude %s  %.2f mm%s   J join  D cut  I intersect  N new body   Click confirm   Esc cancel",
+                              extrudeOpName(faceTool_.choice.op), faceTool_.value,
+                              faceTool_.choice.automatic ? " (following the drag)" : "");
+                break;
+            case FaceOp::Move:
+                std::snprintf(buf, sizeof buf,
+                              "Push / pull  %.2f mm   X / Y / Z along an axis   type a number   Click confirm   Esc cancel",
+                              faceTool_.value);
+                break;
+            }
             ui_.toolStatus = buf;
         } else if (reduceTool_.active) {
             char buf[160];
@@ -6062,9 +7017,11 @@ int Application::run() {
                 break;
             case SketchStage::Depth:
                 ui_.toolStatus = std::string("Extrude: move to set the depth, ") +
-                                 createOpName(sketchTool_.resolvedOp()) +
-                                 "   A auto  J join  D cut  N new body   click finish   Esc back";
+                                 extrudeOpName(sketchTool_.op()) +
+                                 (sketchTool_.opFollowsDrag() ? " (following the drag)" : "") +
+                                 "   J join  D cut  I intersect  N new body   click finish   Esc back";
                 break;
+            case SketchStage::Applied:
             case SketchStage::None:
                 break;
             }
@@ -6078,11 +7035,9 @@ int Application::run() {
             } else if (createTool_.stage() == CreateStage::AdjustProfile) {
                 ui_.toolStatus = "Adjust: Drag edge handles or corner fillet handles, press Enter/OK to extrude (Esc cancel)";
             } else if (createTool_.stage() == CreateStage::ExtrudeDepth) {
-                ui_.toolStatus =
-                    createTool_.hasTargetBody()
-                        ? std::string("Depth: move to set, ") + createOpName(createTool_.resolvedOp()) +
-                          "   A auto  J join  D cut  N new body   Ctrl free (snap on)   click finish   Esc cancel"
-                        : "Depth: move to set, click to finish   Ctrl free (snap on)   Esc cancel";
+                ui_.toolStatus = std::string("Depth: move to set, ") + extrudeOpName(createTool_.op()) +
+                                 (createTool_.opFollowsDrag() ? " (following the drag)" : "") +
+                                 "   J join  D cut  I intersect  N new body   Ctrl free (snap on)   click finish   Esc cancel";
             }
             // What the cursor has caught replaces the step's own prompt: it is
             // the more specific thing to say, and a snap nobody is told about
@@ -6126,6 +7081,7 @@ int Application::run() {
             ui_.stats.vertices  += static_cast<size_t>(o->body.vertexCount());
         }
 
+        gProbe.begin();
         buildUi();
         handleViewportMouse();
         handleShortcuts();
@@ -6138,6 +7094,7 @@ int Application::run() {
         if (std::string sketchErr = sketchTool_.takeError(); !sketchErr.empty())
             setNotice(sketchErr);
 
+        gProbe.end("ui");
         applyActions();
 
         // A feature that dropped out of the chain during any of the above.
@@ -6149,11 +7106,37 @@ int Application::run() {
 
         // Queued before the frame is drawn; the renderer flushes overlay lines
         // at the end of its pass.
+        gProbe.begin();
         drawPrintIssues();
+        gProbe.end("print");
+        gProbe.begin();
         drawSelectionHighlights();
+        gProbe.end("highlight");
         if (createTool_.active()) createTool_.drawOverlay(scene_, camera_, renderer_);
+        drawFaceToolOverlay();
+        drawCombineOverlay();
+        gProbe.begin();
         drawSceneSketches();
-        if (sketchTool_.active()) sketchTool_.drawOverlay(scene_, camera_, renderer_);
+        gProbe.end("sketches");
+        if (sketchTool_.active()) {
+            const auto t0 = std::chrono::steady_clock::now();
+            sketchTool_.drawOverlay(scene_, camera_, renderer_);
+            if (!svgDemo_.empty() && svgDemoFrames_ < 60) {
+                const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+                svgDemoOverlayMs_ = std::max(svgDemoOverlayMs_, ms);
+                if (svgDemoFrames_ >= 10) svgDemoOverlaySum_ += ms;
+                // The first frame has no viewport size to fit a drawing to;
+                // by the third it has.
+                if (svgDemoFrames_ == 2 && sketchTool_.placing()) {
+                    sketchTool_.frameDrawing(camera_);
+                    camera_.snapToGoal();
+                }
+                if (++svgDemoFrames_ == 60)
+                    std::fprintf(stderr, "[svg-demo] overlay: slowest of 60 frames %.2f ms, average after the "
+                                 "first 10 %.2f ms; slowest update %.2f ms\n",
+                                 svgDemoOverlayMs_, svgDemoOverlaySum_ / 50.0, svgDemoUpdateMs_);
+            }
+        }
         measureResult_ = measure_.active() ? measure_.compute(scene_) : MeasureResult{};
         measure_.drawOverlay(renderer_, camera_, measureResult_);
         tool_.drawOverlay(renderer_, camera_);
@@ -6174,11 +7157,24 @@ int Application::run() {
         // frame on purpose: re-tessellating is tens of milliseconds on a heavy
         // part, so doing every body that wants it at once would turn a smooth
         // zoom into a series of stalls. See render/lod.h.
-        refreshTessellation(scene_, camera_);
+        gProbe.begin();
+        // A capture has to show the body at the tolerance this view wants, not
+        // the one a worker is still on its way to: a screenshot and the shading
+        // probe are both compared pixel for pixel, and a mesh landing halfway
+        // through reads as a difference. They wait; a person does not.
+        if (probeActive_ || !screenshotPath_.empty()) refreshTessellation(scene_, camera_);
+        else                                         stepTessellation();
+        gProbe.end("lod");
 
+        gProbe.begin();
         ImGui::Render();
+        gProbe.end("imgui-build");
+        gProbe.begin();
         drawFrame();
+        gProbe.end("render");
+        gProbe.begin();
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+        gProbe.end("imgui-draw");
 
         if (probeActive_) {
             // Let the first couple of frames settle before sampling.
@@ -6228,7 +7224,10 @@ int Application::run() {
             screenshotPath_.clear();
         }
 
+        gProbe.begin();
         SDL_GL_SwapWindow(window_);
+        gProbe.end("swap");
+        gProbe.frame();
 
         ++frame;
         if (!probeActive_ && smokeFrames_ > 0 && frame >= smokeFrames_) {

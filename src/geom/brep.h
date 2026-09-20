@@ -41,6 +41,7 @@ struct BrepShape;
 // grow a dependency on the sketch for the many files that never sweep one.
 struct Sketch;
 struct SketchProfile;
+using SketchId = uint32_t;
 
 using BrepRef = std::shared_ptr<const BrepShape>;
 
@@ -215,9 +216,21 @@ BrepRef filletEdges(const BrepShape& s, const std::vector<EdgeId>& edges,
 // push and pull. Leaving them draws the boss's own boundary, which is what
 // makes it a thing that can be selected and edited afterwards, and that is
 // extrude.
+//
+// `intersect` keeps only what the body and the sweep share instead: pushed into
+// the body, the slab under the face.
 BrepRef extrudeFaces(const BrepRef& s, const std::vector<FaceId>& faces, Real distance,
                      ElementId salt, std::vector<ElementId>* newFaces, std::string* reason,
-                     bool mergeFlush = true, Vec3 along = Vec3{});
+                     bool mergeFlush = true, Vec3 along = Vec3{}, bool intersect = false);
+
+// The solid the faces sweep through, on its own, named as extrudeFaces names
+// its prisms. What an extrusion does to bodies other than the one it came from
+// is done with this.
+BrepRef sweptFaces(const BrepRef& s, const std::vector<FaceId>& faces, Real distance, Vec3 along,
+                   ElementId salt, std::string* reason);
+
+// Whether two shapes touch or overlap, to within `tol`.
+bool touches(const BrepShape& a, const BrepShape& b, Real tol);
 
 // Splits each face into an inner face and the ring around it, the inner one
 // offset inward by `amount`. What a pocket or a boss is drawn from.
@@ -301,6 +314,17 @@ BrepRef shell(const BrepRef& s, const std::vector<FaceId>& openFaces, Real thick
 BrepRef sketchSolid(const Sketch& sketch, const SketchProfile& profile, Real from, Real to,
                     ElementId salt, std::string* reason);
 
+// Every region of `profiles` whose key is in `keys`, swept at once: what
+// extruding a whole imported drawing needs, where one region at a time would
+// be hundreds of booleans. Regions picked inside one another -- a letter and
+// the disc in its counter -- are merged into one face before sweeping, so the
+// solids that come out never touch and stand together as one compound. One
+// region comes out exactly as sketchSolid makes it, names and all; region k
+// of several has its caps named 2k and 2k + 1.
+BrepRef sketchSolids(const Sketch& sketch, const std::vector<SketchProfile>& profiles,
+                     const std::vector<SketchId>& keys, Real from, Real to, ElementId salt,
+                     std::string* reason);
+
 // A solid from a closed outline on a plane, swept between two heights along the
 // plane's normal. The create tool's profiles arrive this way.
 //
@@ -338,6 +362,11 @@ MeshHealth health(const BrepShape& s, bool checkIntersections);
 // ---- Mutation --------------------------------------------------------------
 // Returns a new shape; the input is untouched, as everywhere else in the
 // kernel, so a refused edit cannot half-apply.
+//
+// Any matrix that keeps the solid a solid: a placement stays exact, surfaces
+// and all; a scale that differs between axes is honoured too, at the cost of
+// the surfaces it stretches becoming general ones. A reflection is refused --
+// see mirrored() -- and so is anything that flattens the shape.
 BrepRef transformed(const BrepShape& s, const Mat4& m);
 
 // Reflects across the plane through `point` with `normal`. Separate from

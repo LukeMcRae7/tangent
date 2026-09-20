@@ -104,24 +104,18 @@ bool contains(const std::vector<SketchId>& v, SketchId id) {
     return std::find(v.begin(), v.end(), id) != v.end();
 }
 
-ExtrudeOp toExtrudeOp(CreateOp op) {
-    switch (op) {
-        case CreateOp::Join: return ExtrudeOp::Join;
-        case CreateOp::Cut:  return ExtrudeOp::Cut;
-        case CreateOp::Auto:
-        case CreateOp::NewBody: break;
-    }
-    return ExtrudeOp::Auto;
+// For the solver's lists, which are sorted: an imported drawing has thousands
+// of points, asked about every frame.
+bool sortedHas(const std::vector<SketchId>& v, SketchId id) {
+    return std::binary_search(v.begin(), v.end(), id);
 }
+
 
 // Diagonal strokes across a region, clipped to it -- holes included -- so a
 // region reads as a region whatever shape it is, without triangulating it.
-void hatchRegion(Renderer& renderer, const Sketch& sk, const SketchProfile& region,
-                 const PlaneFrame& plane, Real spacingMm, Vec4 colour) {
-    std::vector<std::vector<Vec2>> loops;
-    loops.push_back(sketchLoopPoints(sk, region.outer));
-    for (const SketchLoop& h : region.holes) loops.push_back(sketchLoopPoints(sk, h));
-
+// Two points a stroke, in plane coordinates.
+std::vector<Vec2> hatchStrokes(std::vector<std::vector<Vec2>> loops, Real spacingMm) {
+    std::vector<Vec2> out;
     // Turned 45 degrees, so the strokes are horizontal in the turned frame.
     const Real c = std::sqrt(0.5);
     auto turn = [c](Vec2 p) { return Vec2{c * (p.x + p.y), c * (p.y - p.x)}; };
@@ -134,7 +128,7 @@ void hatchRegion(Renderer& renderer, const Sketch& sk, const SketchProfile& regi
             lo = std::min(lo, p.y);
             hi = std::max(hi, p.y);
         }
-    if (!(hi > lo) || spacingMm <= 0.0) return;
+    if (!(hi > lo) || spacingMm <= 0.0) return out;
     const int count = static_cast<int>((hi - lo) / spacingMm);
     if (count > 600) spacingMm = (hi - lo) / 600.0;
 
@@ -149,10 +143,22 @@ void hatchRegion(Renderer& renderer, const Sketch& sk, const SketchProfile& regi
             }
         }
         std::sort(xs.begin(), xs.end());
-        for (size_t i = 0; i + 1 < xs.size(); i += 2)
-            renderer.addLine(plane.toWorld(back({xs[i], y})),
-                             plane.toWorld(back({xs[i + 1], y})), colour);
+        for (size_t i = 0; i + 1 < xs.size(); i += 2) {
+            out.push_back(back({xs[i], y}));
+            out.push_back(back({xs[i + 1], y}));
+        }
     }
+    return out;
+}
+
+bool insidePolygon(Vec2 p, const std::vector<Vec2>& poly) {
+    bool in = false;
+    for (size_t i = 0, j = poly.size() - 1; i < poly.size(); j = i++) {
+        const Vec2& a = poly[i];
+        const Vec2& b = poly[j];
+        if ((a.y > p.y) != (b.y > p.y) && p.x < (b.x - a.x) * (p.y - a.y) / (b.y - a.y) + a.x) in = !in;
+    }
+    return in;
 }
 
 } // namespace
@@ -201,13 +207,22 @@ void SketchTool::resetDrawing() {
     fixed_[0] = fixed_[1] = false;
     activeDim_ = kNoSketchId;
     hoverPoint_ = hoverEntity_ = hoverRegion_ = kNoSketchId;
+    handleCurve_ = kNoSketchId;
     lock_ = Lock::None;
     snap_ = PlaneSnap{};
     depth_ = depthBase_ = 10.0;
     depthTyped_ = false;
-    op_ = CreateOp::Auto;
+    choice_.reset();
+    reach_.clear();
+    adjusted_ = false;
+    reachToolKey_.clear();
+    reachTool_ = Body{};
     escapeArmed_ = false;
     mode_ = SketchMode::Line;
+    svg_ = SvgInsert{};
+    svgPlace_ = SvgPlacement{};
+    svgName_.clear();
+    importRequested_ = false;
 }
 
 void SketchTool::start() {
@@ -220,6 +235,81 @@ void SketchTool::start() {
     hoveredChoice_ = PlaneChoice::XY;
     plane_ = frameFor({0, 0, 0}, {0, 0, 1});
     stage_ = SketchStage::SelectPlane;
+    pendingSvg_ = SvgDrawing{};
+    pendingSvgName_.clear();
+}
+
+void SketchTool::startImport(SvgDrawing drawing, std::string name) {
+    start();
+    pendingSvg_ = std::move(drawing);
+    pendingSvgName_ = std::move(name);
+}
+
+bool SketchTool::importSvg(SvgDrawing drawing, std::string name) {
+    if (stage_ != SketchStage::Draw) {
+        error_ = "An SVG goes into a sketch while it is being drawn";
+        return false;
+    }
+    if (!drawing.ok || drawing.empty()) {
+        error_ = drawing.error.empty() ? "There is nothing in that SVG to import" : drawing.error;
+        return false;
+    }
+    endDrag();
+    clearPending();
+    Sketch before = sketch_;
+    SvgPlacement at;
+    const SvgInsert added = insertSvg(sketch_, drawing, at);
+    Sketch kept = before;
+    if (!settle(std::move(before), "The drawing")) return false;
+    // settle() ends any placement, which is right for what came before this
+    // one: this one is what can now be placed.
+    svg_ = added;
+    svgPlace_ = at;
+    svgName_ = std::move(name);
+    svgDrawing_ = std::move(drawing);
+    svgBefore_ = std::move(kept);
+    mode_ = SketchMode::Select;
+    return true;
+}
+
+bool SketchTool::setPlacement(const SvgPlacement& placement) {
+    if (svg_.empty() || stage_ != SketchStage::Draw) return false;
+    if (!(placement.scale > 1e-9) || !std::isfinite(placement.scale)) {
+        error_ = "The drawing has to have some size";
+        return false;
+    }
+    svgPlace_ = placement;
+    placeSvg(sketch_, svg_, svgPlace_);
+    solved_ = solveNow();
+    refreshRegions();
+    return true;
+}
+
+bool SketchTool::setInkColours(const std::vector<bool>& ink) {
+    if (svg_.empty() || stage_ != SketchStage::Draw || !svgDrawing_.source) return false;
+    SvgDrawing again = recolourSvg(svgDrawing_, ink);
+    if (!again.ok) {
+        error_ = again.error.empty() ? "Nothing would be left" : again.error;
+        return false;
+    }
+    // Back to the sketch before the drawing, and the drawing in again, at the
+    // same size and place. The step back from here is still to before it.
+    sketch_ = svgBefore_;
+    svg_ = insertSvg(sketch_, again, svgPlace_);
+    svgDrawing_ = std::move(again);
+    solved_ = solveNow();
+    chosen_.clear();
+    refreshRegions();
+    return true;
+}
+
+void SketchTool::chooseAllRegions() {
+    chosen_.clear();
+    for (const SketchProfile& r : regions_) chosen_.push_back(r.key);
+}
+
+void SketchTool::chooseFilledRegions() {
+    chosen_ = sketchFilledProfiles(sketch_, regions_);
 }
 
 bool SketchTool::startEdit(const Scene& scene, ObjectId object, ElementId sketchUid,
@@ -313,7 +403,32 @@ void SketchTool::setPlane(const PlaneFrame& frame, ObjectId faceObject, Camera* 
     sketch_.plane.xAxis = frame.u;
     sketch_.plane.yAxis = frame.v;
     stage_ = SketchStage::Draw;
-    if (camera) squareUp(*camera);
+    if (pendingSvg_.ok) {
+        SvgDrawing d = std::move(pendingSvg_);
+        pendingSvg_ = SvgDrawing{};
+        importSvg(std::move(d), std::move(pendingSvgName_));
+        pendingSvgName_.clear();
+    }
+    if (camera) {
+        squareUp(*camera);
+        if (placing()) frameDrawing(*camera);
+    }
+}
+
+void SketchTool::frameDrawing(Camera& camera) {
+    if (svg_.empty()) return;
+    const Vec2 size = svg_.size * svgPlace_.scale;
+    // Into the upper half of the view, which is what the sketch's panel
+    // leaves uncovered: the view at least twice the drawing high and a tenth
+    // wider than it, with the drawing's middle a fifth of the view above the
+    // view's. The view's height is 2 d tan(fov / 2).
+    const Real aspect = std::max<Real>(camera.aspect(), 0.1);
+    const Real viewHeight = std::max({size.y * 2.0, size.x * 1.1 / aspect, 1.0});
+    const float dist = static_cast<float>(viewHeight / (2.0 * std::tan(camera.fovY * 0.5)));
+    float y = 0.0f, p = 0.0f;
+    Camera::anglesFor(plane_.normal, y, p);
+    const Vec2 target = svgPlace_.centre - Vec2{0.0, viewHeight * 0.2};
+    camera.animateTo(plane_.toWorld(target), std::max(dist, 10.0f), y, p);
 }
 
 // ---------------------------------------------------------------------------
@@ -342,6 +457,9 @@ bool SketchTool::settle(Sketch before, const char* what) {
     solved_ = std::move(s);
     history_.push_back(std::move(before));
     escapeArmed_ = false;
+    // Something else has been drawn: the import is ordinary geometry now, and
+    // resizing it would undo whatever was just done to it.
+    endPlacing();
     refreshRegions();
     return true;
 }
@@ -543,6 +661,7 @@ void SketchTool::endDrag() {
     if (dragMoved_) {
         solved_ = solveNow();
         history_.push_back(std::move(dragBefore_));
+        endPlacing();
         refreshRegions();
     }
     dragBefore_ = Sketch{};
@@ -741,6 +860,7 @@ SketchId SketchTool::dimensionEntity(SketchId entity) {
     }
     solved_ = std::move(s);
     history_.push_back(std::move(before));
+    endPlacing();
     refreshRegions();
     activeDim_ = id;
     typed_.clear();
@@ -765,6 +885,7 @@ bool SketchTool::setDimension(SketchId constraint, Real value) {
     }
     solved_ = std::move(s);
     history_.push_back(std::move(before));
+    endPlacing();
     refreshRegions();
     return true;
 }
@@ -817,6 +938,7 @@ bool SketchTool::toggleConstruction(SketchId entity) {
 
 bool SketchTool::undoEdit() {
     if (history_.empty()) return false;
+    endPlacing();
     sketch_ = std::move(history_.back());
     history_.pop_back();
     solved_ = solveNow();
@@ -839,7 +961,10 @@ bool SketchTool::beginExtrude(Camera* camera) {
         error_ = "Nothing in the sketch closes yet: a region needs a loop that ends where it began";
         return false;
     }
-    if (chosen_.empty() && regions_.size() == 1) chosen_.push_back(regions_.front().key);
+    // Nothing picked yet: the filled regions, which for one region is that
+    // one, for a plate with a bore is the plate, and for an imported logo is
+    // every letter with its counters left open.
+    if (chosen_.empty()) chooseFilledRegions();
     stage_ = SketchStage::Regions;
     if (camera) restoreCamera(*camera);
     return true;
@@ -866,11 +991,6 @@ bool SketchTool::beginDepth() {
     return true;
 }
 
-CreateOp SketchTool::resolvedOp() const {
-    if (op_ != CreateOp::Auto) return op_;
-    if (depth_ < 0.0) return CreateOp::Cut;
-    return faceObject_ != kNoObject ? CreateOp::Join : CreateOp::NewBody;
-}
 
 Vec2 SketchTool::chosenCentre() const {
     Vec2 sum{0, 0};
@@ -909,73 +1029,30 @@ bool SketchTool::finish(Scene& scene, Camera& camera, UndoStack& undo, bool extr
             error_ = "The depth is zero";
             return false;
         }
+        // A refusal leaves the tool where it was, so the operation or the
+        // bodies can be changed and Finish tried again.
+        if (!commitExtrusion(scene, undo)) return false;
+        restoreCamera(camera);
+        cameraSaved_ = false;
+        stage_ = SketchStage::Applied;
+        return true;
     }
 
-    const CreateOp op = extrude ? resolvedOp() : CreateOp::Join;
-    ObjectId target = editing() ? editObject_ : faceObject_;
-    if (extrude && !editing()) {
-        if (op == CreateOp::NewBody) {
-            target = kNoObject;
-        } else if (op == CreateOp::Cut && target == kNoObject) {
-            // Drawn on a plane of its own: the cut goes into whatever it passes
-            // through, the way the create tool finds its target.
-            AABB swept;
-            for (const SketchProfile& r : regions_) {
-                if (!contains(chosen_, r.key)) continue;
-                for (Vec2 p : sketchLoopPoints(sketch_, r.outer)) {
-                    swept.expand(plane_.toWorld(p));
-                    swept.expand(plane_.toWorld(p) + plane_.normal * depth_);
-                }
-            }
-            for (const auto& o : scene.objects()) {
-                // Something to cut into means something with a body: another
-                // sketch lying in the way is not material.
-                if (o->body.empty()) continue;
-                if (swept.overlaps(o->worldBounds(), 1e-4)) { target = o->id; break; }
-            }
-            if (target == kNoObject) {
-                error_ = "Nothing there to cut into";
-                return false;
-            }
-        } else if (op == CreateOp::Join && target == kNoObject) {
-            error_ = "Nothing there to join onto";
-            return false;
-        }
-    }
-    if (editing() && op == CreateOp::NewBody) {
-        error_ = "A sketch already in a part extrudes into that part: choose Join or Cut";
-        return false;
-    }
-
-    auto sweep = [&](ElementId sketchUid, SketchId key, ExtrudeOp how) {
-        Feature f;
-        f.kind = FeatureKind::ExtrudeProfile;
-        f.uid = scene.takeFeatureUid();
-        f.sketchUid = sketchUid;
-        f.profileKey = key;
-        f.distance = depth_;
-        f.extrudeOp = how;
-        return f;
-    };
-
+    // Kept as a sketch: in the part it was drawn on or is being edited in, or,
+    // drawn on a plane of its own, as its own object in the outliner, to be
+    // extruded whenever.
+    const ObjectId target = owner();
     if (target == kNoObject) {
-        // An object of its own: the sketch where it was drawn, and the regions
-        // swept out of it. With nothing swept it is a sketch and nothing else,
-        // which is a perfectly good thing for the outliner to hold until
-        // something is built from it.
         std::vector<Feature> chain;
         Feature s;
         s.kind = FeatureKind::Sketch;
         s.uid = scene.takeFeatureUid();
         s.sketch = sketch_;
-        // Once a solid stands where the sketch is, the drawing is scaffolding.
-        s.sketchShown = !extrude;
         chain.push_back(s);
-        for (SketchId key : chosen_) chain.push_back(sweep(s.uid, key, ExtrudeOp::Join));
         std::string why;
-        const ObjectId id = scene.addFeatureChain(std::move(chain), extrude ? "Part" : "Sketch", &why);
+        const ObjectId id = scene.addFeatureChain(std::move(chain), "Sketch", &why);
         if (id == kNoObject) {
-            error_ = "Extrude failed: " + (why.empty() ? std::string("no solid came out of it") : why);
+            error_ = "The sketch was not kept: " + (why.empty() ? std::string("it would not evaluate") : why);
             return false;
         }
         undo.push(ExistenceCommand::forCreate(scene, {id}));
@@ -986,19 +1063,10 @@ bool SketchTool::finish(Scene& scene, Camera& camera, UndoStack& undo, bool extr
             error_ = "The part this sketch belongs to is gone";
             return false;
         }
-        // An object with no body yet is a sketch waiting to be built from, not
-        // a mesh: Body calls itself a mesh until a kernel shape is put in it.
-        if (!obj->body.empty() && obj->body.isMesh()) {
-            error_ = "Sketching onto a mesh needs a solid: Modify > Convert to Solid first";
-            return false;
-        }
         const std::vector<Feature> before = obj->features;
         std::vector<Feature> chain = obj->features;
-
         Sketch local = sketch_;
         local.plane = planeToLocal(sketch_.plane, obj->modelMatrix());
-
-        ElementId sketchUid = 0;
         if (editing()) {
             auto it = std::find_if(chain.begin(), chain.end(), [&](const Feature& f) {
                 return f.kind == FeatureKind::Sketch && f.uid == editUid_;
@@ -1008,26 +1076,16 @@ bool SketchTool::finish(Scene& scene, Camera& camera, UndoStack& undo, bool extr
                 return false;
             }
             it->sketch = std::move(local);
-            sketchUid = editUid_;
-            // Sweeping from it turns the drawing off, the way finishing a new
-            // one does: what is on the screen afterwards is the solid.
-            if (extrude) it->sketchShown = false;
         } else {
             Feature s;
             s.kind = FeatureKind::Sketch;
             s.uid = scene.takeFeatureUid();
             s.sketch = std::move(local);
-            s.sketchShown = !extrude;
-            sketchUid = s.uid;
             chain.push_back(std::move(s));
         }
-        if (extrude)
-            for (SketchId key : chosen_) chain.push_back(sweep(sketchUid, key, toExtrudeOp(op_)));
-
         std::string why;
         if (!scene.setFeatures(target, std::move(chain), &why)) {
-            error_ = std::string(editing() ? "The edit was not kept: " : extrude ? "Extrude failed: "
-                                                                                 : "The sketch was not kept: ") +
+            error_ = std::string(editing() ? "The edit was not kept: " : "The sketch was not kept: ") +
                      (why.empty() ? std::string("the history would not evaluate") : why);
             return false;
         }
@@ -1042,6 +1100,244 @@ bool SketchTool::finish(Scene& scene, Camera& camera, UndoStack& undo, bool extr
     resetDrawing();
     editObject_ = kNoObject;
     faceObject_ = kNoObject;
+    return true;
+}
+
+bool SketchTool::recommit(Scene& scene, UndoStack& undo) {
+    if (stage_ != SketchStage::Applied) return false;
+    return commitExtrusion(scene, undo);
+}
+
+void SketchTool::dismissApplied() {
+    if (stage_ != SketchStage::Applied) return;
+    stage_ = SketchStage::None;
+    resetDrawing();
+    editObject_ = kNoObject;
+    faceObject_ = kNoObject;
+}
+
+Body SketchTool::sweptRegions(std::string* why) const {
+    if (chosen_.empty()) return Body{};
+    BrepRef all = brep::sketchSolids(sketch_, regions_, chosen_, 0.0, depth_, 0, why);
+    return all ? Body(std::move(all)) : Body{};
+}
+
+void SketchTool::refreshReach(const Scene& scene, bool now) {
+    if (choice_.op == ExtrudeOp::NewBody || !brep::available() || chosen_.empty()) {
+        reach_.refresh(scene, Body{}, owner(), choice_.op, depth_, "none");
+        return;
+    }
+
+    // Where the sweep could possibly go: the box around the chosen regions,
+    // from the plane to the depth. With no body near that box there is
+    // nothing to reach, and nothing needs sweeping to know it -- the usual
+    // case for a drawing brought in to be a part of its own.
+    AABB swept;
+    {
+        std::vector<SketchId> chosen = chosen_;
+        std::sort(chosen.begin(), chosen.end());
+        Vec2 lo{1e300, 1e300}, hi{-1e300, -1e300};
+        for (const SketchProfile& r : regions_) {
+            if (!std::binary_search(chosen.begin(), chosen.end(), r.key)) continue;
+            for (SketchId id : r.outer.entities) {
+                const SketchEntity* e = sketch_.entity(id);
+                if (!e) continue;
+                for (SketchId p : {e->a, e->b, e->c, e->d}) {
+                    if (p == kNoSketchId) continue;
+                    const Vec2 q = pointUV(p);
+                    const Real grow = e->curve == SketchCurve::Circle || e->curve == SketchCurve::Arc
+                                          ? std::max(e->radius, length(pointUV(e->b) - pointUV(e->a)))
+                                          : 0.0;
+                    lo = {std::min(lo.x, q.x - grow), std::min(lo.y, q.y - grow)};
+                    hi = {std::max(hi.x, q.x + grow), std::max(hi.y, q.y + grow)};
+                }
+            }
+        }
+        for (Vec2 c : {lo, hi, Vec2{lo.x, hi.y}, Vec2{hi.x, lo.y}}) {
+            swept.expand(plane_.toWorld(c));
+            swept.expand(plane_.toWorld(c) + plane_.normal * depth_);
+        }
+    }
+    const bool near = std::any_of(scene.objects().begin(), scene.objects().end(), [&](const auto& o) {
+        return o->visible && !o->body.empty() && !o->body.isMesh() && swept.overlaps(o->worldBounds(), 1e-3);
+    });
+    if (!near) {
+        reach_.refresh(scene, Body{}, owner(), choice_.op, depth_, "clear");
+        return;
+    }
+
+    // The same regions at the same depth are the same tool, and the bodies it
+    // reaches need not be measured again.
+    std::string key;
+    char b[96];
+    std::snprintf(b, sizeof b, "%.9g|%.6g,%.6g,%.6g", depth_, plane_.origin.x, plane_.origin.y,
+                  plane_.origin.z);
+    key = b;
+    for (SketchId k : chosen_) key += "|" + std::to_string(k);
+    if (reachToolKey_ != key) {
+        // A sweep that takes a noticeable time is not made again until four
+        // times that has passed: a depth dragged across a drawing of hundreds
+        // of letters would otherwise sweep all of them on every frame. What it
+        // reaches is shown a moment late; what is built is measured now.
+        const auto t = std::chrono::steady_clock::now();
+        const double since = std::chrono::duration<double, std::milli>(t - reachBuiltAt_).count();
+        if (!now && !reachToolKey_.empty() && reachBuildMs_ > 20.0 && since < 4.0 * reachBuildMs_) return;
+        reachTool_ = sweptRegions(nullptr);
+        reachToolKey_ = key;
+        reachBuiltAt_ = std::chrono::steady_clock::now();
+        reachBuildMs_ = std::chrono::duration<double, std::milli>(reachBuiltAt_ - t).count();
+    }
+    reach_.refresh(scene, reachTool_, owner(), choice_.op, depth_, key);
+}
+
+bool SketchTool::commitExtrusion(Scene& scene, UndoStack& undo) {
+    // Measured now rather than trusted from the last frame: this is what the
+    // extrusion is about to act on.
+    choice_.follow(depth_, owner() != kNoObject);
+    refreshReach(scene, true);
+    ExtrudeOp op = choice_.op;
+    std::vector<ObjectId> bodies = reach_.included();
+
+    // A sketch that is an object of its own, with no body yet, becomes a part
+    // when it is joined or made a body: its first solid is these regions, in
+    // its own history, with anything else the join reaches merged into it.
+    const ObjectId belongs = owner();
+    const SceneObject* belongsTo = scene.find(belongs);
+    const bool firstSolid = belongsTo && belongsTo->body.empty() &&
+                            (op == ExtrudeOp::Join || op == ExtrudeOp::NewBody);
+    if (firstSolid) {
+        if (op == ExtrudeOp::NewBody) bodies.clear();
+        op = ExtrudeOp::Join;
+        bodies.insert(bodies.begin(), belongs);
+    }
+
+    // A join that reaches nothing has nothing to join, and is a body of its
+    // own -- as it is in Fusion.
+    const bool asNewBody = op == ExtrudeOp::NewBody || (op == ExtrudeOp::Join && bodies.empty());
+    if (asNewBody && editing()) {
+        error_ = "A sketch already in a part extrudes into that part: leave the part in, or pick Cut or Intersect";
+        return false;
+    }
+    if (!asNewBody && bodies.empty()) {
+        error_ = op == ExtrudeOp::Cut ? "Nothing there to cut into" : "Nothing there to intersect with";
+        return false;
+    }
+
+    // Every chosen region in one step: one sweep and one boolean, however
+    // many letters a drawing has.
+    std::vector<SketchId> keys = chosen_;
+    std::sort(keys.begin(), keys.end());
+    auto sweep = [&](ElementId sketchUid, ExtrudeOp how) {
+        Feature f;
+        f.kind = FeatureKind::ExtrudeProfile;
+        f.uid = scene.takeFeatureUid();
+        f.sketchUid = sketchUid;
+        f.profileKeys = keys;
+        f.distance = depth_;
+        f.extrudeOp = how;
+        return f;
+    };
+
+    if (asNewBody) {
+        // A part of its own: the sketch where it was drawn, and the regions
+        // swept out of it. Once a solid stands where the sketch is, the
+        // drawing is scaffolding and is hidden.
+        std::vector<Feature> chain;
+        Feature s;
+        s.kind = FeatureKind::Sketch;
+        s.uid = scene.takeFeatureUid();
+        s.sketch = sketch_;
+        s.sketchShown = false;
+        chain.push_back(s);
+        chain.push_back(sweep(s.uid, ExtrudeOp::Join));
+        std::string why;
+        const ObjectId id = scene.addFeatureChain(std::move(chain), "Part", &why);
+        if (id == kNoObject) {
+            error_ = "Extrude failed: " + (why.empty() ? std::string("no solid came out of it") : why);
+            return false;
+        }
+        undo.push(ExistenceCommand::forCreate(scene, {id}));
+        scene.select(id);
+        return true;
+    }
+
+    // Where the sketch lives: the part it belongs to, or -- drawn on a plane
+    // of its own -- the first body it acts on, where it stays editable and
+    // re-runs with that part's history. The regions are swept there as steps
+    // of that history; every other body reached takes the swept solid.
+    const ObjectId home = editing() || firstSolid ? belongs
+                        : belongs != kNoObject && reach_.includes(belongs) ? belongs
+                                                                           : bodies.front();
+    const bool homeActs = std::find(bodies.begin(), bodies.end(), home) != bodies.end();
+    SceneObject* obj = scene.find(home);
+    if (!obj) {
+        error_ = "The part this sketch belongs to is gone";
+        return false;
+    }
+    // An object with no body yet is a sketch waiting to be built from, not a
+    // mesh: Body calls itself a mesh until a kernel shape is put in it.
+    if (!obj->body.empty() && obj->body.isMesh()) {
+        error_ = "Sketching onto a mesh needs a solid: Modify > Convert to Solid first";
+        return false;
+    }
+
+    const char* label = op == ExtrudeOp::Join ? "Extrude Join"
+                      : op == ExtrudeOp::Cut  ? "Extrude Cut" : "Extrude Intersect";
+    const std::vector<Feature> before = obj->features;
+    std::vector<Feature> chain = obj->features;
+    Sketch local = sketch_;
+    local.plane = planeToLocal(sketch_.plane, obj->modelMatrix());
+    ElementId sketchUid = 0;
+    if (editing()) {
+        auto it = std::find_if(chain.begin(), chain.end(), [&](const Feature& f) {
+            return f.kind == FeatureKind::Sketch && f.uid == editUid_;
+        });
+        if (it == chain.end()) {
+            error_ = "That sketch is no longer in the history";
+            return false;
+        }
+        it->sketch = std::move(local);
+        it->sketchShown = false;
+        sketchUid = editUid_;
+    } else {
+        Feature s;
+        s.kind = FeatureKind::Sketch;
+        s.uid = scene.takeFeatureUid();
+        s.sketch = std::move(local);
+        s.sketchShown = false;
+        sketchUid = s.uid;
+        chain.push_back(std::move(s));
+    }
+    if (homeActs) chain.push_back(sweep(sketchUid, op));
+
+    std::string why;
+    if (!scene.setFeatures(home, std::move(chain), &why)) {
+        error_ = std::string(editing() ? "The edit was not kept: " : "Extrude failed: ") +
+                 (why.empty() ? std::string("the history would not evaluate") : why);
+        return false;
+    }
+    std::vector<std::unique_ptr<Command>> parts;
+    parts.push_back(std::make_unique<FeatureCommand>(home, before, scene.find(home)->features,
+                                                     editing() ? "Edit Sketch" : label));
+
+    if (bodies.size() > (homeActs ? 1u : 0u)) {
+        const Body tool = sweptRegions(&why);
+        std::string error;
+        if (tool.empty()) {
+            unwind(scene, parts);
+            error_ = "Extrude failed: " + (why.empty() ? std::string("the regions could not be swept") : why);
+            return false;
+        }
+        if (!applyExtrude(scene, tool, op, bodies, homeActs ? home : kNoObject, "Sketch", label, parts,
+                          error)) {
+            unwind(scene, parts);
+            error_ = error;
+            return false;
+        }
+    }
+    if (parts.size() == 1) undo.push(std::move(parts.front()));
+    else                   undo.push(std::make_unique<CompositeCommand>(std::move(parts), label));
+    if (scene.find(home)) scene.select(home);
     return true;
 }
 
@@ -1075,7 +1371,7 @@ Real SketchTool::depthFromPointer(const Camera& camera, Vec2 mousePx) const {
 }
 
 void SketchTool::update(const Scene& scene, const Camera& camera, Vec2 mousePx, bool snap) {
-    if (stage_ == SketchStage::None) return;
+    if (stage_ == SketchStage::None || stage_ == SketchStage::Applied) return;
 
     if (stage_ == SketchStage::SelectPlane) {
         const Ray ray = camera.rayThroughPixel(static_cast<float>(mousePx.x),
@@ -1129,6 +1425,9 @@ void SketchTool::update(const Scene& scene, const Camera& camera, Vec2 mousePx, 
     pickMm_ = kPointPickPx / pixelsPerMm(camera, plane_);
     Vec2 raw{};
     cursorValid_ = unproject(camera, mousePx, raw);
+    // What the pointer is measured against below is what is drawn: kept
+    // between frames, and only worked out again for what changed.
+    if (stage_ == SketchStage::Draw || stage_ == SketchStage::Regions) refreshDrawCache(camera);
 
     if (stage_ == SketchStage::Draw) {
         // A drag owns the pointer while it lasts: the solver decides where the
@@ -1151,23 +1450,46 @@ void SketchTool::update(const Scene& scene, const Camera& camera, Vec2 mousePx, 
         lock_ = Lock::None;
         if (!cursorValid_) return;
 
-        // The sketch's own points first, measured on screen: a corner that is
-        // meant to close a loop has to win over the grid line under it.
-        Real bestPx = kPointPickPx;
+        // The sketch's own points first: a corner that is meant to close a
+        // loop has to win over the grid line under it. Measured on the plane,
+        // which the view is square to while drawing, so a millimetre there is
+        // a fixed number of pixels -- and ten thousand points cost nothing to
+        // look through. A curve's handle counts only where it is drawn.
+        const Real mmPerPx = drawMmPerPx_;
+        std::vector<SketchId> hiddenHandles;
+        {
+            size_t curves = 0;
+            for (const SketchEntity& e : sketch_.entities) curves += e.curve == SketchCurve::Bezier;
+            if (curves > 64)
+                for (const SketchEntity& e : sketch_.entities)
+                    if (e.curve == SketchCurve::Bezier && e.id != handleCurve_) {
+                        hiddenHandles.push_back(e.b);
+                        hiddenHandles.push_back(e.c);
+                    }
+            std::sort(hiddenHandles.begin(), hiddenHandles.end());
+        }
+        Real bestMm = kPointPickPx * mmPerPx;
         for (const SketchPoint& p : sketch_.points) {
-            Vec2 px{};
-            if (!camera.projectToPixel(plane_.toWorld(p.at), px)) continue;
-            const Real d = length(px - mousePx);
-            if (d <= bestPx) { bestPx = d; hoverPoint_ = p.id; }
+            const Vec2 d = p.at - raw;
+            if (std::fabs(d.x) > bestMm || std::fabs(d.y) > bestMm) continue;
+            const Real dist = length(d);
+            if (dist > bestMm) continue;
+            if (std::binary_search(hiddenHandles.begin(), hiddenHandles.end(), p.id)) continue;
+            bestMm = dist;
+            hoverPoint_ = p.id;
         }
 
         Vec2 uv = raw;
         if (hoverPoint_ != kNoSketchId) {
             uv = pointUV(hoverPoint_);
         } else if (snap) {
+            // Only the points near enough to be snapped to: the snapper looks
+            // at each one it is handed, and a drawing hands it thousands.
             std::vector<SnapPoint> extra;
+            const Real reach = 4.0 * kPointPickPx * mmPerPx;
             for (const SketchPoint& p : sketch_.points)
-                extra.push_back({plane_.toWorld(p.at), p.at, SnapKind::Vertex, kNoObject, 0.0});
+                if (std::fabs(p.at.x - raw.x) <= reach && std::fabs(p.at.y - raw.y) <= reach)
+                    extra.push_back({plane_.toWorld(p.at), p.at, SnapKind::Vertex, kNoObject, 0.0});
             for (Vec2 c : clicks_)
                 extra.push_back({plane_.toWorld(c), c, SnapKind::Vertex, kNoObject, 0.0});
             snap_ = snapOnPlane(scene, camera, plane_, mousePx, raw, {}, extra);
@@ -1201,23 +1523,20 @@ void SketchTool::update(const Scene& scene, const Camera& camera, Vec2 mousePx, 
             }
         }
 
-        // What the pointer is over, for dimensioning, deleting, construction.
-        Real bestEntity = kEntityPickPx;
-        for (const SketchEntity& e : sketch_.entities) {
-            const std::vector<Vec2> pts = sketchEntityPoints(sketch_, e);
-            Vec2 prev{};
-            bool havePrev = false;
-            for (Vec2 p : pts) {
-                Vec2 px{};
-                if (!camera.projectToPixel(plane_.toWorld(p), px)) { havePrev = false; continue; }
-                if (havePrev) {
-                    const Real d = distanceToSegment(mousePx, prev, px);
-                    if (d <= bestEntity) { bestEntity = d; hoverEntity_ = e.id; }
-                }
-                prev = px;
-                havePrev = true;
+        // What the pointer is over, for dimensioning, deleting, construction:
+        // the drawn line of each curve, skipped whole when its box is not
+        // within reach.
+        Real bestEntity = kEntityPickPx * mmPerPx;
+        for (const EntityDraw& d : entityDraw_) {
+            if (raw.x < d.lo.x - bestEntity || raw.x > d.hi.x + bestEntity ||
+                raw.y < d.lo.y - bestEntity || raw.y > d.hi.y + bestEntity)
+                continue;
+            for (size_t i = 0; i + 1 < d.line.size(); ++i) {
+                const Real dist = distanceToSegment(raw, d.line[i], d.line[i + 1]);
+                if (dist <= bestEntity) { bestEntity = dist; hoverEntity_ = d.id; }
             }
         }
+        if (hoverEntity_ != kNoSketchId) handleCurve_ = hoverEntity_;
         return;
     }
 
@@ -1228,7 +1547,7 @@ void SketchTool::update(const Scene& scene, const Camera& camera, Vec2 mousePx, 
         // is its own region, and is the one being pointed at.
         Real smallest = 1e300;
         for (const SketchProfile& r : regions_) {
-            if (r.area < smallest && sketchProfileContains(sketch_, r, raw)) {
+            if (r.area < smallest && regionHas(r, raw)) {
                 smallest = r.area;
                 hoverRegion_ = r.key;
             }
@@ -1237,13 +1556,16 @@ void SketchTool::update(const Scene& scene, const Camera& camera, Vec2 mousePx, 
     }
 
     if (stage_ == SketchStage::Depth) {
-        if (depthTyped_) return;
-        Real d = depthFromPointer(camera, mousePx);
-        if (snap) {
-            const Real step = static_cast<Real>(camera.snapStep(plane_.toWorld(chosenCentre())));
-            if (step > 0.0) d = std::round(d / step) * step;
+        if (!depthTyped_) {
+            Real d = depthFromPointer(camera, mousePx);
+            if (snap) {
+                const Real step = static_cast<Real>(camera.snapStep(plane_.toWorld(chosenCentre())));
+                if (step > 0.0) d = std::round(d / step) * step;
+            }
+            if (std::fabs(d) > 1e-4) depth_ = d;
         }
-        if (std::fabs(d) > 1e-4) depth_ = d;
+        choice_.follow(depth_, owner() != kNoObject);
+        refreshReach(scene);
     }
 }
 
@@ -1279,6 +1601,7 @@ void SketchTool::handleMouseDown(Scene& scene, Camera& camera, UndoStack& undo) 
     case SketchStage::Depth:
         finish(scene, camera, undo, true);
         break;
+    case SketchStage::Applied:
     case SketchStage::None:
         break;
     }
@@ -1307,6 +1630,7 @@ void SketchTool::handleRightClick(Camera& camera) {
     case SketchStage::SelectPlane:
         cancel(camera);
         break;
+    case SketchStage::Applied:
     case SketchStage::None:
         break;
     }
@@ -1351,6 +1675,7 @@ bool SketchTool::handleKey(int key, bool shift, bool ctrl, Scene& scene, Camera&
         case SketchStage::Depth:
             stage_ = SketchStage::Regions;
             break;
+        case SketchStage::Applied:
         case SketchStage::None:
             break;
         }
@@ -1408,12 +1733,19 @@ bool SketchTool::handleKey(int key, bool shift, bool ctrl, Scene& scene, Camera&
 
     case SketchStage::Depth:
         if (key == 13 || key == 'E') { finish(scene, camera, undo, true); return true; }
-        if (key == 'A') { op_ = CreateOp::Auto; return true; }
-        if (key == 'J') { op_ = CreateOp::Join; return true; }
-        if (key == 'D') { op_ = CreateOp::Cut; return true; }
-        if (key == 'N' && !editing()) { op_ = CreateOp::NewBody; return true; }
+        {
+            // Picking one ends the depth's say in it. A sketch already in a
+            // part extrudes into that part, so it has no New Body.
+            ExtrudeOp picked;
+            if (extrudeOpForKey(key, picked) && !(picked == ExtrudeOp::NewBody && editing())) {
+                choice_.pick(picked);
+                refreshReach(scene);
+                return true;
+            }
+        }
         return typeKey(key);
 
+    case SketchStage::Applied:
     case SketchStage::None:
         break;
     }
@@ -1440,8 +1772,141 @@ bool SketchTool::inConflict(const SketchEntity& e) const {
     return false;
 }
 
+void SketchTool::refreshDrawCache(const Camera& camera) const {
+    const Real ppm = pixelsPerMm(camera, plane_);
+    drawMmPerPx_ = 1.0 / ppm;
+    // Half-octave steps of zoom: fine enough that a curve never shows its
+    // corners, coarse enough that zooming does not re-sample every frame.
+    drawBucket_ = static_cast<int>(std::lround(2.0 * std::log2(std::max(ppm, 1e-9))));
+    const Real bucketPpm = std::pow(2.0, drawBucket_ * 0.5);
+
+    std::vector<EntityDraw> next;
+    next.reserve(sketch_.entities.size());
+    std::unordered_map<SketchId, size_t> at;
+    at.reserve(sketch_.entities.size());
+    for (const SketchEntity& e : sketch_.entities) {
+        EntityDraw d;
+        d.id = e.id;
+        d.curve = e.curve;
+        d.radius = e.radius;
+        const SketchId ids[4] = {e.a, e.b, e.c, e.d};
+        for (int i = 0; i < 4; ++i) d.ctrl[i] = ids[i] != kNoSketchId ? pointUV(ids[i]) : Vec2{};
+
+        const auto old = entityDrawAt_.find(e.id);
+        bool same = false;
+        if (old != entityDrawAt_.end()) {
+            const EntityDraw& was = entityDraw_[old->second];
+            same = was.curve == d.curve && was.radius == d.radius &&
+                   (d.curve == SketchCurve::Line || was.bucket == drawBucket_);
+            for (int i = 0; i < 4 && same; ++i)
+                same = was.ctrl[i].x == d.ctrl[i].x && was.ctrl[i].y == d.ctrl[i].y;
+        }
+        if (same) {
+            next.push_back(std::move(entityDraw_[old->second]));
+        } else {
+            // As many pieces as it needs on screen: about one per five pixels
+            // of its length, a line one.
+            Real extent = 0;
+            switch (e.curve) {
+            case SketchCurve::Line:   break;
+            case SketchCurve::Circle: extent = kTwoPi * e.radius; break;
+            case SketchCurve::Arc:    extent = kTwoPi * length(d.ctrl[1] - d.ctrl[0]); break;
+            case SketchCurve::Bezier:
+                extent = length(d.ctrl[1] - d.ctrl[0]) + length(d.ctrl[2] - d.ctrl[1]) +
+                         length(d.ctrl[3] - d.ctrl[2]);
+                break;
+            }
+            const int steps = static_cast<int>(std::clamp(std::ceil(extent * bucketPpm / 5.0), 4.0, 64.0));
+            d.line = sketchEntityPoints(sketch_, e, steps);
+            d.lo = {1e300, 1e300};
+            d.hi = {-1e300, -1e300};
+            for (Vec2 p : d.line) {
+                d.lo = {std::min(d.lo.x, p.x), std::min(d.lo.y, p.y)};
+                d.hi = {std::max(d.hi.x, p.x), std::max(d.hi.y, p.y)};
+            }
+            d.bucket = drawBucket_;
+            d.version = ++drawVersion_;
+            next.push_back(std::move(d));
+        }
+        at.emplace(e.id, next.size() - 1);
+    }
+    entityDraw_.swap(next);
+    entityDrawAt_.swap(at);
+    if (regionDraw_.size() > regions_.size() * 2 + 16) regionDraw_.clear();
+}
+
+const SketchTool::EntityDraw* SketchTool::drawOf(SketchId entity) const {
+    const auto it = entityDrawAt_.find(entity);
+    return it == entityDrawAt_.end() ? nullptr : &entityDraw_[it->second];
+}
+
+const SketchTool::RegionDraw& SketchTool::regionDrawOf(const SketchProfile& region) const {
+    // Which curves, in which order, at which versions: anything else the same
+    // is the same outline.
+    uint64_t sig = 1469598103934665603ull;
+    auto mix = [&sig](uint64_t v) { sig = (sig ^ v) * 1099511628211ull; };
+    std::vector<const SketchLoop*> loops{&region.outer};
+    for (const SketchLoop& h : region.holes) loops.push_back(&h);
+    for (const SketchLoop* loop : loops) {
+        mix(0xABCDu);
+        for (size_t k = 0; k < loop->entities.size(); ++k) {
+            const EntityDraw* d = drawOf(loop->entities[k]);
+            mix(loop->entities[k]);
+            mix(d ? d->version : 0u);
+            mix(k < loop->reversed.size() && loop->reversed[k] ? 1u : 0u);
+        }
+    }
+    RegionDraw& r = regionDraw_[region.key];
+    if (r.signature == sig && !r.loops.empty()) return r;
+
+    r = RegionDraw{};
+    r.signature = sig;
+    r.lo = {1e300, 1e300};
+    r.hi = {-1e300, -1e300};
+    for (const SketchLoop* loop : loops) {
+        std::vector<Vec2> poly;
+        for (size_t k = 0; k < loop->entities.size(); ++k) {
+            const EntityDraw* d = drawOf(loop->entities[k]);
+            if (!d || d->line.empty()) continue;
+            const bool rev = k < loop->reversed.size() && loop->reversed[k];
+            const size_t n = d->line.size();
+            for (size_t i = poly.empty() ? 0 : 1; i < n; ++i) poly.push_back(d->line[rev ? n - 1 - i : i]);
+        }
+        if (poly.size() > 1 && lengthSq(poly.front() - poly.back()) < 1e-18) poly.pop_back();
+        for (Vec2 p : poly) {
+            r.lo = {std::min(r.lo.x, p.x), std::min(r.lo.y, p.y)};
+            r.hi = {std::max(r.hi.x, p.x), std::max(r.hi.y, p.y)};
+        }
+        r.loops.push_back(std::move(poly));
+    }
+    return r;
+}
+
+const std::vector<Vec2>& SketchTool::hatchOf(const SketchProfile& region, Real spacingPx, bool fine) const {
+    RegionDraw& r = const_cast<RegionDraw&>(regionDrawOf(region));
+    // Spaced by the zoom step rather than the zoom itself, so it holds still
+    // between steps instead of being worked out again on every frame of a zoom.
+    const Real mm = spacingPx / std::pow(2.0, drawBucket_ * 0.5);
+    Real& have = fine ? r.fineMm : r.coarseMm;
+    std::vector<Vec2>& strokes = fine ? r.fine : r.coarse;
+    if (have != mm) {
+        strokes = hatchStrokes(r.loops, mm);
+        have = mm;
+    }
+    return strokes;
+}
+
+bool SketchTool::regionHas(const SketchProfile& region, Vec2 uv) const {
+    const RegionDraw& r = regionDrawOf(region);
+    if (r.loops.empty() || uv.x < r.lo.x || uv.x > r.hi.x || uv.y < r.lo.y || uv.y > r.hi.y) return false;
+    if (!insidePolygon(uv, r.loops.front())) return false;
+    for (size_t i = 1; i < r.loops.size(); ++i)
+        if (insidePolygon(uv, r.loops[i])) return false;
+    return true;
+}
+
 void SketchTool::drawOverlay(const Scene& scene, const Camera& camera, Renderer& renderer) const {
-    if (stage_ == SketchStage::None) return;
+    if (stage_ == SketchStage::None || stage_ == SketchStage::Applied) return;
     const Vec4 brand = toVec4(palette::kBrand, 0.95f);
     const Vec4 lit{1.0f, 0.82f, 0.35f, 1.0f};
 
@@ -1504,21 +1969,64 @@ void SketchTool::drawOverlay(const Scene& scene, const Camera& camera, Renderer&
         drawSnapIndicator(renderer, camera, snap_);
     }
 
-    const Real mmPerPx = 1.0 / pixelsPerMm(camera, plane_);
+    refreshDrawCache(camera);
+    const Real mmPerPx = drawMmPerPx_;
+
+    // Lines and points lie in the sketch's plane, so they are drawn as flat
+    // strips and hexagons in it: a width in pixels is a width in millimetres
+    // here, with no per-segment turn towards the eye. That is what lets a
+    // drawing of thousands of curves be drawn every frame.
+    auto flatLine = [&](Vec2 a, Vec2 b, Vec4 col, Real widthPx) {
+        const Vec2 d = b - a;
+        const Real len = length(d);
+        if (len < 1e-12) return;
+        const Vec2 n = Vec2{-d.y, d.x} * (widthPx * 0.5 * mmPerPx / len);
+        const Vec3 a0 = plane_.toWorld(a - n), a1 = plane_.toWorld(a + n);
+        const Vec3 b0 = plane_.toWorld(b - n), b1 = plane_.toWorld(b + n);
+        renderer.addFrontTriangle(a0, b0, b1, col);
+        renderer.addFrontTriangle(a0, b1, a1, col);
+    };
+    auto flatDashes = [&](Vec2 a, Vec2 b, Vec4 col, Real widthPx, Real dashPx) {
+        const Vec2 d = b - a;
+        const Real len = length(d);
+        const Real period = 2.0 * dashPx * mmPerPx;
+        if (len < 1e-12 || period <= 0.0) return;
+        const int count = std::min(static_cast<int>(len / period) + 1, 64);
+        for (int i = 0; i < count; ++i) {
+            const Real s0 = i * period, s1 = std::min(s0 + period * 0.5, len);
+            if (s1 > s0) flatLine(a + d * (s0 / len), a + d * (s1 / len), col, widthPx);
+        }
+    };
+    static const Vec2 kHex[6] = {{1, 0}, {0.5, 0.8660254}, {-0.5, 0.8660254},
+                                 {-1, 0}, {-0.5, -0.8660254}, {0.5, -0.8660254}};
+    auto flatDot = [&](Vec2 c, Real radiusPx, Vec4 col) {
+        const Real r = radiusPx * mmPerPx;
+        const Vec3 mid = plane_.toWorld(c);
+        for (int i = 0; i < 6; ++i)
+            renderer.addFrontTriangle(mid, plane_.toWorld(c + kHex[i] * r),
+                                      plane_.toWorld(c + kHex[(i + 1) % 6] * r), col);
+    };
+    auto hatch = [&](const SketchProfile& r, Real spacingPx, bool fine, Vec4 col) {
+        const std::vector<Vec2>& strokes = hatchOf(r, spacingPx, fine);
+        for (size_t i = 0; i + 1 < strokes.size(); i += 2)
+            renderer.addLine(plane_.toWorld(strokes[i]), plane_.toWorld(strokes[i + 1]), col);
+    };
 
     // Regions: every one faintly while choosing, the chosen ones plainly.
     if (stage_ == SketchStage::Regions || stage_ == SketchStage::Depth) {
+        std::vector<SketchId> chosen = chosen_;
+        std::sort(chosen.begin(), chosen.end());
         for (const SketchProfile& r : regions_) {
-            const bool chosen = contains(chosen_, r.key);
+            const bool on = std::binary_search(chosen.begin(), chosen.end(), r.key);
             const bool hovered = stage_ == SketchStage::Regions && hoverRegion_ == r.key;
-            if (!chosen && !hovered && stage_ == SketchStage::Depth) continue;
-            Vec4 col = chosen ? Vec4{0.20f, 0.60f, 0.95f, 0.55f} : Vec4{0.6f, 0.65f, 0.7f, 0.25f};
+            if (!on && !hovered && stage_ == SketchStage::Depth) continue;
+            Vec4 col = on ? Vec4{0.20f, 0.60f, 0.95f, 0.55f} : Vec4{0.6f, 0.65f, 0.7f, 0.25f};
             if (hovered) col = Vec4{lit.x, lit.y, lit.z, 0.6f};
-            hatchRegion(renderer, sketch_, r, plane_, (chosen || hovered ? 6.0 : 12.0) * mmPerPx, col);
+            const bool fine = on || hovered;
+            hatch(r, fine ? 6.0 : 12.0, fine, col);
         }
     } else if (stage_ == SketchStage::Draw) {
-        for (const SketchProfile& r : regions_)
-            hatchRegion(renderer, sketch_, r, plane_, 14.0 * mmPerPx, Vec4{0.20f, 0.60f, 0.95f, 0.16f});
+        for (const SketchProfile& r : regions_) hatch(r, 14.0, false, Vec4{0.20f, 0.60f, 0.95f, 0.16f});
     }
 
     // The geometry itself, in the colour of what is still free to move: blue
@@ -1526,25 +2034,62 @@ void SketchTool::drawOverlay(const Scene& scene, const Camera& camera, Renderer&
     // pinned down, and the brand red for geometry a disagreement runs through.
     // Editing a sketch is largely deciding which of those you are looking at.
     for (const SketchEntity& e : sketch_.entities) {
-        const std::vector<Vec2> pts = sketchEntityPoints(sketch_, e);
+        const EntityDraw* d = drawOf(e.id);
+        if (!d) continue;
         const bool hovered = stage_ == SketchStage::Draw && hoverEntity_ == e.id;
-        Vec4 col = contains(solved_.freeEntities, e.id) ? kFree : kFixed;
+        Vec4 col = sortedHas(solved_.freeEntities, e.id) ? kFree : kFixed;
         if (inConflict(e)) col = brand;
         if (e.construction) col = Vec4{col.x * 0.75f, col.y * 0.75f, col.z * 0.8f, 0.75f};
         if (hovered) col = lit;
-        for (size_t i = 0; i + 1 < pts.size(); ++i) {
-            const Vec3 a = plane_.toWorld(pts[i]), b = plane_.toWorld(pts[i + 1]);
-            if (e.construction) renderer.addFrontDashes(camera, a, b, col, hovered ? 2.4 : 1.6);
-            else                renderer.addFrontLine(camera, a, b, col, hovered ? 3.0 : 2.0);
+        for (size_t i = 0; i + 1 < d->line.size(); ++i) {
+            if (e.construction) flatDashes(d->line[i], d->line[i + 1], col, hovered ? 2.4 : 1.6, 4.0);
+            else                flatLine(d->line[i], d->line[i + 1], col, hovered ? 3.0 : 2.0);
         }
     }
     if (stage_ == SketchStage::Draw) {
+        // A curve's handles, as every drawing program shows them: a thin line
+        // from each end to the point that steers it there. With a few curves
+        // every one shows them; in an imported drawing of hundreds only the
+        // curve under the pointer does, or the thicket would hide the drawing.
+        size_t curves = 0;
+        for (const SketchEntity& e : sketch_.entities) curves += e.curve == SketchCurve::Bezier;
+        const bool allHandles = curves <= 64;
+        std::vector<SketchId> handles, shown;
+        for (const SketchEntity& e : sketch_.entities) {
+            if (e.curve != SketchCurve::Bezier) continue;
+            handles.push_back(e.b);
+            handles.push_back(e.c);
+            const bool near = allHandles || hoverEntity_ == e.id || handleCurve_ == e.id ||
+                              (hoverPoint_ != kNoSketchId &&
+                               (hoverPoint_ == e.a || hoverPoint_ == e.b || hoverPoint_ == e.c || hoverPoint_ == e.d)) ||
+                              (dragPoint_ != kNoSketchId && (dragPoint_ == e.b || dragPoint_ == e.c));
+            if (!near) continue;
+            shown.push_back(e.b);
+            shown.push_back(e.c);
+            const Vec4 col{kFree.x, kFree.y, kFree.z, 0.45f};
+            flatDashes(pointUV(e.a), pointUV(e.b), col, 1.0, 2.0);
+            flatDashes(pointUV(e.d), pointUV(e.c), col, 1.0, 2.0);
+        }
+        std::sort(handles.begin(), handles.end());
+        std::sort(shown.begin(), shown.end());
+        // A point is drawn where there is room to tell it from its neighbours:
+        // on a curve at least a dozen pixels across. Zoomed out on a drawing of
+        // hundreds of letters, every letter would otherwise be a blot of dots.
+        std::vector<SketchId> roomy;
+        for (const SketchEntity& e : sketch_.entities) {
+            const EntityDraw* d = drawOf(e.id);
+            if (!d || length(d->hi - d->lo) < 12.0 * mmPerPx) continue;
+            for (SketchId id : {e.a, e.b, e.c, e.d})
+                if (id != kNoSketchId) roomy.push_back(id);
+        }
+        std::sort(roomy.begin(), roomy.end());
         for (const SketchPoint& p : sketch_.points) {
-            const Vec3 at = plane_.toWorld(p.at);
             const bool on = hoverPoint_ == p.id || dragPoint_ == p.id;
-            const bool free = contains(solved_.freePoints, p.id);
-            overlay::disc(renderer, at, overlay::frameAt(camera, at), on ? 4.5 : 2.6,
-                          on ? lit : (free ? kFree : kFixed));
+            const bool handle = std::binary_search(handles.begin(), handles.end(), p.id);
+            if (handle && !on && !std::binary_search(shown.begin(), shown.end(), p.id)) continue;
+            if (!on && !std::binary_search(roomy.begin(), roomy.end(), p.id)) continue;
+            const bool free = sortedHas(solved_.freePoints, p.id);
+            flatDot(p.at, on ? 4.5 : handle ? 1.8 : 2.6, on ? lit : (free ? kFree : kFixed));
         }
     }
 
@@ -1619,27 +2164,123 @@ void SketchTool::drawOverlay(const Scene& scene, const Camera& camera, Renderer&
     // How far it goes.
     if (stage_ == SketchStage::Depth && std::fabs(depth_) > 1e-4) {
         const Vec3 lift = plane_.normal * depth_;
-        const Vec4 col = resolvedOp() == CreateOp::Cut ? Vec4{1.0f, 0.4f, 0.3f, 0.9f} : brand;
+        const bool removes = choice_.op == ExtrudeOp::Cut || choice_.op == ExtrudeOp::Intersect;
+        const Vec4 col = removes ? Vec4{1.0f, 0.4f, 0.3f, 0.9f} : brand;
+        // Thick lines for a few regions; thin ones, which cost nothing to
+        // place, for a drawing's worth.
+        const bool many = chosen_.size() > 24;
+        auto edge = [&](Vec3 a, Vec3 b, Real w) {
+            if (many) renderer.addLine(a, b, col);
+            else      renderer.addFrontLine(camera, a, b, col, w);
+        };
         for (const SketchProfile& r : regions_) {
             if (!contains(chosen_, r.key)) continue;
             std::vector<const SketchLoop*> loops{&r.outer};
             for (const SketchLoop& h : r.holes) loops.push_back(&h);
             for (const SketchLoop* loop : loops) {
                 for (SketchId id : loop->entities) {
-                    const SketchEntity* e = sketch_.entity(id);
-                    if (!e) continue;
-                    const std::vector<Vec2> pts = sketchEntityPoints(sketch_, *e);
+                    const EntityDraw* d = drawOf(id);
+                    if (!d) continue;
+                    const std::vector<Vec2>& pts = d->line;
+                    const size_t every = std::max<size_t>(pts.size() / 4, 1);
                     for (size_t i = 0; i < pts.size(); ++i) {
                         const Vec3 a = plane_.toWorld(pts[i]);
-                        if (i + 1 < pts.size())
-                            renderer.addFrontLine(camera, a + lift, plane_.toWorld(pts[i + 1]) + lift, col, 2.0);
-                        if (i == 0 || (e->curve != SketchCurve::Line && i % 12 == 0))
-                            renderer.addFrontLine(camera, a, a + lift, col, 1.4);
+                        if (i + 1 < pts.size()) edge(a + lift, plane_.toWorld(pts[i + 1]) + lift, 2.0);
+                        if (i == 0 || (d->curve != SketchCurve::Line && i % every == 0 && i + 1 < pts.size()))
+                            edge(a, a + lift, 1.4);
                     }
                 }
             }
         }
     }
+}
+
+// The drawing just imported: how big it is, where its middle is, which way
+// round. Sizes are of the whole drawing, and keep its proportions.
+void SketchTool::drawPlacementRows() {
+    SvgPlacement at = svgPlace_;
+    bool changed = false;
+    const bool across = svgPlace_.quarterTurns % 2 != 0;
+    const Vec2 base = across ? Vec2{svg_.size.y, svg_.size.x} : svg_.size;
+
+    ui::commandValue("Drawing", svgName_.empty() ? "SVG" : svgName_.c_str());
+    auto sizeRow = [&](const char* label, Real natural, const char* id) {
+        if (natural < 1e-9) return;
+        ui::commandRow(label);
+        double v = natural * at.scale;
+        ImGui::SetNextItemWidth(-1.0f);
+        ImGui::InputDouble(id, &v, 0.0, 0.0, "%.2f mm");
+        if (ImGui::IsItemDeactivatedAfterEdit() && v > 1e-6) {
+            at.scale = v / natural;
+            changed = true;
+        }
+    };
+    sizeRow("Width", base.x, "##svgw");
+    sizeRow("Height", base.y, "##svgh");
+
+    // Which colours become the part. A pill each, lit when it is ink; the
+    // swatch beside it is the colour itself.
+    if (svgDrawing_.colours.size() > 1) {
+        ui::commandRow("Colours");
+        std::vector<bool> ink;
+        for (const SvgColour& c : svgDrawing_.colours) ink.push_back(c.ink);
+        int toggled = -1;
+        const float right = ImGui::GetWindowContentRegionMax().x;
+        for (size_t i = 0; i < svgDrawing_.colours.size(); ++i) {
+            const SvgColour& c = svgDrawing_.colours[i];
+            const float w = ImGui::CalcTextSize(c.css.c_str()).x + 44.0f;
+            if (i > 0) {
+                ImGui::SameLine(0.0f, 6.0f);
+                if (ImGui::GetCursorPosX() + w > right) {
+                    ImGui::NewLine();
+                    ImGui::SetCursorPosX(ui::commandLabelWidth());
+                }
+            }
+            ImGui::PushID(static_cast<int>(i));
+            ImGui::ColorButton("##swatch",
+                               ImVec4(static_cast<float>(c.rgb.x), static_cast<float>(c.rgb.y),
+                                      static_cast<float>(c.rgb.z), 1.0f),
+                               ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoPicker |
+                                   ImGuiColorEditFlags_NoDragDrop,
+                               ImVec2(ImGui::GetFrameHeight() * 0.6f, ImGui::GetFrameHeight()));
+            ImGui::SameLine(0.0f, 2.0f);
+            if (ui::pillButton(c.css.c_str(), c.ink)) toggled = static_cast<int>(i);
+            ui::hoverTip(c.ink ? "Ink: part of the part. Click to make it paper."
+                               : "Paper: painted in it wipes ink out. Click to make it ink.");
+            ImGui::PopID();
+        }
+        if (toggled >= 0) {
+            ink[static_cast<size_t>(toggled)] = !ink[static_cast<size_t>(toggled)];
+            setInkColours(ink);
+        }
+    }
+
+    ui::commandRow("Centre");
+    double c[2] = {at.centre.x, at.centre.y};
+    ImGui::SetNextItemWidth(-1.0f);
+    ImGui::InputScalarN("##svgc", ImGuiDataType_Double, c, 2, nullptr, nullptr, "%.2f");
+    if (ImGui::IsItemDeactivatedAfterEdit()) {
+        at.centre = {c[0], c[1]};
+        changed = true;
+    }
+
+    ui::commandRow("");
+    if (ui::quietButton("Turn 90\xC2\xB0")) {
+        at.quarterTurns = (at.quarterTurns + 1) % 4;
+        changed = true;
+    }
+    ui::hoverTip("A quarter turn anticlockwise, about its centre");
+    ImGui::SameLine();
+    if (ui::quietButton("Actual size")) {
+        at.scale = 1.0;
+        changed = true;
+    }
+    ui::hoverTip("The size the file says it is");
+    ImGui::SameLine();
+    if (ui::quietButton("Leave it")) endPlacing();
+    ui::hoverTip("Stop placing it: it is ordinary sketch geometry from here on");
+
+    if (changed) setPlacement(at);
 }
 
 void SketchTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& finished) {
@@ -1678,7 +2319,14 @@ void SketchTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& fi
         if (ImGui::Button("Front")) choosePlane(PlaneChoice::XZ, camera);
         ImGui::SameLine();
         if (ImGui::Button("Right")) choosePlane(PlaneChoice::YZ, camera);
-        ui::commandHint("Or click a face of an object to sketch on it.  7 / 1 / 3 pick a plane.");
+        if (importPending()) {
+            char b[160];
+            std::snprintf(b, sizeof b, "Where %s goes: a plane, or click a face to put it on.  %.1f x %.1f mm.",
+                          pendingSvgName_.c_str(), pendingSvg_.size().x, pendingSvg_.size().y);
+            ui::commandHint(b);
+        } else {
+            ui::commandHint("Or click a face of an object to sketch on it.  7 / 1 / 3 pick a plane.");
+        }
         footer = ui::commandFooter(nullptr);
         break;
     }
@@ -1717,6 +2365,8 @@ void SketchTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& fi
                                          0.0, std::max(extent, v)), 0);
             }
         }
+
+        if (placing()) drawPlacementRows();
 
         // What the two colours in the viewport mean, said in the colours
         // themselves: a legend in grey text would need reading twice.
@@ -1812,6 +2462,9 @@ void SketchTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& fi
         ui::commandHint(hint);
         ui::commandHint("Hover and press X to delete, Q for construction.  Ctrl+Z steps back.");
 
+        if (ui::quietButton("Import SVG...")) importRequested_ = true;
+        ui::hoverTip("Bring the outlines of an SVG drawing into this sketch");
+        ImGui::SameLine();
         if (editing()) {
             if (ui::quietButton("Extrude a region")) beginExtrude(&camera);
             ui::hoverTip("Sweep one of the closed regions into the part  (E)");
@@ -1836,46 +2489,52 @@ void SketchTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& fi
         char chosen[64];
         std::snprintf(chosen, sizeof chosen, "%zu of %zu", chosen_.size(), regions_.size());
         ui::commandValue("Regions", chosen);
+        ui::commandRow("Pick");
+        if (ui::quietButton("Filled")) chooseFilledRegions();
+        ui::hoverTip("The regions a drawing program would fill: a letter, not the hole in it");
+        ImGui::SameLine();
+        if (ui::quietButton("All")) chooseAllRegions();
+        ImGui::SameLine();
+        if (ui::quietButton("None")) chooseNoRegions();
         ui::commandHint("Click a region to add it or take it out.");
         footer = ui::commandFooter("Next", !chosen_.empty(), "Back");
         break;
     }
 
-    case SketchStage::Depth: {
+    case SketchStage::Depth:
+    case SketchStage::Applied: {
+        const bool applied = stage_ == SketchStage::Applied;
         {
             const double span = std::max(extent, std::fabs(depth_));
-            pulled(ui::commandNumber("Depth", depth_, "mm", depthTyped_, !typed_.empty(),
-                                     typed_.c_str(), -span, span, true), 0);
+            const ui::NumberEdit e = ui::commandNumber("Depth", depth_, "mm", depthTyped_,
+                                                       !applied && !typed_.empty(), typed_.c_str(),
+                                                       -span, span, true);
+            if (applied) {
+                // Nothing follows the pointer now: the bar sets the depth
+                // itself, and the extrusion is made again at it.
+                if (e.dragged && std::fabs(e.value) > 1e-6 && e.value != depth_) {
+                    depth_ = e.value;
+                    adjusted_ = true;
+                }
+            } else {
+                pulled(e, 0);
+            }
         }
-        {
-            static const ui::Choice kOps[4] = {
-                {Glyph::PushPull,   "Auto", "A", "Join when pulled out, cut when pushed in  (A)"},
-                {Glyph::Union,      "Join", "J", "Add the material to the part  (J)"},
-                {Glyph::Difference, "Cut",  "D", "Take the material out of the part  (D)"},
-                {Glyph::NewBody,    "New",  "N", "A body of its own  (N)"},
-            };
-            const int on = op_ == CreateOp::Auto ? 0 : op_ == CreateOp::Join ? 1
-                         : op_ == CreateOp::Cut  ? 2 : 3;
-            const int pick = ui::commandChoices("Operation", kOps, editing() ? 3 : 4, on);
-            if (pick == 0) op_ = CreateOp::Auto;
-            if (pick == 1) op_ = CreateOp::Join;
-            if (pick == 2) op_ = CreateOp::Cut;
-            if (pick == 3) op_ = CreateOp::NewBody;
+        // A sketch already in a part extrudes into that part: no New Body.
+        if (drawExtrudeChoice(choice_, !editing())) {
+            refreshReach(scene);
+            if (applied) adjusted_ = true;
         }
-        const CreateOp shown = resolvedOp();
-        const SceneObject* target = scene.find(editing() ? editObject_ : faceObject_);
-        char result[128];
-        if (shown == CreateOp::NewBody || (!target && shown != CreateOp::Cut))
-            std::snprintf(result, sizeof result, "A new part");
-        else
-            std::snprintf(result, sizeof result, "%s %s %s", createOpName(shown),
-                          shown == CreateOp::Cut ? "from" : "onto",
-                          target ? target->name.c_str() : "whatever it passes through");
-        ui::commandRow("Result");
-        ImGui::AlignTextToFramePadding();
-        ImGui::TextColored(shown == CreateOp::Cut ? kAccentIm : kFixedIm, "%s", result);
-        ui::commandHint("Move to set the depth, drag the bar, or type one.  A negative depth cuts.");
-        footer = ui::commandFooter("Finish", true, "Back");
+        if (applied) refreshReach(scene);
+        const ObjectId toggled = drawReachedBodies(scene, reach_, choice_.op, owner());
+        if (toggled != kNoObject) {
+            reach_.toggle(toggled);
+            if (applied) adjusted_ = true;
+        }
+        if (applied) ui::commandApplied("Extrude");
+        ui::commandHint(applied ? "Change the depth, the operation or the bodies, and it is made again."
+                                : "Move to set the depth, drag the bar, or type one.  Click a body above to leave it out.");
+        footer = applied ? ui::commandFooter("Done", true, nullptr) : ui::commandFooter("Finish", true, "Back");
         break;
     }
 
@@ -1894,6 +2553,7 @@ void SketchTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& fi
             break;
         case SketchStage::Regions: beginDepth(); break;
         case SketchStage::Depth:   finish(scene, camera, undo, true); break;
+        case SketchStage::Applied: dismissApplied(); break;
         case SketchStage::SelectPlane:
         case SketchStage::None:    break;
         }

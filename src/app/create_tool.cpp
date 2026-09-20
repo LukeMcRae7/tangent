@@ -20,27 +20,6 @@
 
 namespace tg {
 
-const char* createOpName(CreateOp op) {
-    switch (op) {
-        case CreateOp::Auto:    return "Auto";
-        case CreateOp::Join:    return "Join";
-        case CreateOp::Cut:     return "Cut";
-        case CreateOp::NewBody: return "New Body";
-    }
-    return "Auto";
-}
-
-CreateOp CreateTool::resolvedOp() const {
-    if (op_ != CreateOp::Auto) return op_;
-    // Pushing into the plane cuts, whether the profile was drawn on a face or
-    // on an origin plane above a part -- the second is how a hole gets drilled
-    // from a construction plane, and the cut finds its target by overlap.
-    if (extrudeDepth_ < 0.0) return CreateOp::Cut;
-    // Pushing out of a face grows that body; out of an origin plane there is
-    // nothing to grow, so it is a new one.
-    return faceObject_ != kNoObject ? CreateOp::Join : CreateOp::NewBody;
-}
-
 namespace {
 
 constexpr Vec4 kCreateCol(0.20f, 0.60f, 0.95f, 0.70f);
@@ -404,7 +383,9 @@ Body CreateTool::buildCurrentSolid(Real depth, Backend backend) const {
 
 void CreateTool::start(PrimitiveKind kind) {
     lastError_.clear();
-    op_ = CreateOp::Auto;
+    choice_.reset();
+    reach_.clear();
+    adjusted_ = false;
     kind_ = kind;
     stage_ = CreateStage::SelectPlane;
     hoveredPlane_ = PlaneChoice::XY;
@@ -839,9 +820,12 @@ void CreateTool::update(const Scene& scene, const Camera& camera, Vec2 mousePx, 
     }
 
     if (stage_ == CreateStage::ExtrudeDepth) {
-        if (fieldFixed_[0]) return;             // typed, so the mouse is out of it
-        const Real d = quantise(rayPlaneExtrudeDepth(camera, mousePx));
-        if (std::fabs(d) > 1e-4) extrudeDepth_ = d;
+        if (!fieldFixed_[0]) {                  // typed, so the mouse is out of it
+            const Real d = quantise(rayPlaneExtrudeDepth(camera, mousePx));
+            if (std::fabs(d) > 1e-4) extrudeDepth_ = d;
+        }
+        choice_.follow(extrudeDepth_, faceObject_ != kNoObject);
+        refreshReach(scene);
         return;
     }
 }
@@ -1247,12 +1231,15 @@ bool CreateTool::handleKey(int key, bool shift, bool ctrl, Camera& camera, Scene
         }
     }
 
-    // Operation, while the depth is being set and there is a body to act on.
-    if (stage_ == CreateStage::ExtrudeDepth && hasTargetBody()) {
-        if (key == 'A' || key == 'a') { op_ = CreateOp::Auto;    return true; }
-        if (key == 'J' || key == 'j') { op_ = CreateOp::Join;    return true; }
-        if (key == 'D' || key == 'd') { op_ = CreateOp::Cut;     return true; }
-        if (key == 'N' || key == 'n') { op_ = CreateOp::NewBody; return true; }
+    // Operation, while the depth is being set. Picking one ends the depth's
+    // say in it.
+    if (stage_ == CreateStage::ExtrudeDepth) {
+        ExtrudeOp picked;
+        if (extrudeOpForKey(key, picked)) {
+            choice_.pick(picked);
+            refreshReach(scene);
+            return true;
+        }
     }
 
     // Number keys for direct plane selection in SelectPlane
@@ -1277,159 +1264,137 @@ bool CreateTool::handleKey(int key, bool shift, bool ctrl, Camera& camera) {
 
 bool CreateTool::finishCreation(Scene& scene, Camera& camera, UndoStack& undo) {
     if (stage_ != CreateStage::ExtrudeDepth && stage_ != CreateStage::AdjustProfile) return false;
-
-    const Real depth = extrudeDepth_;
-    if (std::fabs(depth) < 1e-4) {
+    if (std::fabs(extrudeDepth_) < 1e-4) {
         cancel(camera);
         return false;
     }
+    // A refusal leaves the tool where it was, so the operation or the bodies
+    // can be changed and Finish tried again.
+    if (!commitExtrusion(scene, undo)) return false;
+    stage_ = CreateStage::Applied;
+    return true;
+}
 
+bool CreateTool::recommit(Scene& scene, Camera& camera, UndoStack& undo) {
+    (void)camera;
+    if (stage_ != CreateStage::Applied) return false;
+    return commitExtrusion(scene, undo);
+}
+
+void CreateTool::refreshReach(const Scene& scene) {
+    if (choice_.op == ExtrudeOp::NewBody || scene.defaultBackend() != Backend::Brep) {
+        reach_.refresh(scene, Body{}, faceObject_, choice_.op, extrudeDepth_, "none");
+        return;
+    }
+    // The tool, and what it is made from: the same profile at the same depth
+    // is the same tool, and the bodies it reaches need not be measured again.
+    char key[256];
+    std::snprintf(key, sizeof key, "%d|%.6g,%.6g,%.6g,%.6g|%.6g,%.6g,%.6g,%.6g|%.6g|%.6g|%.6g,%.6g,%.6g|%.6g,%.6g,%.6g",
+                  static_cast<int>(kind_), pt1_.x, pt1_.y, pt2_.x, pt2_.y, cornerRadii_[0],
+                  cornerRadii_[1], cornerRadii_[2], cornerRadii_[3], currentRadius_, extrudeDepth_,
+                  planeOrigin_.x, planeOrigin_.y, planeOrigin_.z, planeNormal_.x, planeNormal_.y,
+                  planeNormal_.z);
+    if (reachToolKey_ != key) {
+        reachTool_ = buildCurrentSolid(extrudeDepth_, Backend::Brep);
+        reachToolKey_ = key;
+    }
+    reach_.refresh(scene, reachTool_, faceObject_, choice_.op, extrudeDepth_, key);
+}
+
+bool CreateTool::commitExtrusion(Scene& scene, UndoStack& undo) {
+    const Real depth = extrudeDepth_;
+    if (std::fabs(depth) < 1e-4) {
+        lastError_ = "The depth is zero";
+        return false;
+    }
     const Body solid = buildCurrentSolid(depth, scene.defaultBackend());
     if (solid.empty()) {
         lastError_ = "That profile could not be turned into a solid";
-        stage_ = CreateStage::None;
         return false;
     }
 
-    const CreateOp op = resolvedOp();
+    // Measured now rather than trusted from the last frame: this is what the
+    // extrusion is about to act on.
+    choice_.follow(depth, faceObject_ != kNoObject);
+    refreshReach(scene);
+    const ExtrudeOp op = choice_.op;
+    const std::vector<ObjectId> bodies = reach_.included();
+    // A join that reaches nothing has nothing to join, and is a body of its
+    // own -- as it is in Fusion.
+    const bool asNewBody = op == ExtrudeOp::NewBody || (op == ExtrudeOp::Join && bodies.empty());
 
-    if (op == CreateOp::Cut) {
-        SceneObject* target = nullptr;
-        if (faceObject_ != kNoObject) {
-            target = scene.find(faceObject_);
+    if (!asNewBody) {
+        const SceneObject* drawnOn = scene.find(faceObject_);
+        if (scene.defaultBackend() != Backend::Brep) {
+            lastError_ = std::string(extrudeOpName(op)) +
+                         " needs the exact kernel, which this build does not have";
+            return false;
         }
-        if (!target) {
-            // Find first intersecting body in scene
-            const AABB solidBox = solid.bounds();
-            for (const auto& obj : scene.objects()) {
-                if (solidBox.overlaps(obj->worldBounds(), 1e-4)) {
-                    target = obj.get();
-                    break;
-                }
-            }
+        if (bodies.empty()) {
+            lastError_ = drawnOn && drawnOn->body.isMesh()
+                             ? std::string(extrudeOpName(op)) + " needs a solid, and this is a mesh: "
+                                                                "Modify > Convert to Solid first"
+                         : op == ExtrudeOp::Cut ? "Nothing there to cut into"
+                                                : "Nothing there to intersect with";
+            return false;
         }
 
-        if (target) {
-            // Extend cutter slightly outside the entrance face to ensure clean, non-degenerate intersection
-            // Overshoot past the face it enters by a little, so the entry is a
-            // clean crossing rather than a coincident plane. Which side that is
-            // depends on the direction the profile was pushed, which Cut no
-            // longer assumes: cutting outward from a face is a legitimate way to
-            // trim a boss back.
+        std::vector<std::unique_ptr<Command>> parts;
+        const char* label = op == ExtrudeOp::Join ? "Extrude Join"
+                          : op == ExtrudeOp::Cut  ? "Extrude Cut" : "Extrude Intersect";
+        ObjectId ownerDone = kNoObject;
+
+        // Into the face it was drawn on, a cut starts a little outside that
+        // face, so its entry is a clean crossing rather than a coincident
+        // plane. Only for that body: pushed past it, the overshoot would nick
+        // whatever sits against the face.
+        if (op == ExtrudeOp::Cut && faceObject_ != kNoObject && reach_.includes(faceObject_)) {
+            SceneObject* target = scene.find(faceObject_);
             const Real overshoot = std::max(std::fabs(depth) * 0.05, Real(1.0));
             const Real cz0 = depth < 0.0 ? depth : -overshoot;
             const Real cz1 = depth < 0.0 ? overshoot : depth;
-
-            // A cut is a boolean, and booleans are the exact kernel's. Without
-            // one -- or into a mesh -- it is refused with the reason, rather
-            // than a cutter being built only for the combine to turn it down.
-            if (scene.defaultBackend() != Backend::Brep || target->body.isMesh()) {
-                lastError_ = !brep::available()
-                    ? "Cutting needs the exact kernel, which this build does not have"
-                    : "Cutting needs a solid, and this is a mesh: Modify > Convert to Solid first";
-                stage_ = CreateStage::None;
+            Body cutter;
+            std::vector<Vec3> points;
+            std::vector<Real> arcs;
+            getCurrentProfileArcs(points, arcs);
+            std::string why;
+            if (!makeProfileSolid(points, arcs, planeNormal_, cz0, cz1, cutter, 0, &why)) {
+                lastError_ = why.empty() ? "The cutter could not be built" : "Cut failed: " + why;
                 return false;
             }
-            Body cutterBody;
-            {
-                std::vector<Vec3> points;
-                std::vector<Real> arcs;
-                getCurrentProfileArcs(points, arcs);
-                std::string why;
-                if (!makeProfileSolid(points, arcs, planeNormal_, cz0, cz1, cutterBody, 0, &why)) {
-                    lastError_ = why.empty() ? "The cutter could not be built" : "Cut failed: " + why;
-                    stage_ = CreateStage::None;
-                    return false;
-                }
-            }
-
-            // Into the target object's local space, where its own chain lives.
-            cutterBody.transform(inverse(target->modelMatrix()));
-
-            // The cut goes into the history, not over the mesh.
-            //
-            // Assigning target->body here left the feature chain still
-            // describing the body as it was before the cut, and featureCache
-            // holding that same stale body. Everything downstream trusted it:
-            // committing a fillet replayed the chain and either failed to find
-            // the edges it had just previewed, or found them on the uncut body
-            // and threw the cut away. Re-evaluating for any other reason -- a
-            // History checkbox, a dimension nudged in the Inspector -- deleted
-            // the cut outright.
-            const ObjectId targetId = target->id;
+            // Into the target's own space, where its chain lives -- and into
+            // the chain, not over the body: a cut written straight onto the
+            // body was thrown away by the next thing that re-ran the history.
+            cutter.transform(inverse(target->modelMatrix()));
             std::vector<Feature> chainBefore = target->features;
-
             Feature f;
             f.kind = FeatureKind::Boolean;
             f.booleanOp = BooleanOp::Difference;
-            f.bakedBody = std::move(cutterBody);
-
-            std::string why;
-            if (scene.addFeature(targetId, std::move(f), &why)) {
-                SceneObject* cutObj = scene.find(targetId);
-                undo.push(std::make_unique<FeatureCommand>(
-                    targetId, std::move(chainBefore), cutObj->features, "Extrude Cut"));
-                scene.select(targetId);
-                stage_ = CreateStage::None;
-                return true;
+            f.bakedBody = std::move(cutter);
+            f.toolName = primitiveName(kind_);
+            if (!scene.addFeature(faceObject_, std::move(f), &why)) {
+                lastError_ = why.empty() ? "Cut failed: no valid solid came out of it" : "Cut failed: " + why;
+                return false;
             }
-
-            // Refuse, rather than falling through to "add as a new object" and
-            // dropping the cutter into the scene as a solid.
-            lastError_ = why.empty() ? "Cut failed: no valid solid came out of it"
-                                     : "Cut failed: " + why;
-            stage_ = CreateStage::None;
-            return false;
+            parts.push_back(std::make_unique<FeatureCommand>(faceObject_, std::move(chainBefore),
+                                                             target->features, label));
+            ownerDone = faceObject_;
         }
 
-        lastError_ = "Nothing there to cut into";
-        stage_ = CreateStage::None;
-        return false;
-    }
-
-    if (op == CreateOp::Join && faceObject_ == kNoObject) {
-        lastError_ = "Nothing there to join onto";
-        stage_ = CreateStage::None;
-        return false;
-    }
-
-    // Join onto the face the profile was drawn on.
-    if (op == CreateOp::Join && faceObject_ != kNoObject) {
-        SceneObject* target = scene.find(faceObject_);
-        if (target) {
-            // Transform solid into target object's local coordinate space
-            const Mat4 toLocal = inverse(target->modelMatrix());
-            Body localSolid = solid;
-            localSolid.transform(toLocal);
-
-            // As with the cut above: through the chain, so the history keeps
-            // describing the body the user can see.
-            const ObjectId targetId = target->id;
-            std::vector<Feature> chainBefore = target->features;
-
-            Feature f;
-            f.kind = FeatureKind::Boolean;
-            f.booleanOp = BooleanOp::Union;
-            f.bakedBody = std::move(localSolid);
-
-            std::string why;
-            if (scene.addFeature(targetId, std::move(f), &why)) {
-                SceneObject* joined = scene.find(targetId);
-                undo.push(std::make_unique<FeatureCommand>(
-                    targetId, std::move(chainBefore), joined->features, "Extrude Join"));
-                scene.select(targetId);
-                stage_ = CreateStage::None;
-                return true;
-            }
-
-            // The join is the operation that was asked for, so a failure is a
-            // failure -- not grounds for leaving a separate body floating in
-            // the same place, which is what falling through would do.
-            lastError_ = why.empty() ? "Join failed: no valid solid came out of it"
-                                     : "Join failed: " + why;
-            stage_ = CreateStage::None;
+        std::string error;
+        if (!applyExtrude(scene, solid, op, bodies, ownerDone, primitiveName(kind_), label, parts, error)) {
+            unwind(scene, parts);
+            lastError_ = error;
             return false;
         }
+        if (parts.empty()) {
+            lastError_ = std::string(extrudeOpName(op)) + " changed nothing: it does not reach into those bodies";
+            return false;
+        }
+        if (parts.size() == 1) undo.push(std::move(parts.front()));
+        else                   undo.push(std::make_unique<CompositeCommand>(std::move(parts), label));
+        if (scene.find(bodies.front())) scene.select(bodies.front());
+        return true;
     }
 
     // Add as new standalone object in scene
@@ -1453,7 +1418,7 @@ bool CreateTool::finishCreation(Scene& scene, Camera& camera, UndoStack& undo) {
         const Vec3 pos = planeOrigin_ + planeU_ * centerUV.x + planeV_ * centerUV.y +
                          planeNormal_ * (depth * 0.5f);
         id = scene.addPrimitive(PrimitiveKind::Box, spec, pos);
-        if (SceneObject* o = scene.find(id)) o->transform.rotation = orientation;
+        scene.setBasePlacement(id, Transform{pos, orientation, {1, 1, 1}});
     } else if (kind_ == PrimitiveKind::Cylinder) {
         PrimitiveSpec spec;
         spec.kind = PrimitiveKind::Cylinder;
@@ -1462,18 +1427,18 @@ bool CreateTool::finishCreation(Scene& scene, Camera& camera, UndoStack& undo) {
         const Vec3 pos = planeOrigin_ + planeU_ * pt1_.x + planeV_ * pt1_.y +
                          planeNormal_ * (depth * 0.5f);
         id = scene.addPrimitive(PrimitiveKind::Cylinder, spec, pos);
-        if (SceneObject* o = scene.find(id)) o->transform.rotation = orientation;
+        scene.setBasePlacement(id, Transform{pos, orientation, {1, 1, 1}});
     } else {
         // Any rounded rectangle with fillet, or arbitrary plane, or custom profile
         id = scene.addBody(solid, {0, 0, 0}, kind_ == PrimitiveKind::Box ? "Box" : "Cylinder");
     }
 
-    if (id != kNoObject) {
-        undo.push(ExistenceCommand::forCreate(scene, {id}));
-        scene.select(id);
+    if (id == kNoObject) {
+        lastError_ = "The new body could not be made";
+        return false;
     }
-
-    stage_ = CreateStage::None;
+    undo.push(ExistenceCommand::forCreate(scene, {id}));
+    scene.select(id);
     return true;
 }
 
@@ -1482,7 +1447,7 @@ bool CreateTool::finishCreation(Scene& scene, Camera& camera, UndoStack& undo) {
 // ---------------------------------------------------------------------------
 
 void CreateTool::drawOverlay(const Scene& scene, const Camera& camera, Renderer& renderer) const {
-    if (stage_ == CreateStage::None) return;
+    if (stage_ == CreateStage::None || stage_ == CreateStage::Applied) return;
 
     // What the cursor has caught, and what it was inferred from. See
     // app/snap_overlay.h for the shapes and why they are those shapes.
@@ -1582,7 +1547,9 @@ void CreateTool::drawOverlay(const Scene& scene, const Camera& camera, Renderer&
     const std::vector<Vec2> prof = getCurrentProfile();
     if (prof.size() >= 3) {
         const Vec4 outlineCol = toVec4(palette::kBrand, 0.95f);
-        const Vec4 fillCol = (stage_ == CreateStage::ExtrudeDepth && extrudeDepth_ < 0.0) ? kCutCol : kCreateCol;
+        const Vec4 fillCol = (stage_ == CreateStage::ExtrudeDepth &&
+                               (choice_.op == ExtrudeOp::Cut || choice_.op == ExtrudeOp::Intersect))
+                                  ? kCutCol : kCreateCol;
 
         // Boundary lines
         for (size_t i = 0; i < prof.size(); ++i) {
@@ -1699,8 +1666,10 @@ void CreateTool::drawOverlay(const Scene& scene, const Camera& camera, Renderer&
         // has to change.
         const Body solid = buildCurrentSolid(extrudeDepth_, Backend::Mesh);
         if (!solid.empty()) {
-            const Vec4 wireCol = (extrudeDepth_ < 0.0) ? Vec4{1.0f, 0.4f, 0.3f, 0.9f} : toVec4(palette::kBrand, 0.9f);
-            const Vec4 faceTint = (extrudeDepth_ < 0.0) ? kCutCol : kCreateCol;
+            // Red for what takes material away, the brand colour for what adds it.
+            const bool removes = choice_.op == ExtrudeOp::Cut || choice_.op == ExtrudeOp::Intersect;
+            const Vec4 wireCol = removes ? Vec4{1.0f, 0.4f, 0.3f, 0.9f} : toVec4(palette::kBrand, 0.9f);
+            const Vec4 faceTint = removes ? kCutCol : kCreateCol;
 
             std::vector<EdgeId> edges;
             solid.allEdges(edges);
@@ -1872,50 +1841,42 @@ bool CreateTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& ou
     }
 
     // -----------------------------------------------------------------------
-    case CreateStage::ExtrudeDepth: {
+    case CreateStage::ExtrudeDepth:
+    case CreateStage::Applied: {
+        const bool applied = stage_ == CreateStage::Applied;
         {
-            // Either way: out adds, in cuts. As far as the view is tall.
+            // Either way. As far as the view is tall.
             const double span = std::max(extent, std::fabs(extrudeDepth_));
-            pulled(0, ui::commandNumber("Depth", extrudeDepth_, "mm", fieldFixed_[0],
-                                        typing(), typedValue_.c_str(), -span, span, true));
+            const ui::NumberEdit e = ui::commandNumber("Depth", extrudeDepth_, "mm", fieldFixed_[0],
+                                                       !applied && typing(), typedValue_.c_str(),
+                                                       -span, span, true);
+            if (applied) {
+                // Nothing follows the pointer now: the bar sets the depth
+                // itself, and the extrusion is made again at it.
+                if (e.dragged && std::fabs(e.value) > 1e-4 && e.value != extrudeDepth_) {
+                    extrudeDepth_ = e.value;
+                    adjusted_ = true;
+                }
+            } else {
+                pulled(0, e);
+            }
         }
 
-        if (hasTargetBody()) {
-            static const ui::Choice kOps[4] = {
-                {Glyph::PushPull,   "Auto", "A", "Join when pushed out of the face, cut when pushed in  (A)"},
-                {Glyph::Union,      "Join", "J", "Add the material to the body  (J)"},
-                {Glyph::Difference, "Cut",  "D", "Take the material out of the body  (D)"},
-                {Glyph::NewBody,    "New",  "N", "A body of its own  (N)"},
-            };
-            const int on = op_ == CreateOp::Auto ? 0 : op_ == CreateOp::Join ? 1
-                         : op_ == CreateOp::Cut  ? 2 : 3;
-            const int pick = ui::commandChoices("Operation", kOps, 4, on);
-            if (pick == 0) op_ = CreateOp::Auto;
-            if (pick == 1) op_ = CreateOp::Join;
-            if (pick == 2) op_ = CreateOp::Cut;
-            if (pick == 3) op_ = CreateOp::NewBody;
-
-            // What will actually happen, spelled out. With Auto the operation
-            // follows the sign of the depth, so the choice above does not say
-            // it on its own.
-            const CreateOp shown = resolvedOp();
-            const SceneObject* target = scene.find(faceObject_);
-            char result[128];
-            std::snprintf(result, sizeof result, "%s %s %s", createOpName(shown),
-                          shown == CreateOp::Cut  ? "from"
-                        : shown == CreateOp::Join ? "onto"
-                                                  : "beside",
-                          target ? target->name.c_str() : "the body");
-            ui::commandRow("Result");
-            ImGui::AlignTextToFramePadding();
-            ImGui::TextColored(shown == CreateOp::Cut ? kAccentIm
-                                                      : ImVec4(palette::kValid.r, palette::kValid.g,
-                                                               palette::kValid.b, 1.0f),
-                               "%s", result);
+        if (drawExtrudeChoice(choice_)) {
+            refreshReach(scene);
+            if (applied) adjusted_ = true;
+        }
+        if (applied) refreshReach(scene);
+        const ObjectId toggled = drawReachedBodies(scene, reach_, choice_.op, faceObject_);
+        if (toggled != kNoObject) {
+            reach_.toggle(toggled);
+            if (applied) adjusted_ = true;
         }
 
-        ui::commandHint("Move to set the depth, drag the bar, or type one.  A negative depth cuts.");
-        footer = ui::commandFooter("Finish");
+        if (applied) ui::commandApplied("Extrude");
+        ui::commandHint(applied ? "Change the depth, the operation or the bodies, and it is made again."
+                                : "Move to set the depth, drag the bar, or type one.  Click a body above to leave it out.");
+        footer = applied ? ui::commandFooter("Done", true, nullptr) : ui::commandFooter("Finish");
         break;
     }
 
@@ -1923,11 +1884,14 @@ bool CreateTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& ou
         break;
     }
 
-    if (footer > 0) {
+    if (footer > 0 && stage_ == CreateStage::Applied) {
+        stage_ = CreateStage::None;
+        outFinished = true;
+    } else if (footer > 0) {
         // The same path the keys take, so there is one answer to what a step
         // means rather than two that can drift apart.
         handleKey(13, false, false, camera, scene, undo);
-        if (stage_ == CreateStage::None) outFinished = true;
+        if (!active()) outFinished = true;
     } else if (footer < 0) {
         cancel(camera);
     }

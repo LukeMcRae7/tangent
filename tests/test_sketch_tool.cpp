@@ -5,6 +5,7 @@
 // shapes go through the same path the viewport's clicks take. The extruding half
 // runs on the exact kernel and is checked against the volume it has to produce.
 #include "app/sketch_tool.h"
+#include "sketch/svg.h"
 #include "app/undo.h"
 #include "geom/brep.h"
 #include "scene/scene.h"
@@ -423,7 +424,7 @@ void testExtruding() {
         check(tool.chosenRegions().size() == 1, "with the only region already chosen");
         check(tool.beginDepth(), "then the depth");
         tool.setDepth(10.0);
-        check(tool.resolvedOp() == CreateOp::NewBody, "out of an origin plane: a new part");
+        check(tool.op() == ExtrudeOp::NewBody, "out of an origin plane: a new part");
         check(tool.finish(scene, camera, undo, true), "and it is made: " + tool.takeError());
         check(!tool.active(), "which ends the tool");
         check(scene.objectCount() == 1, "one part in the scene");
@@ -446,7 +447,7 @@ void testExtruding() {
         drawCircle(tool, {20, 12.5}, 5);
         check(tool.beginExtrude() && tool.beginDepth(), "the circle is chosen");
         tool.setDepth(-4.0);
-        check(tool.resolvedOp() == CreateOp::Cut, "pushed in: a cut");
+        check(tool.op() == ExtrudeOp::Cut, "pushed in: a cut");
         check(tool.finish(scene, camera, undo, true), "the hole is cut: " + tool.takeError());
         const SceneObject* o = scene.find(part);
         check(o->features.size() == 4, "into the same part's history");
@@ -463,7 +464,7 @@ void testExtruding() {
         drawCircle(tool, {6, 6}, 2);
         tool.beginExtrude();
         tool.beginDepth();
-        tool.setOp(CreateOp::Cut);
+        tool.setOp(ExtrudeOp::Cut);
         tool.setDepth(12.0);
         check(tool.finish(scene, camera, undo, true), "a cut from a bare plane: " + tool.takeError());
         const SceneObject* o = scene.find(part);
@@ -479,7 +480,7 @@ void testExtruding() {
         drawCircle(tool, {200, 200}, 2);
         tool.beginExtrude();
         tool.beginDepth();
-        tool.setOp(CreateOp::Cut);
+        tool.setOp(ExtrudeOp::Cut);
         tool.setDepth(5.0);
         check(!tool.finish(scene, camera, undo, true), "a cut through nothing is refused");
         check(tool.takeError() == "Nothing there to cut into", "and says why");
@@ -519,15 +520,52 @@ void testExtruding() {
         SketchTool tool;
         tool.startEdit(scene, part, first, camera);
         check(tool.beginExtrude() && tool.beginDepth(), "an existing sketch can sweep again");
-        tool.setOp(CreateOp::NewBody);
+        tool.setOp(ExtrudeOp::NewBody);
         tool.setDepth(5.0);
         check(!tool.finish(scene, camera, undo, true), "but not into a separate part");
         check(!tool.takeError().empty(), "which it says");
     }
 }
 
+void testImporting() {
+    std::printf("--- importing a drawing ---\n");
+    // Two dark squares on a pale backing, 1 mm to the unit. The backing is
+    // smaller than the page, or it would be read as the paper and left out.
+    const SvgDrawing d = parseSvg(
+        R"(<svg xmlns="http://www.w3.org/2000/svg" width="60mm" height="40mm" viewBox="0 0 60 40">)"
+        R"(<rect x="5" y="5" width="50" height="30" fill="#e0e0e0"/><rect x="10" y="10" width="10" height="10" fill="#222"/>)"
+        R"(<rect x="35" y="10" width="10" height="10" fill="#222"/></svg>)");
+
+    SketchTool tool;
+    tool.startImport(d, "squares");
+    check(tool.importPending(), "it waits for a plane");
+    tool.setPlane(topPlane(), kNoObject, nullptr);
+    check(tool.stage() == SketchStage::Draw && tool.placing(), "and lands on it, to be placed");
+    check(tool.sketch().entities.size() == 8 && tool.regions().size() == 2,
+          "the two squares, the backing being paper");
+
+    std::vector<bool> ink{true, true};
+    check(tool.setInkColours(ink), "the backing made ink");
+    check(tool.sketch().entities.size() == 4 && tool.regions().size() == 1,
+          "and it is the one plate, the squares in it painted over");
+    ink = {false, true};
+    check(tool.setInkColours(ink) && tool.sketch().entities.size() == 8, "and back");
+    check(!tool.setInkColours({false, false}) && !tool.takeError().empty(), "with no ink it says so");
+    check(tool.sketch().entities.size() == 8, "and keeps what it had");
+
+    SvgPlacement bigger = tool.placement();
+    bigger.scale = 2.0;
+    check(tool.setPlacement(bigger), "sized up");
+    check(tool.setInkColours({true, true}) && near(tool.regions()[0].area, 6000.0),
+          "and recoloured at that size: the backing, 100 x 60");
+
+    check(tool.undoEdit() && tool.sketch().entities.empty() && !tool.placing(),
+          "one step back is before the drawing, however it was changed");
+}
+
 int main() {
     testDrawing();
+    testImporting();
     testSizes();
     testEditMode();
     testSketchObjects();

@@ -33,6 +33,163 @@ AABB SceneObject::worldBounds() const {
 }
 
 // ---------------------------------------------------------------------------
+Transform placementOf(const Transform& base, const std::vector<Feature>& features) {
+    Transform t = base;
+    t.scale = {1, 1, 1};
+    for (const Feature& f : features) {
+        if (!f.enabled) continue;
+        if (f.kind == FeatureKind::Move) {
+            t.position += f.moveBy;
+        } else if (f.kind == FeatureKind::Rotate) {
+            t.rotation = normalize(f.turnBy * t.rotation);
+            t.position = f.turnAbout + rotate(f.turnBy, t.position - f.turnAbout);
+        }
+    }
+    return t;
+}
+
+Vec3 scaleOf(const std::vector<Feature>& features) {
+    Vec3 s{1, 1, 1};
+    for (const Feature& f : features)
+        if (f.enabled && f.kind == FeatureKind::Scale)
+            s = {s.x * f.scaleBy.x, s.y * f.scaleBy.y, s.z * f.scaleBy.z};
+    return s;
+}
+
+namespace {
+
+// The last step, if it is an enabled one of this kind -- the one a new step of
+// the same kind folds into.
+Feature* trailing(SceneObject& obj, FeatureKind kind) {
+    if (obj.features.size() < 2) return nullptr;      // never the root
+    Feature& f = obj.features.back();
+    return f.enabled && f.kind == kind ? &f : nullptr;
+}
+
+// A placement step appended without evaluating anything: the body after it is
+// the body before it, so the cache only needs that body repeated.
+void appendUnchanged(SceneObject& obj, Feature f) {
+    const bool whole = obj.featureCache.size() == obj.features.size();
+    obj.features.push_back(std::move(f));
+    if (whole) obj.featureCache.push_back(obj.body);
+}
+
+void dropLast(SceneObject& obj) {
+    obj.features.pop_back();
+    if (obj.featureCache.size() > obj.features.size()) obj.featureCache.resize(obj.features.size());
+}
+
+} // namespace
+
+bool Scene::recordMove(ObjectId id, Vec3 by) {
+    SceneObject* obj = find(id);
+    if (!obj) return false;
+    if (length(by) < 1e-9) return true;
+    if (Feature* f = trailing(*obj, FeatureKind::Move)) {
+        f->moveBy += by;
+        if (length(f->moveBy) < 1e-9) dropLast(*obj);
+    } else {
+        Feature m;
+        m.kind = FeatureKind::Move;
+        m.uid = nextFeatureUid_++;
+        m.moveBy = by;
+        appendUnchanged(*obj, std::move(m));
+    }
+    place(*obj);
+    return true;
+}
+
+bool Scene::recordRotate(ObjectId id, Quat turn, Vec3 aboutWorld) {
+    SceneObject* obj = find(id);
+    if (!obj) return false;
+    turn = normalize(turn);
+    if (std::fabs(turn.w) > 1.0 - 1e-12) return true;
+    Feature* f = trailing(*obj, FeatureKind::Rotate);
+    if (f && length(f->turnAbout - aboutWorld) < 1e-6) {
+        f->turnBy = normalize(turn * f->turnBy);
+        if (std::fabs(f->turnBy.w) > 1.0 - 1e-12) dropLast(*obj);
+    } else {
+        Feature r;
+        r.kind = FeatureKind::Rotate;
+        r.uid = nextFeatureUid_++;
+        r.turnBy = turn;
+        r.turnAbout = aboutWorld;
+        appendUnchanged(*obj, std::move(r));
+    }
+    place(*obj);
+    return true;
+}
+
+bool Scene::recordScale(ObjectId id, Vec3 factors, Vec3 aboutLocal, std::string* error) {
+    if (error) error->clear();
+    SceneObject* obj = find(id);
+    if (!obj) return false;
+    if (!(factors.x > 0.0) || !(factors.y > 0.0) || !(factors.z > 0.0)) {
+        if (error) *error = "a scale has to be above zero every way: a negative one is a mirror";
+        return false;
+    }
+    if (std::fabs(factors.x - 1.0) < 1e-12 && std::fabs(factors.y - 1.0) < 1e-12 &&
+        std::fabs(factors.z - 1.0) < 1e-12)
+        return true;
+    if (obj->body.empty()) {
+        if (error) *error = "a sketch has no body to scale: change its dimensions instead";
+        return false;
+    }
+
+    const std::vector<Feature> before = obj->features;
+    size_t from = obj->features.size();
+    Feature* f = trailing(*obj, FeatureKind::Scale);
+    if (f && length(f->scaleAbout - aboutLocal) < 1e-9) {
+        f->scaleBy = {f->scaleBy.x * factors.x, f->scaleBy.y * factors.y, f->scaleBy.z * factors.z};
+        from = obj->features.size() - 1;
+        if (std::fabs(f->scaleBy.x - 1.0) < 1e-12 && std::fabs(f->scaleBy.y - 1.0) < 1e-12 &&
+            std::fabs(f->scaleBy.z - 1.0) < 1e-12) {
+            dropLast(*obj);
+            from = obj->features.size();
+        }
+    } else {
+        Feature sc;
+        sc.kind = FeatureKind::Scale;
+        sc.uid = nextFeatureUid_++;
+        sc.scaleBy = factors;
+        sc.scaleAbout = aboutLocal;
+        obj->features.push_back(std::move(sc));
+    }
+
+    // Only the step that changed needs building; the rest is cached.
+    if (from < obj->features.size()) {
+        Body next;
+        const bool ok = evaluateFrom(obj->features, from, obj->featureCache, next);
+        if (!ok || obj->features[from].errored) {
+            if (error) *error = obj->features[from].error.empty() ? "the body could not be scaled"
+                                                                  : obj->features[from].error;
+            obj->features = before;
+            obj->featureCache.resize(std::min(obj->featureCache.size(), obj->features.size()));
+            reevaluate(id);
+            return false;
+        }
+        obj->body = std::move(next);
+    } else {
+        // Folded back to nothing: the body is what it was before the step.
+        Body back;
+        if (!evaluateFrom(obj->features, obj->features.size(), obj->featureCache, back))
+            evaluateFeatures(obj->features, back);
+        obj->body = std::move(back);
+    }
+    obj->refreshDerived();
+    place(*obj);
+    pruneElementSelection();
+    return true;
+}
+
+void Scene::setBasePlacement(ObjectId id, const Transform& base) {
+    SceneObject* obj = find(id);
+    if (!obj) return;
+    obj->base = base;
+    obj->base.scale = {1, 1, 1};
+    place(*obj);
+}
+
 std::string Scene::uniqueName(const std::string& base) const {
     bool taken = false;
     for (const auto& o : objects_) if (o->name == base) { taken = true; break; }
@@ -71,6 +228,7 @@ ObjectId Scene::addImportedBody(Body body, const std::string& name) {
 
     obj->id = nextId_++;
     obj->name = uniqueName(name.empty() ? "Imported" : name);
+    place(*obj);
     obj->body.tessellate(obj->render);
     obj->localBounds = obj->body.bounds();
 
@@ -101,7 +259,8 @@ ObjectId Scene::addPrimitive(PrimitiveKind kind, const PrimitiveSpec& spec, Vec3
 
     obj->id = nextId_++;
     obj->name = uniqueName(primitiveName(kind));
-    obj->transform.position = position;
+    obj->base.position = position;
+    place(*obj);
     obj->body.tessellate(obj->render);
     obj->localBounds = obj->body.bounds();
 
@@ -124,7 +283,8 @@ ObjectId Scene::addBody(Body body, Vec3 position, const std::string& name) {
 
     obj->id = nextId_++;
     obj->name = uniqueName(name.empty() ? "Object" : name);
-    obj->transform.position = position;
+    obj->base.position = position;
+    place(*obj);
     obj->body.tessellate(obj->render);
     obj->localBounds = obj->body.bounds();
 
@@ -167,6 +327,7 @@ ObjectId Scene::addFeatureChain(std::vector<Feature> features, const std::string
 
     obj->id = nextId_++;
     obj->name = uniqueName(name.empty() ? "Part" : name);
+    place(*obj);
     obj->body.tessellate(obj->render);
     obj->localBounds = obj->body.bounds();
 
@@ -183,6 +344,7 @@ ObjectId Scene::addChainAsIs(std::vector<Feature> features, const std::string& n
     std::unique_ptr<SceneObject> obj = buildFromChain(std::move(features), built);
     obj->id = nextId_++;
     obj->name = uniqueName(name.empty() ? "Part" : name);
+    place(*obj);
     obj->body.tessellate(obj->render);
     obj->localBounds = obj->body.bounds();
 
@@ -212,6 +374,7 @@ ObjectId Scene::duplicateObject(ObjectId id) {
                                         // intermediate mesh would cost more
                                         // than re-running the chain once
     obj->transform   = src->transform;
+    obj->base        = src->base;
     obj->body        = src->body;
     obj->render      = src->render;
     obj->localBounds = src->localBounds;
@@ -316,6 +479,9 @@ bool Scene::reevaluateFrom(ObjectId id, size_t fromFeature) {
     // Either way: evaluateFrom has marked each step it ran, and a chain that
     // produced nothing at all is exactly the case worth saying something about.
     noteNewFailures(*obj, wasBroken);
+    // Where it stands follows the chain whatever the body did: a Move turned
+    // off in the history takes the object back even if some later step fails.
+    place(*obj);
     if (!ok) return false;
 
     obj->body = std::move(next);
@@ -352,6 +518,7 @@ bool Scene::addFeature(ObjectId id, Feature feature, std::string* error) {
 
     obj->body = std::move(next);
     obj->refreshDerived();
+    place(*obj);
     pruneElementSelection();
     return true;
 }
@@ -373,6 +540,7 @@ void Scene::addFeatureWithResult(ObjectId id, Feature feature, Body result) {
     obj->featureCache.push_back(result);
     obj->body = std::move(result);
     obj->refreshDerived();
+    place(*obj);
     pruneElementSelection();
 }
 
@@ -406,6 +574,7 @@ bool Scene::setFeatures(ObjectId id, std::vector<Feature> features, std::string*
 
     obj->body = std::move(next);
     obj->refreshDerived();
+    place(*obj);
     pruneElementSelection();
     return true;
 }
@@ -523,10 +692,17 @@ float distToEdgePx(const Body& body, const Mat4& model, EdgeId e,
 ElementHit Scene::pickElement(const Ray& ray, const Mat4& viewProj,
                               int viewportW, int viewportH, Vec2 cursorPx,
                               float vertexTolPx, float edgeTolPx) const {
-    ElementHit out;
+    const std::vector<ElementHit> all =
+        pickElements(ray, viewProj, viewportW, viewportH, cursorPx, vertexTolPx, edgeTolPx);
+    return all.empty() ? ElementHit{} : all.front();
+}
 
-    const RayHit surface = raycast(ray);
-    if (surface.hit()) {
+std::vector<ElementHit> Scene::pickElements(const Ray& ray, const Mat4& viewProj,
+                                            int viewportW, int viewportH, Vec2 cursorPx,
+                                            float vertexTolPx, float edgeTolPx) const {
+    std::vector<ElementHit> found;
+    for (const RayHit& surface : raycastCoincident(ray)) {
+        ElementHit out;
         const SceneObject* obj = find(surface.object);
         if (obj && surface.face != kInvalid) {
             out.ref = {surface.object, ElementKind::Face, surface.face};
@@ -569,9 +745,13 @@ ElementHit Scene::pickElement(const Ray& ray, const Mat4& viewProj,
 
             if (vertPick != kInvalid)      out.ref = {surface.object, ElementKind::Vertex, vertPick};
             else if (edgePick != kInvalid) out.ref = {surface.object, ElementKind::Edge, edgePick};
-            return out;
+            const bool seen = std::any_of(found.begin(), found.end(),
+                                          [&](const ElementHit& h) { return h.ref == out.ref; });
+            if (!seen) found.push_back(out);
         }
     }
+    if (!found.empty()) return found;
+    ElementHit out;
 
     // If raycast missed or didn't hit a surface, check nearby vertices and edges
     // of visible objects on screen (off-silhouette generous picking).
@@ -619,8 +799,8 @@ ElementHit Scene::pickElement(const Ray& ray, const Mat4& viewProj,
     } else if (edgePick != kInvalid && edgeObj != kNoObject) {
         out.ref = {edgeObj, ElementKind::Edge, edgePick};
     }
-
-    return out;
+    if (out.hit()) found.push_back(out);
+    return found;
 }
 
 // ---------------------------------------------------------------------------
@@ -752,6 +932,50 @@ RayHit Scene::raycast(const Ray& ray) const {
         }
     }
     return best;
+}
+
+std::vector<RayHit> Scene::raycastCoincident(const Ray& ray) const {
+    std::vector<RayHit> out;
+    const RayHit nearest = raycast(ray);
+    if (!nearest.hit()) return out;
+
+    // As close as a depth buffer can tell apart at that distance, with room
+    // for the float arithmetic that finds the hits: faces nearer together
+    // than this fight over the same pixels.
+    const float tol = 1e-3f + 2e-5f * nearest.t;
+    for (const auto& o : objects_) {
+        if (!o->visible || o->render.triangles.empty()) continue;
+        const Mat4 model = o->modelMatrix();
+        const Mat4 inv = inverse(model);
+        Ray local{transformPoint(inv, ray.origin), transformVector(inv, ray.dir)};
+        const float dirScale = length(local.dir);
+        if (dirScale < 1e-9f) continue;
+        local.dir = local.dir / dirScale;
+        Real boxT = 0.0;
+        if (!rayAABB(local, o->localBounds, boxT)) continue;
+        if (boxT / dirScale > nearest.t + tol) continue;
+
+        // The nearest face of this body, if it is as near as the nearest of all.
+        RayHit mine;
+        float mineT = nearest.t + tol;
+        const RenderMesh& rm = o->render;
+        for (size_t i = 0; i + 2 < rm.triangles.size(); i += 3) {
+            Real t = 0.0;
+            if (!rayTriangle(local, rm.positions[rm.triangles[i + 0]],
+                                    rm.positions[rm.triangles[i + 1]],
+                                    rm.positions[rm.triangles[i + 2]], t)) continue;
+            const float worldT = t / dirScale;
+            if (worldT > mineT) continue;
+            mineT = worldT;
+            mine.object = o->id;
+            mine.face   = rm.triangleFace[i / 3];
+            mine.t      = worldT;
+            mine.point  = ray.origin + ray.dir * worldT;
+            mine.normal = normalize(transformVector(normalMatrix(model), o->body.faceNormal(mine.face)));
+        }
+        if (mine.hit() && std::fabs(mine.t - nearest.t) <= tol) out.push_back(mine);
+    }
+    return out;
 }
 
 } // namespace tg

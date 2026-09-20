@@ -17,6 +17,7 @@
 #include "geom/brep_valid.h"
 #include "geom/kernel_guard.h"
 #include "sketch/sketch.h"
+#include "sketch/svg.h"
 
 // STEP. Kept together and commented because these are the only headers here
 // that are not modelling -- they come from the DataExchange module.
@@ -33,10 +34,32 @@
 #include <BRepBndLib.hxx>
 #include <BRepAlgoAPI_BooleanOperation.hxx>
 #include <BRepAlgoAPI_Common.hxx>
+#include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepBuilderAPI_MakeShape.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
+#include <BRepBuilderAPI_GTransform.hxx>
+#include <BRepTools_Modification.hxx>
+#include <BRepTools_Modifier.hxx>
+#include <Geom_Plane.hxx>
+#include <Geom_CylindricalSurface.hxx>
+#include <Geom_BSplineSurface.hxx>
+#include <Geom_Line.hxx>
+#include <Geom_Circle.hxx>
+#include <Geom_BSplineCurve.hxx>
+#include <Geom_TrimmedCurve.hxx>
+#include <Geom2d_Line.hxx>
+#include <Geom2d_Circle.hxx>
+#include <Geom2d_BSplineCurve.hxx>
+#include <Geom2d_TrimmedCurve.hxx>
+#include <TColgp_Array2OfPnt.hxx>
+#include <TColgp_Array1OfPnt2d.hxx>
+#include <TColStd_Array1OfReal.hxx>
+#include <TColStd_Array1OfInteger.hxx>
+#include <NCollection_DataMap.hxx>
+#include <TopTools_ShapeMapHasher.hxx>
+#include <gp_GTrsf.hxx>
 #include <BRepBuilderAPI_Copy.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
@@ -78,6 +101,7 @@
 #include <BRepPrimAPI_MakeSphere.hxx>
 #include <BRepPrimAPI_MakeTorus.hxx>
 #include <BRepTools.hxx>
+#include <BRepLib.hxx>
 #include <BRepTools_WireExplorer.hxx>
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
@@ -109,6 +133,11 @@
 #include <memory>
 #include <sstream>
 #include <unordered_map>
+#include <unordered_set>
+#include <atomic>
+#include <OSD_Parallel.hxx>
+#include <chrono>
+#include <cstdio>
 
 namespace tg {
 
@@ -937,13 +966,31 @@ void tessellate(const BrepShape& s, RenderMesh& out, TessellationQuality q) {
         // the mesh backend has to guess with does not appear.
         BRepAdaptor_Surface surf(face);
         const bool haveUV = tri->HasUVNodes();
+        // A flat face has one normal, worked out once: an extruded drawing is
+        // thousands of faces, a good share of them flat, and asking the
+        // surface at every node of those was a third of the time to show it.
+        bool planeNormal = false;
+        Vec3 flatN{0, 0, 1};
+        if (surf.GetType() == GeomAbs_Plane) {
+            // du x dv, which is the axis for a right-handed frame and its
+            // opposite for a left-handed one.
+            const gp_Pln pln = surf.Plane();
+            gp_Dir d = pln.Axis().Direction();
+            if (!pln.Position().Direct()) d.Reverse();
+            if (flipped) d.Reverse();
+            d.Transform(trsf);
+            flatN = {static_cast<Real>(d.X()), static_cast<Real>(d.Y()), static_cast<Real>(d.Z())};
+            planeNormal = true;
+        }
         for (int i = 1; i <= tri->NbNodes(); ++i) {
             gp_Pnt pnt = tri->Node(i);
             pnt.Transform(trsf);
             out.positions.push_back(toVec3(pnt));
 
             Vec3 n{0, 0, 1};
-            if (haveUV) {
+            if (planeNormal) {
+                n = flatN;
+            } else if (haveUV) {
                 const gp_Pnt2d uv = tri->UVNode(i);
                 gp_Pnt at;
                 gp_Vec du, dv;
@@ -1079,11 +1126,15 @@ bool heavyFaceValid(const TopoDS_Face& face) {
     };
 
     if (inner.empty()) return piece(nullptr, nullptr);
-    for (const TopoDS_Wire& w : inner)
-        if (!piece(&w, nullptr)) return false;
 
-    // Hole against hole, swept along x so that even thousands of holes cost a
-    // sort and a pass rather than every pair.
+    // Every piece to check -- each hole alone, and each pair of holes whose
+    // boxes meet, found by a sweep along x so thousands of holes cost a sort
+    // and a pass rather than every pair -- and then all of them across the
+    // cores: the pieces share nothing but the wires they read. An engraved
+    // drawing's face has hundreds of holes, and one after another they took
+    // seconds.
+    std::vector<std::pair<int, int>> jobs;
+    for (size_t i = 0; i < inner.size(); ++i) jobs.push_back({static_cast<int>(i), -1});
     struct Box { Standard_Real x0, x1; Bnd_Box box; size_t wire; };
     std::vector<Box> boxes;
     boxes.reserve(inner.size());
@@ -1098,10 +1149,24 @@ bool heavyFaceValid(const TopoDS_Face& face) {
     std::sort(boxes.begin(), boxes.end(), [](const Box& p, const Box& q) { return p.x0 < q.x0; });
     for (size_t i = 0; i < boxes.size(); ++i)
         for (size_t j = i + 1; j < boxes.size() && boxes[j].x0 <= boxes[i].x1; ++j)
-            if (!boxes[i].box.IsOut(boxes[j].box) &&
-                !piece(&inner[boxes[i].wire], &inner[boxes[j].wire]))
-                return false;
-    return true;
+            if (!boxes[i].box.IsOut(boxes[j].box))
+                jobs.push_back({static_cast<int>(boxes[i].wire), static_cast<int>(boxes[j].wire)});
+
+    std::atomic<bool> ok{true};
+    auto run = [&](int k) {
+        if (!ok.load(std::memory_order_relaxed)) return;
+        const auto [a, b] = jobs[static_cast<size_t>(k)];
+        if (!piece(&inner[static_cast<size_t>(a)], b >= 0 ? &inner[static_cast<size_t>(b)] : nullptr))
+            ok.store(false, std::memory_order_relaxed);
+    };
+    // Not in a child process isolating a trial: threads there are what the
+    // isolation keeps away from.
+    if (inIsolatedChild()) {
+        for (int k = 0; k < static_cast<int>(jobs.size()) && ok; ++k) run(k);
+    } else {
+        OSD_Parallel::For(0, static_cast<int>(jobs.size()), run);
+    }
+    return ok.load();
 }
 
 // What the whole-shape pass checks across faces: each edge of a solid bounds
@@ -1463,9 +1528,76 @@ BrepRef unifyFlush(const BrepRef& made, const BrepRef& before, ElementId salt) {
     return makeBrep(merged, names);
 }
 
+namespace {
+
+// One face swept `distance` along its normal, or along `along` when given, as a
+// solid of its own -- named from the face it came from, so that whatever it is
+// combined with has something to carry.
+BrepRef sweepFace(const BrepShape& step, FaceId use, ElementId target, Real distance, Vec3 along,
+                  ElementId salt, std::string* reason) {
+    const Vec3 n = faceNormal(step, use);
+    if (length(n) < 0.5) {
+        if (reason) *reason = "a face has no direction to be pushed along";
+        return {};
+    }
+    // Along the face's own normal unless the caller named a direction. A
+    // sweep square to the normal moves the face's plane nowhere, so there is
+    // nothing to build and it says so.
+    Vec3 push = n;
+    if (lengthSq(along) > 1e-12) {
+        push = normalize(along);
+        if (std::fabs(dot(push, n)) < 1e-3) {
+            if (reason) *reason = "that direction runs along the face, not into it";
+            return {};
+        }
+    }
+    const gp_Vec sweep(push.x * distance, push.y * distance, push.z * distance);
+
+    TopoDS_Shape solid;
+    try {
+        BRepPrimAPI_MakePrism prism(faceAt(step, use), sweep);
+        prism.Build();
+        if (!prism.IsDone()) {
+            if (reason) *reason = "the face could not be swept";
+            return {};
+        }
+        solid = prism.Shape();
+    } catch (const Standard_Failure& e) {
+        if (reason) *reason = kernelReason(e, "the face could not be swept that far");
+        return {};
+    }
+
+    TopTools_IndexedMapOfShape pf;
+    TopExp::MapShapes(solid, TopAbs_FACE, pf);
+    std::vector<ElementId> prismNames(static_cast<size_t>(pf.Extent()), kNoId);
+    const Vec3 startCentre = faceCentroid(step, use);
+    for (int k = 0; k < pf.Extent(); ++k) {
+        const TopoDS_Face& face = TopoDS::Face(pf(k + 1));
+        GProp_GProps props;
+        BRepGProp::SurfaceProperties(face, props);
+        const Vec3 c = toVec3(props.CentreOfMass());
+        const Real travelled = dot(c - startCentre, n);
+        // The cap at the far end carries the *original* face's name,
+        // because that is what it is: the face the user selected, moved.
+        // A feature that referred to it before the extrude has to go on
+        // referring to it after, which is the whole job of the history.
+        // The near cap vanishes into the body and gets a derived name.
+        if (std::fabs(travelled) > std::fabs(distance) * 0.9)
+            prismNames[static_cast<size_t>(k)] = target;
+        else if (std::fabs(travelled) < std::fabs(distance) * 0.1)
+            prismNames[static_cast<size_t>(k)] = nameId(salt, IdRole::Cap, target);
+        else
+            prismNames[static_cast<size_t>(k)] =
+                nameId(salt, IdRole::Wall, target, static_cast<ElementId>(k));
+    }
+    return makeBrep(solid, prismNames);
+}
+
+} // namespace
+
 BrepRef extrudeFaces(const BrepRef& s, const std::vector<FaceId>& faces, Real distance,
                      ElementId salt, std::vector<ElementId>* newFaces, std::string* reason,
-                     bool mergeFlush, Vec3 along) {
+                     bool mergeFlush, Vec3 along, bool intersect) {
     if (newFaces) newFaces->clear();
     if (reason) reason->clear();
     if (!s || faces.empty()) {
@@ -1498,87 +1630,58 @@ BrepRef extrudeFaces(const BrepRef& s, const std::vector<FaceId>& faces, Real di
             return {};
         }
 
-        // One prism per piece: a face split by an earlier step is still one
-        // face as far as the feature is concerned.
-        BrepRef step = current;
-        for (FaceId f : at) {
-            std::vector<FaceId> live;
-            findFaces(*step, targets[i], live);
-            if (live.empty()) break;
-            const FaceId use = f < static_cast<FaceId>(step->faces.Extent()) ? live.front() : live.front();
-
-            const Vec3 n = faceNormal(*step, use);
-            if (length(n) < 0.5) {
-                if (reason) *reason = "a face has no direction to be pushed along";
-                return {};
-            }
-            // Along the face's own normal unless the caller named a
-            // direction. A sweep square to the normal moves the face's plane
-            // nowhere, so there is nothing to build and it says so.
-            Vec3 push = n;
-            if (lengthSq(along) > 1e-12) {
-                push = normalize(along);
-                if (std::fabs(dot(push, n)) < 1e-3) {
-                    if (reason) *reason = "that direction runs along the face, not into it";
-                    return {};
-                }
-            }
-            const gp_Vec sweep(push.x * distance, push.y * distance, push.z * distance);
-
-            TopoDS_Shape solid;
-            try {
-                BRepPrimAPI_MakePrism prism(faceAt(*step, use), sweep);
-                prism.Build();
-                if (!prism.IsDone()) {
-                    if (reason) *reason = "the face could not be swept";
-                    return {};
-                }
-                solid = prism.Shape();
-            } catch (const Standard_Failure& e) {
-                if (reason) *reason = kernelReason(e, "the face could not be swept that far");
-                return {};
-            }
-
-            // Name the swept solid from the face it came from, so the boolean
-            // that follows has something to carry.
-            TopTools_IndexedMapOfShape pf;
-            TopExp::MapShapes(solid, TopAbs_FACE, pf);
-            std::vector<ElementId> prismNames(static_cast<size_t>(pf.Extent()), kNoId);
-            const Vec3 startCentre = faceCentroid(*step, use);
-            for (int k = 0; k < pf.Extent(); ++k) {
-                const TopoDS_Face& face = TopoDS::Face(pf(k + 1));
-                GProp_GProps props;
-                BRepGProp::SurfaceProperties(face, props);
-                const Vec3 c = toVec3(props.CentreOfMass());
-                const Real along = dot(c - startCentre, n);
-                // The cap at the far end carries the *original* face's name,
-                // because that is what it is: the face the user selected, moved.
-                // A feature that referred to it before the extrude has to go on
-                // referring to it after, which is the whole job of the history.
-                // The near cap vanishes into the body and gets a derived name.
-                if (along > std::fabs(distance) * 0.9)
-                    prismNames[static_cast<size_t>(k)] = targets[i];
-                else if (std::fabs(along) < std::fabs(distance) * 0.1)
-                    prismNames[static_cast<size_t>(k)] = nameId(salt, IdRole::Cap, targets[i]);
-                else
-                    prismNames[static_cast<size_t>(k)] =
-                        nameId(salt, IdRole::Wall, targets[i], static_cast<ElementId>(k));
-            }
-            BrepRef tool = makeBrep(solid, prismNames);
-
-            BrepRef combined = booleanOp(*step, *tool,
-                                         distance > 0 ? BooleanOp::Union : BooleanOp::Difference,
-                                         nameId(salt, IdRole::Split, targets[i]), reason);
-            if (!combined) return {};
-            step = mergeFlush
-                       ? unifyFlush(combined, step, nameId(salt, IdRole::Patch, targets[i]))
-                       : combined;
-            break;   // the prism spans every piece of that face already
-        }
-        current = step;
+        // One prism per face: a face split by an earlier step is still one
+        // face as far as the feature is concerned, and the prism off its first
+        // piece spans every piece of it already.
+        BrepRef tool = sweepFace(*current, at.front(), targets[i], distance, along, salt, reason);
+        if (!tool) return {};
+        const BooleanOp op = intersect      ? BooleanOp::Intersection
+                           : distance > 0.0 ? BooleanOp::Union
+                                            : BooleanOp::Difference;
+        BrepRef combined = booleanOp(*current, *tool, op, nameId(salt, IdRole::Split, targets[i]), reason);
+        if (!combined) return {};
+        current = mergeFlush && !intersect
+                      ? unifyFlush(combined, current, nameId(salt, IdRole::Patch, targets[i]))
+                      : combined;
         if (newFaces) newFaces->push_back(targets[i]);
     }
     return current;
+}
+
+BrepRef sweptFaces(const BrepRef& s, const std::vector<FaceId>& faces, Real distance, Vec3 along,
+                   ElementId salt, std::string* reason) {
+    if (reason) reason->clear();
+    if (!s || faces.empty()) {
+        if (reason) *reason = "nothing to sweep";
+        return {};
+    }
+    if (std::fabs(distance) < 1e-9) {
+        if (reason) *reason = "the distance is zero";
+        return {};
+    }
+    BrepRef all;
+    for (FaceId f : faces) {
+        BrepRef one = sweepFace(*s, f, faceName(*s, f), distance, along, salt, reason);
+        if (!one) return {};
+        if (!all) { all = std::move(one); continue; }
+        all = booleanOp(*all, *one, BooleanOp::Union, nameId(salt, IdRole::Split, faceName(*s, f)), reason);
+        if (!all) return {};
+    }
+    return all;
+}
+
+bool touches(const BrepShape& a, const BrepShape& b, Real tol) {
+    if (a.shape.IsNull() || b.shape.IsNull()) return false;
+    try {
+        BRepExtrema_DistShapeShape d(a.shape, b.shape);
+        if (!d.IsDone()) return false;
+        // Overlapping solids report no distance between their surfaces only
+        // when the surfaces cross; one wholly inside the other is the case
+        // that needs asking separately.
+        return d.Value() <= tol || d.InnerSolution();
+    } catch (const Standard_Failure&) {
+        return false;
+    }
 }
 
 BrepRef rotateFaces(const BrepRef& s, const std::vector<FaceId>& faces, Real angleRad,
@@ -1686,22 +1789,21 @@ BrepRef scaleFaces(const BrepRef& s, const std::vector<FaceId>& faces, Real fact
             const Vec3 centre = faceCentroid(*s, f);
             if (lengthSq(n) < 1e-18) continue;
 
-            // How far the body reaches back from this face. Every neighbour
-            // pivots about its own far end, and that is where the plane holding
-            // them still has to sit.
-            Real deepest = 0.0;
-            {
+            // How far a neighbour reaches back from this face. Each one pivots
+            // about its own far end, which is where it stays put -- not the
+            // far end of the whole body: the walls of a boss extruded off a
+            // box end where the boss meets the box, and pivoting them about
+            // the box's bottom dragged their foot out across the top with it.
+            auto depthOf = [&](FaceId side) {
+                Real deepest = 0.0;
                 TopTools_IndexedMapOfShape vs;
-                TopExp::MapShapes(s->shape, TopAbs_VERTEX, vs);
+                TopExp::MapShapes(s->faces(static_cast<int>(side) + 1), TopAbs_VERTEX, vs);
                 for (int i = 1; i <= vs.Extent(); ++i) {
                     const gp_Pnt p = BRep_Tool::Pnt(TopoDS::Vertex(vs(i)));
                     deepest = std::max(deepest, -dot(Vec3{p.X(), p.Y(), p.Z()} - centre, n));
                 }
-            }
-            if (deepest < 1e-6) {
-                if (reason) *reason = "there is no depth behind that face to taper";
-                return {};
-            }
+                return deepest;
+            };
 
             std::vector<EdgeId> es;
             faceEdges(*s, f, es);
@@ -1733,6 +1835,8 @@ BrepRef scaleFaces(const BrepRef& s, const std::vector<FaceId>& faces, Real fact
                 // face is the negative angle: measured on a box, 1.5 came back
                 // as 0.5 until this was the other way round.
                 const Real sense = dot(out, sn) >= 0.0 ? 1.0 : -1.0;
+                const Real deepest = depthOf(side);
+                if (deepest < 1e-6) continue;              // nothing behind it to lean
                 const Real angle = -std::atan2(travel * sense, deepest);
                 if (std::fabs(angle) < 1e-9) continue;
 
@@ -1752,7 +1856,7 @@ BrepRef scaleFaces(const BrepRef& s, const std::vector<FaceId>& faces, Real fact
         }
 
         if (tilted == 0) {
-            if (reason) *reason = "nothing beside that face could be tapered";
+            if (reason) *reason = "there is no depth behind that face to taper";
             return {};
         }
 
@@ -2176,15 +2280,28 @@ BrepRef shell(const BrepRef& s, const std::vector<FaceId>& openFaces, Real thick
     }
 }
 
-BrepRef sketchSolid(const Sketch& sk, const SketchProfile& profile, Real from, Real to,
-                    ElementId salt, std::string* reason) {
+namespace {
+
+// One face to sweep: an outline and the loops cut out of it.
+struct SweptFace {
+    const SketchLoop* outer = nullptr;
+    std::vector<const SketchLoop*> holes;
+};
+
+SketchId loopKey(const SketchLoop& loop) {
+    return loop.entities.empty() ? kNoSketchId
+                                 : *std::min_element(loop.entities.begin(), loop.entities.end());
+}
+
+BrepRef sweepSketchFaces(const Sketch& sk, const std::vector<SweptFace>& faces, Real from, Real to,
+                         ElementId salt, std::string* reason) {
     if (reason) reason->clear();
     const Real lo = std::min(from, to), hi = std::max(from, to);
     if (hi - lo < 1e-9) {
         if (reason) *reason = "the profile has no depth";
         return {};
     }
-    if (profile.outer.entities.empty()) {
+    if (faces.empty()) {
         if (reason) *reason = "the profile is empty";
         return {};
     }
@@ -2278,35 +2395,93 @@ BrepRef sketchSolid(const Sketch& sk, const SketchProfile& profile, Real from, R
             return true;
         };
 
-        TopoDS_Wire outer;
-        if (!wireFor(profile.outer, true, outer)) {
-            if (reason) *reason = "the profile does not close";
-            return {};
-        }
+        const Real depth = hi - lo;
         const Vec3 o = pl.origin + lift;
-        BRepBuilderAPI_MakeFace face(gp_Pln(gp_Pnt(o.x, o.y, o.z), normal), outer, Standard_True);
-        for (const SketchLoop& hole : profile.holes) {
-            TopoDS_Wire w;
-            if (!wireFor(hole, false, w)) {
-                if (reason) *reason = "a hole in the profile does not close";
+        struct Swept { TopoDS_Shape shape, first, last; };
+        std::vector<Swept> solids;
+        solids.reserve(faces.size());
+        std::vector<TopoDS_Face> flat;
+        flat.reserve(faces.size());
+        for (const SweptFace& f : faces) {
+            TopoDS_Wire outer;
+            if (!wireFor(*f.outer, true, outer)) {
+                if (reason) *reason = "the profile does not close";
                 return {};
             }
-            face.Add(w);
+            BRepBuilderAPI_MakeFace face(gp_Pln(gp_Pnt(o.x, o.y, o.z), normal), outer, Standard_True);
+            for (const SketchLoop* hole : f.holes) {
+                TopoDS_Wire w;
+                if (!wireFor(*hole, false, w)) {
+                    if (reason) *reason = "a hole in the profile does not close";
+                    return {};
+                }
+                face.Add(w);
+            }
+            if (!face.IsDone()) {
+                if (reason) *reason = "the profile does not bound a face";
+                return {};
+            }
+            flat.push_back(face.Face());
         }
-        if (!face.IsDone()) {
-            if (reason) *reason = "the profile does not bound a face";
+
+        // What can be wrong with a drawing is in its outlines -- one that
+        // crosses itself, a hole that crosses the outline around it. Found on
+        // the sketch's own curves, exactly and quickly: the kernel's check of
+        // the same faces compares every edge with every other, and took
+        // thirteen seconds on a rose of a few thousand curves -- two and a
+        // half even told to leave the geometry alone. The rest of what it
+        // would catch cannot happen here: every wire was checked closed as it
+        // was built, and every hole lies inside its outline because that is
+        // how the sketch found it to be a hole.
+        {
+            size_t bad = 0;
+            for (const SweptFace& f : faces) {
+                std::vector<std::vector<SvgSegment>> loops{sketchLoopCurves(sk, *f.outer)};
+                for (const SketchLoop* h : f.holes) loops.push_back(sketchLoopCurves(sk, *h));
+                if (outlineCrossings(loops) > 0) ++bad;
+            }
+            if (bad > 0) {
+                if (reason)
+                    *reason = flat.size() == 1
+                                  ? std::string("the profile crosses itself")
+                                  : std::to_string(bad) + " of " + std::to_string(flat.size()) +
+                                        " regions have outlines that cross: leave them out, or fix them in the sketch";
+                return {};
+            }
+        }
+
+        for (const TopoDS_Face& f : flat) {
+            BRepPrimAPI_MakePrism solid(f, gp_Vec(n.x * depth, n.y * depth, n.z * depth));
+            solid.Build();
+            if (!solid.IsDone()) {
+                if (reason) *reason = "the profile could not be swept into a solid";
+                return {};
+            }
+            solids.push_back({solid.Shape(), solid.FirstShape(), solid.LastShape()});
+        }
+
+        // One region is its prism; several stand together in a compound. They
+        // do not touch -- regions picked inside one another were merged into
+        // one face above -- so there is nothing to fuse.
+        TopoDS_Shape shape;
+        if (solids.size() == 1) {
+            shape = solids.front().shape;
+        } else {
+            BRep_Builder b;
+            TopoDS_Compound c;
+            b.MakeCompound(c);
+            for (const Swept& sw : solids) b.Add(c, sw.shape);
+            shape = c;
+        }
+        // The faces were checked before they were swept, and a prism of a
+        // valid flat face is valid: checking every wall of every prism again
+        // was three quarters of the time a drawing of hundreds of letters
+        // took to extrude.
+        if (shape.IsNull()) {
+            if (reason) *reason = "the profile could not be swept into a solid";
             return {};
         }
 
-        const Real depth = hi - lo;
-        BRepPrimAPI_MakePrism solid(face.Face(), gp_Vec(n.x * depth, n.y * depth, n.z * depth));
-        solid.Build();
-        if (!solid.IsDone() || !acceptable(solid.Shape(), reason)) {
-            if (reason && reason->empty()) *reason = "the profile could not be swept into a solid";
-            return {};
-        }
-
-        const TopoDS_Shape shape = solid.Shape();
         TopTools_IndexedMapOfShape fs;
         TopExp::MapShapes(shape, TopAbs_FACE, fs);
         std::vector<ElementId> names(static_cast<size_t>(fs.Extent()), kNoId);
@@ -2315,11 +2490,26 @@ BrepRef sketchSolid(const Sketch& sk, const SketchProfile& profile, Real from, R
             if (i > 0 && names[static_cast<size_t>(i - 1)] == kNoId)
                 names[static_cast<size_t>(i - 1)] = name;
         };
-        nameFace(solid.FirstShape(), nameId(salt, IdRole::Cap, 0));
-        nameFace(solid.LastShape(), nameId(salt, IdRole::Cap, 1));
-        for (const auto& [edge, entity] : made)
-            for (TopTools_ListOfShape::Iterator it(solid.Generated(edge)); it.More(); it.Next())
-                nameFace(it.Value(), nameId(salt, IdRole::Side, entity));
+        for (size_t k = 0; k < solids.size(); ++k) {
+            nameFace(solids[k].first, nameId(salt, IdRole::Cap, static_cast<ElementId>(2 * k)));
+            nameFace(solids[k].last, nameId(salt, IdRole::Cap, static_cast<ElementId>(2 * k + 1)));
+        }
+        // A wall is the face its edge swept: the one of the prism's side faces
+        // that contains that edge. Found through the edge-to-face map of the
+        // result, which holds for any number of prisms at once.
+        TopTools_IndexedDataMapOfShapeListOfShape edgeFaces;
+        TopExp::MapShapesAndAncestors(shape, TopAbs_EDGE, TopAbs_FACE, edgeFaces);
+        for (const auto& [edge, entity] : made) {
+            const int i = edgeFaces.FindIndex(edge);
+            if (i <= 0) continue;
+            for (TopTools_ListOfShape::Iterator it(edgeFaces(i)); it.More(); it.Next()) {
+                const int fi = fs.FindIndex(it.Value());
+                // Not a cap: the caps were named first, and a named face is
+                // left alone.
+                if (fi > 0 && names[static_cast<size_t>(fi - 1)] == kNoId)
+                    names[static_cast<size_t>(fi - 1)] = nameId(salt, IdRole::Side, entity);
+            }
+        }
 
         // Every face above should have a name by now. One that does not still
         // gets a derived one, so the body is usable, rather than a zero that
@@ -2332,6 +2522,66 @@ BrepRef sketchSolid(const Sketch& sk, const SketchProfile& profile, Real from, R
         if (reason) *reason = e.GetMessageString() ? e.GetMessageString() : "the profile threw";
         return {};
     }
+}
+
+} // namespace
+
+BrepRef sketchSolid(const Sketch& sk, const SketchProfile& profile, Real from, Real to,
+                    ElementId salt, std::string* reason) {
+    if (profile.outer.entities.empty()) {
+        if (reason) *reason = "the profile is empty";
+        return {};
+    }
+    SweptFace f;
+    f.outer = &profile.outer;
+    for (const SketchLoop& h : profile.holes) f.holes.push_back(&h);
+    return sweepSketchFaces(sk, {f}, from, to, salt, reason);
+}
+
+BrepRef sketchSolids(const Sketch& sk, const std::vector<SketchProfile>& profiles,
+                     const std::vector<SketchId>& keys, Real from, Real to, ElementId salt,
+                     std::string* reason) {
+    std::unordered_map<SketchId, const SketchProfile*> byKey;
+    for (const SketchProfile& p : profiles) byKey.emplace(p.key, &p);
+    std::unordered_set<SketchId> chosen;
+    for (SketchId k : keys) {
+        if (!byKey.count(k)) {
+            if (reason) *reason = "that region of the sketch no longer closes";
+            return {};
+        }
+        chosen.insert(k);
+    }
+    // Which region each one is a hole in.
+    std::unordered_map<SketchId, SketchId> parent;
+    for (const SketchProfile& p : profiles)
+        for (const SketchLoop& h : p.holes) parent[loopKey(h)] = p.key;
+
+    // A face starts at each picked region whose surrounding region is not
+    // picked, and takes in every picked region inside it: its holes are the
+    // loops inside it that are not picked, however deep the picked ones go.
+    std::vector<SweptFace> faces;
+    std::vector<SketchId> tops(keys);
+    std::sort(tops.begin(), tops.end());
+    tops.erase(std::unique(tops.begin(), tops.end()), tops.end());
+    for (SketchId top : tops) {
+        const auto up = parent.find(top);
+        if (up != parent.end() && chosen.count(up->second)) continue;
+        SweptFace f;
+        f.outer = &byKey[top]->outer;
+        std::vector<const SketchProfile*> open{byKey[top]};
+        while (!open.empty()) {
+            const SketchProfile* q = open.back();
+            open.pop_back();
+            for (const SketchLoop& h : q->holes) {
+                const SketchId k = loopKey(h);
+                auto inner = byKey.find(k);
+                if (chosen.count(k) && inner != byKey.end()) open.push_back(inner->second);
+                else f.holes.push_back(&h);
+            }
+        }
+        faces.push_back(std::move(f));
+    }
+    return sweepSketchFaces(sk, faces, from, to, salt, reason);
 }
 
 BrepRef prism(const std::vector<Vec3>& points, const std::vector<Real>& arcs,
@@ -2491,18 +2741,375 @@ void findFaces(const BrepShape& s, ElementId id, std::vector<FaceId>& out) {
         if (s.faceNames[static_cast<size_t>(i)] == id) out.push_back(i);
 }
 
+namespace {
+
+// A stretch along the three axes, done exactly.
+//
+// BRepBuilderAPI_GTransform can stretch anything, and does it by first turning
+// every surface into a NURBS one: a box scaled along one axis comes back with
+// six freeform faces, none of which Inset will take and none of which anything
+// can tell is flat. But an axis-aligned stretch keeps most of what a part is
+// made of exactly what it was. A plane stays a plane, a line a line; a cylinder
+// standing along one of the axes stays a cylinder so long as the two axes
+// across it stretch alike, and a circle in a plane that stretches alike stays a
+// circle. Splines just have their poles moved.
+//
+// The price of keeping them is reparameterising: a plane's (u, v) and a line's
+// length both change, so every curve on a face is carried through the same
+// linear map the face was. Anything this does not know how to keep exactly
+// sets `unsupported`, and the caller stretches the whole shape the general way
+// instead -- a correct answer with freeform faces beats a wrong one without.
+class AxisStretch : public BRepTools_Modification {
+public:
+    AxisStretch(const gp_XYZ& factors, const gp_XYZ& shift) : k_(factors), t_(shift) {}
+
+    bool unsupported = false;
+
+    Standard_Boolean NewSurface(const TopoDS_Face& F, Handle(Geom_Surface)& S, TopLoc_Location& L,
+                                Standard_Real& Tol, Standard_Boolean& RevWires,
+                                Standard_Boolean& RevFace) override {
+        RevWires = RevFace = Standard_False;
+        const FaceMap& fm = face(F);
+        if (fm.surface.IsNull()) return Standard_False;
+        S = fm.surface;
+        L = TopLoc_Location();
+        Tol = BRep_Tool::Tolerance(F) * grow();
+        return Standard_True;
+    }
+
+    Standard_Boolean NewCurve(const TopoDS_Edge& E, Handle(Geom_Curve)& C, TopLoc_Location& L,
+                              Standard_Real& Tol) override {
+        const EdgeMap& em = edge(E);
+        if (em.curve.IsNull()) return Standard_False;
+        C = em.curve;
+        L = TopLoc_Location();
+        Tol = BRep_Tool::Tolerance(E) * grow();
+        return Standard_True;
+    }
+
+    Standard_Boolean NewPoint(const TopoDS_Vertex& V, gp_Pnt& P, Standard_Real& Tol) override {
+        P = gp_Pnt(apply(BRep_Tool::Pnt(V).XYZ()));
+        Tol = BRep_Tool::Tolerance(V) * grow();
+        return Standard_True;
+    }
+
+    Standard_Boolean NewCurve2d(const TopoDS_Edge& E, const TopoDS_Face& F, const TopoDS_Edge&,
+                                const TopoDS_Face&, Handle(Geom2d_Curve)& C,
+                                Standard_Real& Tol) override {
+        const FaceMap& fm = face(F);
+        const EdgeMap& em = edge(E);
+        Standard_Real f = 0.0, l = 0.0;
+        const Handle(Geom2d_Curve) old = BRep_Tool::CurveOnSurface(E, F, f, l);
+        if (old.IsNull()) { unsupported = true; return Standard_False; }
+        const Handle(Geom2d_Curve) mapped = map2d(old, fm, em);
+        if (mapped.IsNull()) { unsupported = true; return Standard_False; }
+        C = mapped;
+        Tol = BRep_Tool::Tolerance(E) * grow();
+        return Standard_True;
+    }
+
+    // An output, not an adjustment: what comes in is not the vertex's old
+    // parameter, so it is read from the edge.
+    Standard_Boolean NewParameter(const TopoDS_Vertex& V, const TopoDS_Edge& E, Standard_Real& P,
+                                  Standard_Real& Tol) override {
+        if (V.IsNull()) return Standard_False;
+        const EdgeMap& em = edge(E);
+        P = em.k * BRep_Tool::Parameter(V, E) + em.b;
+        Tol = BRep_Tool::Tolerance(V) * grow();
+        return Standard_True;
+    }
+
+    GeomAbs_Shape Continuity(const TopoDS_Edge& E, const TopoDS_Face& F1, const TopoDS_Face& F2,
+                             const TopoDS_Edge&, const TopoDS_Face&, const TopoDS_Face&) override {
+        return BRep_Tool::Continuity(E, F1, F2);
+    }
+
+private:
+    // How a face's parameters move: (u, v) -> M (u, v) + o.
+    struct FaceMap {
+        Handle(Geom_Surface) surface;
+        double m[2][2] = {{1, 0}, {0, 1}};
+        double o[2] = {0, 0};
+    };
+    // How an edge's parameter moves: s -> k s + b.
+    struct EdgeMap {
+        Handle(Geom_Curve) curve;
+        double k = 1.0, b = 0.0;
+    };
+
+    gp_XYZ k_, t_;
+    NCollection_DataMap<TopoDS_Shape, FaceMap, TopTools_ShapeMapHasher> faces_;
+    NCollection_DataMap<TopoDS_Shape, EdgeMap, TopTools_ShapeMapHasher> edges_;
+
+    double grow() const { return std::max(k_.X(), std::max(k_.Y(), k_.Z())); }
+    gp_XYZ apply(const gp_XYZ& p) const {
+        return gp_XYZ(p.X() * k_.X() + t_.X(), p.Y() * k_.Y() + t_.Y(), p.Z() * k_.Z() + t_.Z());
+    }
+    gp_XYZ stretch(const gp_XYZ& v) const {                  // a direction, before normalising
+        return gp_XYZ(v.X() * k_.X(), v.Y() * k_.Y(), v.Z() * k_.Z());
+    }
+    gp_XYZ squeeze(const gp_XYZ& n) const {                  // a normal: the inverse transpose
+        return gp_XYZ(n.X() / k_.X(), n.Y() / k_.Y(), n.Z() / k_.Z());
+    }
+    // Which axis a direction lies along, or -1.
+    static int alongAxis(const gp_Dir& d) {
+        for (int i = 1; i <= 3; ++i)
+            if (std::fabs(std::fabs(d.Coord(i)) - 1.0) < 1e-9) return i - 1;
+        return -1;
+    }
+    double factor(int axis) const { return k_.Coord(axis + 1); }
+
+    const FaceMap& face(const TopoDS_Face& F) {
+        if (const FaceMap* hit = faces_.Seek(F)) return *hit;
+        FaceMap fm;
+        TopLoc_Location loc;
+        Handle(Geom_Surface) s = BRep_Tool::Surface(F, loc);
+        if (!s.IsNull() && !loc.IsIdentity())
+            s = Handle(Geom_Surface)::DownCast(s->Transformed(loc.Transformation()));
+
+        if (auto pl = Handle(Geom_Plane)::DownCast(s)) {
+            const gp_Ax3 a = pl->Position();
+            const gp_XYZ ax = stretch(a.XDirection().XYZ()), ay = stretch(a.YDirection().XYZ());
+            gp_Ax3 n(gp_Pnt(apply(a.Location().XYZ())), gp_Dir(squeeze(a.Direction().XYZ())),
+                     gp_Dir(ax));
+            if (!a.Direct()) n.YReverse();
+            const gp_XYZ nx = n.XDirection().XYZ(), ny = n.YDirection().XYZ();
+            fm.m[0][0] = ax.Dot(nx); fm.m[0][1] = ay.Dot(nx);
+            fm.m[1][0] = ax.Dot(ny); fm.m[1][1] = ay.Dot(ny);
+            fm.surface = new Geom_Plane(n);
+        } else if (auto cy = Handle(Geom_CylindricalSurface)::DownCast(s)) {
+            // Standing along an axis, with the two across it stretching alike:
+            // a wider or narrower cylinder, and taller or shorter by the third.
+            const gp_Ax3 a = cy->Position();
+            const int axis = alongAxis(a.Direction());
+            if (axis >= 0) {
+                const double across1 = factor((axis + 1) % 3), across2 = factor((axis + 2) % 3);
+                if (std::fabs(across1 - across2) < 1e-12 * std::max(across1, across2)) {
+                    gp_Ax3 n = a;
+                    n.SetLocation(gp_Pnt(apply(a.Location().XYZ())));
+                    fm.surface = new Geom_CylindricalSurface(n, cy->Radius() * across1);
+                    fm.m[1][1] = factor(axis);
+                }
+            }
+        } else if (auto bs = Handle(Geom_BSplineSurface)::DownCast(s)) {
+            Handle(Geom_BSplineSurface) c = Handle(Geom_BSplineSurface)::DownCast(bs->Copy());
+            for (int i = 1; i <= c->NbUPoles(); ++i)
+                for (int j = 1; j <= c->NbVPoles(); ++j)
+                    c->SetPole(i, j, gp_Pnt(apply(c->Pole(i, j).XYZ())));
+            fm.surface = c;
+        }
+        if (fm.surface.IsNull()) unsupported = true;
+        faces_.Bind(F, fm);
+        return *faces_.Seek(F);
+    }
+
+    const EdgeMap& edge(const TopoDS_Edge& E) {
+        if (const EdgeMap* hit = edges_.Seek(E)) return *hit;
+        EdgeMap em;
+        TopLoc_Location loc;
+        Standard_Real f = 0.0, l = 0.0;
+        Handle(Geom_Curve) c = BRep_Tool::Curve(E, loc, f, l);
+        if (!c.IsNull() && !loc.IsIdentity())
+            c = Handle(Geom_Curve)::DownCast(c->Transformed(loc.Transformation()));
+        mapCurve(c, em);
+        if (em.curve.IsNull()) unsupported = true;
+        edges_.Bind(E, em);
+        return *edges_.Seek(E);
+    }
+
+    // A 3D curve through the stretch, and how its parameter moves; a null
+    // curve when it cannot be kept exact. A trimmed curve is its basis curve
+    // trimmed again, at the parameters the basis curve's map takes its ends to.
+    void mapCurve(const Handle(Geom_Curve)& c, EdgeMap& em) {
+        if (auto tr = Handle(Geom_TrimmedCurve)::DownCast(c)) {
+            mapCurve(tr->BasisCurve(), em);
+            if (em.curve.IsNull()) return;
+            em.curve = new Geom_TrimmedCurve(em.curve, em.k * tr->FirstParameter() + em.b,
+                                             em.k * tr->LastParameter() + em.b);
+            return;
+        }
+        if (auto ln = Handle(Geom_Line)::DownCast(c)) {
+            const gp_Ax1 a = ln->Position();
+            const gp_XYZ d = stretch(a.Direction().XYZ());
+            em.k = d.Modulus();
+            em.curve = new Geom_Line(gp_Pnt(apply(a.Location().XYZ())), gp_Dir(d));
+        } else if (auto ci = Handle(Geom_Circle)::DownCast(c)) {
+            // Still a circle only where its plane stretches alike both ways.
+            const gp_Ax2 a = ci->Position();
+            const gp_XYZ ax = stretch(a.XDirection().XYZ()), ay = stretch(a.YDirection().XYZ());
+            const double lx = ax.Modulus(), ly = ay.Modulus();
+            if (std::fabs(lx - ly) < 1e-12 * std::max(lx, ly) &&
+                std::fabs(ax.Dot(ay)) < 1e-12 * lx * ly) {
+                const gp_Ax2 n(gp_Pnt(apply(a.Location().XYZ())), gp_Dir(ax.Crossed(ay)), gp_Dir(ax));
+                em.curve = new Geom_Circle(n, ci->Radius() * lx);
+            }
+        } else if (auto bs = Handle(Geom_BSplineCurve)::DownCast(c)) {
+            Handle(Geom_BSplineCurve) n = Handle(Geom_BSplineCurve)::DownCast(bs->Copy());
+            for (int i = 1; i <= n->NbPoles(); ++i) n->SetPole(i, gp_Pnt(apply(n->Pole(i).XYZ())));
+            em.curve = n;
+        }
+    }
+
+    // A curve on a face, carried through the face's map and the edge's.
+    Handle(Geom2d_Curve) map2d(const Handle(Geom2d_Curve)& c, const FaceMap& fm, const EdgeMap& em) {
+        auto M = [&](const gp_XY& p) {
+            return gp_XY(fm.m[0][0] * p.X() + fm.m[0][1] * p.Y() + fm.o[0],
+                         fm.m[1][0] * p.X() + fm.m[1][1] * p.Y() + fm.o[1]);
+        };
+        auto Mv = [&](const gp_XY& v) {
+            return gp_XY(fm.m[0][0] * v.X() + fm.m[0][1] * v.Y(),
+                         fm.m[1][0] * v.X() + fm.m[1][1] * v.Y());
+        };
+        if (auto tr = Handle(Geom2d_TrimmedCurve)::DownCast(c)) {
+            const Handle(Geom2d_Curve) basis = map2d(tr->BasisCurve(), fm, em);
+            if (basis.IsNull()) return {};
+            return new Geom2d_TrimmedCurve(basis, em.k * tr->FirstParameter() + em.b,
+                                           em.k * tr->LastParameter() + em.b);
+        }
+        if (auto ln = Handle(Geom2d_Line)::DownCast(c)) {
+            // c(s) = P + s D, and c'(s') = M c((s' - b) / k).
+            const gp_XY d = Mv(ln->Direction().XY()) / em.k;
+            if (std::fabs(d.Modulus() - 1.0) > 1e-7) return {};
+            const gp_XY p = M(ln->Location().XY()) - d * em.b;
+            return new Geom2d_Line(gp_Pnt2d(p), gp_Dir2d(d));
+        }
+        if (auto ci = Handle(Geom2d_Circle)::DownCast(c)) {
+            if (std::fabs(em.k - 1.0) > 1e-12 || std::fabs(em.b) > 1e-12) return {};
+            const gp_Ax22d a = ci->Position();
+            const gp_XY ax = Mv(a.XDirection().XY()), ay = Mv(a.YDirection().XY());
+            const double lx = ax.Modulus(), ly = ay.Modulus();
+            if (std::fabs(lx - ly) > 1e-9 * std::max(lx, ly) || std::fabs(ax.Dot(ay)) > 1e-9 * lx * ly)
+                return {};
+            return new Geom2d_Circle(gp_Ax22d(gp_Pnt2d(M(a.Location().XY())), gp_Dir2d(ax), gp_Dir2d(ay)),
+                                     ci->Radius() * lx);
+        }
+        if (auto bs = Handle(Geom2d_BSplineCurve)::DownCast(c)) {
+            TColgp_Array1OfPnt2d poles(1, bs->NbPoles());
+            for (int i = 1; i <= bs->NbPoles(); ++i) poles(i) = gp_Pnt2d(M(bs->Pole(i).XY()));
+            TColStd_Array1OfReal knots(1, bs->NbKnots());
+            TColStd_Array1OfInteger mults(1, bs->NbKnots());
+            for (int i = 1; i <= bs->NbKnots(); ++i) {
+                knots(i) = em.k * bs->Knot(i) + em.b;
+                mults(i) = bs->Multiplicity(i);
+            }
+            if (bs->IsRational()) {
+                TColStd_Array1OfReal w(1, bs->NbPoles());
+                bs->Weights(w);
+                return new Geom2d_BSplineCurve(poles, w, knots, mults, bs->Degree(), bs->IsPeriodic());
+            }
+            return new Geom2d_BSplineCurve(poles, knots, mults, bs->Degree(), bs->IsPeriodic());
+        }
+        return {};
+    }
+};
+
+// Stretches `s` along the axes by `factors` and then moves it by `shift`,
+// keeping every surface it can. Null when something in it cannot be kept exact.
+TopoDS_Shape stretchExactly(const TopoDS_Shape& s, const gp_XYZ& factors, const gp_XYZ& shift,
+                            BRepTools_Modifier& modifier) {
+    Handle(AxisStretch) stretch = new AxisStretch(factors, shift);
+    modifier.Init(s);
+    modifier.Perform(stretch);
+    if (!modifier.IsDone() || stretch->unsupported) return {};
+    const TopoDS_Shape out = modifier.ModifiedShape(s);
+    if (!fullAnalyzerValid(out)) return {};
+    return out;
+}
+
+} // namespace
+
 BrepRef transformed(const BrepShape& s, const Mat4& m) {
-    gp_Trsf t;
-    // A rigid placement: the seam promises this is exact, so only the rotation
-    // and the translation are taken. A scale would make a cylinder into
-    // something that is not one, and belongs in an operation, not here.
-    t.SetValues(m.col[0].x, m.col[1].x, m.col[2].x, m.col[3].x,
-                m.col[0].y, m.col[1].y, m.col[2].y, m.col[3].y,
-                m.col[0].z, m.col[1].z, m.col[2].z, m.col[3].z);
+    // A placement -- a rotation and a move, perhaps a uniform scale -- keeps
+    // every surface what it was: a plane stays a plane and a cylinder a
+    // cylinder. gp_Trsf is exactly that and nothing more, and handed a matrix
+    // that stretches one way more than another it quietly averages the stretch
+    // into a uniform scale of the same volume. That is how a box scaled along
+    // one axis used to arrive at a boolean as a bigger cube.
+    //
+    // So first: is this a similarity? Its columns have to be at right angles
+    // and all the same length.
+    const Vec3 c0{m.col[0].x, m.col[0].y, m.col[0].z};
+    const Vec3 c1{m.col[1].x, m.col[1].y, m.col[1].z};
+    const Vec3 c2{m.col[2].x, m.col[2].y, m.col[2].z};
+    const Real l0 = length(c0), l1 = length(c1), l2 = length(c2);
+    const Real lmax = std::max(l0, std::max(l1, l2));
+    if (lmax < 1e-12) return {};
+    const Real tol = 1e-9 * lmax;
+    const bool similar = std::fabs(l0 - l1) < 1e-7 * lmax && std::fabs(l0 - l2) < 1e-7 * lmax &&
+                         std::fabs(dot(c0, c1)) < tol * lmax && std::fabs(dot(c0, c2)) < tol * lmax &&
+                         std::fabs(dot(c1, c2)) < tol * lmax;
+    const Real det = dot(c0, cross(c1, c2));
+    // A reflection turns a solid inside out; mirrored() is the way to ask for one.
+    if (det <= 0.0) return {};
+
     try {
-        BRepBuilderAPI_Transform xf(s.shape, t, Standard_True);
+        if (similar) {
+            gp_Trsf t;
+            t.SetValues(m.col[0].x, m.col[1].x, m.col[2].x, m.col[3].x,
+                        m.col[0].y, m.col[1].y, m.col[2].y, m.col[3].y,
+                        m.col[0].z, m.col[1].z, m.col[2].z, m.col[3].z);
+            BRepBuilderAPI_Transform xf(s.shape, t, Standard_True);
+            if (!xf.IsDone()) return {};
+            return makeBrep(xf.Shape(), s.faceNames);
+        }
+
+        // A stretch along the axes -- what a Scale step asks for -- keeps its
+        // planes, lines, and the cylinders it can. See AxisStretch.
+        const bool alongAxes = std::fabs(m.col[0].y) + std::fabs(m.col[0].z) +
+                               std::fabs(m.col[1].x) + std::fabs(m.col[1].z) +
+                               std::fabs(m.col[2].x) + std::fabs(m.col[2].y) < 1e-12 * lmax;
+        if (alongAxes) {
+            BRepTools_Modifier modifier(Standard_False);
+            const TopoDS_Shape out = stretchExactly(
+                s.shape, gp_XYZ(m.col[0].x, m.col[1].y, m.col[2].z),
+                gp_XYZ(m.col[3].x, m.col[3].y, m.col[3].z), modifier);
+            if (!out.IsNull()) {
+                TopTools_IndexedMapOfShape faces;
+                TopExp::MapShapes(out, TopAbs_FACE, faces);
+                std::vector<ElementId> names(static_cast<size_t>(faces.Extent()), kNoId);
+                for (int i = 1; i <= s.faces.Extent(); ++i) {
+                    const int at = faces.FindIndex(modifier.ModifiedShape(s.faces(i)));
+                    if (at > 0) names[static_cast<size_t>(at - 1)] = s.faceNames[static_cast<size_t>(i - 1)];
+                }
+                return makeBrep(out, names);
+            }
+        }
+
+        // Any other stretch. Nothing but a general surface can hold a circle
+        // pulled into an ellipse, so the kernel converts what it has to -- the
+        // price of the shape being the shape that was asked for. The faces are
+        // followed through the modification rather than trusted to come out
+        // in the same order.
+        gp_GTrsf g;
+        g.SetVectorialPart(gp_Mat(m.col[0].x, m.col[1].x, m.col[2].x,
+                                  m.col[0].y, m.col[1].y, m.col[2].y,
+                                  m.col[0].z, m.col[1].z, m.col[2].z));
+        g.SetTranslationPart(gp_XYZ(m.col[3].x, m.col[3].y, m.col[3].z));
+        //
+        // On a copy, with every curve a flat face needs stored rather than
+        // left to be worked out when asked for: OCCT's NURBS conversion reads
+        // them as though they were all there, and on the output of a boolean
+        // -- where they often are not -- it faults instead of refusing.
+        BRepBuilderAPI_Copy copy(s.shape, Standard_True, Standard_False);
+        if (!copy.IsDone()) return {};
+        const TopoDS_Shape work = copy.Shape();
+        for (TopExp_Explorer fx(work, TopAbs_FACE); fx.More(); fx.Next()) {
+            const TopoDS_Face& face = TopoDS::Face(fx.Current());
+            for (TopExp_Explorer ex(face, TopAbs_EDGE); ex.More(); ex.Next())
+                BRepLib::BuildPCurveForEdgeOnPlane(TopoDS::Edge(ex.Current()), face);
+        }
+        BRepBuilderAPI_GTransform xf(work, g, Standard_True);
         if (!xf.IsDone()) return {};
-        return makeBrep(xf.Shape(), s.faceNames);
+        const TopoDS_Shape out = xf.Shape();
+        TopTools_IndexedMapOfShape faces;
+        TopExp::MapShapes(out, TopAbs_FACE, faces);
+        std::vector<ElementId> names(static_cast<size_t>(faces.Extent()), kNoId);
+        for (int i = 1; i <= s.faces.Extent(); ++i) {
+            const int at = faces.FindIndex(xf.ModifiedShape(copy.ModifiedShape(s.faces(i))));
+            if (at > 0) names[static_cast<size_t>(at - 1)] = s.faceNames[static_cast<size_t>(i - 1)];
+        }
+        if (!fullAnalyzerValid(out)) return {};
+        return makeBrep(out, names);
     } catch (const Standard_Failure&) {
         return {};
     }

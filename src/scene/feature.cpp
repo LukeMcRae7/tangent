@@ -5,7 +5,6 @@
 #include "geom/operations.h"
 
 #include <algorithm>
-#include <algorithm>
 #include <cstdio>
 #include <unordered_map>
 #include <unordered_set>
@@ -30,6 +29,9 @@ const char* featureKindName(FeatureKind k) {
         case FeatureKind::Reduce:     return "Reduce Mesh";
         case FeatureKind::Sketch:     return "Sketch";
         case FeatureKind::ExtrudeProfile: return "Extrude Profile";
+        case FeatureKind::Move:       return "Move";
+        case FeatureKind::Rotate:     return "Rotate";
+        case FeatureKind::Scale:      return "Scale";
     }
     return "Feature";
 }
@@ -69,16 +71,60 @@ std::string Feature::summary() const {
             std::snprintf(buf, sizeof(buf), "Mesh  (%d faces)", bakedBody.faceCount());
             break;
         case FeatureKind::Boolean:
-            std::snprintf(buf, sizeof(buf), "%s  (%d faces)",
-                          booleanOpName(booleanOp), bakedBody.faceCount());
+            if (!toolName.empty())
+                std::snprintf(buf, sizeof(buf), "%s  %s", booleanOpName(booleanOp), toolName.c_str());
+            else
+                std::snprintf(buf, sizeof(buf), "%s  (%d faces)",
+                              booleanOpName(booleanOp), bakedBody.faceCount());
+            break;
+        case FeatureKind::Move:
+            std::snprintf(buf, sizeof(buf), "Move  %.2f, %.2f, %.2f mm", static_cast<double>(moveBy.x),
+                          static_cast<double>(moveBy.y), static_cast<double>(moveBy.z));
+            break;
+        case FeatureKind::Rotate: {
+            // As an angle about an axis, which is how a turn is thought of --
+            // and when the axis is one of the three, by its name.
+            const Real w = std::clamp(turnBy.w, Real(-1), Real(1));
+            Real angle = degrees(2.0 * std::acos(w));
+            Vec3 axis{turnBy.x, turnBy.y, turnBy.z};
+            if (length(axis) < 1e-12) axis = {0, 0, 1};
+            axis = normalize(axis);
+            if (angle > 180.0) { angle = 360.0 - angle; axis = -axis; }
+            const char* name = nullptr;
+            for (int i = 0; i < 3 && !name; ++i)
+                if (std::fabs(std::fabs(axis[i]) - 1.0) < 1e-6) {
+                    static const char* const kPos[] = {"X", "Y", "Z"};
+                    if (axis[i] < 0) angle = -angle;
+                    name = kPos[i];
+                }
+            if (name)
+                std::snprintf(buf, sizeof(buf), "Rotate  %.1f\xC2\xB0 about %s", static_cast<double>(angle), name);
+            else
+                std::snprintf(buf, sizeof(buf), "Rotate  %.1f\xC2\xB0", static_cast<double>(angle));
+            break;
+        }
+        case FeatureKind::Scale:
+            if (std::fabs(scaleBy.x - scaleBy.y) < 1e-9 && std::fabs(scaleBy.x - scaleBy.z) < 1e-9)
+                std::snprintf(buf, sizeof(buf), "Scale  %.3g\xC3\x97", static_cast<double>(scaleBy.x));
+            else
+                std::snprintf(buf, sizeof(buf), "Scale  %.3g \xC3\x97 %.3g \xC3\x97 %.3g",
+                              static_cast<double>(scaleBy.x), static_cast<double>(scaleBy.y),
+                              static_cast<double>(scaleBy.z));
             break;
         case FeatureKind::Extrude:
-            if (extrudeOp == ExtrudeOp::Auto) {
-                std::snprintf(buf, sizeof(buf), "Extrude  %.2f mm  (%s)",
+            // Push / pull says nothing of joining or cutting: moving a face
+            // out adds and in takes away, and that is all it can mean. An
+            // extrude names its operation, a step from before "Auto" was
+            // dropped the one its direction made it.
+            if (mergeFlush) {
+                std::snprintf(buf, sizeof(buf), "Push / Pull  %.2f mm  (%s)",
                               static_cast<double>(distance), faces.describe("face").c_str());
             } else {
-                std::snprintf(buf, sizeof(buf), "Extrude %s  %.2f mm  (%s)",
-                              extrudeOpName(extrudeOp), static_cast<double>(distance), faces.describe("face").c_str());
+                const ExtrudeOp shown = extrudeOp == ExtrudeOp::Auto
+                                            ? (distance < 0.0 ? ExtrudeOp::Cut : ExtrudeOp::Join)
+                                            : extrudeOp;
+                std::snprintf(buf, sizeof(buf), "Extrude %s  %.2f mm  (%s)", extrudeOpName(shown),
+                              static_cast<double>(distance), faces.describe("face").c_str());
             }
             break;
         case FeatureKind::Inset:
@@ -171,10 +217,18 @@ std::string Feature::summary() const {
                               sketch.entities.size(), dims, sketchFreedoms);
             break;
         }
-        case FeatureKind::ExtrudeProfile:
-            std::snprintf(buf, sizeof(buf), "Extrude Profile  %.2f mm  (%s)",
-                          static_cast<double>(distance), extrudeOpName(extrudeOp));
+        case FeatureKind::ExtrudeProfile: {
+            const ExtrudeOp shown = extrudeOp == ExtrudeOp::Auto
+                                        ? (distance < 0.0 ? ExtrudeOp::Cut : ExtrudeOp::Join)
+                                        : extrudeOp;
+            if (profileKeys.size() > 1)
+                std::snprintf(buf, sizeof(buf), "Extrude Profile  %.2f mm  (%s, %zu regions)",
+                              static_cast<double>(distance), extrudeOpName(shown), profileKeys.size());
+            else
+                std::snprintf(buf, sizeof(buf), "Extrude Profile  %.2f mm  (%s)",
+                              static_cast<double>(distance), extrudeOpName(shown));
             break;
+        }
         case FeatureKind::Divide:
             std::snprintf(buf, sizeof(buf), "Divide  at %.2f, %.2f, %.2f",
                           static_cast<double>(axisPoint.x),
@@ -512,17 +566,22 @@ bool evaluateFrom(std::vector<Feature>& features, size_t from,
             if (source->errored) { fail("the sketch it extrudes does not solve"); break; }
 
             const std::vector<SketchProfile> regions = sketchProfiles(source->sketch);
-            const auto region = std::find_if(regions.begin(), regions.end(),
-                [&](const SketchProfile& p) { return p.key == f.profileKey; });
-            if (region == regions.end()) {
-                fail("that region of the sketch no longer closes");
+            if (f.profileKeys.empty()) { fail("it names no region to sweep"); break; }
+            const bool allClose = std::all_of(f.profileKeys.begin(), f.profileKeys.end(), [&](SketchId k) {
+                return std::any_of(regions.begin(), regions.end(),
+                                   [k](const SketchProfile& p) { return p.key == k; });
+            });
+            if (!allClose) {
+                fail(f.profileKeys.size() == 1 ? "that region of the sketch no longer closes"
+                                               : "a region of the sketch it sweeps no longer closes");
                 break;
             }
 
             const bool cut = f.extrudeOp == ExtrudeOp::Cut ||
                              (f.extrudeOp == ExtrudeOp::Auto && f.distance < 0.0);
             std::string why;
-            BrepRef tool = brep::sketchSolid(source->sketch, *region, 0.0, f.distance, f.uid, &why);
+            BrepRef tool = brep::sketchSolids(source->sketch, regions, f.profileKeys, 0.0, f.distance, f.uid,
+                                              &why);
             if (!tool) {
                 fail(why.empty() ? "the region could not be swept" : why.c_str());
                 break;
@@ -554,6 +613,21 @@ bool evaluateFrom(std::vector<Feature>& features, size_t from,
                 body = std::move(combined);
             break;
         }
+
+        case FeatureKind::Move:
+        case FeatureKind::Rotate:
+            // Where the object stands, not what it is: the body goes through
+            // untouched, and the scene composes these onto its placement.
+            break;
+
+        case FeatureKind::Scale:
+            if (body.empty()) { fail("there is no body yet to scale"); break; }
+            if (!(f.scaleBy.x > 0.0) || !(f.scaleBy.y > 0.0) || !(f.scaleBy.z > 0.0)) {
+                fail("a scale has to be above zero every way: a negative one is a mirror");
+                break;
+            }
+            if (!body.scale(f.scaleBy, f.scaleAbout)) fail("the body could not be scaled");
+            break;
 
         case FeatureKind::BaseMesh:
             if (f.bakedBody.empty()) fail("no geometry");

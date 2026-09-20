@@ -126,7 +126,7 @@ bool eyeToggle(const char* id, bool& visible, float sizePx) {
     const ImU32 col = visible ? u32(palette::kText, hovered ? 1.0f : 0.85f)
                               : u32(palette::kTextDim, hovered ? 1.0f : 0.8f);
     drawGlyph(ImGui::GetWindowDrawList(), visible ? Glyph::Eye : Glyph::EyeOff,
-              ImVec2(at.x + size.x * 0.5f, at.y + size.y * 0.5f), sizePx, col, 1.3f);
+              ImVec2(at.x + size.x * 0.5f, at.y + size.y * 0.5f), sizePx, col);
     if (hovered) ImGui::SetTooltip("%s", visible ? "Shown. Click to hide." : "Hidden. Click to show.");
     ImGui::PopID();
     return clicked;
@@ -142,7 +142,7 @@ bool closeButton(const char* id, float sizePx) {
     if (hovered)
         dl->AddRectFilled(at, ImVec2(at.x + size.x, at.y + size.y), u32(palette::kBrand, 0.2f), 4.0f);
     drawGlyph(dl, Glyph::Close, ImVec2(at.x + size.x * 0.5f, at.y + size.y * 0.5f), sizePx,
-              hovered ? u32(palette::kBrand) : u32(palette::kTextDim), 1.5f);
+              hovered ? u32(palette::kBrand) : u32(palette::kTextDim));
     ImGui::PopID();
     return clicked;
 }
@@ -270,7 +270,7 @@ bool menuEntry(Glyph g, const char* label, const char* shortcut, bool enabled, b
     const ImU32 textCol = u32(selected ? palette::kBrand : palette::kText, alpha);
     if (g != Glyph::Count)
         drawGlyph(dl, g, ImVec2(at.x + 8.0f + 9.0f, at.y + h * 0.5f), 16.0f,
-                  u32(selected ? palette::kBrand : palette::kTextDim, alpha), 1.4f);
+                  u32(selected ? palette::kBrand : palette::kTextDim, alpha));
     dl->AddText(ImVec2(at.x + 34.0f, at.y + (h - ImGui::GetTextLineHeight()) * 0.5f), textCol, label);
     if (shortcut && *shortcut) {
         pushFont(FontWeight::Regular, uiFonts().size * 0.86f);
@@ -296,7 +296,7 @@ bool menuToggle(Glyph g, const char* label, bool* value, const char* shortcut) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     if (hovered) dl->AddRectFilled(at, ImVec2(at.x + w, at.y + h), u32(palette::kHover), 5.0f);
     if (g != Glyph::Count)
-        drawGlyph(dl, g, ImVec2(at.x + 17.0f, at.y + h * 0.5f), 16.0f, u32(palette::kTextDim), 1.4f);
+        drawGlyph(dl, g, ImVec2(at.x + 17.0f, at.y + h * 0.5f), 16.0f, u32(palette::kTextDim));
     dl->AddText(ImVec2(at.x + 34.0f, at.y + (h - ImGui::GetTextLineHeight()) * 0.5f),
                 u32(palette::kText), label);
 

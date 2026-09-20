@@ -326,6 +326,47 @@ int main() {
         check(near(u.health(false).volume, 24000.0), "with the body untouched");
     }
 
+    std::printf("--- scaling the top of a boss leaves its foot where it was ---\n");
+    {
+        // A 40 x 30 x 20 box, its top inset by 3 and the middle pulled up 14:
+        // a 34 x 24 boss. Grown by half, the boss is a frustum from 34 x 24 at
+        // its foot to 51 x 36 at the top -- 14/6 x (816 + 4x1275 + 1836) =
+        // 18088 -- on a box that is not touched. The walls used to pivot about
+        // the bottom of the whole box, and their foot slid out across the top.
+        Body b = makeBox(40, 30, 20);
+        std::string why;
+        std::vector<FaceId> inner;
+        check(insetFaces(b, {facing(b, {0, 0, 1})}, 3.0, &inner, 4711, &why), "inset: " + why);
+        const Real ztop = b.bounds().max.z;
+        const AABB boxBefore = b.bounds();
+        std::vector<FaceId> top;
+        check(!inner.empty() && extrudeFaces(b, {inner.front()}, 14.0, &top, 4712, ExtrudeOp::Join,
+                                             &why, false),
+              "boss: " + why);
+        check(!top.empty() && scaleFaces(b, {top.front()}, 1.5, 4713, &why), "scaled: " + why);
+        check(b.validate(), "still a solid");
+        check(near(b.health(false).volume, 24000.0 + 18088.0, 1.0),
+              "42088 mm3, got " + std::to_string(b.health(false).volume));
+
+        // Every corner at the height of the box's top is where it was: the
+        // box's own four and the boss's foot, 3 in from them.
+        int foot = 0, moved = 0;
+        for (VertexId v = 0; v < b.vertexCount(); ++v) {
+            if (!b.hasVertex(v)) continue;
+            const Vec3 p = b.vertexPosition(v);
+            if (!near(p.z, ztop, 1e-3)) continue;
+            const bool outer = (near(p.x, boxBefore.min.x, 1e-3) || near(p.x, boxBefore.max.x, 1e-3)) &&
+                               (near(p.y, boxBefore.min.y, 1e-3) || near(p.y, boxBefore.max.y, 1e-3));
+            const bool inset = (near(p.x, boxBefore.min.x + 3, 1e-3) || near(p.x, boxBefore.max.x - 3, 1e-3)) &&
+                               (near(p.y, boxBefore.min.y + 3, 1e-3) || near(p.y, boxBefore.max.y - 3, 1e-3));
+            if (inset) ++foot;
+            else if (!outer) ++moved;
+        }
+        check(foot == 4, "the boss's four foot corners stayed put, found " + std::to_string(foot));
+        check(moved == 0, "and nothing else at that height moved, found " + std::to_string(moved));
+        std::printf("  %.1f mm3, %d foot corners in place\n", b.health(false).volume, foot);
+    }
+
     std::printf("--- a divide splits faces without splitting the body ---\n");
     {
         Body b = makeBox(30, 20, 10);

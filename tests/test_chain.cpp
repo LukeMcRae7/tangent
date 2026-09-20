@@ -344,7 +344,8 @@ int main() {
         Scene s;
         const ObjectId id = s.addImportedBody(solid, "bracket");
         check(id != kNoObject, "comes in as an object");
-        s.find(id)->transform.position = {5, 6, 7};
+        // Where it was brought in: the placement its history starts from.
+        s.setBasePlacement(id, Transform{{5, 6, 7}, Quat{}, {1, 1, 1}});
 
         const std::string path = tempPath("chain_import.tgt");
         check(saveProject(s, path).ok, "saved");

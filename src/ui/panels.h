@@ -43,9 +43,19 @@ struct UiActions {
     ObjectId      rebuildObject = kNoObject;
     PrimitiveSpec specBefore;
 
-    // Set when an inspector transform field was dragged.
+    // Set when an inspector transform field was dragged. The application
+    // turns what it came to into a Move, Rotate or Scale in the history.
     ObjectId  transformEdited = kNoObject;
     Transform transformBefore;
+
+    // Back to the origin, unturned, at full size -- as steps, like any other
+    // move.
+    ObjectId  resetTransform = kNoObject;
+
+    // A body's row in the outliner was clicked: what Ctrl+clicking the body
+    // in the view does. Shift or Ctrl on the row adds or takes away.
+    ObjectId  pickObject = kNoObject;
+    bool      pickObjectAdditive = false;
 
     bool undo = false;
     bool redo = false;
@@ -60,9 +70,11 @@ struct UiActions {
     bool exportStep = false;
     bool importStep = false;
     bool importMesh = false;
+    bool importSvg = false;
     bool convertToSolid = false;
     bool pushPull = false;
     bool extrude = false;
+    bool extrudeCut = false;       // Shift+E: an extrude with Cut already picked
     bool rotateFace = false;
     bool scaleFace = false;
     bool divide = false;

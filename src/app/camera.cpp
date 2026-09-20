@@ -100,6 +100,11 @@ void Camera::anglesFor(Vec3 dir, float& yawRad, float& pitchRad) {
     // hand and stays valid there, but going past would tumble the view.
     pitchRad = clampf(std::asin(clampf(static_cast<float>(d.z), -1.0f, 1.0f)),
                       -kPitchLimit, kPitchLimit);
+    // Straight up or down, any yaw looks the same way, and atan2(0, -0) is pi:
+    // the top view came out half a turn round, x to the left and y down the
+    // screen, so a sketch -- and an imported drawing -- read upside down. Yaw
+    // 0 is the front view tipped over, x to the right and y up.
+    if (std::hypot(d.x, d.y) < 1e-6) { yawRad = 0.0f; return; }
     yawRad = std::atan2(static_cast<float>(d.x), static_cast<float>(-d.y));
 }
 

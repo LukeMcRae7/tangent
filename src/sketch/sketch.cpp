@@ -37,15 +37,19 @@ namespace {
 // The name this file has always used internally.
 const char* ruleName(SketchRule rule) { return sketchRuleName(rule); }
 
-template <class T>
-auto findById(std::vector<T>& v, SketchId id) {
-    auto it = std::find_if(v.begin(), v.end(), [id](const T& x) { return x.id == id; });
-    return it == v.end() ? nullptr : &*it;
-}
-template <class T>
-auto findById(const std::vector<T>& v, SketchId id) {
-    auto it = std::find_if(v.begin(), v.end(), [id](const T& x) { return x.id == id; });
-    return it == v.end() ? nullptr : &*it;
+// Ids are handed out in increasing order and everything is appended, so each
+// list is sorted by id and a lookup is a binary search: an imported drawing has
+// tens of thousands of points, and every sample of every curve looks up its
+// control points. A list put together some other way still finds what is in
+// it, by looking through the whole of it.
+template <class V>
+auto findById(V& v, SketchId id) -> decltype(&v[0]) {
+    auto it = std::lower_bound(v.begin(), v.end(), id,
+                               [](const auto& x, SketchId want) { return x.id < want; });
+    if (it != v.end() && it->id == id) return &*it;
+    if (id == kNoSketchId) return nullptr;
+    auto any = std::find_if(v.begin(), v.end(), [id](const auto& x) { return x.id == id; });
+    return any == v.end() ? nullptr : &*any;
 }
 
 } // namespace
@@ -178,6 +182,30 @@ struct SketchSolver::Impl {
     double* dragRadius = nullptr;
     bool dragActive = false;
 
+    // What some constraint reaches. Only these go to the solver as unknowns:
+    // everything else is free by definition and nothing can move it, and
+    // handing the solver an imported drawing's fifteen thousand coordinates
+    // for the sake of a dozen level lines made its diagnosis take a second.
+    std::unordered_set<const double*> used;
+    size_t undeclared = 0;
+    // A drag of something no constraint reaches moves it directly.
+    GCS::Point* directPoint = nullptr;
+    double* directRadius = nullptr;
+
+    void use(const GCS::Point& p) { used.insert(p.x); used.insert(p.y); }
+    void use(const GCS::Line& l) { use(l.p1); use(l.p2); }
+    void use(const GCS::Circle& c) { use(c.center); used.insert(c.rad); }
+    void use(const GCS::Arc& a) {
+        use(a.center); use(a.start); use(a.end);
+        used.insert(a.rad); used.insert(a.startAngle); used.insert(a.endAngle);
+    }
+    // Whichever of these `id` is.
+    void useEntity(SketchId id) {
+        if (GCS::Line* l = L(id)) use(*l);
+        if (GCS::Circle* c = C(id)) use(*c);
+        if (GCS::Arc* a = A(id)) use(*a);
+    }
+
     explicit Impl(Sketch& s) : sketch(s) { build(); }
 
     double* unknown(double v) {
@@ -256,6 +284,7 @@ void SketchSolver::Impl::build() {
             // Tagged 0: it belongs to the arc rather than to anything a person
             // said, so a diagnosis never names it.
             sys.addConstraintArcRules(arc, 0);
+            use(arc);
             arcs[e.id] = arc;
             break;
         }
@@ -278,13 +307,18 @@ void SketchSolver::Impl::build() {
         }
     }
 
-    sys.declareUnknowns(unknowns);
+    std::vector<double*> declared;
+    declared.reserve(used.size());
+    for (double* u : unknowns)
+        if (used.count(u)) declared.push_back(u);
+    undeclared = unknowns.size() - declared.size();
+    sys.declareUnknowns(declared);
     sys.initSolution();
 
     // What is free and what disagrees is a property of how the sketch is put
     // together, not of the numbers in it, so it is found once here rather than
     // on every solve.
-    freedoms = sys.dofsNumber();
+    freedoms = sys.dofsNumber() + static_cast<int>(undeclared);
     GCS::VEC_I bad, again;
     sys.getConflicting(bad);
     sys.getRedundant(again);
@@ -302,12 +336,14 @@ void SketchSolver::Impl::build() {
     // the one planegcs reports as an empty diagnosis rather than as a list.
     std::unordered_set<const double*> loose;
     if (sys.isEmptyDiagnoseMatrix()) {
-        for (const double* p : unknowns) loose.insert(p);
+        for (const double* p : declared) loose.insert(p);
     } else {
         GCS::VEC_pD dependent;
         sys.getDependentParams(dependent);
         loose.insert(dependent.begin(), dependent.end());
     }
+    for (const double* p : unknowns)
+        if (!used.count(p)) loose.insert(p);
 
     for (const SketchPoint& p : sketch.points) {
         const GCS::Point* g = P(p.id);
@@ -325,10 +361,20 @@ void SketchSolver::Impl::build() {
                    loose.count(a->endAngle);
         if (free) freeEntities.push_back(e.id);
     }
+    // Sorted, so a sketch of thousands of points can be asked about each one
+    // every frame without searching the whole list each time.
+    std::sort(freePoints.begin(), freePoints.end());
+    std::sort(freeEntities.begin(), freeEntities.end());
 }
 
 bool SketchSolver::Impl::addConstraint(const SketchConstraint& k) {
     const int tag = static_cast<int>(k.id);
+    // What it names, point or curve, is reached by it.
+    for (SketchId named : {k.first, k.second}) {
+        if (named == kNoSketchId) continue;
+        if (GCS::Point* p = P(named)) use(*p);
+        useEntity(named);
+    }
     switch (k.rule) {
     case SketchRule::Coincident: {
         GCS::Point* p = P(k.first);
@@ -505,6 +551,11 @@ bool SketchSolver::beginDrag(SketchId point) {
     if (!m.buildError.empty() || m.dragActive) return false;
     GCS::Point* p = m.P(point);
     if (!p) return false;
+    if (!m.used.count(p->x)) {
+        m.directPoint = p;
+        m.dragActive = true;
+        return true;
+    }
     // One pair of doubles for the life of the solver: the target is written
     // over on every drag rather than allocated again.
     if (!m.dragTarget.x) {
@@ -527,6 +578,12 @@ bool SketchSolver::beginRadiusDrag(SketchId entity) {
     GCS::Arc* a = m.A(entity);
     if (!c && !a) return false;
     const double now = c ? *c->rad : *a->rad;
+    double* rad = c ? c->rad : a->rad;
+    if (!m.used.count(rad)) {
+        m.directRadius = rad;
+        m.dragActive = true;
+        return true;
+    }
     if (!m.dragRadius) m.dragRadius = m.fixed(now);
     else               *m.dragRadius = now;
     if (c) m.sys.addConstraintCircleRadius(*c, m.dragRadius, GCS::DefaultTemporaryConstraint);
@@ -538,6 +595,12 @@ bool SketchSolver::beginRadiusDrag(SketchId entity) {
 
 bool SketchSolver::dragTo(Vec2 at) {
     Impl& m = *impl_;
+    if (m.dragActive && m.directPoint) {
+        *m.directPoint->x = at.x;
+        *m.directPoint->y = at.y;
+        m.readBack();
+        return true;
+    }
     if (!m.dragActive || !m.dragTarget.x) return false;
     *m.dragTarget.x = at.x;
     *m.dragTarget.y = at.y;
@@ -551,6 +614,11 @@ bool SketchSolver::dragTo(Vec2 at) {
 
 bool SketchSolver::dragRadiusTo(Real radius) {
     Impl& m = *impl_;
+    if (m.dragActive && m.directRadius) {
+        *m.directRadius = std::max(radius, 1e-6);
+        m.readBack();
+        return true;
+    }
     if (!m.dragActive || !m.dragRadius) return false;
     *m.dragRadius = std::max(radius, 1e-6);
     if (m.sys.solve(false, GCS::DogLeg) != GCS::Success) return false;
@@ -562,6 +630,12 @@ bool SketchSolver::dragRadiusTo(Real radius) {
 void SketchSolver::endDrag() {
     Impl& m = *impl_;
     if (!m.dragActive) return;
+    if (m.directPoint || m.directRadius) {
+        m.directPoint = nullptr;
+        m.directRadius = nullptr;
+        m.dragActive = false;
+        return;
+    }
     m.sys.clearByTag(GCS::DefaultTemporaryConstraint);
     m.sys.initSolution();
     m.dragActive = false;
@@ -611,12 +685,13 @@ bool endsOf(const SketchEntity& e, SketchId& s, SketchId& t) {
 // Points along an entity in the direction it is traversed. Exact at the ends
 // and sampled between them: enough to tell which loop lies inside which, and to
 // measure an area, neither of which needs to be exact to the micron.
-void sampleInto(const Sketch& sk, const SketchEntity& e, bool reversed, std::vector<Vec2>& out) {
+void sampleInto(const Sketch& sk, const SketchEntity& e, bool reversed, std::vector<Vec2>& out,
+                int steps = 48) {
     auto at = [&](SketchId id) {
         const SketchPoint* p = sk.point(id);
         return p ? p->at : Vec2{};
     };
-    constexpr int kSteps = 48;
+    const int kSteps = std::max(steps, 1);
     std::vector<Vec2> pts;
     switch (e.curve) {
     case SketchCurve::Line:
@@ -669,6 +744,50 @@ Real shoelace(const std::vector<Vec2>& poly) {
         twice += a.x * b.y - b.x * a.y;
     }
     return twice * 0.5;
+}
+
+struct Box {
+    Vec2 lo{1e300, 1e300}, hi{-1e300, -1e300};
+    bool has(Vec2 p) const { return p.x >= lo.x && p.x <= hi.x && p.y >= lo.y && p.y <= hi.y; }
+};
+
+// A point strictly inside a loop, for asking whether the loop lies inside
+// another. Not a point on it: two loops that touch -- the lobes of a figure of
+// eight, a letter's serif meeting the next -- share points, and a shared point
+// is on the other loop's boundary, where inside and out is a coin toss. Found
+// across the loop's middle height, between the first two places it is crossed.
+Vec2 interiorPoint(const std::vector<Vec2>& poly) {
+    if (poly.size() < 3) return poly.empty() ? Vec2{} : poly.front();
+    Real lo = 1e300, hi = -1e300;
+    for (Vec2 p : poly) { lo = std::min(lo, p.y); hi = std::max(hi, p.y); }
+    // A little off the exact middle, so the line does not run through a
+    // vertex of a symmetric shape.
+    for (Real f : {0.5 + 1.0 / 7919.0, 0.37 + 1.0 / 104729.0, 0.63 + 1.0 / 7727.0}) {
+        const Real y = lo + (hi - lo) * f;
+        std::vector<Real> xs;
+        for (size_t i = 0, n = poly.size(); i < n; ++i) {
+            const Vec2 a = poly[i], b = poly[(i + 1) % n];
+            if ((a.y > y) == (b.y > y)) continue;
+            xs.push_back(a.x + (y - a.y) * (b.x - a.x) / (b.y - a.y));
+        }
+        std::sort(xs.begin(), xs.end());
+        // The widest span inside, the safest place for the point.
+        Real best = -1;
+        Vec2 at{};
+        for (size_t i = 0; i + 1 < xs.size(); i += 2)
+            if (xs[i + 1] - xs[i] > best) { best = xs[i + 1] - xs[i]; at = {(xs[i] + xs[i + 1]) * 0.5, y}; }
+        if (best > 0) return at;
+    }
+    return poly.front();
+}
+
+Box boxOf(const std::vector<Vec2>& poly) {
+    Box b;
+    for (Vec2 p : poly) {
+        b.lo = {std::min(b.lo.x, p.x), std::min(b.lo.y, p.y)};
+        b.hi = {std::max(b.hi.x, p.x), std::max(b.hi.y, p.y)};
+    }
+    return b;
 }
 
 bool inside(Vec2 p, const std::vector<Vec2>& poly) {
@@ -776,13 +895,21 @@ std::vector<SketchProfile> sketchProfiles(const Sketch& sk) {
         if (polys[i].size() >= 3 && std::fabs(loops[i].signedArea) > 1e-12) live.push_back(i);
 
     // The nearest loop around each one, which is the region it is a hole in.
+    // A loop's box is looked at before the loop itself: most pairs of letters
+    // in a drawing are nowhere near each other.
+    std::vector<Box> boxes(loops.size());
+    std::vector<Vec2> probe(loops.size());
+    for (size_t i : live) {
+        boxes[i] = boxOf(polys[i]);
+        probe[i] = interiorPoint(polys[i]);
+    }
     std::vector<int> parent(loops.size(), -1);
     for (size_t i : live) {
         for (size_t j : live) {
             if (i == j) continue;
             const Real ai = std::fabs(loops[i].signedArea);
             const Real aj = std::fabs(loops[j].signedArea);
-            if (aj <= ai || !inside(polys[i].front(), polys[j])) continue;
+            if (aj <= ai || !boxes[j].has(probe[i]) || !inside(probe[i], polys[j])) continue;
             if (parent[i] < 0 || aj < std::fabs(loops[static_cast<size_t>(parent[i])].signedArea))
                 parent[i] = static_cast<int>(j);
         }
@@ -811,9 +938,33 @@ std::vector<SketchProfile> sketchProfiles(const Sketch& sk) {
     return profiles;
 }
 
-std::vector<Vec2> sketchEntityPoints(const Sketch& sketch, const SketchEntity& entity) {
+std::vector<SketchId> sketchFilledProfiles(const Sketch& sketch,
+                                           const std::vector<SketchProfile>& profiles) {
+    std::vector<std::vector<Vec2>> outer(profiles.size());
+    std::vector<Real> area(profiles.size());
+    std::vector<Box> boxes(profiles.size());
+    for (size_t i = 0; i < profiles.size(); ++i) {
+        outer[i] = sketchLoopPoints(sketch, profiles[i].outer);
+        area[i] = std::fabs(profiles[i].outer.signedArea);
+        boxes[i] = boxOf(outer[i]);
+    }
+    std::vector<Vec2> probe(profiles.size());
+    for (size_t i = 0; i < profiles.size(); ++i) probe[i] = interiorPoint(outer[i]);
+    std::vector<SketchId> out;
+    for (size_t i = 0; i < profiles.size(); ++i) {
+        if (outer[i].empty()) continue;
+        int around = 0;
+        for (size_t j = 0; j < profiles.size(); ++j)
+            if (j != i && area[j] > area[i] && boxes[j].has(probe[i]) && inside(probe[i], outer[j]))
+                ++around;
+        if (around % 2 == 0) out.push_back(profiles[i].key);
+    }
+    return out;
+}
+
+std::vector<Vec2> sketchEntityPoints(const Sketch& sketch, const SketchEntity& entity, int steps) {
     std::vector<Vec2> out;
-    sampleInto(sketch, entity, false, out);
+    sampleInto(sketch, entity, false, out, steps);
     return out;
 }
 

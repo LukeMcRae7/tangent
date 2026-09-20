@@ -76,7 +76,7 @@ bool beginCommand(const char* id, const char* title, Glyph glyph, const char* co
     const float box = line + 6.0f;
     dl->AddRectFilled(at, ImVec2(at.x + box, at.y + box), u32(palette::kBrand), 5.0f);
     drawGlyph(dl, glyph, ImVec2(at.x + box * 0.5f, at.y + box * 0.5f), line * 0.95f,
-              IM_COL32(255, 255, 255, 255), 1.5f);
+              IM_COL32(255, 255, 255, 255));
     ImGui::Dummy(ImVec2(box, box));
     ImGui::SameLine(0.0f, 9.0f);
     ImGui::AlignTextToFramePadding();
@@ -255,7 +255,7 @@ int commandChoices(const char* label, const Choice* choices, int count, int acti
         dl->AddRectFilled(at, hi, on ? u32(palette::kBrand)
                                      : hovered ? u32(palette::kHover) : u32(palette::kRaised), 7.0f);
         const ImU32 fg = on ? IM_COL32(255, 255, 255, 255) : u32(palette::kText);
-        drawGlyph(dl, choices[i].glyph, ImVec2(at.x + each * 0.5f, at.y + 22.0f), 24.0f, fg, 1.7f);
+        drawGlyph(dl, choices[i].glyph, ImVec2(at.x + each * 0.5f, at.y + 22.0f), 24.0f, fg);
 
         pushFont(FontWeight::Medium, uiFonts().size * 0.92f);
         const ImVec2 ls = ImGui::CalcTextSize(choices[i].label);

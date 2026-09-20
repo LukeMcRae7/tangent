@@ -29,10 +29,29 @@ struct Transform {
     }
 };
 
+// Where the history puts an object that started at `base`: every Move and
+// Rotate in it, in order, the ones turned off left out.
+Transform placementOf(const Transform& base, const std::vector<Feature>& features);
+
+// How much bigger the history has made the body along each of its own axes:
+// every Scale step, multiplied together. What the inspector calls its scale.
+Vec3 scaleOf(const std::vector<Feature>& features);
+
 struct SceneObject {
     ObjectId      id = kNoObject;
     std::string   name;
+
+    // Where the object is. Derived, not set: `base` is where it was made --
+    // the point a box was drawn at, the plane a part was drawn on -- and the
+    // Move and Rotate steps in its history take it on from there. Scene keeps
+    // the two in step every time the chain changes; anything that sets
+    // `transform` directly is showing something, like a gesture in progress,
+    // and the next evaluation puts it back where the history says.
+    //
+    // The scale is always one, but for the moment a Scale gesture is being
+    // dragged: a scale is a change of shape, so it is a step in the chain.
     Transform     transform;
+    Transform     base;
     PrimitiveSpec spec;
 
     // The chain the mesh is evaluated from. The first entry is the base
@@ -48,9 +67,15 @@ struct SceneObject {
     AABB       localBounds;
     bool       visible = true;
 
-    // Bumped on every geometry change; the renderer re-uploads when it differs
-    // from the version it last saw.
+    // Bumped whenever `render` changes, for any reason; the renderer re-uploads
+    // when it differs from the version it last saw.
     uint32_t meshVersion = 1;
+
+    // Bumped when the body itself changes -- not when the same body is merely
+    // drawn at a different tolerance. What is worked out from the geometry, and
+    // costs real time, hangs off this: the printability check and the health
+    // report are about the part, and a zoom does not change the part.
+    uint32_t geometryVersion = 1;
 
     // The chord tolerance `render` was built at, or 0 for "whatever the backend
     // chose". An exact body is re-tessellated as the view changes -- see
@@ -96,6 +121,7 @@ struct SceneObject {
             }
         }
         ++meshVersion;
+        ++geometryVersion;
     }
     AABB worldBounds() const;
     void markMeshChanged() { ++meshVersion; }
@@ -225,6 +251,27 @@ public:
     // it makes. The feature must arrive with that uid already set.
     void addFeatureWithResult(ObjectId id, Feature feature, Body result);
 
+    // Sets where an object was made, and puts it where its history then says.
+    // For creation -- a box drawn at a point, a part on a plane -- and for a
+    // file, never for moving something the user has placed: that is a Move.
+    void setBasePlacement(ObjectId id, const Transform& base);
+
+    // Moving, turning and scaling a whole object, as steps in its history.
+    //
+    // Each folds into the step before it when that is the same kind of step --
+    // and, for a turn or a scale, about the same point -- so nudging an object
+    // about leaves one Move behind rather than one per nudge, the way a fillet
+    // added to next to another becomes part of it. A step folded back to
+    // nothing is removed. Placement is cheap: a move or a turn changes no
+    // geometry, so nothing is rebuilt. A scale is a change of shape and is
+    // built like any other; false, with the reason, if it cannot be.
+    bool recordMove(ObjectId id, Vec3 by);
+    bool recordRotate(ObjectId id, Quat turn, Vec3 aboutWorld);
+    bool recordScale(ObjectId id, Vec3 factors, Vec3 aboutLocal, std::string* error = nullptr);
+
+    // Puts an object where its base and its history say it is.
+    void place(SceneObject& obj) const { obj.transform = placementOf(obj.base, obj.features); }
+
     // For serialisation, which has to preserve the counter alongside the
     // features it has already handed numbers to.
     uint64_t nextFeatureUid() const { return nextFeatureUid_; }
@@ -278,6 +325,15 @@ public:
     // Nearest surface hit along the ray, in world space.
     RayHit raycast(const Ray& ray) const;
 
+    // Every surface the ray meets at the nearest depth, one hit per body.
+    //
+    // Usually one. More where faces of different bodies lie in the same plane
+    // -- two parts flush on the build plate, a copy left where the original
+    // is -- and fight over the same pixels, so that whichever the depth buffer
+    // happens to draw is no guide to which a click means. The caller cycles
+    // through them. In scene order, so the cycle is the same every time.
+    std::vector<RayHit> raycastCoincident(const Ray& ray) const;
+
     // Resolves a click to the specific vertex, edge or face under the cursor,
     // the way a CAD tool does: whatever is nearest in *screen* space wins, with
     // vertices beating edges beating the face behind them. Tolerances are in
@@ -288,6 +344,13 @@ public:
     ElementHit pickElement(const Ray& ray, const Mat4& viewProj,
                            int viewportW, int viewportH, Vec2 cursorPx,
                            float vertexTolPx = 16.0f, float edgeTolPx = 12.0f) const;
+
+    // Everything a click could mean there: what pickElement would choose on
+    // each body raycastCoincident finds, each once. The first is what
+    // pickElement returns.
+    std::vector<ElementHit> pickElements(const Ray& ray, const Mat4& viewProj,
+                                         int viewportW, int viewportH, Vec2 cursorPx,
+                                         float vertexTolPx = 16.0f, float edgeTolPx = 12.0f) const;
 
     // ---- Sub-object selection --------------------------------------------
     const std::vector<ElementRef>& elementSelection() const { return elements_; }

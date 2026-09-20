@@ -660,7 +660,7 @@ void testSection8_SceneLifecycleAndTransforms() {
 
         // Key 'E' in ExtrudeDepth finishes creation
         tool.handleKey('E', false, false, camera, scene, undo);
-        check(tool.stage() == CreateStage::None, "'E' finishes creation");
+        check(!tool.active() && tool.applied(), "'E' finishes creation, and the panel stays to adjust it");
         check(scene.objectCount() == 1, "object created via E shortcuts");
     }
 }
@@ -904,15 +904,18 @@ void testSection10_CreateOperation() {
         tool.setStage(CreateStage::ExtrudeDepth);
     };
 
-    // 10.1 Auto is what it always was
+    // 10.1 Until one is picked, the drag decides; picking one ends that
     {
         Scene scene; Camera camera; UndoStack undo; CreateTool tool; ObjectId id;
         onTopFace(scene, camera, tool, id);
         tool.setExtrudeDepth(10.0);
-        check(tool.op() == CreateOp::Auto, "the tool starts on Auto");
-        check(tool.resolvedOp() == CreateOp::Join, "auto + outward = join");
+        check(tool.opFollowsDrag(), "the operation follows the drag until one is picked");
+        check(tool.op() == ExtrudeOp::Join, "outward joins");
         tool.setExtrudeDepth(-10.0);
-        check(tool.resolvedOp() == CreateOp::Cut, "auto + inward = cut");
+        check(tool.op() == ExtrudeOp::Cut, "inward cuts");
+        tool.setOp(ExtrudeOp::Join);
+        check(!tool.opFollowsDrag(), "picking one stops the drag deciding");
+        check(tool.op() == ExtrudeOp::Join, "and it stays what was picked");
     }
 
     // 10.2 Join, forced, on an inward depth
@@ -920,7 +923,7 @@ void testSection10_CreateOperation() {
         Scene scene; Camera camera; UndoStack undo; CreateTool tool; ObjectId id;
         onTopFace(scene, camera, tool, id);
         tool.setExtrudeDepth(10.0);
-        tool.setOp(CreateOp::Join);
+        tool.setOp(ExtrudeOp::Join);
         check(tool.finishCreation(scene, camera, undo), "forced join succeeds");
         check(scene.objectCount() == 1, "join does not add a body");
         check(near(volumeOf(scene.find(id)->body), kBox + kStub), "join adds the stub's volume");
@@ -931,7 +934,7 @@ void testSection10_CreateOperation() {
         Scene scene; Camera camera; UndoStack undo; CreateTool tool; ObjectId id;
         onTopFace(scene, camera, tool, id);
         tool.setExtrudeDepth(-10.0);
-        tool.setOp(CreateOp::Cut);
+        tool.setOp(ExtrudeOp::Cut);
         check(tool.finishCreation(scene, camera, undo), "forced cut succeeds");
         check(scene.objectCount() == 1, "cut does not add a body");
         check(near(volumeOf(scene.find(id)->body), kBox - kStub), "cut removes the stub's volume");
@@ -942,7 +945,7 @@ void testSection10_CreateOperation() {
         Scene scene; Camera camera; UndoStack undo; CreateTool tool; ObjectId id;
         onTopFace(scene, camera, tool, id);
         tool.setExtrudeDepth(depth);
-        tool.setOp(CreateOp::NewBody);
+        tool.setOp(ExtrudeOp::NewBody);
         const std::string what = depth > 0 ? "outward" : "inward";
         check(tool.finishCreation(scene, camera, undo), "new body (" + what + ") succeeds");
         check(scene.objectCount() == 2, "new body adds a second object (" + what + ")");
@@ -960,15 +963,114 @@ void testSection10_CreateOperation() {
         tool.setProfileRect({-5, -5}, {5, 5}, 0.0);
         tool.setExtrudeDepth(10.0);
         tool.setStage(CreateStage::ExtrudeDepth);
-        check(tool.resolvedOp() == CreateOp::NewBody, "outward from an origin plane is a new body");
+        check(tool.op() == ExtrudeOp::NewBody, "outward from an origin plane is a new body");
 
         // ...but pushing into an origin plane still cuts whatever is under it,
         // which is how a hole gets drilled from a construction plane.
         tool.setExtrudeDepth(-10.0);
-        check(tool.resolvedOp() == CreateOp::Cut, "inward from an origin plane still cuts");
+        check(tool.op() == ExtrudeOp::Cut, "inward from an origin plane still cuts");
     }
 }
 
+
+// ===========================================================================
+// SECTION 10b: Intersect, several bodies, and adjusting once applied
+// ===========================================================================
+void testSection10b_Reach() {
+    std::printf("\n--- Section 10b: Intersect, the bodies reached, applied ---\n");
+    if (!brep::available()) { std::printf("  (needs the exact kernel)\n"); return; }
+
+    // Two 20mm boxes side by side along X with a gap between, and a 30 x 10
+    // slot drawn on the ground plane under both, pushed up through them.
+    auto twoBoxes = [](Scene& scene, ObjectId& a, ObjectId& b) {
+        a = scene.addPrimitive(PrimitiveKind::Box, {}, {-15, 0, 10});
+        b = scene.addPrimitive(PrimitiveKind::Box, {}, {15, 0, 10});
+    };
+    auto slot = [](Scene& scene, Camera& camera, CreateTool& tool) {
+        tool.start(PrimitiveKind::Box);
+        tool.setHoveredPlane(PlaneChoice::XY, {0, 0, 0}, {0, 0, 1});
+        tool.commitPlaneSelection(camera);
+        tool.setProfileRect({-20, -5}, {20, 5}, 0.0);
+        tool.setStage(CreateStage::ExtrudeDepth);
+        tool.setExtrudeDepth(30.0);
+        tool.refreshReach(scene);
+    };
+    const double kBox = 20.0 * 20.0 * 20.0;
+
+    // 10b.1 A cut reaches both bodies and cuts both
+    {
+        Scene scene; Camera camera; UndoStack undo; CreateTool tool; ObjectId a, b;
+        twoBoxes(scene, a, b);
+        slot(scene, camera, tool);
+        tool.setOp(ExtrudeOp::Cut);
+        tool.refreshReach(scene);
+        check(tool.reach().bodies().size() == 2, "the slot reaches both boxes");
+        check(tool.finishCreation(scene, camera, undo), "the cut is made");
+        // Each box loses 15 x 10 x 20 where the slot passes through it.
+        check(near(volumeOf(scene.find(a)->body), kBox - 3000.0), "the first box is cut");
+        check(near(volumeOf(scene.find(b)->body), kBox - 3000.0), "and so is the second");
+        check(tool.applied() && !tool.active(), "and the panel stays, applied, to adjust it");
+        check(undo.depth() == 1, "as one undo step");
+        undo.undo(scene);
+        check(near(volumeOf(scene.find(a)->body), kBox) && near(volumeOf(scene.find(b)->body), kBox),
+              "undo takes both cuts back");
+    }
+
+    // 10b.2 Leaving a body out leaves it alone
+    {
+        Scene scene; Camera camera; UndoStack undo; CreateTool tool; ObjectId a, b;
+        twoBoxes(scene, a, b);
+        slot(scene, camera, tool);
+        tool.setOp(ExtrudeOp::Cut);
+        tool.refreshReach(scene);
+        tool.toggleBody(b);
+        check(tool.finishCreation(scene, camera, undo), "the cut is made");
+        check(near(volumeOf(scene.find(a)->body), kBox - 3000.0), "the included box is cut");
+        check(near(volumeOf(scene.find(b)->body), kBox), "the excluded one is not");
+    }
+
+    // 10b.3 Intersect keeps what each body shares with the slot
+    {
+        Scene scene; Camera camera; UndoStack undo; CreateTool tool; ObjectId a, b;
+        twoBoxes(scene, a, b);
+        slot(scene, camera, tool);
+        tool.setOp(ExtrudeOp::Intersect);
+        check(tool.finishCreation(scene, camera, undo), "the intersect is made");
+        check(near(volumeOf(scene.find(a)->body), 3000.0), "the first box is what it shares");
+        check(near(volumeOf(scene.find(b)->body), 3000.0), "and the second");
+    }
+
+    // 10b.4 A join that reaches two bodies makes them one
+    {
+        Scene scene; Camera camera; UndoStack undo; CreateTool tool; ObjectId a, b;
+        twoBoxes(scene, a, b);
+        slot(scene, camera, tool);
+        tool.setOp(ExtrudeOp::Join);
+        check(tool.finishCreation(scene, camera, undo), "the join is made");
+        check(scene.objectCount() == 1, "the two boxes and the slot are one body");
+        const double joined = volumeOf(scene.objects().front()->body);
+        check(near(joined, 2 * kBox + 40.0 * 10.0 * 30.0 - 2 * 3000.0), "with the volume of all three");
+        undo.undo(scene);
+        check(scene.objectCount() == 2, "undo brings the second box back");
+    }
+
+    // 10b.5 Applied, a change is made again over the top: the recommit takes
+    // the last step's undo entry back first, as the application does.
+    {
+        Scene scene; Camera camera; UndoStack undo; CreateTool tool; ObjectId a, b;
+        twoBoxes(scene, a, b);
+        slot(scene, camera, tool);
+        tool.setOp(ExtrudeOp::Cut);
+        check(tool.finishCreation(scene, camera, undo), "the cut is made");
+        tool.setExtrudeDepth(10.0);
+        check(undo.undo(scene), "the application takes the cut back");
+        check(tool.recommit(scene, camera, undo), "and makes it again, shallower");
+        check(near(volumeOf(scene.find(a)->body), kBox - 15.0 * 10.0 * 10.0), "cut to the new depth");
+        check(undo.depth() == 1, "still one undo step");
+        tool.dismissApplied();
+        check(!tool.applied(), "Done puts the panel away");
+    }
+}
 
 // ===========================================================================
 // SECTION 11: Numeric Entry
@@ -1160,7 +1262,7 @@ static void testSection12_ParametricOnAnyPlane() {
         tool.setProfileCircle({0, 0}, 4.0);
         tool.setStage(CreateStage::ExtrudeDepth);
         tool.setExtrudeDepth(6.0);
-        tool.setOp(CreateOp::NewBody);
+        tool.setOp(ExtrudeOp::NewBody);
         check(tool.finishCreation(scene, camera, undo), "boss created as its own body");
 
         SceneObject* o = scene.objects().back().get();
@@ -1277,7 +1379,7 @@ static void testSection13_SnapToGeometry() {
         t3.handleMouseDown(rimPx, scene, camera, undo);
         check(t3.stage() == CreateStage::AdjustProfile, "and on to adjusting");
 
-        t3.setOp(CreateOp::NewBody);
+        t3.setOp(ExtrudeOp::NewBody);
         t3.setStage(CreateStage::ExtrudeDepth);
         t3.setExtrudeDepth(6.0);
         const size_t before = scene.objects().size();
@@ -1573,6 +1675,7 @@ int main() {
     testSection8_SceneLifecycleAndTransforms();
     testSection9_EditsLandInTheHistory();
     testSection10_CreateOperation();
+    testSection10b_Reach();
     testSection11_NumericEntry();
     testSection12_ParametricOnAnyPlane();
     testSection13_SnapToGeometry();

@@ -29,6 +29,28 @@ bool needsRetessellation(Real current, Real target, const LodPolicy& p) {
     return false;
 }
 
+std::vector<LodWant> tessellationWanted(const Scene& scene, const Camera& camera, const LodPolicy& p) {
+    std::vector<LodWant> wants;
+    for (const auto& obj : scene.objects()) {
+        const SceneObject* o = obj.get();
+        if (!o->visible || o->body.empty()) continue;
+        if (o->body.isMesh()) continue;                 // fixed at birth; nothing to do
+
+        const Real target = targetDeviation(*o, camera, p);
+        if (!needsRetessellation(o->renderDeviation, target, p)) continue;
+
+        const Real ratio = o->renderDeviation > 0.0
+                               ? std::max(o->renderDeviation / target, target / o->renderDeviation)
+                               : 1e9;
+        wants.push_back({o->id, target, ratio});
+    }
+    std::sort(wants.begin(), wants.end(),
+              [](const LodWant& a, const LodWant& b) { return a.ratio > b.ratio; });
+    if (static_cast<int>(wants.size()) > p.budgetPerFrame)
+        wants.resize(static_cast<size_t>(std::max(p.budgetPerFrame, 0)));
+    return wants;
+}
+
 int refreshTessellation(Scene& scene, const Camera& camera, const LodPolicy& p) {
     // Worst first: the body furthest from the tolerance it should have is the
     // one the user is most likely to be looking at the facets of.

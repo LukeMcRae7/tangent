@@ -17,7 +17,7 @@
 
 namespace tg {
 
-inline constexpr uint32_t kProjectVersion = 13;
+inline constexpr uint32_t kProjectVersion = 15;
 // 3: features name what they act on
 // 4: geometry is a tagged Body
 // 5: bodies may be exact, and say which kernel built them
@@ -27,6 +27,8 @@ inline constexpr uint32_t kProjectVersion = 13;
 // 9: a bevel may be a flat cut, and may taper along its edges
 // 12: a feature may be a sketch, or extrude a region of one
 // 13: a sketch can be shown or hidden, and an object may be nothing but sketches
+// 14: moves, turns and scales are steps in the history; an object records where
+//     it was made rather than where it is; a boolean names its tool
 
 // The oldest a file may be and still open. Reading an older format costs a
 // branch or two and keeps someone's work openable; writing one does not, so

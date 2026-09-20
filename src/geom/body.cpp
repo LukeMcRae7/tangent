@@ -2,6 +2,11 @@
 
 namespace tg {
 
+std::mutex& meshingLock() {
+    static std::mutex lock;
+    return lock;
+}
+
 // An edge is named by the lower of its two half-edges. That is a mesh-backend
 // detail and it stops here: every handle this file hands out is already
 // canonical, so no caller ever has to know the rule or apply it.
@@ -120,14 +125,28 @@ Vec3 Body::edgeDirection(EdgeId e) const {
     return normalize(b - a);
 }
 
-void Body::transform(const Mat4& m) {
+bool Body::transform(const Mat4& m) {
     if (brep_) {
         // A new shape rather than an edit: the old one may be held by a feature
         // cache, an undo entry, or another Body that copied this one.
-        brep_ = brep::transformed(*brep_, m);
-        return;
+        BrepRef moved = brep::transformed(*brep_, m);
+        if (!moved) return false;
+        brep_ = std::move(moved);
+        return true;
     }
+    // A mesh is its vertices, so any matrix is exact on it -- except one that
+    // reverses it, which would leave every triangle facing inward.
+    const Vec3 c0{m.col[0].x, m.col[0].y, m.col[0].z};
+    const Vec3 c1{m.col[1].x, m.col[1].y, m.col[1].z};
+    const Vec3 c2{m.col[2].x, m.col[2].y, m.col[2].z};
+    if (dot(c0, cross(c1, c2)) <= 0.0) return false;
     for (MeshVertex& v : mesh_.verts) v.position = transformPoint(m, v.position);
+    return true;
+}
+
+bool Body::scale(Vec3 factors, Vec3 pivot) {
+    if (!(factors.x > 0.0) || !(factors.y > 0.0) || !(factors.z > 0.0)) return false;
+    return transform(translate(pivot) * scaleMat(factors) * translate(-pivot));
 }
 
 bool Body::mirror(Vec3 planePoint, Vec3 planeNormal) {

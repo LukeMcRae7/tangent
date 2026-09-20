@@ -8,9 +8,10 @@ namespace tg {
 
 const char* booleanOpName(BooleanOp op) {
     switch (op) {
-        case BooleanOp::Union:        return "Union";
-        case BooleanOp::Difference:   return "Difference";
-        case BooleanOp::Intersection: return "Intersection";
+        // The words the interface uses for them, everywhere it uses them.
+        case BooleanOp::Union:        return "Join";
+        case BooleanOp::Difference:   return "Cut";
+        case BooleanOp::Intersection: return "Intersect";
     }
     return "Boolean";
 }
@@ -75,14 +76,19 @@ bool extrudeFaces(Body& body, const std::vector<FaceId>& faces, Real distance,
         // The exact backend sweeps the face and combines the result, so which
         // way the push goes decides whether that is a join or a cut. ExtrudeOp
         // says it outright when the caller knows better than the sign does.
+        //
+        // For the body the faces belong to there is one way each operation
+        // means anything: a join grows out of it, and a cut or an intersect
+        // goes into it. What they do to other bodies is the caller's, with the
+        // swept solid from sweptFaces.
         Real signed_ = distance;
-        if (op == ExtrudeOp::Cut && signed_ > 0) signed_ = -signed_;
+        if ((op == ExtrudeOp::Cut || op == ExtrudeOp::Intersect) && signed_ > 0) signed_ = -signed_;
         if (op == ExtrudeOp::Join && signed_ < 0) signed_ = -signed_;
 
         std::vector<ElementId> names;
         BrepRef result = brep::extrudeFaces(body.brepRef(), faces, signed_, salt,
                                             newFaces ? &names : nullptr, reason,
-                                            mergeFlush, along);
+                                            mergeFlush, along, op == ExtrudeOp::Intersect);
         if (!result) return false;
         body = Body(std::move(result));
         if (newFaces) {
@@ -97,6 +103,21 @@ bool extrudeFaces(Body& body, const std::vector<FaceId>& faces, Real distance,
     }
 
     return refuseMesh("extruding a face", reason);
+}
+
+bool sweepFaces(const Body& body, const std::vector<FaceId>& faces, Real distance, Vec3 along,
+                ElementId salt, Body& out, std::string* reason) {
+    if (reason) reason->clear();
+    if (body.isMesh()) return refuseMesh("sweeping a face", reason);
+    BrepRef s = brep::sweptFaces(body.brepRef(), faces, distance, along, salt, reason);
+    if (!s) return false;
+    out = Body(std::move(s));
+    return true;
+}
+
+bool bodiesTouch(const Body& a, const Body& b, Real tol) {
+    if (a.isMesh() || b.isMesh() || a.empty() || b.empty()) return false;
+    return brep::touches(a.brep(), b.brep(), tol);
 }
 
 bool makeProfileSolid(const std::vector<Vec3>& points, const std::vector<Real>& arcs,

@@ -46,7 +46,9 @@ Glyph glyphFor(const Feature& f) {
         case FeatureKind::Divide:         return Glyph::Divide;
         case FeatureKind::Merge:          return Glyph::Merge;
         case FeatureKind::Pattern:
-            return f.patternMode == PatternMode::Mirror ? Glyph::Mirror : Glyph::Pattern;
+            return f.patternMode == PatternMode::Mirror   ? Glyph::Mirror
+                 : f.patternMode == PatternMode::Circular ? Glyph::PatternRing
+                                                          : Glyph::Pattern;
         case FeatureKind::Inset:          return Glyph::Inset;
         case FeatureKind::Boolean:
             return f.booleanOp == BooleanOp::Union        ? Glyph::Union
@@ -56,6 +58,9 @@ Glyph glyphFor(const Feature& f) {
         case FeatureKind::BaseMesh:       return Glyph::Mesh;
         case FeatureKind::Reduce:         return Glyph::Reduce;
         case FeatureKind::VertexEdit:     return Glyph::Move;
+        case FeatureKind::Move:           return Glyph::Move;
+        case FeatureKind::Rotate:         return Glyph::Rotate;
+        case FeatureKind::Scale:          return Glyph::Scale;
     }
     return Glyph::Box;
 }
@@ -145,7 +150,7 @@ bool sectionHeader(const char* name, size_t count) {
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
     drawGlyph(dl, open ? Glyph::ChevronDown : Glyph::ChevronRight, ImVec2(at.x + 7.0f, at.y + h * 0.5f),
-              11.0f, u32(hovered ? palette::kText : palette::kTextDim), 1.3f);
+              14.0f, u32(hovered ? palette::kText : palette::kTextDim));
     pushFont(FontWeight::SemiBold, uiFonts().size * 0.95f);
     dl->AddText(ImVec2(at.x + 18.0f, at.y + (h - ImGui::GetTextLineHeight()) * 0.5f),
                 u32(palette::kText), name);
@@ -173,9 +178,10 @@ void objectRow(UiContext& ctx, Scene& scene, SceneObject& obj, Glyph glyph) {
     const bool clicked = ImGui::InvisibleButton("##row", ImVec2(std::max(10.0f, w - eyeW - 4.0f), h));
     const bool hovered = ImGui::IsItemHovered();
     if (clicked) {
-        const bool additive = ImGui::GetIO().KeyShift || ImGui::GetIO().KeyCtrl;
-        if (additive) scene.toggleSelect(obj.id);
-        else          scene.select(obj.id);
+        // The application does it, the same way it does a Ctrl+click on the
+        // body in the view, so the two cannot come to mean different things.
+        ctx.actions.pickObject = obj.id;
+        ctx.actions.pickObjectAdditive = ImGui::GetIO().KeyShift || ImGui::GetIO().KeyCtrl;
     }
     if (hovered && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) ctx.actions.frameSelected = true;
 
@@ -190,7 +196,7 @@ void objectRow(UiContext& ctx, Scene& scene, SceneObject& obj, Glyph glyph) {
     }
 
     const float alpha = obj.visible ? 1.0f : 0.45f;
-    drawGlyph(dl, glyph, ImVec2(at.x + 18.0f, at.y + h * 0.5f), 16.0f, u32(palette::kBrand, alpha), 1.4f);
+    drawGlyph(dl, glyph, ImVec2(at.x + 18.0f, at.y + h * 0.5f), 16.0f, u32(palette::kBrand, alpha));
     pushFont(selected ? FontWeight::Medium : FontWeight::Regular);
     dl->AddText(ImVec2(at.x + 34.0f, at.y + (h - ImGui::GetTextLineHeight()) * 0.5f),
                 u32(palette::kText, alpha), obj.name.c_str());
@@ -222,8 +228,8 @@ void objectRow(UiContext& ctx, Scene& scene, SceneObject& obj, Glyph glyph) {
                 ImGui::SetTooltip("Double-click to edit it%s",
                                   f.sketchFreedoms == 0 ? "  (fully constrained)" : "");
             const float salpha = f.sketchShown ? 0.85f : 0.4f;
-            drawGlyph(dl, Glyph::Sketch, ImVec2(sat.x + 36.0f, sat.y + sh * 0.5f), 13.0f,
-                      u32(palette::kBrand, salpha), 1.3f);
+            drawGlyph(dl, Glyph::Sketch, ImVec2(sat.x + 36.0f, sat.y + sh * 0.5f), 15.0f,
+                      u32(palette::kBrand, salpha));
             char label[64];
             std::snprintf(label, sizeof label, "Sketch  %zu entit%s", f.sketch.entities.size(),
                           f.sketch.entities.size() == 1 ? "y" : "ies");
@@ -348,16 +354,20 @@ void featureDetails(UiContext& ctx, SceneObject& obj, Feature& f, bool& changed)
     case FeatureKind::ExtrudeProfile:
     case FeatureKind::Extrude: {
         changed |= labelledNumber("Distance", f.distance, 0.1f, -10000.0f, 10000.0f);
-        static const char* const kOps[] = {"Auto", "Join", "Cut", "Intersect"};
-        int op = static_cast<int>(f.extrudeOp);
-        if (op < 0 || op > 3) op = 0;
+        // Three ways to combine, and no "Auto" to pick: a step written before
+        // that was dropped shows the one its direction made it.
+        static const char* const kOps[] = {"Join", "Cut", "Intersect"};
+        static const ExtrudeOp kOf[] = {ExtrudeOp::Join, ExtrudeOp::Cut, ExtrudeOp::Intersect};
+        const ExtrudeOp shown = f.extrudeOp == ExtrudeOp::Auto
+                                    ? (f.distance < 0.0 ? ExtrudeOp::Cut : ExtrudeOp::Join)
+                                    : f.extrudeOp;
         ImGui::AlignTextToFramePadding();
         ImGui::TextColored(dim, "Operation");
         ImGui::SameLine(ui::labelColumn());
-        for (int i = 0; i < 4; ++i) {
+        for (int i = 0; i < 3; ++i) {
             if (i) ImGui::SameLine(0.0f, 3.0f);
-            if (ui::pillButton(kOps[i], op == i) && op != i) {
-                f.extrudeOp = static_cast<ExtrudeOp>(i);
+            if (ui::pillButton(kOps[i], shown == kOf[i]) && f.extrudeOp != kOf[i]) {
+                f.extrudeOp = kOf[i];
                 changed = true;
             }
         }
@@ -466,11 +476,50 @@ void featureDetails(UiContext& ctx, SceneObject& obj, Feature& f, bool& changed)
     case FeatureKind::VertexEdit:
         ImGui::TextColored(dim, "Free-form edit of %zu vertices", f.verts.size());
         break;
+    case FeatureKind::Move:
+        changed |= labelledNumber("X", f.moveBy.x, 0.1f, -1e6, 1e6);
+        changed |= labelledNumber("Y", f.moveBy.y, 0.1f, -1e6, 1e6);
+        changed |= labelledNumber("Z", f.moveBy.z, 0.1f, -1e6, 1e6);
+        ImGui::TextColored(dim, "Where the object went, in the world");
+        break;
+    case FeatureKind::Rotate: {
+        // Shown as the three angles the Transform fields use.
+        Vec3 e = toEuler(f.turnBy);
+        e = {degrees(e.x), degrees(e.y), degrees(e.z)};
+        bool turned = labelledNumber("X", e.x, 0.5f, -360.0, 360.0, "%.1f deg");
+        turned |= labelledNumber("Y", e.y, 0.5f, -360.0, 360.0, "%.1f deg");
+        turned |= labelledNumber("Z", e.z, 0.5f, -360.0, 360.0, "%.1f deg");
+        if (turned) {
+            f.turnBy = normalize(Quat::fromEuler({radians(e.x), radians(e.y), radians(e.z)}));
+            changed = true;
+        }
+        ImGui::TextColored(dim, "about %.2f, %.2f, %.2f", f.turnAbout.x, f.turnAbout.y, f.turnAbout.z);
+        break;
+    }
+    case FeatureKind::Scale:
+        changed |= labelledNumber("X", f.scaleBy.x, 0.01f, 0.001, 1000.0, "%.3f x");
+        changed |= labelledNumber("Y", f.scaleBy.y, 0.01f, 0.001, 1000.0, "%.3f x");
+        changed |= labelledNumber("Z", f.scaleBy.z, 0.01f, 0.001, 1000.0, "%.3f x");
+        if (length(f.scaleAbout) < 1e-9)
+            ImGui::TextColored(dim, "Along the body's own axes, about its origin");
+        else
+            ImGui::TextColored(dim, "Along its own axes, about %.2f, %.2f, %.2f", f.scaleAbout.x,
+                               f.scaleAbout.y, f.scaleAbout.z);
+        break;
     }
 }
 
 void drawHistorySection(UiContext& ctx, SceneObject& obj) {
-    const std::vector<Feature> before = obj.features;
+    // What the chain was, for the undo entry an edit here would make. Taken
+    // only when an edit could begin -- the pointer is over this panel, or a
+    // field in it is being dragged -- because a step can hold a whole imported
+    // mesh or a sketch of thousands of curves, and copying that every frame
+    // was a millisecond a frame of nothing.
+    const bool couldEdit = ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows |
+                                                  ImGuiHoveredFlags_AllowWhenBlockedByActiveItem) ||
+                           ImGui::IsAnyItemActive();
+    std::vector<Feature> before;
+    if (couldEdit) before = obj.features;
     bool changed = false;
     ImGuiStorage* store = ImGui::GetStateStorage();
     ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -503,9 +552,9 @@ void drawHistorySection(UiContext& ctx, SceneObject& obj) {
 
         const float alpha = f.enabled ? 1.0f : 0.45f;
         drawGlyph(dl, open ? Glyph::ChevronDown : Glyph::ChevronRight, ImVec2(at.x + 8.0f, at.y + h * 0.5f),
-                  10.0f, u32(palette::kTextFaint), 1.2f);
+                  13.0f, u32(palette::kTextFaint));
         drawGlyph(dl, glyphFor(f), ImVec2(at.x + 24.0f, at.y + h * 0.5f), 15.0f,
-                  u32(f.errored ? palette::kBrand : palette::kTextDim, alpha), 1.3f);
+                  u32(f.errored ? palette::kBrand : palette::kTextDim, alpha));
 
         // The name, and what is special about it beside the name. Clipped
         // short of the row's own controls: a long summary ends under them
@@ -552,7 +601,7 @@ void drawHistorySection(UiContext& ctx, SceneObject& obj) {
             // be removed without leaving the rest with nothing to act on.
             if (f.kind != FeatureKind::Primitive) {
                 ImGui::SetCursorScreenPos(ImVec2(hi.x - 22.0f, at.y + (h - 19.0f) * 0.5f));
-                if (ui::closeButton("del", 12.0f)) {
+                if (ui::closeButton("del", 14.0f)) {
                     obj.features.erase(obj.features.begin() + static_cast<long>(i));
                     changed = true;
                     ImGui::PopID();
@@ -576,7 +625,7 @@ void drawHistorySection(UiContext& ctx, SceneObject& obj) {
 
     if (changed) {
         ctx.actions.featuresEdited = obj.id;
-        ctx.actions.featuresBefore = before;
+        ctx.actions.featuresBefore = std::move(before);
     }
 }
 
@@ -678,7 +727,7 @@ void drawInspector(UiContext& ctx) {
         const ImVec2 at = ImGui::GetCursorScreenPos();
         dl->AddRectFilled(at, ImVec2(at.x + box, at.y + box), u32(palette::kBrand), 6.0f);
         drawGlyph(dl, glyphFor(kindOf(*obj)), ImVec2(at.x + box * 0.5f, at.y + box * 0.5f), box * 0.7f,
-                  IM_COL32(255, 255, 255, 255), 1.5f);
+                  IM_COL32(255, 255, 255, 255));
         ImGui::Dummy(ImVec2(box, box));
         ImGui::SameLine(0.0f, 8.0f);
         char nameBuf[128];
@@ -709,7 +758,7 @@ void drawInspector(UiContext& ctx) {
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
         ImGui::PushStyleColor(ImGuiCol_Text, im(palette::kTextDim));
         ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6.0f, 1.0f));
-        if (ImGui::Button("Reset")) obj->transform = Transform{};
+        if (ImGui::Button("Reset")) ctx.actions.resetTransform = obj->id;
         ImGui::PopStyleVar();
         ImGui::PopStyleColor(2);
         ImGui::PopFont();
@@ -728,8 +777,20 @@ void drawInspector(UiContext& ctx) {
         obj->transform.rotation = normalize(Quat::fromEuler(
             {radians(euler.x), radians(euler.y), radians(euler.z)}));
     }
+    // How much the history has scaled the body, each Scale step multiplied
+    // in. A drag is shown through the transform and becomes a Scale step when
+    // it is let go of: the shape itself changes, which is too much work to do
+    // on every frame of a drag.
     ui::fieldHeader("Scale", "x");
-    ui::axisFields("scale", obj->transform.scale, 0.01f, "%.2f");
+    {
+        const Vec3 made = scaleOf(obj->features);
+        const Vec3& live = obj->transform.scale;
+        Vec3 shown{made.x * live.x, made.y * live.y, made.z * live.z};
+        if (ui::axisFields("scale", shown, 0.01f, "%.2f")) {
+            for (int i = 0; i < 3; ++i)
+                obj->transform.scale[i] = std::max(shown[i], Real(1e-4)) / made[i];
+        }
+    }
 
     ui::fieldHeader("Bounds", "mm");
     {
@@ -780,7 +841,7 @@ void drawInspector(UiContext& ctx) {
 
         struct Stat { const char* label; char value[32]; };
         Stat stats[3] = {{"Volume", ""}, {"Vertices", ""}, {"Faces", ""}};
-        if (obj->healthVersion == obj->meshVersion)
+        if (obj->healthVersion == obj->geometryVersion)
             std::snprintf(stats[0].value, sizeof stats[0].value, "%.1f cm\xC2\xB3", obj->health.volume / 1000.0);
         else
             std::snprintf(stats[0].value, sizeof stats[0].value, "...");
@@ -864,7 +925,7 @@ void drawViewportOverlays(UiContext& ctx, float x, float y, float w, float h) {
         const char* solid = nullptr;
         Rgb solidCol = palette::kTextFaint;
         if (const SceneObject* o = scene.find(scene.contextObject())) {
-            if (o->healthVersion != o->meshVersion) solid = "checking";
+            if (o->healthVersion != o->geometryVersion) solid = "checking";
             else if (o->health.solid()) { solid = "solid"; solidCol = palette::kValid; }
             else { solid = "not solid"; solidCol = palette::kBrand; }
         }

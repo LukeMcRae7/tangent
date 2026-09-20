@@ -181,11 +181,15 @@ void Application::drawFacePanel() {
     if (!faceTool_.active && !settled) return;
 
     auto signature = [&] {
-        char b[96];
-        std::snprintf(b, sizeof b, "%d|%.9g|%.9g|%.9g|%.9g", (int)faceTool_.op,
+        char b[128];
+        std::snprintf(b, sizeof b, "%d|%.9g|%.9g|%.9g|%.9g|%d|%d|%d", (int)faceTool_.op,
                       faceTool_.value, faceTool_.direction.x,
-                      faceTool_.direction.y, faceTool_.direction.z);
-        return std::string(b);
+                      faceTool_.direction.y, faceTool_.direction.z, (int)faceTool_.choice.op,
+                      (int)faceTool_.choice.automatic, (int)faceTool_.combineWithMeet);
+        std::string sig = b;
+        for (const ReachedBody& r : faceTool_.reach.bodies())
+            sig += "|" + std::to_string(r.id) + (r.included ? "+" : "-");
+        return sig;
     };
     const std::string was = settled ? signature() : std::string();
 
@@ -266,9 +270,24 @@ void Application::drawFacePanel() {
         if (pick >= 0 && pick - 1 != faceTool_.lockedAxis) setFaceAxis(pick - 1);
     }
 
+    // An extrusion's operation, and the bodies it reaches -- the same two
+    // questions the create tool and a sketch ask. See app/extrude_ops.h.
+    if (extrude) {
+        if (drawExtrudeChoice(faceTool_.choice)) {
+            faceTool_.previewValid = false;
+            if (faceTool_.active) refreshFaceReach();
+        }
+        const ObjectId toggled = drawReachedBodies(scene_, faceTool_.reach, faceTool_.choice.op,
+                                                   faceTool_.objectId);
+        if (toggled != kNoObject) {
+            faceTool_.reach.toggle(toggled);
+            faceTool_.previewValid = false;
+        }
+    }
+
     // What the number is doing to the body, said plainly. Not a choice: moving
     // a face out adds material and moving it in takes some away.
-    if (!rotate && !scale) {
+    if (!rotate && !scale && !extrude) {
         ui::commandRow("Result");
         ImGui::AlignTextToFramePadding();
         const bool cutting = faceTool_.value < 0.0;
@@ -281,12 +300,12 @@ void Application::drawFacePanel() {
 
     // Only when it has actually run into something. Until the material meets
     // another body there is no decision to make.
-    if (!rotate && faceTool_.meets != kNoObject) {
+    if (!rotate && !extrude && faceTool_.meets != kNoObject) {
         const SceneObject* other = scene_.find(faceTool_.meets);
         char meets[96];
         std::snprintf(meets, sizeof meets, "Meets %s", other ? other->name.c_str() : "another body");
         static const ui::Choice kMeet[3] = {
-            {Glyph::Body,       "Leave", nullptr, "Two bodies that overlap, left as they are"},
+            {Glyph::Overlap,    "Leave", nullptr, "Two bodies that overlap, left as they are"},
             {Glyph::Union,      "Join",  nullptr, "Join them into one"},
             {Glyph::Difference, "Cut",   nullptr, "Cut this one out of the other"},
         };
@@ -303,7 +322,7 @@ void Application::drawFacePanel() {
         : rotate
         ? "Pull either way across the pivot, or type an angle. X / Y / Z choose which way it turns."
         : extrude
-        ? "Grows a boss off the face and keeps its outline, so you can take hold of it afterwards. Negative cuts in."
+        ? "Grows off the face and keeps its outline. Out joins, in cuts, until you pick. Click a body to leave it out."
         : "Moves the face; the body follows. X / Y / Z move it along a world axis instead of its own.");
 
     if (settled)
@@ -319,6 +338,135 @@ void Application::drawFacePanel() {
     }
     if (footer > 0)      commitFaceMove();
     else if (footer < 0) abortFaceMove();
+}
+
+// Combine: the target, the tools, which way, and whether the tools stay.
+void Application::drawCombinePanel() {
+    CombineToolState& ct = combineTool_;
+    const bool settled = settledIs(Settled::Combine);
+    if (!ct.active && !settled) return;
+
+    auto signature = [&] {
+        std::string sig = std::to_string(static_cast<int>(ct.op)) + (ct.keepTools ? "k" : "u");
+        for (ObjectId id : ct.tools) sig += "|" + std::to_string(id);
+        return sig;
+    };
+    const std::string was = settled ? signature() : std::string();
+
+    if (!ui::beginCommand("##combine", "Combine", Glyph::Boolean,
+                          ct.targetName.empty() ? nullptr : ct.targetName.c_str()))
+        return;
+
+    {
+        static const ui::Choice kOps[3] = {
+            {Glyph::Union,      "Join",      "J", "The tools become part of the target  (J)"},
+            {Glyph::Difference, "Cut",       "D", "The tools are taken out of the target  (D)"},
+            {Glyph::Intersect,  "Intersect", "I", "Only what the target shares with every tool  (I)"},
+        };
+        const int on = ct.op == BooleanOp::Union ? 0 : ct.op == BooleanOp::Difference ? 1 : 2;
+        const int pick = ui::commandChoices("Operation", kOps, 3, on);
+        if (pick >= 0) {
+            ct.op = pick == 0 ? BooleanOp::Union : pick == 1 ? BooleanOp::Difference : BooleanOp::Intersection;
+            ct.previewKey.clear();
+        }
+    }
+
+    // The target: the body that is kept. Any of the bodies can be it.
+    ui::commandRow("Target");
+    if (ct.target == kNoObject) {
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextColored(ui::im(palette::kTextDim), "click the body to keep");
+    } else if (settled) {
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted(ct.targetName.c_str());
+    } else {
+        ImGui::SetNextItemWidth(-1.0f);
+        if (ImGui::BeginCombo("##target", ct.targetName.c_str())) {
+            ObjectId chosen = kNoObject;
+            ImGui::Selectable(ct.targetName.c_str(), true);
+            for (ObjectId id : ct.tools)
+                if (const SceneObject* o = scene_.find(id)) {
+                    ImGui::PushID(static_cast<int>(id));
+                    if (ImGui::Selectable(o->name.c_str(), false)) chosen = id;
+                    ImGui::PopID();
+                }
+            ImGui::EndCombo();
+            if (chosen != kNoObject) setCombineTarget(chosen);
+        }
+        ui::hoverTip("The body that is kept. Pick another to swap it with a tool.");
+    }
+
+    // The tools, lit. Clicking one takes it out; clicking a body in the view
+    // puts it in.
+    ui::commandRow("Tools");
+    if (ct.tools.empty()) {
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextColored(ui::im(palette::kTextDim), "click bodies in the view to add them");
+    } else {
+        const float right = ImGui::GetWindowContentRegionMax().x;
+        ObjectId dropped = kNoObject;
+        for (size_t i = 0; i < ct.tools.size(); ++i) {
+            const SceneObject* o = scene_.find(ct.tools[i]);
+            const std::string name = o ? o->name : i < ct.toolNames.size() ? ct.toolNames[i] : "a body";
+            const float w = ImGui::CalcTextSize(name.c_str()).x + 24.0f;
+            if (i) {
+                ImGui::SameLine(0.0f, 4.0f);
+                if (ImGui::GetCursorPosX() + w > right) {
+                    ImGui::NewLine();
+                    ImGui::SetCursorPosX(ui::commandLabelWidth());
+                }
+            }
+            ImGui::PushID(static_cast<int>(ct.tools[i]));
+            if (ui::pillButton(name.c_str(), true)) dropped = ct.tools[i];
+            ui::hoverTip("A tool. Click to take it out.");
+            ImGui::PopID();
+        }
+        if (dropped != kNoObject) {
+            if (settled) {
+                ct.tools.erase(std::find(ct.tools.begin(), ct.tools.end(), dropped));
+            } else {
+                toggleCombineBody(dropped);
+            }
+        }
+    }
+
+    ui::commandRow("Keep tools");
+    if (ui::pillButton(ct.keepTools ? "Kept" : "Used up", ct.keepTools)) ct.keepTools = !ct.keepTools;
+    ui::hoverTip(ct.keepTools ? "The tools stay in the scene after combining. Click to use them up."
+                              : "The tools are used up. Click to keep them in the scene as well.");
+
+    // What it comes to, in a line.
+    if (ct.target != kNoObject && !ct.tools.empty()) {
+        char text[192];
+        const size_t n = ct.tools.size();
+        const char* tools = n == 1 ? "1 tool" : "the tools";
+        if (ct.op == BooleanOp::Union)
+            std::snprintf(text, sizeof text, "%s, with %s joined to it", ct.targetName.c_str(), tools);
+        else if (ct.op == BooleanOp::Difference)
+            std::snprintf(text, sizeof text, "%s, with %s cut out of it", ct.targetName.c_str(), tools);
+        else
+            std::snprintf(text, sizeof text, "only what %s shares with %s", ct.targetName.c_str(),
+                          n == 1 ? "the tool" : "every tool");
+        ui::commandRow("Result");
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextColored(ct.previewError.empty() ? ui::im(palette::kValid) : ui::im(palette::kBrand), "%s",
+                           ct.previewError.empty() ? text : ct.previewError.c_str());
+    }
+
+    if (settled) ui::commandApplied("Combine");
+    ui::commandHint(settled ? "Change the operation, drop a tool, or keep the tools, and it is made again."
+                            : "Click bodies in the view to add or remove tools.");
+
+    const int footer = settled ? ui::commandFooter("Done", true, nullptr)
+                               : ui::commandFooter("Finish", ct.target != kNoObject && !ct.tools.empty());
+    ui::endCommand();
+    if (settled) {
+        if (footer > 0)              dismissSettled();
+        else if (signature() != was) recommitSettled();
+        return;
+    }
+    if (footer > 0)      finishCombine();
+    else if (footer < 0) abortCombine();
 }
 
 void Application::drawPatternPanel() {
@@ -346,9 +494,9 @@ void Application::drawPatternPanel() {
     // How the copies are laid out. Three answers to one question.
     {
         static const ui::Choice kLayout[3] = {
-            {Glyph::Pattern, "Row",    "L", "Copies along a direction  (L)"},
-            {Glyph::Rotate,  "Ring",   "C", "Copies around an axis  (C)"},
-            {Glyph::Mirror,  "Mirror", "M", "Reflected across a plane  (M)"},
+            {Glyph::PatternRow,  "Row",    "L", "Copies along a direction  (L)"},
+            {Glyph::PatternRing, "Ring",   "C", "Copies around an axis  (C)"},
+            {Glyph::Mirror,      "Mirror", "M", "Reflected across a plane  (M)"},
         };
         const int on = patternTool_.mode == PatternMode::Linear ? 0 : ring ? 1 : 2;
         const int pick = ui::commandChoices("Layout", kLayout, 3, on);

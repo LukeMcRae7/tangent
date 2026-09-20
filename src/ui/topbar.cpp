@@ -59,7 +59,7 @@ bool barButton(UiContext& ctx, const char* id, Glyph g, const char* tip, bool en
 void dropMark() {
     const ImVec2 hi = ImGui::GetItemRectMax();
     drawGlyph(ImGui::GetWindowDrawList(), Glyph::ChevronDown, ImVec2(hi.x - 5.0f, hi.y - 5.0f),
-              8.0f, u32(palette::kTextDim), 1.2f);
+              11.0f, u32(palette::kTextDim));
 }
 
 // ---- the menus under the groups ---------------------------------------------
@@ -74,6 +74,8 @@ void fileMenu(UiContext& ctx) {
     menuNote("the surfaces themselves, not a mesh of them");
     if (menuEntry(Glyph::Mesh, "Import Mesh...")) ctx.actions.importMesh = true;
     menuNote(".stl or .obj, as triangles");
+    if (menuEntry(Glyph::Sketch, "Import SVG...")) ctx.actions.importSvg = true;
+    menuNote("outlines, into a sketch on a plane or a face");
     menuGap();
     if (menuEntry(Glyph::Export, "Export STEP...")) ctx.actions.exportStep = true;
     menuNote("exact; what another CAD package wants");
@@ -94,10 +96,10 @@ void createMenu(UiContext& ctx) {
     drawAddMenuItems(ctx);
     menuGap();
     const bool has = !ctx.scene->selection().empty();
-    if (menuEntry(Glyph::Plus, "Duplicate", "Shift+D", has)) ctx.actions.duplicateSelected = true;
+    if (menuEntry(Glyph::Duplicate, "Duplicate", "Shift+D", has)) ctx.actions.duplicateSelected = true;
     if (menuEntry(Glyph::Trash, "Delete", "X", has)) ctx.actions.deleteSelected = true;
     menuGap();
-    if (menuEntry(Glyph::Select, "Select All", "A")) ctx.scene->selectAll();
+    if (menuEntry(Glyph::SelectAll, "Select All", "A")) ctx.scene->selectAll();
     if (menuEntry(Glyph::Count, "Deselect All", "Alt+A")) ctx.scene->clearSelection();
 }
 
@@ -109,7 +111,6 @@ void modifyMenu(UiContext& ctx) {
     const bool hasSel = !scene.selection().empty();
     const size_t selFaces = scene.selectedFaces(ctxObj).size();
     const size_t selEdges = scene.selectedEdges(ctxObj).size();
-    const bool pair = scene.selection().size() == 2;
 
     menuHeader("Body");
     if (menuEntry(Glyph::Move,   "Move",   "G", hasSel)) ctx.actions.moveObject = true;
@@ -120,7 +121,7 @@ void modifyMenu(UiContext& ctx) {
     menuHeader("Face");
     if (menuEntry(Glyph::PushPull, "Push / Pull Face", "G", selFaces > 0)) ctx.actions.pushPull = true;
     if (menuEntry(Glyph::Extrude, "Extrude Face", "E", selFaces > 0)) ctx.actions.extrude = true;
-    menuNote("keeps the outline of the boss; Shift+E cuts inward");
+    menuNote("keeps its outline; Shift+E starts it as a cut");
     if (menuEntry(Glyph::RotateFace, "Rotate Face", "R", selFaces > 0)) ctx.actions.rotateFace = true;
     if (menuEntry(Glyph::ScaleFace, "Scale Face", "S", selFaces > 0)) ctx.actions.scaleFace = true;
     if (menuEntry(Glyph::Inset, "Inset Face", nullptr, selFaces > 0)) ctx.actions.inset = true;
@@ -158,19 +159,20 @@ void modifyMenu(UiContext& ctx) {
     if (menuEntry(Glyph::Split,   "Split Body", nullptr, hasObject)) ctx.actions.split = true;
     menuNote("by a face's plane, a tool plane, or into its shells");
 
-    menuHeader("Combine two bodies");
-    const char* note = pair ? "the first selected is kept, the second is the tool"
-                            : "select two bodies first";
-    if (menuEntry(Glyph::Union, "Join", "Ctrl+Shift+U", pair)) {
+    // Each opens the Combine dialog with that operation chosen: a target and
+    // any number of tools, picked there or from what is selected.
+    menuHeader("Combine");
+    if (menuEntry(Glyph::Union, "Join...", "Ctrl+Shift+U")) {
         ctx.actions.booleanRequested = true; ctx.actions.booleanOp = BooleanOp::Union;
     }
-    if (menuEntry(Glyph::Difference, "Cut", "Ctrl+Shift+D", pair)) {
+    if (menuEntry(Glyph::Difference, "Cut...", "Ctrl+Shift+D")) {
         ctx.actions.booleanRequested = true; ctx.actions.booleanOp = BooleanOp::Difference;
     }
-    if (menuEntry(Glyph::Intersect, "Intersect", "Ctrl+Shift+I", pair)) {
+    if (menuEntry(Glyph::Intersect, "Intersect...", "Ctrl+Shift+I")) {
         ctx.actions.booleanRequested = true; ctx.actions.booleanOp = BooleanOp::Intersection;
     }
-    menuNote(note);
+    menuNote(hasSel ? "the first selected is the target, the rest are tools"
+                    : "then click the target and the tools");
 
     const SceneObject* o = scene.find(ctxObj);
     const bool isMesh = o && !o->body.empty() && o->body.isMesh();
@@ -191,16 +193,16 @@ void inspectMenu(UiContext& ctx) {
     menuNote("red: thinner than the nozzle can lay");
     menuToggle(Glyph::Grid, "Grid", &ctx.view->showGrid);
     menuToggle(Glyph::Wire, "Wireframe", &ctx.view->showWireframe, "Z");
-    menuToggle(Glyph::Frame, "Selection Box", &ctx.view->showSelectionBox);
-    menuToggle(Glyph::Cube, "Backface Cull", &ctx.view->backfaceCulling);
+    menuToggle(Glyph::Bounds, "Selection Box", &ctx.view->showSelectionBox);
+    menuToggle(Glyph::Backface, "Backface Cull", &ctx.view->backfaceCulling);
     menuGap();
     menuHeader("View");
-    if (menuEntry(Glyph::Frame, "Frame Selected", "Numpad .")) ctx.actions.frameSelected = true;
-    if (menuEntry(Glyph::Frame, "Frame All", "Home")) ctx.actions.frameAll = true;
+    if (menuEntry(Glyph::FrameSelected, "Frame Selected", "Numpad .")) ctx.actions.frameSelected = true;
+    if (menuEntry(Glyph::FrameAll, "Frame All", "Home")) ctx.actions.frameAll = true;
     bool ortho = ctx.camera->orthographic;
-    if (menuToggle(Glyph::Camera, "Orthographic", &ortho, "Numpad 5")) ctx.camera->setOrthographic(ortho);
-    menuToggle(Glyph::Rotate, "Invert Orbit X", &ctx.camera->invertOrbitX);
-    menuToggle(Glyph::Rotate, "Invert Orbit Y", &ctx.camera->invertOrbitY);
+    if (menuToggle(Glyph::Orthographic, "Orthographic", &ortho, "Numpad 5")) ctx.camera->setOrthographic(ortho);
+    menuToggle(Glyph::Orbit, "Invert Orbit X", &ctx.camera->invertOrbitX);
+    menuToggle(Glyph::Orbit, "Invert Orbit Y", &ctx.camera->invertOrbitY);
     menuGap();
     char timing[64];
     std::snprintf(timing, sizeof timing, "%.1f fps   %.2f ms",
@@ -233,7 +235,7 @@ void groupCaption(UiContext& ctx, const char* name, const char* popupId, float x
         dl->AddText(ImVec2(x, at.y + 2.0f), col, c);
         x += ImGui::CalcTextSize(c).x + space;
     }
-    drawGlyph(dl, Glyph::ChevronDown, ImVec2(x + 5.0f, at.y + h * 0.5f), 9.0f, col, 1.2f);
+    drawGlyph(dl, Glyph::ChevronDown, ImVec2(x + 6.0f, at.y + h * 0.5f), 12.0f, col);
     ImGui::PopFont();
 
     if (clicked) ImGui::OpenPopup(popupId);
@@ -279,7 +281,6 @@ float drawTopBar(UiContext& ctx) {
     const ObjectId ctxObj = scene.contextObject();
     const bool hasObject = ctxObj != kNoObject;
     const bool hasSel = !scene.selection().empty();
-    const bool pair = scene.selection().size() == 2;
     const size_t edges = scene.selectedEdges(ctxObj).size();
     const size_t faces = scene.selectedFaces(ctxObj).size();
 
@@ -416,7 +417,7 @@ float drawTopBar(UiContext& ctx) {
         ctx.actions.addKind = PrimitiveKind::Plane;
     }
     ImGui::SameLine();
-    if (barButton(ctx, "import", Glyph::Import, "Import a STEP file or a mesh"))
+    if (barButton(ctx, "import", Glyph::Import, "Import a STEP file, a mesh or an SVG drawing"))
         ImGui::OpenPopup("##m_import");
     ImGui::SetNextWindowPos(ImVec2(ImGui::GetItemRectMin().x, ImGui::GetItemRectMax().y + 4.0f));
     if (ui::beginMenuPopup("##m_import")) {
@@ -425,6 +426,8 @@ float drawTopBar(UiContext& ctx) {
         ui::menuNote("exact surfaces from another CAD package");
         if (ui::menuEntry(Glyph::Mesh, "Import Mesh...")) ctx.actions.importMesh = true;
         ui::menuNote(".stl or .obj");
+        if (ui::menuEntry(Glyph::Sketch, "Import SVG...")) ctx.actions.importSvg = true;
+        ui::menuNote("outlines, into a sketch");
         ImGui::EndPopup();
     }
     endGroup(1);
@@ -439,35 +442,20 @@ float drawTopBar(UiContext& ctx) {
     }
     ImGui::SameLine();
     {
-        const char* firstName = "the first";
-        const char* secondName = "the second";
-        if (pair) {
-            if (const SceneObject* a = scene.find(scene.selection()[0])) firstName = a->name.c_str();
-            if (const SceneObject* b = scene.find(scene.selection()[1])) secondName = b->name.c_str();
-        }
+        // Not a menu: a dialog, like every other operation -- the target, the
+        // tools, which way they combine, and whether the tools stay.
+        const size_t n = scene.selection().size();
         char tip[160];
-        if (pair) std::snprintf(tip, sizeof tip, "Combine %s with %s", firstName, secondName);
-        else      std::snprintf(tip, sizeof tip, "Combine - select two bodies (%zu selected)",
-                                scene.selection().size());
-        if (barButton(ctx, "boolean", Glyph::Boolean, tip, pair)) ImGui::OpenPopup("##m_boolean");
-        dropMark();
-        ImGui::SetNextWindowPos(ImVec2(ImGui::GetItemRectMin().x, ImGui::GetItemRectMax().y + 4.0f));
-        if (ui::beginMenuPopup("##m_boolean")) {
-            ctx.frame.popupOpen = true;
-            char line[192];
-            std::snprintf(line, sizeof line, "Join:  %s + %s", firstName, secondName);
-            if (ui::menuEntry(Glyph::Union, line, "Ctrl+Shift+U")) {
-                ctx.actions.booleanRequested = true; ctx.actions.booleanOp = BooleanOp::Union;
-            }
-            std::snprintf(line, sizeof line, "Cut:  %s minus %s", firstName, secondName);
-            if (ui::menuEntry(Glyph::Difference, line, "Ctrl+Shift+D")) {
-                ctx.actions.booleanRequested = true; ctx.actions.booleanOp = BooleanOp::Difference;
-            }
-            std::snprintf(line, sizeof line, "Intersect:  %s with %s", firstName, secondName);
-            if (ui::menuEntry(Glyph::Intersect, line, "Ctrl+Shift+I")) {
-                ctx.actions.booleanRequested = true; ctx.actions.booleanOp = BooleanOp::Intersection;
-            }
-            ImGui::EndPopup();
+        if (n >= 2) {
+            const SceneObject* a = scene.find(scene.selection()[0]);
+            std::snprintf(tip, sizeof tip, "Combine: %s with %zu other bod%s  (Ctrl+Shift+U)",
+                          a ? a->name.c_str() : "the first", n - 1, n == 2 ? "y" : "ies");
+        } else {
+            std::snprintf(tip, sizeof tip, "Combine bodies: join, cut or intersect  (Ctrl+Shift+U)");
+        }
+        if (barButton(ctx, "boolean", Glyph::Boolean, tip)) {
+            ctx.actions.booleanRequested = true;
+            ctx.actions.booleanOp = BooleanOp::Union;
         }
     }
     ImGui::SameLine();
@@ -554,7 +542,7 @@ float drawTopBar(UiContext& ctx) {
                 if (hovered)
                     dl->AddRectFilled(lo, hi, i == 2 ? u32(palette::kBrand) : u32(palette::kHover));
                 drawGlyph(dl, controls[i].g, ImVec2((lo.x + hi.x) * 0.5f, (lo.y + hi.y) * 0.5f), 14.0f,
-                          hovered ? IM_COL32(255, 255, 255, 255) : u32(palette::kTextDim), 1.3f);
+                          hovered ? IM_COL32(255, 255, 255, 255) : u32(palette::kTextDim));
                 if (clicked) {
                     if (i == 0) ctx.frame.wantMinimize = true;
                     if (i == 1) ctx.frame.wantToggleMaximize = true;

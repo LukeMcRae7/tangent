@@ -34,8 +34,8 @@ struct LodPolicy {
     Real finerFactor = 1.6;
     Real coarserFactor = 4.0;
 
-    // Bodies re-tessellated per frame. One is enough to keep up with a zoom on
-    // an ordinary scene and cheap enough not to be felt on a heavy one.
+    // Bodies re-tessellated at once. They are meshed on worker threads, so
+    // this is about how much work is in flight, not about the frame.
     int budgetPerFrame = 2;
 
     // Nothing finer than this, whatever the zoom: past it the triangles are
@@ -53,11 +53,25 @@ Real targetDeviation(const SceneObject& obj, const Camera& camera, const LodPoli
 // Is what it has good enough for what the view wants?
 bool needsRetessellation(Real current, Real target, const LodPolicy& p = {});
 
-// Brings up to `budgetPerFrame` visible bodies to the tolerance the view wants,
-// worst offender first. Returns how many were redrawn.
+// A body that should be drawn at another tolerance, and which.
+struct LodWant {
+    ObjectId object;
+    Real target;
+    Real ratio;      // how far out it is; the worst is wanted first
+};
+
+// The visible bodies whose tolerance the view has outgrown, worst first, at
+// most `budgetPerFrame` of them. Nothing is meshed here -- meshing a heavy body
+// is hundreds of milliseconds, which is a frame nobody would miss noticing, so
+// the caller does it on a worker and swaps the result in when it arrives.
 //
 // Mesh bodies are skipped: their resolution was decided when they were made,
-// and pretending otherwise would spend the budget achieving nothing.
+// and pretending otherwise would achieve nothing.
+std::vector<LodWant> tessellationWanted(const Scene& scene, const Camera& camera,
+                                        const LodPolicy& p = {});
+
+// The same, meshed on the spot. For tests and for anything that wants the
+// result now rather than a frame or two later.
 int refreshTessellation(Scene& scene, const Camera& camera, const LodPolicy& p = {});
 
 } // namespace tg

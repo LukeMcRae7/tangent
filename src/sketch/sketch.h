@@ -155,7 +155,7 @@ struct SketchSolve {
     // What still has freedom left in it. A sketch is drawn in two colours from
     // this: geometry a later dimension could still move, and geometry that is
     // pinned down. Everything is free until something says otherwise, so an
-    // undimensioned sketch lists all of it.
+    // undimensioned sketch lists all of it. Both sorted by id.
     std::vector<SketchId> freePoints;
     std::vector<SketchId> freeEntities;
 
@@ -244,9 +244,18 @@ struct SketchProfile {
 // also a region of its own: the disc that fills the hole.
 std::vector<SketchProfile> sketchProfiles(const Sketch& sketch);
 
+// The keys of the regions that are filled the way SVG and every drawing program
+// fill: those inside an even number of other loops. A letter O is its ring and
+// not its counter; a plate with a bore is the plate and not the disc; a single
+// region is itself.
+std::vector<SketchId> sketchFilledProfiles(const Sketch& sketch,
+                                           const std::vector<SketchProfile>& profiles);
+
 // Points along one entity from its start to its end, exact at both: enough to
 // draw it and to tell whether the pointer is on it.
-std::vector<Vec2> sketchEntityPoints(const Sketch& sketch, const SketchEntity& entity);
+// `steps` is how many pieces a curve is cut into -- fewer for one that is small
+// on screen; a line is always one.
+std::vector<Vec2> sketchEntityPoints(const Sketch& sketch, const SketchEntity& entity, int steps = 48);
 
 // A loop as one closed polygon, in the order it runs, without repeating its
 // first point at the end.

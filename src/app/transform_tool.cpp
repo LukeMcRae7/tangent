@@ -135,9 +135,12 @@ bool TransformTool::begin(TransformMode mode, Scene& scene, const Camera& camera
         if (scene.selection().empty()) return false;
         target_ = TransformTarget::Objects;
         for (ObjectId id : scene.selection())
-            if (const SceneObject* o = scene.find(id)) entries_.push_back({id, o->transform});
+            if (const SceneObject* o = scene.find(id)) entries_.push_back({id, o->transform, {}});
         if (entries_.empty()) return false;
         pivot = scene.selectionCenter();
+        for (Entry& e : entries_)
+            if (const SceneObject* o = scene.find(e.id))
+                e.pivotLocal = transformPoint(inverse(o->modelMatrix()), pivot);
     }
 
     mode_ = mode;
@@ -152,6 +155,8 @@ bool TransformTool::begin(TransformMode mode, Scene& scene, const Camera& camera
 
     rotateAccum_ = 0.0f;
     rotateLast_ = std::atan2(mousePx.y - pivotPx_.y, mousePx.x - pivotPx_.x);
+    rot_ = Quat{};
+    scl_ = {1, 1, 1};
     return true;
 }
 
@@ -285,6 +290,8 @@ void TransformTool::apply(Scene& scene, const Camera& camera, Vec2 mousePx, bool
     case TransformMode::None:
         return;
     }
+    rot_ = rot;
+    scl_ = scl;
 
     // How the gesture moves an arbitrary world point.
     auto mapWorld = [&](Vec3 p) -> Vec3 {
@@ -328,6 +335,10 @@ void TransformTool::apply(Scene& scene, const Camera& camera, Vec2 mousePx, bool
             o->transform.position = pivot_ + rotate(rot, e.before.position - pivot_);
             break;
         case TransformMode::Scale: {
+            // Shown, not yet done: the shape is scaled when the gesture is
+            // confirmed. Until then the transform stretches the drawing about
+            // the pivot's place in the object, which is where the confirmed
+            // scale will hold still.
             Vec3 next = e.before.scale * scl;
             // A scale of exactly zero makes the model matrix singular, which
             // silently breaks picking and normals. Keep a hair of thickness.
@@ -336,7 +347,9 @@ void TransformTool::apply(Scene& scene, const Camera& camera, Vec2 mousePx, bool
                 if (std::fabs(next[i]) < kMinScale)
                     next[i] = next[i] < 0.0f ? -kMinScale : kMinScale;
             o->transform.scale = next;
-            o->transform.position = pivot_ + (e.before.position - pivot_) * scl;
+            const Vec3 c = e.pivotLocal;
+            o->transform.position = e.before.position +
+                rotate(e.before.rotation, c - Vec3{c.x * next.x, c.y * next.y, c.z * next.z});
             break;
         }
         case TransformMode::None:
@@ -344,6 +357,22 @@ void TransformTool::apply(Scene& scene, const Camera& camera, Vec2 mousePx, bool
         }
     }
 }
+
+namespace {
+
+// Whether recording a step changed the chain. The count covers a step added or
+// folded away; a step folded into keeps the count and changes its numbers.
+bool chainChanged(const std::vector<Feature>& a, const std::vector<Feature>& b) {
+    if (a.size() != b.size()) return true;
+    if (a.empty()) return false;
+    const Feature& x = a.back();
+    const Feature& y = b.back();
+    return x.kind != y.kind || x.moveBy != y.moveBy || x.turnBy.x != y.turnBy.x ||
+           x.turnBy.y != y.turnBy.y || x.turnBy.z != y.turnBy.z || x.turnBy.w != y.turnBy.w ||
+           x.scaleBy != y.scaleBy;
+}
+
+} // namespace
 
 // ---------------------------------------------------------------------------
 std::unique_ptr<Command> TransformTool::confirm(Scene& scene) {
@@ -377,25 +406,50 @@ std::unique_ptr<Command> TransformTool::confirm(Scene& scene) {
                                                std::move(after), what);
     }
 
-    std::vector<TransformCommand::Entry> changed;
+    // Each object into its history. The gesture only ever showed itself
+    // through the transform; putting that back and recording the step is what
+    // makes it real, and re-placing from the history lands it where the drag
+    // left it.
+    const std::string what = transformModeName(mode_);
+    std::vector<std::unique_ptr<Command>> parts;
     for (const Entry& e : entries_) {
-        const SceneObject* o = scene.find(e.id);
+        SceneObject* o = scene.find(e.id);
         if (!o) continue;
-        const Transform& a = e.before;
-        const Transform& b = o->transform;
-        const bool moved = a.position != b.position || a.scale != b.scale ||
-                           a.rotation.x != b.rotation.x || a.rotation.y != b.rotation.y ||
-                           a.rotation.z != b.rotation.z || a.rotation.w != b.rotation.w;
-        if (moved) changed.push_back({e.id, a, b});
+        const Transform shown = o->transform;
+        o->transform = e.before;
+        std::vector<Feature> before = o->features;
+
+        bool recorded = true;
+        switch (mode_) {
+        case TransformMode::Translate:
+            recorded = scene.recordMove(e.id, shown.position - e.before.position);
+            break;
+        case TransformMode::Rotate:
+            recorded = scene.recordRotate(e.id, rot_, pivot_);
+            break;
+        case TransformMode::Scale: {
+            Vec3 by = shown.scale;
+            for (int i = 0; i < 3; ++i) by[i] = e.before.scale[i] != 0.0 ? by[i] / e.before.scale[i] : by[i];
+            std::string why;
+            recorded = scene.recordScale(e.id, by, e.pivotLocal, &why);
+            if (!recorded && error_.empty()) error_ = o->name + " was not scaled: " + why;
+            break;
+        }
+        case TransformMode::None:
+            break;
+        }
+        scene.place(*o);
+        if (recorded && chainChanged(before, o->features))
+            parts.push_back(std::make_unique<FeatureCommand>(e.id, std::move(before), o->features, what));
     }
 
-    const std::string what = transformModeName(mode_);
     mode_ = TransformMode::None;
     entries_.clear();
     typed_.clear();
 
-    if (changed.empty()) return nullptr;   // a click that did not move anything
-    return std::make_unique<TransformCommand>(std::move(changed), what);
+    if (parts.empty()) return nullptr;     // a click that did not move anything
+    if (parts.size() == 1) return std::move(parts.front());
+    return std::make_unique<CompositeCommand>(std::move(parts), what);
 }
 
 void TransformTool::cancel(Scene& scene) {
