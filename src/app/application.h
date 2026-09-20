@@ -465,8 +465,8 @@ private:
 
             Real good = 0.0;      // verified to build
             Real bad = 0.0;       // verified not to, or assumed so
-            Real ceiling = 0.0;   // the shortest edge the fillet runs into
-            Real hardCeiling = 0.0;  // half the body's smallest dimension
+            Real ceiling = 0.0;   // the material behind the faces it runs along
+            Real hardCeiling = 0.0;  // the size of the body; nothing beats it
             int  stepsLeft = 0;
             Real pending = 0.0;
             bool testedTop = false;

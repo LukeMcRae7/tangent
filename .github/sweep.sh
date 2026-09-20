@@ -11,6 +11,7 @@ modes=(
   "--face-demo 10" "--face-demo 11" "--face-demo 12"
   "--preview-check 1" "--preview-check 2" "--preview-check 3"
   "--preview-check 4" "--preview-check 5" "--preview-check 6"
+  "--preview-check 7"
   "--pattern-demo 1" "--pattern-demo 2" "--pattern-demo 3" "--pattern-demo 4"
   "--pattern-demo 5" "--pattern-demo 6" "--pattern-demo 7" "--pattern-demo 8"
   "--step-demo /tmp/tg_sweep.step"
@@ -32,7 +33,7 @@ done
 # The preview must agree with what gets committed. A gesture that shows one
 # thing and builds another is the worst kind of bug in a modeller, so the
 # comparison is a build failure rather than a note.
-for m in 1 2 3 4 5; do
+for m in 1 2 3 4 5 7; do
   # Captured rather than piped into grep: `grep -q` exits on its first match and
   # SIGPIPEs the program upstream, which under `pipefail` reads as the pipeline
   # failing -- so every check reported a mismatch that had not happened.

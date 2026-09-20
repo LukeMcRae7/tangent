@@ -131,6 +131,25 @@ struct FilletSpec {
 // Rounds edges. `reason` gets a short phrase on refusal; see the note above.
 bool filletEdges(Body& body, const FilletSpec& spec, std::string* reason = nullptr);
 
+// How large a fillet a selection of edges could hold: a bracket for a search,
+// never an answer. Only the kernel knows whether a radius builds, so this says
+// where to start looking and where to stop.
+struct FilletRoom {
+    Real likely = 0.05;   // ought to build: the first radius worth trying
+    Real most   = 0.05;   // nothing larger can build, whatever the shape
+};
+
+// The room is the material behind the faces the round runs along -- stand on
+// each face, look straight into it, and measure to the other side -- halved
+// where two selected edges share a face, because those two rounds eat towards
+// each other and only have half the face each.
+//
+// `rm` is the body's tessellation, which the ray goes against: it is already
+// built, it is what the pointer picks against, and a chord tolerance of a few
+// microns is far below the precision this bound needs. Without one, only the
+// bounding box is left to go on.
+FilletRoom filletRoom(const Body& body, const RenderMesh& rm, const std::vector<Index>& edges);
+
 // How a pattern lays its copies out.
 enum class PatternMode : uint32_t {
     Linear,     // `step` mm along `dir`, `count` times

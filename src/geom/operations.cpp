@@ -2,7 +2,9 @@
 
 #include "mesh/decimate.h"
 
+#include <algorithm>
 #include <cstdio>
+#include <map>
 
 namespace tg {
 
@@ -215,6 +217,67 @@ bool filletEdges(Body& body, const FilletSpec& spec, std::string* reason) {
         return true;
     }
     return refuseMesh(spec.chamfer ? "chamfering an edge" : "filleting an edge", reason);
+}
+
+FilletRoom filletRoom(const Body& body, const RenderMesh& rm, const std::vector<Index>& edges) {
+    const Vec3 extent = body.bounds().size();
+
+    // The one bound that is always true. A round reaches `r` back along both
+    // faces it touches, so a radius larger than the whole body has nowhere to
+    // put its tangent lines -- whatever the shape, however thin it is.
+    //
+    // It used to be half the body's *smallest* dimension, which is the answer
+    // to a different question: that is what is left when both sides of a face
+    // are being rounded at once. One edge of a twenty millimetre cube takes
+    // very nearly twenty, and the panel said ten.
+    const Real most = std::max(std::max({extent.x, extent.y, extent.z}), Real(0.1));
+
+    // How many of the selected edges each face carries. Two rounds on one face
+    // grow towards each other, so each of them has half the face.
+    std::map<FaceId, int> onFace;
+    for (Index e : edges) {
+        FaceId fa = kInvalid, fb = kInvalid;
+        body.edgeFaces(e, fa, fb);
+        for (FaceId f : {fa, fb})
+            if (f != kInvalid) ++onFace[f];
+    }
+
+    Real room = most;
+    for (Index e : edges) {
+        FaceId fa = kInvalid, fb = kInvalid;
+        body.edgeFaces(e, fa, fb);
+        const Vec3 mid = body.edgeMidpoint(e);
+        for (FaceId f : {fa, fb}) {
+            if (f == kInvalid) continue;
+            Real across = most;
+            const Vec3 n = body.faceNormal(f);
+            if (!rm.triangles.empty() && length(n) > 1e-9) {
+                // Started a hair inside so the face the ray leaves from is not
+                // the face it hits.
+                const Vec3 into = normalize(n) * Real(-1.0);
+                const Ray r{mid + into * Real(1e-3), into};
+                for (size_t i = 0; i + 2 < rm.triangles.size(); i += 3) {
+                    Real t = 0.0;
+                    if (!rayTriangle(r, rm.positions[rm.triangles[i + 0]],
+                                     rm.positions[rm.triangles[i + 1]],
+                                     rm.positions[rm.triangles[i + 2]], t))
+                        continue;
+                    if (t > 1e-3 && t < across) across = t;
+                }
+            }
+            const auto it = onFace.find(f);
+            if (it != onFace.end() && it->second > 1) across *= 0.5;
+            room = std::min(room, across);
+        }
+    }
+
+    FilletRoom out;
+    out.most = most;
+    // A hair under the room rather than exactly on it: a radius that is exactly
+    // the wall it is rounding is the one case OpenCASCADE does not survive, and
+    // a first trial that builds saves the search the walk back down.
+    out.likely = std::clamp(room * Real(0.9), Real(0.05), most);
+    return out;
 }
 
 const char* patternModeName(PatternMode m) {

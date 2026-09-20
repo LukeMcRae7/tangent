@@ -2713,54 +2713,6 @@ void Application::filletSelectedEdges() {
     beginFillet();
 }
 
-// How much material lies behind the faces a fillet would run along.
-//
-// This is the bound that actually decides how big a round can be, and nothing
-// cheaper finds it: a shelled box is twenty millimetres across and two thick,
-// its faces are twenty on a side, and every edge length in the neighbourhood
-// says twenty. The wall only shows up as a distance between two faces. So the
-// question is asked directly -- stand on the face, look straight into it, and
-// see how far it is to the other side.
-//
-// Rays go against the tessellation rather than the exact shape: it is already
-// built, it is what the pointer is picking against anyway, and a chord
-// tolerance of a few microns is far below the precision this bound needs.
-static Real materialBehindEdges(const SceneObject& obj,
-                                const std::vector<Index>& edges, Real fallback) {
-    const RenderMesh& rm = obj.render;
-    if (rm.triangles.empty()) return fallback;
-
-    Real thinnest = fallback;
-    for (Index e : edges) {
-        FaceId fa = kInvalid, fb = kInvalid;
-        obj.body.edgeFaces(e, fa, fb);
-        const Vec3 mid = obj.body.edgeMidpoint(e);
-        for (FaceId f : {fa, fb}) {
-            if (f == kInvalid) continue;
-            const Vec3 n = obj.body.faceNormal(f);
-            if (length(n) < 1e-9) continue;
-
-            // Started a hair inside so the face the ray leaves from is not the
-            // face it hits, and biased towards the face's own middle so an edge
-            // shared with a neighbour does not sight along the seam.
-            const Vec3 into = normalize(n) * Real(-1.0);
-            const Ray r{mid + into * Real(1e-3), into};
-
-            Real nearest = fallback;
-            for (size_t i = 0; i + 2 < rm.triangles.size(); i += 3) {
-                Real t = 0.0;
-                if (!rayTriangle(r, rm.positions[rm.triangles[i + 0]],
-                                 rm.positions[rm.triangles[i + 1]],
-                                 rm.positions[rm.triangles[i + 2]], t))
-                    continue;
-                if (t > 1e-3 && t < nearest) nearest = t;
-            }
-            thinnest = std::min(thinnest, nearest);
-        }
-    }
-    return std::max(thinnest, Real(0.05));
-}
-
 // ---------------------------------------------------------------------------
 // Moving a face
 // ---------------------------------------------------------------------------
@@ -4023,19 +3975,12 @@ void Application::beginFillet() {
     // gesture begins immediately and the limit narrows over the next few
     // frames. Until it lands, the limit is the largest radius actually
     // verified, so the track never offers travel that has not been checked.
-    // How far this can possibly go, bounded twice and tightly.
-    //
-    // Half the smallest dimension of the whole body is a true bound but a very
-    // loose one: on a shelled box it says ten millimetres where the wall gives
-    // out at two, and a track scaled to ten puts the entire usable range in the
-    // first forty pixels of travel. The shortest edge of any face the fillet
-    // runs into is the local bound, and it is the one that bites -- it is the
-    // wall thickness, the width of the rib, the flat the round has to fit on.
-    const Vec3 extent = obj->body.bounds().size();
-    const Real smallest = std::max(std::min({extent.x, extent.y, extent.z}), Real(0.1));
-
-    const Real nearby = materialBehindEdges(*obj, edges, smallest);
-    const Real ceiling = std::max(std::min(smallest * 0.5, nearby), Real(0.05));
+    // How far this can possibly go, bounded twice: the material behind the
+    // faces the round runs along, which is the bound that usually bites -- the
+    // wall thickness, the width of the rib, the flat the round has to sit on --
+    // and the size of the body, which nothing can exceed.
+    const FilletRoom room = filletRoom(obj->body, obj->render, edges);
+    const Real ceiling = room.likely;
     const Real maxRadius = 0.0;   // nothing verified yet
 
     // Select all extended edges in the scene so the highlight displays them
@@ -4057,7 +4002,7 @@ void Application::beginFillet() {
     filletTool_.search.floorPhase = true;
     filletTool_.search.floorIndex = 0;
     filletTool_.search.ceiling = ceiling;
-    filletTool_.search.hardCeiling = std::max(smallest * 0.5, ceiling);
+    filletTool_.search.hardCeiling = std::max(room.most, ceiling);
     filletTool_.search.good = minRadius;
     filletTool_.search.bad = std::max(ceiling, minRadius * 4.0);
     filletTool_.search.stepsLeft = 8;
@@ -5233,6 +5178,13 @@ void Application::stepPreviewCheck() {
         for (FaceId f : fs)
             if (dot(o->body.faceNormal(f), Vec3{0, 0, 1}) > 0.99)
                 scene_.selectElement({id, ElementKind::Face, f}, true);
+    } else if (previewCheck_ == 7) {
+        // One edge, on its own. This is the case the limit used to get wrong:
+        // a single round on a cube may eat a whole face on each side, so the
+        // most it can take is the width of the face and not half of it.
+        std::vector<EdgeId> es;
+        o->body.allEdges(es);
+        if (!es.empty()) scene_.selectElement({id, ElementKind::Edge, es.front()}, true);
     } else {
         // Every edge of the body.
         std::vector<EdgeId> es;
@@ -5499,9 +5451,9 @@ void Application::stepFilletLimitSearch() {
         return;
     }
 
-    // The top of the bracket first. On an ordinary part it builds -- half the
-    // smallest dimension really is available -- and the whole search is one
-    // trial rather than eight converging on a number already known.
+    // The top of the bracket first. On an ordinary part it builds -- the
+    // material behind the face really is available -- and the whole search is
+    // one trial rather than eight converging on a number already known.
     if (!s.testedTop) {
         s.testedTop = true;
         s.pending = s.bad;

@@ -182,6 +182,70 @@ static void seamContract() {
 
 }
 
+// How big a round the panel is allowed to offer.
+//
+// The number under "Largest" is a promise: the arrow stops there, so a bound
+// that is too low hides radii the shape will happily take. One edge of a
+// twenty millimetre cube takes very nearly twenty millimetres -- the round
+// eats a whole face on each side -- and the panel used to stop it at ten,
+// because the bound was half the body's smallest dimension. That is the answer
+// to a different question: it is what is left when both sides of a face are
+// being rounded at once.
+static void filletBounds() {
+    std::printf("\n--- Fillet: how large a round the selection can hold ---\n");
+    gBackend = Backend::Brep;
+
+    Body cube = box(20, 20, 20);
+    RenderMesh rm;
+    cube.tessellate(rm);
+
+    std::vector<EdgeId> all;
+    cube.allEdges(all);
+    check(all.size() == 12, "a box has twelve edges");
+
+    const FilletRoom one = filletRoom(cube, rm, {all.front()});
+    check(near(one.most, 20.0, 1e-6), "nothing on a 20 mm cube can exceed 20 mm");
+    check(one.likely > 15.0 && one.likely <= 20.0,
+          "one edge of it is offered most of that, not half: " + std::to_string(one.likely));
+
+    // The bound is only worth anything if the kernel agrees, so ask it.
+    Body big = cube;
+    FilletSpec deep;
+    deep.edges.push_back({all.front(), 15.0});
+    std::string why;
+    check(filletEdges(big, deep, &why), "and a 15 mm round on that edge builds: " + why);
+
+    // Both sides of every face at once: now half really is all there is.
+    std::vector<Index> twelve(all.begin(), all.end());
+    const FilletRoom every = filletRoom(cube, rm, twelve);
+    check(every.likely <= 10.05 && every.likely > 5.0,
+          "rounding every edge leaves each one half the face: " + std::to_string(every.likely));
+
+    // A thin plate: the material behind the top face is the wall, and that is
+    // the bound that bites, not anything about the forty millimetre span.
+    Body plate = box(40, 40, 2);
+    RenderMesh prm;
+    plate.tessellate(prm);
+    std::vector<EdgeId> pe;
+    plate.allEdges(pe);
+    EdgeId top = kInvalid;
+    for (EdgeId e : pe) {
+        FaceId fa = kInvalid, fb = kInvalid;
+        plate.edgeFaces(e, fa, fb);
+        // An edge of the top face: one side points up.
+        if ((fa != kInvalid && plate.faceNormal(fa).z > 0.9) ||
+            (fb != kInvalid && plate.faceNormal(fb).z > 0.9)) { top = e; break; }
+    }
+    check(top != kInvalid, "the plate has a top edge");
+    if (top != kInvalid) {
+        const FilletRoom thin = filletRoom(plate, prm, {top});
+        check(thin.likely > 0.5 && thin.likely <= 2.05,
+              "a 2 mm plate offers about its thickness: " + std::to_string(thin.likely));
+    }
+
+    gBackend = Backend::Mesh;
+}
+
 int main() {
     std::printf("== mesh backend ==\n");
     gBackend = Backend::Mesh;
@@ -192,6 +256,7 @@ int main() {
         gBackend = Backend::Brep;
         seamContract();
         gBackend = Backend::Mesh;
+        filletBounds();
     } else {
         std::printf("\n== B-rep backend: not built (TANGENT_BREP=OFF) ==\n");
     }
