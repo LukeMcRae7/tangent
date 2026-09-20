@@ -505,9 +505,10 @@ void Application::drawPatternPanel() {
     // already applied re-applies it.
     auto signature = [&] {
         char b[96];
-        std::snprintf(b, sizeof b, "%d|%d|%d|%d|%.9g", (int)patternTool_.mode,
+        std::snprintf(b, sizeof b, "%d|%d|%d|%d|%.9g|%.9g,%.9g,%.9g", (int)patternTool_.mode,
                       patternTool_.count, patternTool_.axisIndex,
-                      (int)patternTool_.useTool, patternTool_.dragged());
+                      (int)patternTool_.useTool, patternTool_.dragged(), patternTool_.origin.x,
+                      patternTool_.origin.y, patternTool_.origin.z);
         return std::string(b);
     };
     const std::string was = settled ? signature() : std::string();
@@ -546,6 +547,46 @@ void Application::drawPatternPanel() {
         if (pick >= 0 && pick != patternTool_.axisIndex) {
             patternTool_.axisIndex = pick;
             setPatternMode(patternTool_.mode);
+        }
+    }
+
+    // Where the axis stands. A ring turns about the body's middle unless it is
+    // told otherwise, and a bolt circle hardly ever goes round the middle of
+    // the part: it goes round a hole. The two numbers are the ones across the
+    // axis, in the body's own space.
+    if (ring) {
+        const int u = (patternTool_.axisIndex + 1) % 3, w = (patternTool_.axisIndex + 2) % 3;
+        static const char* kNames[3] = {"x", "y", "z"};
+        char label[32];
+        std::snprintf(label, sizeof label, "Axis at %s, %s", kNames[u], kNames[w]);
+        ui::commandRow(label);
+        double at[2] = {patternTool_.origin[u], patternTool_.origin[w]};
+        ImGui::SetNextItemWidth(-1.0f);
+        ImGui::InputScalarN("##axisat", ImGuiDataType_Double, at, 2, nullptr, nullptr, "%.2f");
+        if (ImGui::IsItemDeactivatedAfterEdit()) {
+            patternTool_.origin[u] = at[0];
+            patternTool_.origin[w] = at[1];
+            setPatternMode(patternTool_.mode);
+        }
+        // A face is the usual way to say where: the middle of the hole the
+        // copies go round.
+        const std::vector<FaceId> faces = scene_.selectedFaces(patternTool_.objectId);
+        if (!faces.empty()) {
+            ImGui::SameLine(0.0f, 6.0f);
+            if (ui::pillButton("From the face", false)) {
+                if (const SceneObject* o = scene_.find(patternTool_.objectId)) {
+                    std::vector<VertexId> fv;
+                    o->body.faceVertices(faces.front(), fv);
+                    Vec3 centre{};
+                    for (VertexId vid : fv) centre += o->body.vertexPosition(vid);
+                    if (!fv.empty()) {
+                        centre *= 1.0 / static_cast<Real>(fv.size());
+                        patternTool_.origin = centre;
+                        setPatternMode(patternTool_.mode);
+                    }
+                }
+            }
+            ui::hoverTip("Put the axis through the middle of the selected face");
         }
     }
 
@@ -648,6 +689,8 @@ void Application::drawPatternPanel() {
 void Application::drawInsetPanel() {
     const bool settled = settledIs(Settled::Inset);
     if (!settled && !insetTool_.pending) return;
+    // The body it was opened on may be gone -- deleted, or undone away.
+    if (!scene_.find(insetTool_.objectId)) { insetTool_.reset(); return; }
     const double was = insetTool_.amount;
 
     if (!ui::beginCommand("##inset", "Inset Face", Glyph::Inset,
@@ -697,6 +740,7 @@ void Application::drawInsetPanel() {
 void Application::drawShellPanel() {
     const bool settled = settledIs(Settled::Shell);
     if (!settled && !shellTool_.pending) return;
+    if (!scene_.find(shellTool_.objectId)) { shellTool_.reset(); return; }
     const double was = shellTool_.amount;
 
     if (!ui::beginCommand("##shell", "Shell", Glyph::Shell,
@@ -768,6 +812,7 @@ void Application::drawShellPanel() {
 void Application::drawSplitPanel() {
     const bool settled = settledIs(Settled::Split);
     if (!settled && !splitTool_.pending) return;
+    if (!scene_.find(splitTool_.objectId)) { splitTool_.reset(); return; }
     const auto was = std::make_pair(static_cast<int>(splitTool_.by), splitTool_.offset);
 
     if (!ui::beginCommand("##split", "Split Body", Glyph::Split,

@@ -12,7 +12,7 @@ modes=(
   "--preview-check 1" "--preview-check 2" "--preview-check 3"
   "--preview-check 4" "--preview-check 5" "--preview-check 6"
   "--pattern-demo 1" "--pattern-demo 2" "--pattern-demo 3" "--pattern-demo 4"
-  "--pattern-demo 5" "--pattern-demo 6" "--pattern-demo 7"
+  "--pattern-demo 5" "--pattern-demo 6" "--pattern-demo 7" "--pattern-demo 8"
   "--step-demo /tmp/tg_sweep.step"
   "--inset-demo 2" "--shell-demo 2" "--split-demo 3"
 )

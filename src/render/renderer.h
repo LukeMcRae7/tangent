@@ -39,11 +39,12 @@ struct ViewOptions {
     Real  gridSpacing    = 1.0;
     Real  gridSubdivide  = 10.0;
 
-    // The wall a shell leaves. 2mm is a few perimeters at a common nozzle
-    // width, which is the thinnest wall most printers make well.
+    // Where the Shell dialog's wall starts, and where the Inset dialog's
+    // distance starts: each is the last one used, so the next part of the same
+    // job begins where the last left off. Both are chosen in their dialog.
+    // 2mm is a few perimeters at a common nozzle width, which is the thinnest
+    // wall most printers make well.
     Real  shellThickness = 2.0;
-
-    // How far an inset pulls a face in from its own boundary.
     Real  insetAmount   = 2.0;
 };
 

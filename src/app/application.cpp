@@ -4763,7 +4763,7 @@ void Application::stepPatternDemo() {
         base.kind = PrimitiveKind::Box;
         base.box = {100, 20, 10};
         id = scene_.addPrimitive(PrimitiveKind::Box, base);
-    } else if (mode == 2 || mode == 5 || mode == 6 || mode == 7) {
+    } else if (mode == 2 || mode == 5 || mode == 6 || mode == 7 || mode == 8) {
         base.kind = PrimitiveKind::Cylinder;
         base.cylinder = {30, 6, 64};
         id = scene_.addPrimitive(PrimitiveKind::Cylinder, base);
@@ -4812,11 +4812,17 @@ void Application::stepPatternDemo() {
     if (mode == 1) {
         patternTool_.typedValue = "15";
         patternTool_.count = 5;
-    } else if (mode == 2 || mode == 5 || mode == 6 || mode == 7) {
+    } else if (mode == 2 || mode == 5 || mode == 6 || mode == 7 || mode == 8) {
         patternTool_.axisIndex = 2;
         setPatternMode(PatternMode::Circular);
         patternTool_.count = 8;
         patternTool_.typedValue = "45";
+        // 8 moves the axis off the body's middle, which is where a ring goes
+        // round a hole rather than round the part.
+        if (mode == 8) {
+            patternTool_.origin = Vec3{10, 0, 0};
+            setPatternMode(PatternMode::Circular);
+        }
     } else {
         patternTool_.axisIndex = 0;
         setPatternMode(PatternMode::Mirror);
@@ -4828,8 +4834,9 @@ void Application::stepPatternDemo() {
     report("previewed");
 
     if (mode == 5) return;          // left open mid-gesture, to be seen
-    std::fprintf(stderr, "[pattern-demo] plane/axis %d at %.2f, useTool=%d\n",
-                 patternTool_.axisIndex, patternTool_.offset, (int)patternTool_.useTool);
+    std::fprintf(stderr, "[pattern-demo] plane/axis %d at %.2f, origin (%.1f, %.1f, %.1f), useTool=%d\n",
+                 patternTool_.axisIndex, patternTool_.offset, patternTool_.origin.x,
+                 patternTool_.origin.y, patternTool_.origin.z, (int)patternTool_.useTool);
     commitPattern();
     report("committed");
     if (!ui_.notice.empty())
@@ -4865,6 +4872,18 @@ void Application::stepPatternDemo() {
         dismissSettled();
         std::fprintf(stderr, "[pattern-demo] dismissed: settled=%d\n",
                      (int)(settled_ == Settled::Pattern));
+    }
+    // 8 then moves the axis again from the panel, which is the control that
+    // was not there: a ring about a point that is not the body's middle.
+    if (mode == 8) {
+        for (Real x : {0.0, 18.0}) {
+            patternTool_.origin = Vec3{x, 0, 0};
+            setPatternMode(PatternMode::Circular);
+            recommitSettled();
+            const SceneObject* o = scene_.find(id);
+            std::fprintf(stderr, "[pattern-demo] axis at x = %.0f: %d faces, %.1f mm3\n", x,
+                         o->body.faceCount(), o->body.health(false).volume);
+        }
     }
     // 7 stops with the panel settled, which is the state this is all for: the
     // ring is cut, the pointer is free, and the count is still there to change.
