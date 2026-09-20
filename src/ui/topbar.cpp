@@ -128,6 +128,8 @@ void modifyMenu(UiContext& ctx) {
     menuNote("a ring in from its edges; the distance is set in the dialog");
     if (menuEntry(Glyph::Hole, "Hole...", "H", hasObject)) ctx.actions.hole = true;
     menuNote("point at the face it goes into; sized for a screw, not typed in millimetres");
+    if (menuEntry(Glyph::Draft, "Draft...", nullptr, selFaces > 0)) ctx.actions.draft = true;
+    menuNote("leans the selected walls off the bed, so nothing prints over nothing");
 
     menuHeader("Edges");
     if (menuEntry(Glyph::Fillet, "Fillet / Chamfer", "F", selEdges > 0 || selFaces > 0)) ctx.actions.fillet = true;

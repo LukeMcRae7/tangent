@@ -1685,6 +1685,76 @@ bool touches(const BrepShape& a, const BrepShape& b, Real tol) {
     }
 }
 
+BrepRef draftFaces(const BrepRef& s, const std::vector<FaceId>& faces, Real angleRad,
+                   Vec3 neutralPoint, Vec3 pull, ElementId salt, std::string* reason) {
+    if (reason) reason->clear();
+    if (!s || s->shape.IsNull() || faces.empty()) {
+        if (reason) *reason = "no faces to draft";
+        return {};
+    }
+    if (std::fabs(angleRad) < 1e-9) {
+        if (reason) *reason = "the angle is zero";
+        return {};
+    }
+    if (std::fabs(angleRad) > 1.4) {
+        if (reason) *reason = "that is more lean than a wall can take";
+        return {};
+    }
+    if (lengthSq(pull) < 1e-18) {
+        if (reason) *reason = "there is no direction to pull in";
+        return {};
+    }
+    const Vec3 dir = normalize(pull);
+
+    try {
+        BRepOffsetAPI_DraftAngle draft(s->shape);
+        // The plane the part is widest at: everything named narrows away from
+        // it, along the pull.
+        const gp_Pln neutral(gp_Pnt(neutralPoint.x, neutralPoint.y, neutralPoint.z),
+                             gp_Dir(dir.x, dir.y, dir.z));
+        int added = 0;
+        for (FaceId f : faces) {
+            if (!validFace(*s, f)) {
+                if (reason) *reason = "a face to draft no longer exists";
+                return {};
+            }
+            const Vec3 n = faceNormal(*s, f);
+            if (lengthSq(n) < 1e-18) continue;
+            // A face facing the way the part is pulled has no line in the
+            // neutral plane to turn about: it is the top or the bottom, not a
+            // wall, and drafting it means nothing.
+            if (std::fabs(dot(normalize(n), dir)) > 0.999) {
+                if (reason) *reason = "a face square to the pull has no wall to lean";
+                return {};
+            }
+            const TopoDS_Face face = TopoDS::Face(s->faces(static_cast<int>(f) + 1));
+            draft.Add(face, gp_Dir(dir.x, dir.y, dir.z), static_cast<Standard_Real>(angleRad),
+                      neutral);
+            if (!draft.AddDone()) {
+                if (reason) *reason = "that face will not take a draft";
+                return {};
+            }
+            ++added;
+        }
+        if (added == 0) {
+            if (reason) *reason = "no face could be drafted";
+            return {};
+        }
+
+        draft.Build();
+        if (!draft.IsDone()) {
+            if (reason) *reason = "the draft could not be built: try a smaller angle";
+            return {};
+        }
+        const TopoDS_Shape result = draft.Shape();
+        if (!acceptable(result, reason)) return {};
+        return makeBrep(result, propagateNames(draft, {{s.get()}}, result, salt));
+    } catch (const Standard_Failure& e) {
+        if (reason) *reason = kernelReason(e, "the draft could not be built");
+        return {};
+    }
+}
+
 BrepRef rotateFaces(const BrepRef& s, const std::vector<FaceId>& faces, Real angleRad,
                     Vec3 hingePoint, Vec3 hingeDir, ElementId salt, std::string* reason) {
     if (reason) reason->clear();

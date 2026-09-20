@@ -152,6 +152,9 @@ public:
     // through a plate, 2 an M4 counterbore adjusted to M5 in its panel,
     // 3 a blind tapped hole whose face then moves under it.
     void setHoleDemo(int step) { holeDemo_ = step; }
+    // Leans the walls of a box: 1 three degrees off the bed, 2 the same
+    // adjusted to six in the panel, 3 widest in the middle.
+    void setDraftDemo(int step) { draftDemo_ = step; }
     // An SVG onto the top plane: 1 placed in the sketch, 2 its filled regions
     // picked, 3 extruded 3 mm, 4 cut 3 mm into a plate under it, 5 with the
     // busiest face of the result selected -- what the highlight costs to draw.
@@ -230,6 +233,7 @@ private:
     int  sketchDemo_ = 0;
     int  revolveDemo_ = 0;
     int  holeDemo_ = 0;
+    int  draftDemo_ = 0;
     std::string svgDemo_;
     int  svgDemoStep_ = 1;
     int  svgDemoFrames_ = 0;
@@ -991,6 +995,36 @@ private:
     };
     HoleToolState holeTool_;
 
+    // Draft: how far the walls lean, which way the part comes off, and where
+    // it is widest. Made as soon as it is asked for and adjusted in its panel
+    // until Done, as Inset and Shell are.
+    struct DraftToolState {
+        ObjectId objectId = kNoObject;
+        std::vector<FaceId> faces;
+        Real angle = 3.0 * kDeg2Rad;
+        int  axis = 2;                   // 0 X, 1 Y, 2 Z: the way it is pulled
+        enum class Widest { Bottom, Top, Middle };
+        Widest widest = Widest::Bottom;  // the bed, for a printed part
+        Body before;
+        std::vector<Feature> chainBefore;
+        std::string typedValue;
+        bool pending = false;
+        std::string refusal;
+        bool active = false;
+
+        void reset() {
+            objectId = kNoObject;
+            faces.clear();
+            before = Body();
+            chainBefore.clear();
+            typedValue.clear();
+            pending = false;
+            refusal.clear();
+            active = false;
+        }
+    };
+    DraftToolState draftTool_;
+
     // Split: what to cut with, and where. It used to decide for itself from
     // what happened to be selected -- a face's plane, a second body's, or the
     // pieces it was already in, and a cut through the middle when none of
@@ -1040,6 +1074,13 @@ private:
     AmountToolState insetTool_;
     AmountToolState shellTool_;
     // Placing a hole, making it, and the panel that adjusts it.
+    void beginDraft();
+    void commitDraft();
+    void drawDraftPanel();
+    // The pull direction and the point on the neutral plane the choices come
+    // to, in the body's own space.
+    void draftPlane(Vec3& neutralPoint, Vec3& pull) const;
+
     void beginHole();
     void updateHole();
     void commitHole();
@@ -1122,7 +1163,7 @@ private:
     // viewport click in the first place. This is the first of those, because
     // this app does confirm on a click.
     enum class Settled { None, Fillet, Divide, Face, Pattern, Create, Sketch, Combine, Inset, Shell,
-                         Split, Hole };
+                         Split, Hole, Draft };
     Settled  settled_ = Settled::None;
     ObjectId settledObject_ = kNoObject;
 

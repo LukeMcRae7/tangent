@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <tuple>
 
 namespace tg {
 namespace {
@@ -681,6 +682,122 @@ void Application::drawPatternPanel() {
     }
     if (footer > 0)      commitPattern();
     else if (footer < 0) abortPattern();
+}
+
+// A draft: how far the walls lean, and off what.
+//
+// Print-first: the part comes off the bed, so the pull starts as Z and the
+// widest place as the bottom. Leaning a wall three degrees is what keeps it
+// from printing out over nothing, and it is the same operation a moulded part
+// needs to leave its tool.
+void Application::drawDraftPanel() {
+    const bool settled = settledIs(Settled::Draft);
+    if (!settled && !draftTool_.pending) return;
+    if (!scene_.find(draftTool_.objectId)) { draftTool_.reset(); return; }
+
+    const auto was = std::make_tuple(draftTool_.angle, draftTool_.axis,
+                                     static_cast<int>(draftTool_.widest));
+
+    if (!ui::beginCommand("##draft", "Draft", Glyph::Draft,
+                          objectName(scene_, draftTool_.objectId)))
+        return;
+
+    {
+        double deg = draftTool_.angle * kRad2Deg;
+        const ui::NumberEdit v = ui::commandNumber("Angle", deg, "\xC2\xB0",
+                                                   !draftTool_.typedValue.empty(),
+                                                   !draftTool_.typedValue.empty(),
+                                                   draftTool_.typedValue.c_str(), -45.0, 45.0,
+                                                   /*signedRange=*/true);
+        applyBar(v, /*active=*/false, draftTool_.typedValue,
+                 [&](double x) { draftTool_.angle = std::clamp(x, -60.0, 60.0) * kDeg2Rad; },
+                 [] {});
+    }
+
+    // Which way the part comes off. A wall square to an axis cannot lean about
+    // it -- there is no line where it meets the neutral plane -- so that axis
+    // is dimmed with the reason rather than offered and then refused.
+    {
+        ui::Choice kAxis[3] = {
+            {Glyph::Count, "X", nullptr, "Pulled along X"},
+            {Glyph::Count, "Y", nullptr, "Pulled along Y"},
+            {Glyph::Count, "Z", nullptr, "Pulled along Z: up, off the bed"},
+        };
+        const SceneObject* o = scene_.find(draftTool_.objectId);
+        for (int a = 0; a < 3; ++a) {
+            Vec3 dir{};
+            (&dir.x)[a] = 1.0;
+            const bool ok = o && std::all_of(draftTool_.faces.begin(), draftTool_.faces.end(),
+                                             [&](FaceId f) {
+                                                 const Vec3 n = draftTool_.before.faceNormal(f);
+                                                 return length(n) > 1e-9 &&
+                                                        std::fabs(dot(normalize(n), dir)) < 0.999;
+                                             });
+            if (!ok) {
+                kAxis[a].enabled = false;
+                kAxis[a].tip = "A wall square to this axis has nothing to lean about";
+            }
+        }
+        const int pick = ui::commandChoices("Pulled along", kAxis, 3, draftTool_.axis,
+                                            /*compact=*/true);
+        if (pick >= 0 && pick != draftTool_.axis) draftTool_.axis = pick;
+    }
+
+    // Where the wall is the size it was drawn. It leans the same way all the
+    // way along; this only says where it pivots, so a part can be kept to size
+    // at the end that matters -- the bed it stands on, or the face something
+    // else has to fit against.
+    {
+        using Widest = DraftToolState::Widest;
+        static const ui::Choice kAt[3] = {
+            {Glyph::Count, "Bottom", nullptr, "Keeps its size where it stands: the bed"},
+            {Glyph::Count, "Top",    nullptr, "Keeps its size at the far end"},
+            {Glyph::Count, "Middle", nullptr, "Keeps its size half way along"},
+        };
+        const int on = static_cast<int>(draftTool_.widest);
+        const int pick = ui::commandChoices("Same size at", kAt, 3, on, /*compact=*/true);
+        if (pick >= 0 && pick != on) draftTool_.widest = static_cast<Widest>(pick);
+    }
+
+    char sel[64];
+    std::snprintf(sel, sizeof sel, "%zu face%s", draftTool_.faces.size(),
+                  draftTool_.faces.size() == 1 ? "" : "s");
+    ui::commandValue("Selection", sel);
+
+    // What the lean comes to on this part, which is the number that decides
+    // whether it prints: how far the top of the wall has come in.
+    if (const SceneObject* o = scene_.find(draftTool_.objectId)) {
+        const AABB b = draftTool_.before.bounds();
+        if (b.valid()) {
+            const Vec3 size = b.size();
+            const Real height = (&size.x)[std::clamp(draftTool_.axis, 0, 2)];
+            const Real reach = std::fabs(std::tan(draftTool_.angle)) * height;
+            char in[80];
+            std::snprintf(in, sizeof in, "%.2f mm over %.1f mm", static_cast<double>(reach),
+                          static_cast<double>(height));
+            ui::commandValue("Leans", in);
+        }
+        (void)o;
+    }
+
+    if (settled) ui::commandApplied("Draft");
+    else         ui::commandRefused(draftTool_.refusal.c_str());
+    ui::commandHint("Each wall keeps the size it was drawn where it crosses that plane, and "
+                    "narrows along the pull from there. A negative angle leans it the other way.");
+
+    const int footer = settled ? ui::commandFooter("Done", true, nullptr)
+                               : ui::commandFooter("Try again", true, "Cancel");
+    ui::endCommand();
+
+    if (std::make_tuple(draftTool_.angle, draftTool_.axis,
+                        static_cast<int>(draftTool_.widest)) != was) {
+        if (settled) recommitSettled();
+        else         { draftTool_.active = true; commitDraft(); }
+        return;
+    }
+    if (footer > 0 && settled)  dismissSettled();
+    else if (footer > 0)        { draftTool_.active = true; commitDraft(); }
+    else if (footer < 0)        draftTool_.reset();
 }
 
 // A hole: which screw it is for, how freely that screw passes, what its head

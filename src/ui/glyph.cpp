@@ -81,6 +81,7 @@ ImWchar glyphCodepoint(Glyph g) {
     case Glyph::Hole:          return 0xefb1;   // circle-dot
     case Glyph::Counterbore:   return 0xece5;   // circles
     case Glyph::Countersink:   return 0xefdd;   // cone
+    case Glyph::Draft:         return 0xef20;   // angle
     case Glyph::Divide:        return 0xebdb;   // slice
     case Glyph::Merge:         return 0xedaf;   // arrows-join
     case Glyph::Pattern:       return 0xedba;   // layout-grid

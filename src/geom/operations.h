@@ -131,6 +131,13 @@ struct FilletSpec {
 // Rounds edges. `reason` gets a short phrase on refusal; see the note above.
 bool filletEdges(Body& body, const FilletSpec& spec, std::string* reason = nullptr);
 
+// Tips faces away from a pull direction, about the line where each meets the
+// plane through `neutralPoint` square to `pull`: the draft that gets a part out
+// of a mould, and the lean that keeps a printed wall from hanging over nothing.
+// Refused on a mesh, and refused with a reason for a face square to the pull.
+bool draftFaces(Body& body, const std::vector<FaceId>& faces, Real angleRad, Vec3 neutralPoint,
+                Vec3 pull, ElementId salt, std::string* reason = nullptr);
+
 // Drills a hole into a body: a bore from `at`, going `into` the material, with
 // a counterbore or a countersink at its mouth when the cut asks for one. Both
 // are in the body's own space. Refused on a mesh, and refused with a reason

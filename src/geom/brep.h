@@ -248,6 +248,20 @@ bool touches(const BrepShape& a, const BrepShape& b, Real tol);
 //
 // `hingePoint` and `hingeDir` name that line; it should be an edge of the face,
 // or the operation has nothing to pivot on.
+// Tips faces away from a pull direction: the draft a moulded part needs to come
+// out of its tool, and the one a printed part needs to stand up without a wall
+// leaning out over nothing.
+//
+// Every face named turns about the line where it meets the neutral plane --
+// the plane through `neutralPoint` square to `pull` -- so the part is widest
+// where it meets that plane and narrows along the pull. A positive angle
+// narrows; a negative one widens.
+//
+// Faces square to the pull cannot be drafted -- there is no line to turn about
+// -- and are refused rather than quietly left alone.
+BrepRef draftFaces(const BrepRef& s, const std::vector<FaceId>& faces, Real angleRad,
+                   Vec3 neutralPoint, Vec3 pull, ElementId salt, std::string* reason);
+
 BrepRef rotateFaces(const BrepRef& s, const std::vector<FaceId>& faces, Real angleRad,
                     Vec3 hingePoint, Vec3 hingeDir, ElementId salt, std::string* reason);
 

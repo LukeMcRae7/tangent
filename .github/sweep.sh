@@ -14,6 +14,7 @@ modes=(
   "--preview-check 7"
   "--revolve-demo 1" "--revolve-demo 2" "--revolve-demo 3"
   "--hole-demo 1" "--hole-demo 2" "--hole-demo 3"
+  "--draft-demo 1" "--draft-demo 2" "--draft-demo 3"
   "--pattern-demo 1" "--pattern-demo 2" "--pattern-demo 3" "--pattern-demo 4"
   "--pattern-demo 5" "--pattern-demo 6" "--pattern-demo 7" "--pattern-demo 8"
   "--step-demo /tmp/tg_sweep.step"
@@ -71,6 +72,18 @@ for m in 1 2 3; do
     fail=1
   else
     printf '  ok    --hole-demo %s\n' "$m"
+  fi
+done
+
+# And a draft has to lean by exactly the angle it was asked for.
+for m in 1 2 3; do
+  out=$(timeout 200 ./build/tangent --draft-demo $m --smoke-test 20 2>&1)
+  if echo "$out" | grep "\[draft-demo\]" | grep -q "agrees=0"; then
+    printf '  FAIL  draft-demo %s\n' "$m"
+    echo "$out" | grep "\[draft-demo\]" | sed 's/^/        /'
+    fail=1
+  else
+    printf '  ok    --draft-demo %s\n' "$m"
   fi
 done
 

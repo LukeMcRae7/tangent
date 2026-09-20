@@ -228,6 +228,15 @@ bool filletEdges(Body& body, const FilletSpec& spec, std::string* reason) {
     return refuseMesh(spec.chamfer ? "chamfering an edge" : "filleting an edge", reason);
 }
 
+bool draftFaces(Body& body, const std::vector<FaceId>& faces, Real angleRad, Vec3 neutralPoint,
+                Vec3 pull, ElementId salt, std::string* reason) {
+    if (body.isMesh()) return refuseMesh("drafting a face", reason);
+    BrepRef out = brep::draftFaces(body.brepRef(), faces, angleRad, neutralPoint, pull, salt, reason);
+    if (!out) return false;
+    body = Body(std::move(out));
+    return true;
+}
+
 bool drillHole(Body& body, Vec3 at, Vec3 into, const HoleCut& cut, ElementId salt,
                std::string* reason) {
     if (body.isMesh()) return refuseMesh("drilling a hole", reason);

@@ -52,6 +52,7 @@ enum class FeatureKind {
     Scale,       // stretches the body along its own axes: a change of shape
     RevolveProfile, // a region of a sketch turned about an axis in its plane
     Hole,        // a bore into a named face, sized for a fastener
+    Draft,       // named faces leant away from a pull direction
 
     // New kinds go on the end and nowhere else. The value is what is written
     // to a file, so inserting one in the middle renumbers every kind after it
@@ -62,7 +63,7 @@ enum class FeatureKind {
 // here rather than in the loader so that adding a kind above is one edit and
 // not two: a kind the loader does not know about is refused as a corrupt file,
 // and that refusal is silent about why.
-inline constexpr FeatureKind kLastFeatureKind = FeatureKind::Hole;
+inline constexpr FeatureKind kLastFeatureKind = FeatureKind::Draft;
 
 const char* featureKindName(FeatureKind k);
 
@@ -158,7 +159,10 @@ struct Feature {
     Real amount   = 2.0;    // Inset
 
     // FaceRotate: how far to tip, and the edge to tip about. Divide: a point on
-    // the cutting plane, and its normal.
+    // the cutting plane, and its normal. Draft: a point on the neutral plane,
+    // and the direction the part is pulled -- which for a printed one is the
+    // way it comes off the bed. Hole: where its mouth is, and the way it goes
+    // in. All of them a point and a direction, so all of them these.
     //
     // Held in the body's own space as plain geometry rather than as a named
     // edge, which means an edit further up the chain that moves that edge does

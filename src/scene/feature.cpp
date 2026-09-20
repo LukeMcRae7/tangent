@@ -31,6 +31,7 @@ const char* featureKindName(FeatureKind k) {
         case FeatureKind::ExtrudeProfile: return "Extrude Profile";
         case FeatureKind::RevolveProfile: return "Revolve";
         case FeatureKind::Hole:       return "Hole";
+        case FeatureKind::Draft:      return "Draft";
         case FeatureKind::Move:       return "Move";
         case FeatureKind::Rotate:     return "Rotate";
         case FeatureKind::Scale:      return "Scale";
@@ -255,6 +256,14 @@ std::string Feature::summary() const {
             else
                 std::snprintf(buf, sizeof(buf), "Revolve  %.1f deg  (%s)", deg,
                               extrudeOpName(shown));
+            break;
+        }
+        case FeatureKind::Draft: {
+            const Vec3 d = axisDir;
+            const char* way = std::fabs(d.x) > 0.9 ? "X" : std::fabs(d.y) > 0.9 ? "Y" : "Z";
+            std::snprintf(buf, sizeof(buf), "Draft  %.1f deg  (%s, along %s)",
+                          static_cast<double>(angle) * kRad2Deg,
+                          faces.describe("face").c_str(), way);
             break;
         }
         case FeatureKind::Hole: {
@@ -677,6 +686,19 @@ bool evaluateFrom(std::vector<Feature>& features, size_t from,
                                  : why.c_str());
             else
                 body = std::move(combined);
+            break;
+        }
+
+        case FeatureKind::Draft: {
+            if (body.empty()) { fail("there is no body to draft"); break; }
+            std::vector<FaceId> fs;
+            if (!f.faces.resolveFaces(body, fs) || fs.empty()) {
+                fail("the faces it leans are gone");
+                break;
+            }
+            std::string why;
+            if (!draftFaces(body, fs, f.angle, f.axisPoint, f.axisDir, f.uid, &why))
+                fail(why.empty() ? "the draft could not be built" : why.c_str());
             break;
         }
 

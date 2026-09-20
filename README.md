@@ -114,6 +114,13 @@ drill leaves, which is also the shape a printer wants: a flat ceiling over a
 hole has nothing to print onto. The hole belongs to its face, so when that face
 moves the hole goes with it.
 
+**Walls can be leant off the bed.** Modify > Draft takes the selected walls and
+tips them a few degrees away from the direction the part is pulled, which for a
+printed part is up off the bed and for a moulded one is out of its tool. Each
+wall keeps the size it was drawn where it crosses the plane you name -- the
+bottom, the top or half way -- and the panel says how far the far end has come
+in, in millimetres, because that is the number that decides whether it prints.
+
 **A sketch extrudes or revolves.** Having picked the regions, Extrude pushes
 them along the plane's normal and Revolve turns them about an axis lying in it
 -- one of the sketch's own, or any line of the drawing, clicked. A turn takes

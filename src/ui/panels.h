@@ -88,6 +88,7 @@ struct UiActions {
     bool fillet = false;
     bool shell = false;
     bool hole = false;
+    bool draft = false;
 
     // The modal transforms, from the bar or a menu.
     bool moveObject = false;

@@ -43,6 +43,7 @@ Glyph glyphFor(const Feature& f) {
         case FeatureKind::ExtrudeProfile: return Glyph::Extrude;
         case FeatureKind::RevolveProfile: return Glyph::Revolve;
         case FeatureKind::Hole:           return Glyph::Hole;
+        case FeatureKind::Draft:          return Glyph::Draft;
         case FeatureKind::Bevel:          return f.chamfer ? Glyph::Chamfer : Glyph::Fillet;
         case FeatureKind::Shell:          return Glyph::Shell;
         case FeatureKind::FaceRotate:     return Glyph::RotateFace;
@@ -353,6 +354,21 @@ void featureDetails(UiContext& ctx, SceneObject& obj, Feature& f, bool& changed)
         ImGui::TextColored(f.sketchFreedoms == 0 ? im(palette::kValid) : im(palette::kInfo), "%s",
                            f.sketchFreedoms == 0 ? "fully constrained"
                                                  : "not fully constrained: some of it can still move");
+        break;
+    }
+    case FeatureKind::Draft: {
+        double deg = f.angle * kRad2Deg;
+        if (labelledNumber("Angle", deg, 0.1f, -80.0f, 80.0f)) {
+            f.angle = deg * kDeg2Rad;
+            changed = true;
+        }
+        // Which way the part is pulled, and where it is widest. Both are
+        // geometry rather than a choice of words, so the row says them.
+        const Vec3 d = f.axisDir;
+        ImGui::TextColored(dim, "along %s, same size at %.2f", std::fabs(d.x) > 0.9 ? "X"
+                                                          : std::fabs(d.y) > 0.9 ? "Y" : "Z",
+                           dot(f.axisPoint, normalize(d)));
+        ImGui::TextColored(dim, "%s", f.faces.describe("face").c_str());
         break;
     }
     case FeatureKind::Hole: {

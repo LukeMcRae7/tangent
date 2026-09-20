@@ -682,6 +682,61 @@ int main() {
                     body.faceCount(), rm.triangles.size() / 3, rm.edgeLines.size() / 2);
     }
 
+    std::printf("--- a draft, so a wall leans the way it has to ---\n");
+    {
+        // A 20 cube, drafted 5 degrees on all four walls with the neutral
+        // plane at the bottom. The section at height z is a square of side
+        // 20 - 2 z tan(5), so the volume integrates exactly.
+        const Real angle = 5.0 * kDeg2Rad;
+        const Real k = 2.0 * std::tan(angle);
+        const Real exact = (20.0 * 20.0 * 20.0 - std::pow(20.0 - 20.0 * k, 3.0)) / (3.0 * k);
+
+        Body body = plate(20, 20, 20);
+        std::vector<FaceId> walls;
+        std::vector<FaceId> all;
+        body.allFaces(all);
+        for (FaceId f : all)
+            if (std::fabs(body.faceNormal(f).z) < 0.01) walls.push_back(f);
+        check(walls.size() == 4, "a cube has four walls");
+
+        std::string why;
+        check(draftFaces(body, walls, angle, {0, 0, -10}, {0, 0, 1}, 950, &why),
+              "the walls take a 5 degree draft: " + why);
+        check(body.health().solid(), "and it is still a solid");
+        check(near(body.health(false).volume, exact, 1e-4),
+              "narrowing exactly as the arithmetic says: " +
+                  std::to_string(body.health(false).volume) + " against " +
+                  std::to_string(exact));
+        const AABB b = body.bounds();
+        check(near(b.size().z, 20.0, 1e-6), "the height is untouched");
+
+        // The bottom stays where the neutral plane is; the top comes in.
+        Real top = 0.0, bottom = 0.0;
+        std::vector<VertexId> vs;
+        body.allVertices(vs);
+        for (VertexId v : vs) {
+            const Vec3 p = body.vertexPosition(v);
+            if (p.z > 9.99) top = std::max(top, p.x);
+            if (p.z < -9.99) bottom = std::max(bottom, p.x);
+        }
+        check(near(bottom, 10.0, 1e-6), "the neutral plane keeps its size");
+        check(near(top, 10.0 - 20.0 * std::tan(angle), 1e-6),
+              "and the far end is in by the angle: " + std::to_string(top));
+
+        // A face square to the pull is the top, not a wall, and drafting it
+        // means nothing.
+        Body again = plate(20, 20, 20);
+        FaceId lid = kInvalid;
+        std::vector<FaceId> fs;
+        again.allFaces(fs);
+        for (FaceId f : fs)
+            if (again.faceNormal(f).z > 0.99) lid = f;
+        why.clear();
+        check(!draftFaces(again, {lid}, angle, {0, 0, -10}, {0, 0, 1}, 951, &why),
+              "the top of the part cannot be drafted");
+        check(why.find("square to the pull") != std::string::npos, "and says why: " + why);
+    }
+
     std::printf("--- a hole, and what it is chosen from ---\n");
     {
         // A plate 40 x 40 x 10, standing from z = -5 to 5, drilled from the top.

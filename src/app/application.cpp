@@ -715,6 +715,71 @@ bool Application::init() {
         }
     }
 
+    if (draftDemo_ > 0) {
+        // A 20 cube with its four walls leant off the bed. What that should
+        // come to is an integral: the section at height z is a square of side
+        // 20 - 2 z tan(angle), widest where the neutral plane is.
+        scene_.clear();
+        camera_.yaw = 0.8f;
+        camera_.pitch = 0.4f;
+        camera_.distance = 90.0f;
+        camera_.target = {0, 0, 0};
+        camera_.snapToGoal();
+
+        PrimitiveSpec spec;
+        spec.kind = PrimitiveKind::Box;
+        spec.box = {20.0, 20.0, 20.0};
+        const ObjectId id = scene_.addPrimitive(PrimitiveKind::Box, spec, {0, 0, 0});
+        SceneObject* obj = scene_.find(id);
+        std::vector<FaceId> all;
+        obj->body.allFaces(all);
+        scene_.select(id);
+        scene_.clearElementSelection();
+        for (FaceId f : all)
+            if (std::fabs(obj->body.faceNormal(f).z) < 0.01)
+                scene_.selectElement({id, ElementKind::Face, f}, true);
+
+        beginDraft();
+        if (draftDemo_ == 3) draftTool_.widest = DraftToolState::Widest::Middle;
+        draftTool_.angle = 3.0 * kDeg2Rad;
+        if (draftDemo_ != 1) recommitSettled();
+
+        auto tapered = [](Real angle, Real from, Real height) {
+            // The volume of a square section narrowing at `angle`, starting
+            // `from` wide, over `height`.
+            const Real k = 2.0 * std::tan(angle);
+            if (std::fabs(k) < 1e-12) return from * from * height;
+            return (from * from * from - std::pow(from - k * height, 3.0)) / (3.0 * k);
+        };
+        auto say = [&](const char* what, Real expected) {
+            const SceneObject* o = scene_.find(id);
+            const Real got = o ? o->body.health(false).volume : 0.0;
+            std::fprintf(stderr,
+                         "[draft-demo] %s: %zu features, %d faces, %.3f mm3, "
+                         "arithmetic says %.3f, agrees=%d%s%s\n",
+                         what, o ? o->features.size() : 0, o ? o->body.faceCount() : 0,
+                         static_cast<double>(got), static_cast<double>(expected),
+                         std::fabs(got - expected) < std::fabs(expected) * 1e-5 ? 1 : 0,
+                         draftTool_.refusal.empty() ? "" : "  ", draftTool_.refusal.c_str());
+        };
+
+        if (draftDemo_ == 1) {
+            say("3 degrees off the bed", tapered(3.0 * kDeg2Rad, 20.0, 20.0));
+        } else if (draftDemo_ == 2) {
+            draftTool_.angle = 6.0 * kDeg2Rad;
+            recommitSettled();
+            say("adjusted to 6 degrees", tapered(6.0 * kDeg2Rad, 20.0, 20.0));
+        } else {
+            // Pivoting half way: the wall leans the same way all along, so the
+            // bottom is wider than it was drawn by as much as the top is
+            // narrower. One taper, starting from that wider bottom.
+            const Real a = 3.0 * kDeg2Rad;
+            say("3 degrees, same size half way",
+                tapered(a, 20.0 + 2.0 * 10.0 * std::tan(a), 20.0));
+        }
+        dismissSettled();
+    }
+
     if (holeDemo_ > 0) {
         // A plate, and a hole drilled into its top face the way the tool
         // drills one -- placed, made, then adjusted in the panel. What each
@@ -1157,6 +1222,7 @@ Vec2 Application::mouseInViewport() const {
 bool Application::editToolActive() const {
     return filletTool_.active || faceTool_.active || divideTool_.active || patternTool_.active ||
            reduceTool_.active || combineTool_.active || holeTool_.placing ||
+           draftTool_.pending ||
            // Open with nothing applied, waiting for a number that works.
            insetTool_.pending || shellTool_.pending || splitTool_.pending || holeTool_.pending;
 }
@@ -2671,6 +2737,98 @@ void Application::convertSelectedToSolid() {
 // distance used, then adjusted in its panel -- which is the number a person
 // can only choose by seeing it.
 // ---------------------------------------------------------------------------
+// Draft
+// ---------------------------------------------------------------------------
+
+void Application::draftPlane(Vec3& neutralPoint, Vec3& pull) const {
+    const int axis = std::clamp(draftTool_.axis, 0, 2);
+    pull = Vec3{};
+    (&pull.x)[axis] = 1.0;
+    const AABB b = draftTool_.before.bounds();
+    neutralPoint = b.valid() ? b.center() : Vec3{};
+    if (!b.valid()) return;
+    using Widest = DraftToolState::Widest;
+    if (draftTool_.widest == Widest::Bottom)   (&neutralPoint.x)[axis] = (&b.min.x)[axis];
+    else if (draftTool_.widest == Widest::Top) (&neutralPoint.x)[axis] = (&b.max.x)[axis];
+}
+
+void Application::beginDraft() {
+    dismissSettled();
+    if (tool_.active() || createTool_.active() || sketchTool_.active() || editToolActive()) {
+        setNotice("Finish the current operation first");
+        return;
+    }
+    const ObjectId id = scene_.contextObject();
+    SceneObject* obj = scene_.find(id);
+    if (!obj) { setNotice("Select an object first"); return; }
+    if (refuseMeshEdit(*obj, "Drafting a face")) return;
+
+    const std::vector<FaceId> faces = scene_.selectedFaces(id);
+    if (faces.empty()) { setNotice("Select the walls to lean"); return; }
+
+    draftTool_.reset();
+    draftTool_.objectId = id;
+    draftTool_.faces = faces;
+    draftTool_.before = obj->body;
+    draftTool_.chainBefore = obj->features;
+    // Up, off the bed, and widest where it touches it: the draft a printed
+    // part is usually after. A wall square to Z cannot lean that way, so the
+    // axis starts as one the selection can actually take.
+    draftTool_.axis = 2;
+    for (int a = 0; a < 3; ++a) {
+        Vec3 dir{};
+        (&dir.x)[a] = 1.0;
+        const bool ok = std::all_of(faces.begin(), faces.end(), [&](FaceId f) {
+            const Vec3 n = obj->body.faceNormal(f);
+            return length(n) > 1e-9 && std::fabs(dot(normalize(n), dir)) < 0.999;
+        });
+        if (a == 2 && ok) break;
+        if (ok) { draftTool_.axis = a; break; }
+    }
+    draftTool_.active = true;
+    preEditSolid_ = obj->healthVersion == obj->geometryVersion && obj->health.solid();
+    commitDraft();
+}
+
+void Application::commitDraft() {
+    if (!draftTool_.active) return;
+    const ObjectId id = draftTool_.objectId;
+    draftTool_.active = false;
+    SceneObject* obj = scene_.find(id);
+    if (!obj) return;
+
+    std::vector<Feature> chainBefore = draftTool_.chainBefore;
+    obj->features = draftTool_.chainBefore;
+    obj->body = draftTool_.before;
+
+    Vec3 at{}, pull{};
+    draftPlane(at, pull);
+
+    Feature f;
+    f.kind = FeatureKind::Draft;
+    f.angle = draftTool_.angle;
+    f.axisPoint = at;
+    f.axisDir = pull;
+    f.faces = nameFaces(draftTool_.before, draftTool_.faces);
+
+    std::string why;
+    if (scene_.addFeature(id, std::move(f), &why) && editKeepsSolid(id)) {
+        undo_.push(std::make_unique<FeatureCommand>(id, std::move(chainBefore), obj->features,
+                                                    "Draft"),
+                   /*merge=*/recommitting_);
+        draftTool_.pending = false;
+        draftTool_.refusal.clear();
+        settleCommand(Settled::Draft, id);
+    } else {
+        obj->features = std::move(chainBefore);
+        obj->body = draftTool_.before;
+        obj->refreshDerived();
+        draftTool_.pending = true;
+        draftTool_.refusal = why.empty() ? "those walls will not lean that far" : why;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Holes
 // ---------------------------------------------------------------------------
 
@@ -3761,6 +3919,7 @@ void Application::recommitSettled() {
         case Settled::Inset:   insetTool_.active = true;   commitInset();    break;
         case Settled::Shell:   shellTool_.active = true;   commitShell();    break;
         case Settled::Hole:    holeTool_.active = true;    commitHole();     break;
+        case Settled::Draft:   draftTool_.active = true;   commitDraft();    break;
         default:               break;
     }
     recommitting_ = false;
@@ -7157,7 +7316,8 @@ void Application::applyActions() {
     // catches the commands that are not gestures.
     if (a.addRequested || a.sketch || a.editSketchObject != kNoObject ||
         a.deleteSelected || a.duplicateSelected || a.mergeFaces ||
-        a.booleanRequested || a.split || a.shell || a.inset || a.hole || a.undo || a.redo ||
+        a.booleanRequested || a.split || a.shell || a.inset || a.hole || a.draft ||
+        a.undo || a.redo ||
         a.importStep || a.importMesh || a.importSvg || a.convertToSolid || a.reduceMesh ||
         a.newProject || a.openProject || a.rebuildObject != kNoObject ||
         a.transformEdited != kNoObject || a.resetTransform != kNoObject ||
@@ -7269,6 +7429,7 @@ void Application::applyActions() {
     if (a.shell)   beginShell();
     if (a.inset)   beginInset();
     if (a.hole)    beginHole();
+    if (a.draft)   beginDraft();
     if (a.booleanRequested) beginCombine(a.booleanOp);
 
     if (a.rebuildObject != kNoObject) {
@@ -7435,6 +7596,7 @@ void Application::buildUi() {
     drawShellPanel();
     drawSplitPanel();
     drawHolePanel();
+    drawDraftPanel();
     drawPatternPanel();
     drawReducePanel();
 
