@@ -21,6 +21,7 @@
 #pragma once
 
 #include "geom/body.h"
+#include "geom/fasteners.h"
 #include "geom/operations.h"
 #include "sketch/sketch.h"
 
@@ -50,6 +51,7 @@ enum class FeatureKind {
     Rotate,      // turns the object about a point; its shape is untouched
     Scale,       // stretches the body along its own axes: a change of shape
     RevolveProfile, // a region of a sketch turned about an axis in its plane
+    Hole,        // a bore into a named face, sized for a fastener
 
     // New kinds go on the end and nowhere else. The value is what is written
     // to a file, so inserting one in the middle renumbers every kind after it
@@ -60,7 +62,7 @@ enum class FeatureKind {
 // here rather than in the loader so that adding a kind above is one edit and
 // not two: a kind the loader does not know about is refused as a corrupt file,
 // and that refusal is silent about why.
-inline constexpr FeatureKind kLastFeatureKind = FeatureKind::RevolveProfile;
+inline constexpr FeatureKind kLastFeatureKind = FeatureKind::Hole;
 
 const char* featureKindName(FeatureKind k);
 
@@ -270,6 +272,16 @@ struct Feature {
     Vec2 revolveAxisAt{0, 0};
     Vec2 revolveAxisDir{0, 1};
     Real revolveAngle = 2.0 * kPi;
+
+    // Hole: what is cut, and what it was chosen for. The face it goes into is
+    // in `faces` and where it goes in is `axisPoint` and `axisDir`, so that a
+    // hole stays on its face and square to it when the face moves. The
+    // fastener and the fit are kept beside the numbers they produced: they are
+    // what the panel shows and what the step says, and a hole typed by hand is
+    // one with no fastener (-1).
+    HoleCut hole;
+    int     holeFastener = -1;
+    HoleFit holeFit = HoleFit::Normal;
 
     // Sketch: whether its geometry is drawn in the viewport. A sketch stays in
     // the outliner once something has been built from it, but showing every

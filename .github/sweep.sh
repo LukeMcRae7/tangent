@@ -13,6 +13,7 @@ modes=(
   "--preview-check 4" "--preview-check 5" "--preview-check 6"
   "--preview-check 7"
   "--revolve-demo 1" "--revolve-demo 2" "--revolve-demo 3"
+  "--hole-demo 1" "--hole-demo 2" "--hole-demo 3"
   "--pattern-demo 1" "--pattern-demo 2" "--pattern-demo 3" "--pattern-demo 4"
   "--pattern-demo 5" "--pattern-demo 6" "--pattern-demo 7" "--pattern-demo 8"
   "--step-demo /tmp/tg_sweep.step"
@@ -56,6 +57,20 @@ for m in 1 2 3; do
     fail=1
   else
     printf '  ok    --revolve-demo %s\n' "$m"
+  fi
+done
+
+# A hole has to take away exactly the cylinder it says it does -- including
+# after the panel changes its size, and after the face it was drilled into
+# moves under it.
+for m in 1 2 3; do
+  out=$(timeout 200 ./build/tangent --hole-demo $m --smoke-test 20 2>&1)
+  if echo "$out" | grep "\[hole-demo\]" | grep -q "agrees=0"; then
+    printf '  FAIL  hole-demo %s\n' "$m"
+    echo "$out" | grep "\[hole-demo\]" | sed 's/^/        /'
+    fail=1
+  else
+    printf '  ok    --hole-demo %s\n' "$m"
   fi
 done
 

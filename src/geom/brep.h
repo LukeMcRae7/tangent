@@ -299,6 +299,22 @@ BrepRef insetFaces(const BrepRef& s, const std::vector<FaceId>& faces, Real amou
 BrepRef shell(const BrepRef& s, const std::vector<FaceId>& openFaces, Real thickness,
               ElementId salt, std::string* reason);
 
+// Drills a hole into the solid: a cylinder from `at`, going `into` the
+// material, with a counterbore or a countersink at its mouth when the cut asks
+// for one. `at` and `into` are in the body's own space.
+//
+// Through means through: the tool is made long enough to leave the body on
+// both sides, so a hole across a curved wall does not stop half way. A blind
+// hole ends in the drill's own cone unless the cut says otherwise -- a flat
+// ceiling over a hole is the one overhang a slicer cannot help with.
+//
+// The wall is named for the hole, so a fillet or a chamfer put on its rim
+// stays on it when the hole moves or changes size. Refused, with a reason,
+// when the tool takes nothing away: a hole that misses the material is a
+// mistake to be told about, not a step that quietly does nothing.
+BrepRef drillHole(const BrepRef& s, Vec3 at, Vec3 into, const HoleCut& cut, ElementId salt,
+                  std::string* reason);
+
 // A solid swept from one region of a sketch, between two offsets along the
 // sketch plane's normal.
 //

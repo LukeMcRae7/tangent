@@ -164,7 +164,7 @@ if(TANGENT_BREP)
     ${OpenCASCADE_DataExchange_LIBRARIES})
 endif()
 
-set(TANGENT_GEOM src/geom/body.cpp src/geom/operations.cpp
+set(TANGENT_GEOM src/geom/body.cpp src/geom/operations.cpp src/geom/fasteners.cpp
                  src/geom/kernel_guard.cpp src/mesh/decimate.cpp src/sketch/sketch.cpp
                  src/sketch/svg.cpp
                  ${TANGENT_BREP_SRC})

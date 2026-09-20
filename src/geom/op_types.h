@@ -25,4 +25,34 @@ enum class ExtrudeOp : uint32_t {
 
 const char* extrudeOpName(ExtrudeOp op);
 
+// What a hole looks like where it meets the face it is drilled into.
+enum class HoleKind : uint32_t {
+    Simple = 0,       // one diameter all the way
+    Counterbore = 1,  // a flat-bottomed pocket for a cap head
+    Countersink = 2,  // a cone for a flat head
+};
+
+const char* holeKindName(HoleKind k);
+
+// A hole, as the kernel is asked for it: every number in millimetres, already
+// decided. Which fastener it was chosen for, and what a printed one has to
+// allow for, are the panel's business -- see geom/fasteners.h -- because the
+// body only ever has a diameter cut out of it.
+struct HoleCut {
+    HoleKind kind = HoleKind::Simple;
+    double diameter = 3.4;
+    double depth = 10.0;        // from the face, when it does not go through
+    bool   through = true;      // all the way out the other side
+    // A drill leaves a cone at the bottom of a blind hole, and a printed part
+    // wants one too: a flat ceiling over a hole is the one overhang a slicer
+    // cannot help with. The angle is the drill's, included.
+    bool   drillPoint = true;
+    double pointAngle = 118.0 * 3.14159265358979323846 / 180.0;
+    // Counterbore: how wide and how deep. Countersink: how wide at the face,
+    // and the cone's included angle.
+    double headDiameter = 6.0;
+    double headDepth = 3.3;
+    double sinkAngle = 90.0 * 3.14159265358979323846 / 180.0;
+};
+
 } // namespace tg

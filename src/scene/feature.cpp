@@ -30,6 +30,7 @@ const char* featureKindName(FeatureKind k) {
         case FeatureKind::Sketch:     return "Sketch";
         case FeatureKind::ExtrudeProfile: return "Extrude Profile";
         case FeatureKind::RevolveProfile: return "Revolve";
+        case FeatureKind::Hole:       return "Hole";
         case FeatureKind::Move:       return "Move";
         case FeatureKind::Rotate:     return "Rotate";
         case FeatureKind::Scale:      return "Scale";
@@ -254,6 +255,26 @@ std::string Feature::summary() const {
             else
                 std::snprintf(buf, sizeof(buf), "Revolve  %.1f deg  (%s)", deg,
                               extrudeOpName(shown));
+            break;
+        }
+        case FeatureKind::Hole: {
+            // What was asked for, not what came out of the table: "M4
+            // clearance, counterbored" is what the step is, and 4.70 mm is
+            // what it happens to measure.
+            char what[64];
+            if (holeFastener >= 0)
+                std::snprintf(what, sizeof(what), "%s %s", fastenerAt(holeFastener).name,
+                              holeFit == HoleFit::Tapped ? "tapped" : holeFitName(holeFit));
+            else
+                std::snprintf(what, sizeof(what), "%.2f mm", static_cast<double>(hole.diameter));
+            char how[48];
+            if (hole.kind == HoleKind::Simple) how[0] = '\0';
+            else std::snprintf(how, sizeof(how), ", %s", holeKindName(hole.kind));
+            if (hole.through)
+                std::snprintf(buf, sizeof(buf), "Hole  %s, through%s", what, how);
+            else
+                std::snprintf(buf, sizeof(buf), "Hole  %s, %.2f mm deep%s", what,
+                              static_cast<double>(hole.depth), how);
             break;
         }
         case FeatureKind::Divide:
@@ -656,6 +677,41 @@ bool evaluateFrom(std::vector<Feature>& features, size_t from,
                                  : why.c_str());
             else
                 body = std::move(combined);
+            break;
+        }
+
+        case FeatureKind::Hole: {
+            if (body.empty()) { fail("there is no body to drill"); break; }
+            Vec3 at = f.axisPoint;
+            Vec3 into = f.axisDir;
+            if (length(into) < 1e-9) { fail("the hole has no direction to go in"); break; }
+            into = normalize(into);
+
+            // A hole belongs to the face it was drilled into: if that face has
+            // moved or tipped since, the hole goes with it, square to it and
+            // in the same place on it. The point is carried onto the face
+            // along the old axis, which is exact for a face that moved and
+            // right for one that tipped a little.
+            std::vector<FaceId> fs;
+            if (!f.faces.empty()) {
+                if (!f.faces.resolveFaces(body, fs) || fs.empty()) {
+                    fail("the face it was drilled into is gone");
+                    break;
+                }
+                const Vec3 n = body.faceNormal(fs.front());
+                if (length(n) > 1e-9) {
+                    const Vec3 unit = normalize(n);
+                    const Real facing = dot(unit, into);
+                    if (std::fabs(facing) > 1e-6) {
+                        const Real t = dot(body.faceCentroid(fs.front()) - at, unit) / facing;
+                        at = at + into * t;
+                    }
+                    into = unit * Real(-1.0);
+                }
+            }
+            std::string why;
+            if (!drillHole(body, at, into, f.hole, f.uid, &why))
+                fail(why.empty() ? "the hole could not be drilled" : why.c_str());
             break;
         }
 

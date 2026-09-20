@@ -126,6 +126,8 @@ void modifyMenu(UiContext& ctx) {
     if (menuEntry(Glyph::ScaleFace, "Scale Face", "S", selFaces > 0)) ctx.actions.scaleFace = true;
     if (menuEntry(Glyph::Inset, "Inset Face...", nullptr, selFaces > 0)) ctx.actions.inset = true;
     menuNote("a ring in from its edges; the distance is set in the dialog");
+    if (menuEntry(Glyph::Hole, "Hole...", "H", hasObject)) ctx.actions.hole = true;
+    menuNote("point at the face it goes into; sized for a screw, not typed in millimetres");
 
     menuHeader("Edges");
     if (menuEntry(Glyph::Fillet, "Fillet / Chamfer", "F", selEdges > 0 || selFaces > 0)) ctx.actions.fillet = true;

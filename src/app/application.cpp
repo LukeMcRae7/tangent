@@ -715,6 +715,97 @@ bool Application::init() {
         }
     }
 
+    if (holeDemo_ > 0) {
+        // A plate, and a hole drilled into its top face the way the tool
+        // drills one -- placed, made, then adjusted in the panel. What each
+        // step should come to is arithmetic: a bore is a cylinder.
+        scene_.clear();
+        camera_.yaw = 0.8f;
+        camera_.pitch = 0.6f;
+        camera_.distance = 140.0f;
+        camera_.target = {0, 0, 0};
+        camera_.snapToGoal();
+
+        PrimitiveSpec spec;
+        spec.kind = PrimitiveKind::Box;
+        spec.box = {40.0, 40.0, 20.0};
+        const ObjectId id = scene_.addPrimitive(PrimitiveKind::Box, spec, {0, 0, 0});
+        SceneObject* obj = scene_.find(id);
+        const Real plate = 40.0 * 40.0 * 20.0;
+
+        // The top face, and a point on it off to one side.
+        FaceId top = kInvalid;
+        std::vector<FaceId> faces;
+        obj->body.allFaces(faces);
+        for (FaceId f : faces)
+            if (obj->body.faceNormal(f).z > 0.9) top = f;
+        scene_.select(id);
+        scene_.clearElementSelection();
+        if (top != kInvalid) scene_.selectElement({id, ElementKind::Face, top}, true);
+
+        beginHole();
+        holeTool_.face = top;
+        holeTool_.at = {10, 0, 10};
+        holeTool_.into = {0, 0, -1};
+        holeTool_.fastener = fastenerNamed(holeDemo_ == 1 ? "M3" : "M4");
+        holeTool_.fit = holeDemo_ == 3 ? HoleFit::Tapped : HoleFit::Normal;
+        holeTool_.cut.kind = holeDemo_ == 2 ? HoleKind::Counterbore : HoleKind::Simple;
+        holeTool_.cut.through = holeDemo_ != 3;
+        holeTool_.cut.depth = 8.0;
+        holeTool_.cut.drillPoint = true;
+        commitHole();
+
+        auto say = [&](const char* what, Real expected) {
+            const SceneObject* o = scene_.find(id);
+            const Real got = o ? o->body.health(false).volume : 0.0;
+            std::fprintf(stderr,
+                         "[hole-demo] %s: %zu features, %d faces, %.2f mm3, "
+                         "arithmetic says %.2f, agrees=%d%s%s\n",
+                         what, o ? o->features.size() : 0, o ? o->body.faceCount() : 0,
+                         static_cast<double>(got), static_cast<double>(expected),
+                         std::fabs(got - expected) < std::fabs(expected) * 1e-6 ? 1 : 0,
+                         holeTool_.refusal.empty() ? "" : "  ", holeTool_.refusal.c_str());
+        };
+
+        const HoleCut made = holeCutNow();
+        const Real bore = made.diameter * 0.5;
+        if (holeDemo_ == 1) {
+            say("M3 clearance, through", plate - kPi * bore * bore * 20.0);
+        } else if (holeDemo_ == 2) {
+            const Real head = made.headDiameter * 0.5;
+            say("M4 counterbored, through",
+                plate - kPi * head * head * made.headDepth -
+                    kPi * bore * bore * (20.0 - made.headDepth));
+            // The panel's own path: pick the next size up and it is drilled
+            // again, in the same step, with the same undo entry.
+            holeTool_.fastener = fastenerNamed("M5");
+            recommitSettled();
+            const HoleCut now = holeCutNow();
+            const Real b5 = now.diameter * 0.5, h5 = now.headDiameter * 0.5;
+            say("adjusted to M5",
+                plate - kPi * h5 * h5 * now.headDepth - kPi * b5 * b5 * (20.0 - now.headDepth));
+        } else {
+            const Real tip = bore / std::tan(made.pointAngle * 0.5);
+            say("M4 tapped, 8 mm deep",
+                plate - kPi * bore * bore * 8.0 - kPi * bore * bore * tip / 3.0);
+
+            // The point of a hole being a step: the face it was drilled into
+            // moves, and the hole goes with it rather than staying where the
+            // pointer happened to be.
+            SceneObject* o = scene_.find(id);
+            o->features.front().primitive.box.height = 30.0;
+            scene_.reevaluate(id);
+            const Real taller = 40.0 * 40.0 * 30.0;
+            say("after the plate grows to 30 mm",
+                taller - kPi * bore * bore * 8.0 - kPi * bore * bore * tip / 3.0);
+            const SceneObject* after = scene_.find(id);
+            const AABB b = after->body.bounds();
+            std::fprintf(stderr, "[hole-demo] the hole followed its face: top at %.1f mm\n",
+                         static_cast<double>(b.max.z));
+        }
+        dismissSettled();
+    }
+
     if (shellFilletDemo_ && !scene_.objects().empty()) {
         const ObjectId id = scene_.objects().front()->id;
         // The ordinary case first, on solid material: one edge of the untouched
@@ -1065,9 +1156,9 @@ Vec2 Application::mouseInViewport() const {
 
 bool Application::editToolActive() const {
     return filletTool_.active || faceTool_.active || divideTool_.active || patternTool_.active ||
-           reduceTool_.active || combineTool_.active ||
+           reduceTool_.active || combineTool_.active || holeTool_.placing ||
            // Open with nothing applied, waiting for a number that works.
-           insetTool_.pending || shellTool_.pending || splitTool_.pending;
+           insetTool_.pending || shellTool_.pending || splitTool_.pending || holeTool_.pending;
 }
 
 bool Application::refuseMeshEdit(const SceneObject& obj, const char* what) {
@@ -1213,6 +1304,16 @@ void Application::handleViewportMouse() {
         if (!io.WantCaptureMouse) {
             if (ImGui::IsMouseClicked(ImGuiMouseButton_Left))       commitFaceMove();
             else if (ImGui::IsMouseClicked(ImGuiMouseButton_Right))  abortFaceMove();
+        }
+        return;
+    }
+    // Placing a hole: it follows the pointer over the body, and the click
+    // drills it.
+    if (holeTool_.placing) {
+        updateHole();
+        if (!io.WantCaptureMouse && overViewport) {
+            if (ImGui::IsMouseClicked(ImGuiMouseButton_Left))       commitHole();
+            else if (ImGui::IsMouseClicked(ImGuiMouseButton_Right))  abortHole();
         }
         return;
     }
@@ -2162,6 +2263,8 @@ void Application::handleShortcuts() {
         ui_.actions.extrudeCut = shift;
     }
     if (!ctrl && !alt && ImGui::IsKeyPressed(ImGuiKey_K, false)) ui_.actions.divide = true;
+    // H for a hole: it starts placing one, and the click drills it.
+    if (!ctrl && !alt && !shift && ImGui::IsKeyPressed(ImGuiKey_H, false)) ui_.actions.hole = true;
     if (!ctrl && !alt && !shift && ImGui::IsKeyPressed(ImGuiKey_P, false))
         ui_.actions.pattern = true;
     if (!ctrl && !alt && !shift && ImGui::IsKeyPressed(ImGuiKey_M, false))
@@ -2567,6 +2670,162 @@ void Application::convertSelectedToSolid() {
 // Inset: the faces it runs in from, and how far. Made at once with the last
 // distance used, then adjusted in its panel -- which is the number a person
 // can only choose by seeing it.
+// ---------------------------------------------------------------------------
+// Holes
+// ---------------------------------------------------------------------------
+
+HoleCut Application::holeCutNow() const {
+    const HoleToolState& t = holeTool_;
+    if (t.fastener < 0) return t.cut;
+    HoleCut cut = holeFor(t.fastener, t.fit, t.cut.kind, t.cut.depth, t.cut.through);
+    // The things the table has no opinion about stay as the panel left them.
+    cut.drillPoint = t.cut.drillPoint;
+    cut.pointAngle = t.cut.pointAngle;
+    if (t.cut.kind == HoleKind::Counterbore) cut.headDepth = t.cut.headDepth;
+    return cut;
+}
+
+void Application::beginHole() {
+    dismissSettled();
+    if (tool_.active() || createTool_.active() || sketchTool_.active() || editToolActive()) {
+        setNotice("Finish the current operation first");
+        return;
+    }
+    const ObjectId id = scene_.contextObject();
+    SceneObject* obj = scene_.find(id);
+    if (!obj) { setNotice("Select an object to drill into"); return; }
+    if (refuseMeshEdit(*obj, "Drilling a hole")) return;
+    if (obj->body.empty()) { setNotice("That object has no body to drill into"); return; }
+
+    holeTool_.reset();
+    holeTool_.objectId = id;
+    holeTool_.before = obj->body;
+    holeTool_.chainBefore = obj->features;
+    holeTool_.cut = holeFor(holeTool_.fastener, holeTool_.fit, HoleKind::Simple, 10.0, true);
+    holeTool_.placing = true;
+    preEditSolid_ = obj->healthVersion == obj->geometryVersion && obj->health.solid();
+
+    // A face already picked is where it starts, in the middle of that face, so
+    // the command does something sensible before the pointer has moved.
+    const std::vector<FaceId> faces = scene_.selectedFaces(id);
+    if (!faces.empty()) {
+        holeTool_.face = faces.front();
+        holeTool_.at = obj->body.faceCentroid(faces.front());
+        const Vec3 n = obj->body.faceNormal(faces.front());
+        if (length(n) > 1e-9) holeTool_.into = normalize(n) * Real(-1.0);
+    }
+    updateHole();
+}
+
+// Follows the pointer: the hole goes where it is and square to what is under
+// it. Nothing is built until the click -- a hole is a boolean, and one a frame
+// while the pointer moves across a part is not something to pay for.
+void Application::updateHole() {
+    if (!holeTool_.placing) return;
+    SceneObject* obj = scene_.find(holeTool_.objectId);
+    if (!obj) { abortHole(); return; }
+
+    const Vec2 m = mouseInViewport();
+    const RayHit hit = scene_.raycast(camera_.rayThroughPixel(static_cast<float>(m.x),
+                                                              static_cast<float>(m.y)));
+    if (!hit.hit() || hit.object != holeTool_.objectId || hit.face == kInvalid) return;
+
+    const Mat4 model = obj->modelMatrix();
+    const Mat4 toLocal = inverse(model);
+    holeTool_.face = hit.face;
+    holeTool_.at = transformPoint(toLocal, hit.point);
+    const Vec3 n = obj->body.faceNormal(hit.face);
+    if (length(n) > 1e-9) holeTool_.into = normalize(n) * Real(-1.0);
+}
+
+void Application::commitHole() {
+    const ObjectId id = holeTool_.objectId;
+    SceneObject* obj = scene_.find(id);
+    if (!obj) { abortHole(); return; }
+    if (holeTool_.face == kInvalid) {
+        setNotice("Point at a face to drill into");
+        return;
+    }
+    holeTool_.placing = false;
+    holeTool_.active = false;
+    justFinishedModal_ = true;
+
+    std::vector<Feature> chainBefore = holeTool_.chainBefore;
+    obj->features = holeTool_.chainBefore;
+    obj->body = holeTool_.before;
+
+    Feature f;
+    f.kind = FeatureKind::Hole;
+    f.hole = holeCutNow();
+    f.holeFastener = holeTool_.fastener;
+    f.holeFit = holeTool_.fit;
+    f.axisPoint = holeTool_.at;
+    f.axisDir = holeTool_.into;
+    f.faces = nameFaces(holeTool_.before, {holeTool_.face});
+
+    std::string why;
+    if (scene_.addFeature(id, std::move(f), &why) && editKeepsSolid(id)) {
+        undo_.push(std::make_unique<FeatureCommand>(id, std::move(chainBefore), obj->features,
+                                                    "Hole"),
+                   /*merge=*/recommitting_);
+        holeTool_.cut = holeCutNow();
+        holeTool_.pending = false;
+        holeTool_.refusal.clear();
+        settleCommand(Settled::Hole, id);
+    } else {
+        obj->features = std::move(chainBefore);
+        obj->body = holeTool_.before;
+        obj->refreshDerived();
+        holeTool_.pending = true;
+        holeTool_.refusal = why.empty() ? "that hole could not be drilled" : why;
+    }
+}
+
+void Application::abortHole() {
+    if (!holeTool_.placing && !holeTool_.pending) return;
+    const ObjectId id = holeTool_.objectId;
+    holeTool_.reset();
+    justFinishedModal_ = true;
+    if (SceneObject* obj = scene_.find(id)) {
+        obj->refreshDerived();
+    }
+}
+
+// Where it will go, drawn on the face: the bore, and the head's circle around
+// it when there is one, so the pocket's size is seen against the part rather
+// than read off a number.
+void Application::drawHoleOverlay() {
+    if (!holeTool_.placing || holeTool_.face == kInvalid) return;
+    const SceneObject* obj = scene_.find(holeTool_.objectId);
+    if (!obj) return;
+    const Mat4 model = obj->modelMatrix();
+    const HoleCut cut = holeCutNow();
+    const Vec3 at = transformPoint(model, holeTool_.at);
+    const Vec3 dir = normalize(transformVector(model, holeTool_.into));
+    Vec3 u = std::fabs(dir.z) < 0.9 ? cross(dir, Vec3{0, 0, 1}) : cross(dir, Vec3{1, 0, 0});
+    if (length(u) < 1e-9) return;
+    u = normalize(u);
+    const Vec3 v = cross(dir, u);
+    const Vec4 col = toVec4(palette::kBrand, 0.95f);
+
+    auto ring = [&](Real radius, Real lift, Real width) {
+        const int n = 48;
+        const Vec3 c = at - dir * lift;
+        for (int i = 0; i < n; ++i) {
+            const Real a0 = kTwoPi * i / n, a1 = kTwoPi * (i + 1) / n;
+            renderer_.addFrontLine(camera_,
+                                   c + u * (radius * std::cos(a0)) + v * (radius * std::sin(a0)),
+                                   c + u * (radius * std::cos(a1)) + v * (radius * std::sin(a1)),
+                                   col, width);
+        }
+    };
+    ring(cut.diameter * 0.5, 0.0, 2.0);
+    if (cut.kind != HoleKind::Simple) ring(cut.headDiameter * 0.5, 0.0, 1.4);
+    // How deep it goes, down the axis.
+    const Real depth = cut.through ? length(obj->localBounds.size()) : cut.depth;
+    renderer_.addFrontDashes(camera_, at, at + dir * depth, col, 1.6, 4.0, 3.0);
+}
+
 void Application::beginInset() {
     dismissSettled();
     if (tool_.active() || createTool_.active() || sketchTool_.active() || editToolActive()) {
@@ -3501,6 +3760,7 @@ void Application::recommitSettled() {
         case Settled::Pattern: patternTool_.active = true; commitPattern();  break;
         case Settled::Inset:   insetTool_.active = true;   commitInset();    break;
         case Settled::Shell:   shellTool_.active = true;   commitShell();    break;
+        case Settled::Hole:    holeTool_.active = true;    commitHole();     break;
         default:               break;
     }
     recommitting_ = false;
@@ -6897,7 +7157,7 @@ void Application::applyActions() {
     // catches the commands that are not gestures.
     if (a.addRequested || a.sketch || a.editSketchObject != kNoObject ||
         a.deleteSelected || a.duplicateSelected || a.mergeFaces ||
-        a.booleanRequested || a.split || a.shell || a.inset || a.undo || a.redo ||
+        a.booleanRequested || a.split || a.shell || a.inset || a.hole || a.undo || a.redo ||
         a.importStep || a.importMesh || a.importSvg || a.convertToSolid || a.reduceMesh ||
         a.newProject || a.openProject || a.rebuildObject != kNoObject ||
         a.transformEdited != kNoObject || a.resetTransform != kNoObject ||
@@ -7008,6 +7268,7 @@ void Application::applyActions() {
     if (a.fillet)  beginFillet();
     if (a.shell)   beginShell();
     if (a.inset)   beginInset();
+    if (a.hole)    beginHole();
     if (a.booleanRequested) beginCombine(a.booleanOp);
 
     if (a.rebuildObject != kNoObject) {
@@ -7173,6 +7434,7 @@ void Application::buildUi() {
     drawInsetPanel();
     drawShellPanel();
     drawSplitPanel();
+    drawHolePanel();
     drawPatternPanel();
     drawReducePanel();
 
@@ -7463,6 +7725,16 @@ int Application::run() {
                           "Divide  %.2f mm along the edge   type a number   Click confirm   Esc cancel",
                           divideTool_.t * length(divideTool_.dir));
             ui_.toolStatus = buf;
+        } else if (holeTool_.placing) {
+            const HoleCut cut = holeCutNow();
+            char buf[160];
+            std::snprintf(buf, sizeof(buf),
+                          "Hole  %s %.2f mm, %s   point at the face it goes into   "
+                          "Click drill   Esc cancel",
+                          holeTool_.fastener >= 0 ? fastenerAt(holeTool_.fastener).name : "custom",
+                          static_cast<double>(cut.diameter),
+                          cut.through ? "through" : "to a depth");
+            ui_.toolStatus = buf;
         } else if (filletTool_.active) {
             char buf[128];
             std::snprintf(buf, sizeof(buf), "Fillet  %.2f mm   type a number   Click confirm   Esc cancel",
@@ -7586,6 +7858,7 @@ int Application::run() {
         if (createTool_.active()) createTool_.drawOverlay(scene_, camera_, renderer_);
         drawFaceToolOverlay();
         drawCombineOverlay();
+        drawHoleOverlay();
         gProbe.begin();
         drawSceneSketches();
         gProbe.end("sketches");

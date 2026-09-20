@@ -683,6 +683,163 @@ void Application::drawPatternPanel() {
     else if (footer < 0) abortPattern();
 }
 
+// A hole: which screw it is for, how freely that screw passes, what its head
+// sits in, and how deep.
+//
+// Almost none of that is a number to type. A hole in a printed part is chosen
+// from a short list -- M3 clearance, counterbored -- and the millimetres come
+// from the table, including the two tenths a printed hole has to be cut over
+// size to come out the size it was drawn. The panel says what it arrived at,
+// so the number is never a mystery, and typing one directly is still there for
+// the hole that is not for a screw at all.
+void Application::drawHolePanel() {
+    const bool settled = settledIs(Settled::Hole);
+    if (!settled && !holeTool_.pending && !holeTool_.placing) return;
+    if (!scene_.find(holeTool_.objectId)) { holeTool_.reset(); return; }
+
+    auto signature = [&] {
+        const HoleCut c = holeCutNow();
+        char b[160];
+        std::snprintf(b, sizeof b, "%d|%d|%d|%d|%.9g|%.9g|%.9g|%d", holeTool_.fastener,
+                      static_cast<int>(holeTool_.fit), static_cast<int>(c.kind),
+                      static_cast<int>(c.through), c.depth, c.headDepth, c.diameter,
+                      static_cast<int>(c.drillPoint));
+        return std::string(b);
+    };
+    const std::string was = signature();
+
+    if (!ui::beginCommand("##hole", "Hole", Glyph::Hole,
+                          objectName(scene_, holeTool_.objectId)))
+        return;
+
+    // The sizes, as a row of names rather than diameters: M3 is the thing
+    // being chosen, 3.4 is what it happens to measure.
+    {
+        ui::commandRow("Size");
+        for (int i = 0; i < fastenerCount(); ++i) {
+            if (i) ImGui::SameLine(0.0f, 3.0f);
+            if (ui::pillButton(fastenerAt(i).name, holeTool_.fastener == i) &&
+                holeTool_.fastener != i)
+                holeTool_.fastener = i;
+        }
+        ImGui::SameLine(0.0f, 3.0f);
+        if (ui::pillButton("Custom", holeTool_.fastener < 0) && holeTool_.fastener >= 0) {
+            holeTool_.cut = holeCutNow();      // start from where the table left it
+            holeTool_.fastener = -1;
+        }
+    }
+
+    // How freely the screw passes, or that it cuts its own thread. A tapped
+    // hole has no head to sit in, so those go dim rather than away.
+    if (holeTool_.fastener >= 0) {
+        static const ui::Choice kFits[4] = {
+            {Glyph::Count, "Close",  nullptr, "Located by the hole (ISO 273 fine)"},
+            {Glyph::Count, "Normal", nullptr, "The everyday clearance (ISO 273 medium)"},
+            {Glyph::Count, "Loose",  nullptr, "Room to move (ISO 273 coarse)"},
+            {Glyph::Count, "Tapped", nullptr, "No clearance: the screw cuts its own thread"},
+        };
+        const int on = static_cast<int>(holeTool_.fit);
+        const int pick = ui::commandChoices("Fit", kFits, 4, on, /*compact=*/true);
+        if (pick >= 0 && pick != on) {
+            holeTool_.fit = static_cast<HoleFit>(pick);
+            if (holeTool_.fit == HoleFit::Tapped) holeTool_.cut.kind = HoleKind::Simple;
+        }
+    } else {
+        const ui::NumberEdit d = ui::commandNumber("Diameter", holeTool_.cut.diameter, "mm",
+                                                   !holeTool_.typedValue.empty(),
+                                                   !holeTool_.typedValue.empty(),
+                                                   holeTool_.typedValue.c_str(), 0.5, 50.0);
+        applyBar(d, /*active=*/false, holeTool_.typedValue,
+                 [&](double x) { holeTool_.cut.diameter = std::max(x, 0.1); }, [] {});
+    }
+
+    // What the mouth looks like. A tapped hole is not counterbored here --
+    // there is no head to sink -- and saying so beats offering it.
+    {
+        ui::Choice kHead[3] = {
+            {Glyph::Hole,        "Plain",       nullptr, "One diameter all the way"},
+            {Glyph::Counterbore, "Counterbore", nullptr, "A flat pocket for a cap head"},
+            {Glyph::Countersink, "Countersink", nullptr, "A cone for a flat head"},
+        };
+        const bool tapped = holeTool_.fastener >= 0 && holeTool_.fit == HoleFit::Tapped;
+        if (tapped) {
+            kHead[1].enabled = kHead[2].enabled = false;
+            kHead[1].tip = kHead[2].tip = "A tapped hole has no head to sit in";
+        }
+        const int on = static_cast<int>(holeTool_.cut.kind);
+        const int pick = ui::commandChoices("Head", kHead, 3, on);
+        if (pick >= 0 && pick != on) holeTool_.cut.kind = static_cast<HoleKind>(pick);
+    }
+
+    // The counterbore's depth is the one head number worth setting: how far
+    // below the surface the screw ends up.
+    if (holeCutNow().kind == HoleKind::Counterbore) {
+        const ui::NumberEdit v = ui::commandNumber("Pocket", holeTool_.cut.headDepth, "mm", false,
+                                                   false, nullptr, 0.5, 30.0);
+        if (v.dragged) holeTool_.cut.headDepth = std::max(v.value, 0.2);
+    }
+
+    // How deep. Through is the common case and is a button rather than a
+    // number nobody can pick: a depth that happens to be longer than the part
+    // is not the same thing as through.
+    {
+        ui::commandRow("Depth");
+        if (ui::pillButton("Through", holeTool_.cut.through) && !holeTool_.cut.through)
+            holeTool_.cut.through = true;
+        ImGui::SameLine(0.0f, 3.0f);
+        if (ui::pillButton("To a depth", !holeTool_.cut.through) && holeTool_.cut.through)
+            holeTool_.cut.through = false;
+    }
+    if (!holeTool_.cut.through) {
+        double most = 100.0;
+        if (const SceneObject* o = scene_.find(holeTool_.objectId))
+            if (o->localBounds.valid()) most = length(o->localBounds.size());
+        const ui::NumberEdit v = ui::commandNumber("Deep", holeTool_.cut.depth, "mm", false, false,
+                                                   nullptr, 0.5, most);
+        if (v.dragged) holeTool_.cut.depth = std::max(v.value, 0.2);
+        ui::commandRow("Bottom");
+        if (ui::pillButton("Drill point", holeTool_.cut.drillPoint) && !holeTool_.cut.drillPoint)
+            holeTool_.cut.drillPoint = true;
+        ui::hoverTip("A cone at the bottom, as a drill leaves and as a printer wants: "
+                     "a flat ceiling over a hole has nothing to print onto");
+        ImGui::SameLine(0.0f, 3.0f);
+        if (ui::pillButton("Flat", !holeTool_.cut.drillPoint) && holeTool_.cut.drillPoint)
+            holeTool_.cut.drillPoint = false;
+    }
+
+    // What it comes to, and why it is not the number in the standard: a
+    // printed hole is cut over size to come out the size it was drawn.
+    {
+        const HoleCut c = holeCutNow();
+        char at[96];
+        if (holeTool_.fastener >= 0 && printedAllowance(holeTool_.fit) > 0.0)
+            std::snprintf(at, sizeof at, "%.2f mm  (%.2f + %.2f for printing)", c.diameter,
+                          c.diameter - printedAllowance(holeTool_.fit),
+                          printedAllowance(holeTool_.fit));
+        else
+            std::snprintf(at, sizeof at, "%.2f mm", c.diameter);
+        ui::commandValue("Cut at", at);
+    }
+
+    if (holeTool_.placing)   ui::commandHint("Point at the face it goes into, and click to drill it.");
+    else if (settled)      { ui::commandApplied("Hole"); ui::commandHint("Change the size or the depth and it is drilled again."); }
+    else                     ui::commandRefused(holeTool_.refusal.c_str());
+
+    const int footer = holeTool_.placing ? ui::commandFooter(nullptr, false, "Cancel")
+                     : settled           ? ui::commandFooter("Done", true, nullptr)
+                                         : ui::commandFooter("Try again", true, "Cancel");
+    ui::endCommand();
+
+    if (signature() != was && !holeTool_.placing) {
+        if (settled) recommitSettled();
+        else         { holeTool_.active = true; commitHole(); }
+        return;
+    }
+    if (footer > 0 && settled)  dismissSettled();
+    else if (footer > 0)        { holeTool_.active = true; commitHole(); }
+    else if (footer < 0)        abortHole();
+}
+
 // Inset, and Shell. Neither has a gesture behind it: the operation is one
 // number, made as soon as it is asked for and adjusted here until Done. That
 // is the difference between choosing a wall thickness and guessing one.

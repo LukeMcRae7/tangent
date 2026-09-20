@@ -103,6 +103,17 @@ paths first. Extruding picks the filled regions -- a letter and not the hole in
 it -- and sweeps them as one step: a drawing of 240 letters is under a second,
 not one boolean per letter.
 
+**A hole is chosen, not measured.** Press H, point at the face it goes into
+and click. What the dialog asks for is the screw -- M2 to M10, close, normal or
+loose, or tapped for one that cuts its own thread -- and whether its head sits
+in a counterbore or a countersink; the millimetres come from the standards, and
+the panel says what it arrived at. A printed hole is cut two tenths over size,
+because that is roughly what a nozzle takes back off it, and a tapped one is
+not, because the thread needs the material. A blind hole ends in the cone a
+drill leaves, which is also the shape a printer wants: a flat ceiling over a
+hole has nothing to print onto. The hole belongs to its face, so when that face
+moves the hole goes with it.
+
 **A sketch extrudes or revolves.** Having picked the regions, Extrude pushes
 them along the plane's normal and Revolve turns them about an axis lying in it
 -- one of the sketch's own, or any line of the drawing, clicked. A turn takes
@@ -169,6 +180,7 @@ The icons are [Tabler Icons](https://tabler.io/icons), bundled as
 | E | Extrude selected faces, then drag to set the height (Shift + E starts it as a cut) |
 | J / D / I / N | *(while extruding)* join, cut, intersect or a new body — until one is picked the drag decides: out joins, in cuts |
 | F | Fillet the selected edges |
+| H | Hole — point at the face it goes into and click; the size is chosen in the dialog |
 | Ctrl + B | Bevel all edges of the active object |
 | Ctrl + Shift + U / D / I | Combine, set to join / cut / intersect: the first selected body is the target, the rest are tools |
 | D | Measure — one entity for its own size, two for the distance between |

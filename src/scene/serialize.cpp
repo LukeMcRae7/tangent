@@ -354,6 +354,18 @@ void writeFeature(Writer& w, const Feature& f) {
     w.f64(f.revolveAxisAt.x);  w.f64(f.revolveAxisAt.y);
     w.f64(f.revolveAxisDir.x); w.f64(f.revolveAxisDir.y);
     w.f64(f.revolveAngle);
+    // v18: a hole, and the fastener it was chosen for.
+    w.u32(static_cast<uint32_t>(f.hole.kind));
+    w.f64(f.hole.diameter);
+    w.f64(f.hole.depth);
+    w.u8(f.hole.through ? 1 : 0);
+    w.u8(f.hole.drillPoint ? 1 : 0);
+    w.f64(f.hole.pointAngle);
+    w.f64(f.hole.headDiameter);
+    w.f64(f.hole.headDepth);
+    w.f64(f.hole.sinkAngle);
+    w.i32(f.holeFastener);
+    w.u32(static_cast<uint32_t>(f.holeFit));
 }
 
 // `version` is the file's, not this build's: a project written before bodies
@@ -487,6 +499,25 @@ bool readFeature(Reader& r, Feature& f, uint32_t version) {
         f.revolveAxisDir.x = r.f64(); f.revolveAxisDir.y = r.f64();
         f.revolveAngle = r.f64();
         if (!(f.revolveAngle > 0.0) || length(f.revolveAxisDir) < 1e-9) return false;
+    }
+    // Before this there were no holes to read one for.
+    if (version >= 18) {
+        const uint32_t kind = r.u32();
+        if (kind > static_cast<uint32_t>(HoleKind::Countersink)) return false;
+        f.hole.kind = static_cast<HoleKind>(kind);
+        f.hole.diameter = r.f64();
+        f.hole.depth = r.f64();
+        f.hole.through = r.u8() != 0;
+        f.hole.drillPoint = r.u8() != 0;
+        f.hole.pointAngle = r.f64();
+        f.hole.headDiameter = r.f64();
+        f.hole.headDepth = r.f64();
+        f.hole.sinkAngle = r.f64();
+        f.holeFastener = r.i32();
+        const uint32_t fit = r.u32();
+        if (fit > static_cast<uint32_t>(HoleFit::Tapped)) return false;
+        f.holeFit = static_cast<HoleFit>(fit);
+        if (!(f.hole.diameter > 0.0)) return false;
     }
     return !r.bad;
 }

@@ -2281,6 +2281,174 @@ BrepRef shell(const BrepRef& s, const std::vector<FaceId>& openFaces, Real thick
     }
 }
 
+
+// ---------------------------------------------------------------------------
+// Drilling
+// ---------------------------------------------------------------------------
+namespace {
+
+// The tool a hole is cut with, named for what each of its surfaces will become
+// in the body: the bore's wall, the pocket's wall and floor, the cone of a
+// countersink or of a drill's point. Names are given by what a face *is* and
+// where it sits along the axis, not by the order the kernel happens to list
+// them, so they hold when the hole moves or changes size.
+std::vector<ElementId> nameHoleTool(const TopoDS_Shape& shape, Vec3 at, Vec3 dir,
+                                    const HoleCut& cut, ElementId salt) {
+    TopTools_IndexedMapOfShape faces;
+    TopExp::MapShapes(shape, TopAbs_FACE, faces);
+    std::vector<ElementId> names(static_cast<size_t>(faces.Extent()), kNoId);
+    const Real bore = cut.diameter * 0.5;
+
+    for (int i = 1; i <= faces.Extent(); ++i) {
+        const TopoDS_Face& face = TopoDS::Face(faces(i));
+        BRepAdaptor_Surface surf(face);
+        // Where the face sits, measured down the hole from its mouth.
+        GProp_GProps props;
+        BRepGProp::SurfaceProperties(face, props);
+        const gp_Pnt c = props.CentreOfMass();
+        const Real along = dot(Vec3{c.X(), c.Y(), c.Z()} - at, dir);
+
+        ElementId id = kNoId;
+        switch (surf.GetType()) {
+            case GeomAbs_Cylinder: {
+                const Real r = surf.Cylinder().Radius();
+                id = nameId(salt, IdRole::Wall, std::fabs(r - bore) < 1e-6 ? 0 : 1);
+                break;
+            }
+            case GeomAbs_Cone:
+                // The one at the mouth is the countersink; the one at the far
+                // end is the drill's point.
+                id = nameId(salt, IdRole::Wall, along < cut.depth * 0.5 ? 2 : 3);
+                break;
+            case GeomAbs_Plane:
+                // The pocket's floor is the one plane inside the material; the
+                // others cap the tool off outside it.
+                id = nameId(salt, IdRole::Top,
+                            cut.kind == HoleKind::Counterbore && std::fabs(along - cut.headDepth) < 1e-6
+                                ? 0 : 1);
+                break;
+            default:
+                id = nameId(salt, IdRole::Patch, static_cast<ElementId>(i));
+                break;
+        }
+        names[static_cast<size_t>(i - 1)] = id;
+    }
+    return names;
+}
+
+} // namespace
+
+BrepRef drillHole(const BrepRef& s, Vec3 at, Vec3 into, const HoleCut& cut, ElementId salt,
+                  std::string* reason) {
+    if (reason) reason->clear();
+    if (!s || s->shape.IsNull()) {
+        if (reason) *reason = "there is no body to drill";
+        return {};
+    }
+    if (!(cut.diameter > 1e-6)) {
+        if (reason) *reason = "a hole needs a diameter";
+        return {};
+    }
+    if (length(into) < 1e-9) {
+        if (reason) *reason = "the hole has no direction to go in";
+        return {};
+    }
+    if (!cut.through && !(cut.depth > 1e-6)) {
+        if (reason) *reason = "a hole that does not go through needs a depth";
+        return {};
+    }
+    if (cut.kind != HoleKind::Simple && cut.headDiameter <= cut.diameter + 1e-9) {
+        if (reason)
+            *reason = cut.kind == HoleKind::Counterbore
+                          ? "the counterbore is not wider than the hole"
+                          : "the countersink is not wider than the hole";
+        return {};
+    }
+    if (cut.kind == HoleKind::Counterbore && !(cut.headDepth > 1e-6)) {
+        if (reason) *reason = "the counterbore needs a depth";
+        return {};
+    }
+
+    const Vec3 dir = normalize(into);
+    const AABB box = bounds(*s);
+    const Real span = length(box.size()) + 10.0;
+    // The tool starts above the face rather than on it: a cut whose mouth is
+    // exactly the surface is the boolean's hardest case and the one that most
+    // often comes back with a sliver of a face on it.
+    const Real lift = std::max(span * 1e-3, Real(0.05));
+    const Vec3 mouth = at - dir * lift;
+    const gp_Dir axis(dir.x, dir.y, dir.z);
+    const gp_Pnt start(mouth.x, mouth.y, mouth.z);
+    const Real bore = cut.diameter * 0.5;
+    const Real reach = cut.through ? span : cut.depth;
+
+    try {
+        TopoDS_Shape tool = BRepPrimAPI_MakeCylinder(gp_Ax2(start, axis), bore, reach + lift).Shape();
+        auto add = [&](const TopoDS_Shape& piece) {
+            BRepAlgoAPI_Fuse fuse(tool, piece);
+            fuse.SetRunParallel(!inIsolatedChild());
+            fuse.Build();
+            if (fuse.IsDone() && !fuse.HasErrors()) tool = fuse.Shape();
+        };
+
+        if (cut.kind == HoleKind::Counterbore) {
+            add(BRepPrimAPI_MakeCylinder(gp_Ax2(start, axis), cut.headDiameter * 0.5,
+                                         cut.headDepth + lift).Shape());
+        } else if (cut.kind == HoleKind::Countersink) {
+            // The cone is the head's width at the face and the bore's width
+            // where it runs out, so the part above the face only exists
+            // because the tool starts there.
+            const Real half = std::clamp(cut.sinkAngle * 0.5, Real(0.05), Real(1.5));
+            const Real slope = std::tan(half);
+            const Real head = cut.headDiameter * 0.5;
+            const Real drop = slope > 1e-6 ? (head - bore) / slope : 0.0;
+            add(BRepPrimAPI_MakeCone(gp_Ax2(start, axis), head + lift * slope, bore,
+                                     lift + drop).Shape());
+        }
+
+        if (!cut.through && cut.drillPoint) {
+            // The cone a drill leaves, and the shape a printed hole wants at
+            // its far end for the same reason: nothing to bridge.
+            const Real half = std::clamp(cut.pointAngle * 0.5, Real(0.05), Real(1.5));
+            const Real slope = std::tan(half);
+            const Real tip = slope > 1e-6 ? bore / slope : bore;
+            const Vec3 bottom = at + dir * cut.depth;
+            add(BRepPrimAPI_MakeCone(gp_Ax2(gp_Pnt(bottom.x, bottom.y, bottom.z), axis), bore,
+                                     0.0, tip).Shape());
+        }
+
+        if (tool.IsNull()) {
+            if (reason) *reason = "the hole could not be made";
+            return {};
+        }
+
+        GProp_GProps was;
+        BRepGProp::VolumeProperties(s->shape, was);
+
+        BrepRef toolShape = makeBrep(tool, nameHoleTool(tool, at, dir, cut, salt));
+        if (!toolShape) {
+            if (reason) *reason = "the hole could not be made";
+            return {};
+        }
+        BrepRef out = booleanOp(*s, *toolShape, BooleanOp::Difference, salt, reason);
+        if (!out) return out;
+
+        GProp_GProps now;
+        BRepGProp::VolumeProperties(out->shape, now);
+        if (now.Mass() > was.Mass() * 0.999999) {
+            // A hole that takes nothing away is a hole in the air. OCCT does
+            // not call that an error, and a step in the history claiming to
+            // have drilled something is worse than being told.
+            if (reason) *reason = "the hole misses the material";
+            return {};
+        }
+        return out;
+    } catch (const Standard_Failure& e) {
+        if (reason) *reason = kernelReason(e, "the hole could not be drilled");
+        return {};
+    }
+}
+
 namespace {
 
 // One face to sweep: an outline and the loops cut out of it.

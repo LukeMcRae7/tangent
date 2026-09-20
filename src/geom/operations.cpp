@@ -18,6 +18,15 @@ const char* booleanOpName(BooleanOp op) {
     return "Boolean";
 }
 
+const char* holeKindName(HoleKind k) {
+    switch (k) {
+        case HoleKind::Simple:      return "Simple";
+        case HoleKind::Counterbore: return "Counterbore";
+        case HoleKind::Countersink: return "Countersink";
+    }
+    return "Hole";
+}
+
 const char* extrudeOpName(ExtrudeOp op) {
     switch (op) {
         case ExtrudeOp::Auto:      return "Auto";
@@ -217,6 +226,15 @@ bool filletEdges(Body& body, const FilletSpec& spec, std::string* reason) {
         return true;
     }
     return refuseMesh(spec.chamfer ? "chamfering an edge" : "filleting an edge", reason);
+}
+
+bool drillHole(Body& body, Vec3 at, Vec3 into, const HoleCut& cut, ElementId salt,
+               std::string* reason) {
+    if (body.isMesh()) return refuseMesh("drilling a hole", reason);
+    BrepRef out = brep::drillHole(body.brepRef(), at, into, cut, salt, reason);
+    if (!out) return false;
+    body = Body(std::move(out));
+    return true;
 }
 
 FilletRoom filletRoom(const Body& body, const RenderMesh& rm, const std::vector<Index>& edges) {

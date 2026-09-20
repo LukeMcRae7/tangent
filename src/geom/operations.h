@@ -131,6 +131,16 @@ struct FilletSpec {
 // Rounds edges. `reason` gets a short phrase on refusal; see the note above.
 bool filletEdges(Body& body, const FilletSpec& spec, std::string* reason = nullptr);
 
+// Drills a hole into a body: a bore from `at`, going `into` the material, with
+// a counterbore or a countersink at its mouth when the cut asks for one. Both
+// are in the body's own space. Refused on a mesh, and refused with a reason
+// when the hole takes nothing away -- see brep.h for the rest.
+//
+// What size a hole should be for a given screw is not decided here: see
+// geom/fasteners.h, which is where the printed allowance lives too.
+bool drillHole(Body& body, Vec3 at, Vec3 into, const HoleCut& cut, ElementId salt,
+               std::string* reason = nullptr);
+
 // How large a fillet a selection of edges could hold: a bracket for a search,
 // never an answer. Only the kernel knows whether a radius builds, so this says
 // where to start looking and where to stop.

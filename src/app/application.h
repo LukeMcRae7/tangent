@@ -148,6 +148,10 @@ public:
     // cylinder. Each prints the volume it made, against the one arithmetic
     // says it should be.
     void setRevolveDemo(int step) { revolveDemo_ = step; }
+    // Drills a hole the way the tool drills one: 1 an M3 clearance hole
+    // through a plate, 2 an M4 counterbore adjusted to M5 in its panel,
+    // 3 a blind tapped hole whose face then moves under it.
+    void setHoleDemo(int step) { holeDemo_ = step; }
     // An SVG onto the top plane: 1 placed in the sketch, 2 its filled regions
     // picked, 3 extruded 3 mm, 4 cut 3 mm into a plate under it, 5 with the
     // busiest face of the result selected -- what the highlight costs to draw.
@@ -225,6 +229,7 @@ private:
     int  snapDemo_ = 0;
     int  sketchDemo_ = 0;
     int  revolveDemo_ = 0;
+    int  holeDemo_ = 0;
     std::string svgDemo_;
     int  svgDemoStep_ = 1;
     int  svgDemoFrames_ = 0;
@@ -949,6 +954,43 @@ private:
             active = false;
         }
     };
+    // Hole: where it goes, and what it is for.
+    //
+    // Placed by pointing at a face -- the hole follows the pointer and goes in
+    // square to whatever is under it -- and made on the click, after which the
+    // panel adjusts it until Done, the way Inset and Shell do. What is
+    // adjusted there is mostly not a number but a choice: which screw, how
+    // freely it passes, and what the head sits in. See geom/fasteners.h.
+    struct HoleToolState {
+        ObjectId objectId = kNoObject;
+        FaceId face = kInvalid;          // the face it goes into, as it stands
+        Vec3 at{0, 0, 0};                // its mouth, in the body's own space
+        Vec3 into{0, 0, -1};             // the way it goes in, likewise
+        HoleCut cut;
+        int fastener = 2;                // M3, the one most printed parts use
+        HoleFit fit = HoleFit::Normal;
+        Body before;
+        std::vector<Feature> chainBefore;
+        std::string typedValue;
+        bool placing = false;            // following the pointer, not yet made
+        bool pending = false;            // refused: the panel stays, to try again
+        std::string refusal;
+        bool active = false;             // only while it is being made
+
+        void reset() {
+            objectId = kNoObject;
+            face = kInvalid;
+            before = Body();
+            chainBefore.clear();
+            typedValue.clear();
+            placing = false;
+            pending = false;
+            refusal.clear();
+            active = false;
+        }
+    };
+    HoleToolState holeTool_;
+
     // Split: what to cut with, and where. It used to decide for itself from
     // what happened to be selected -- a face's plane, a second body's, or the
     // pieces it was already in, and a cut through the middle when none of
@@ -997,6 +1039,17 @@ private:
 
     AmountToolState insetTool_;
     AmountToolState shellTool_;
+    // Placing a hole, making it, and the panel that adjusts it.
+    void beginHole();
+    void updateHole();
+    void commitHole();
+    void abortHole();
+    void drawHolePanel();
+    void drawHoleOverlay();
+    // The cut the current choices come to: the table's numbers for the
+    // fastener, or what was typed when there is none.
+    HoleCut holeCutNow() const;
+
     void beginInset();
     void commitInset();
     void drawInsetPanel();
@@ -1069,7 +1122,7 @@ private:
     // viewport click in the first place. This is the first of those, because
     // this app does confirm on a click.
     enum class Settled { None, Fillet, Divide, Face, Pattern, Create, Sketch, Combine, Inset, Shell,
-                         Split };
+                         Split, Hole };
     Settled  settled_ = Settled::None;
     ObjectId settledObject_ = kNoObject;
 

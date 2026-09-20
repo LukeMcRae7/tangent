@@ -1,6 +1,7 @@
 // STL and 3MF export, and project round-trips.
 #include "mesh/export_3mf.h"
 #include "mesh/export_stl.h"
+#include "geom/fasteners.h"
 #include "scene/serialize.h"
 
 #include <zlib.h>
@@ -709,6 +710,44 @@ int main() {
                   "re-evaluating gives the same hollow body");
             std::remove(p2.c_str());
             std::printf("[project] a shell round-trips at version %u\n", kProjectVersion);
+
+            // Version 18 added a hole: nine numbers and the fastener they
+            // came from, all written at the end of a feature, which is the
+            // easiest place to get a field subtly wrong.
+            Scene s3;
+            s3.setDefaultBackend(Backend::Brep);
+            const ObjectId id3 = s3.addPrimitive(PrimitiveKind::Box);
+            Feature h;
+            h.kind = FeatureKind::Hole;
+            h.holeFastener = fastenerNamed("M4");
+            h.holeFit = HoleFit::Normal;
+            h.hole = holeFor(h.holeFastener, h.holeFit, HoleKind::Counterbore, 6.0, false);
+            h.axisPoint = {0, 0, 10};
+            h.axisDir = {0, 0, -1};
+            std::string why3;
+            check(s3.addFeature(id3, h, &why3), std::string("drilled: ") + why3);
+            const Real drilled = s3.find(id3)->body.health(false).volume;
+
+            const std::string p3 = tmp("hole.tng");
+            check(saveProject(s3, p3).ok, "saved a drilled project");
+            Scene back3;
+            check(loadProject(back3, p3).ok, "loaded it again");
+            const SceneObject* o3 = back3.objects().front().get();
+            check(o3->features.size() == 2 && o3->features[1].kind == FeatureKind::Hole,
+                  "the hole is still a hole");
+            const Feature& g = o3->features[1];
+            check(g.holeFastener == h.holeFastener && g.holeFit == HoleFit::Normal,
+                  "it remembers which screw it was for");
+            check(near(g.hole.diameter, h.hole.diameter) &&
+                      near(g.hole.headDiameter, h.hole.headDiameter) &&
+                      near(g.hole.headDepth, h.hole.headDepth) &&
+                      near(g.hole.depth, 6.0) && !g.hole.through &&
+                      g.hole.kind == HoleKind::Counterbore,
+                  "and every number of it");
+            check(near(o3->body.health(false).volume, drilled, 1e-6),
+                  "re-evaluating gives the same drilled body");
+            std::remove(p3.c_str());
+            std::printf("[project] a hole round-trips at version %u\n", kProjectVersion);
         }
 
         std::printf("[project] round trip: %zu features, %d faces\n",

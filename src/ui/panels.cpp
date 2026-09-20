@@ -1,4 +1,6 @@
 #include "ui/panels.h"
+
+#include "geom/fasteners.h"
 #include "ui/command_panel.h"
 #include "ui/glyph.h"
 #include "ui/theme.h"
@@ -40,6 +42,7 @@ Glyph glyphFor(const Feature& f) {
         case FeatureKind::Extrude:        return f.mergeFlush ? Glyph::PushPull : Glyph::Extrude;
         case FeatureKind::ExtrudeProfile: return Glyph::Extrude;
         case FeatureKind::RevolveProfile: return Glyph::Revolve;
+        case FeatureKind::Hole:           return Glyph::Hole;
         case FeatureKind::Bevel:          return f.chamfer ? Glyph::Chamfer : Glyph::Fillet;
         case FeatureKind::Shell:          return Glyph::Shell;
         case FeatureKind::FaceRotate:     return Glyph::RotateFace;
@@ -350,6 +353,49 @@ void featureDetails(UiContext& ctx, SceneObject& obj, Feature& f, bool& changed)
         ImGui::TextColored(f.sketchFreedoms == 0 ? im(palette::kValid) : im(palette::kInfo), "%s",
                            f.sketchFreedoms == 0 ? "fully constrained"
                                                  : "not fully constrained: some of it can still move");
+        break;
+    }
+    case FeatureKind::Hole: {
+        // What it is, and what that came to. The size and the fit are the
+        // choice; the diameter is what the table made of it, and typing over
+        // it is what "no fastener" means.
+        if (f.holeFastener >= 0) {
+            char what[64];
+            std::snprintf(what, sizeof what, "%s %s", fastenerAt(f.holeFastener).name,
+                          holeFitName(f.holeFit));
+            ui::commandValue("Size", what);
+        }
+        double dia = f.hole.diameter;
+        if (labelledNumber("Diameter", dia, 0.05f, 0.1f, 200.0f)) {
+            f.hole.diameter = dia;
+            f.holeFastener = -1;          // typed over: it is that size now
+            changed = true;
+        }
+        if (!f.hole.through) {
+            double deep = f.hole.depth;
+            if (labelledNumber("Depth", deep, 0.1f, 0.2f, 1000.0f)) {
+                f.hole.depth = deep;
+                changed = true;
+            }
+        }
+        if (f.hole.kind == HoleKind::Counterbore || f.hole.kind == HoleKind::Countersink) {
+            double head = f.hole.headDiameter;
+            if (labelledNumber(f.hole.kind == HoleKind::Counterbore ? "Pocket" : "Head", head,
+                               0.05f, 0.1f, 400.0f)) {
+                f.hole.headDiameter = head;
+                f.holeFastener = -1;
+                changed = true;
+            }
+        }
+        if (f.hole.kind == HoleKind::Counterbore) {
+            double deep = f.hole.headDepth;
+            if (labelledNumber("Pocket depth", deep, 0.05f, 0.1f, 400.0f)) {
+                f.hole.headDepth = deep;
+                changed = true;
+            }
+        }
+        ImGui::TextColored(dim, "%s, %s", holeKindName(f.hole.kind),
+                           f.hole.through ? "through" : "to a depth");
         break;
     }
     case FeatureKind::RevolveProfile: {

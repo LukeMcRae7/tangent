@@ -5,6 +5,7 @@
 // The parts are the ones the mesh kernel refuses, because that is the whole
 // argument for the backend existing.
 #include "geom/body.h"
+#include "geom/fasteners.h"
 #include "geom/operations.h"
 
 #include <cmath>
@@ -679,6 +680,108 @@ int main() {
         check(acrossTheBore == 0, "no seam line is drawn across the bore");
         std::printf("  rounded cube with a bore: %d faces, %zu triangles, %zu lines\n",
                     body.faceCount(), rm.triangles.size() / 3, rm.edgeLines.size() / 2);
+    }
+
+    std::printf("--- a hole, and what it is chosen from ---\n");
+    {
+        // A plate 40 x 40 x 10, standing from z = -5 to 5, drilled from the top.
+        const Real volume = 40.0 * 40.0 * 10.0;
+        {
+            Body body = plate(40, 40, 10);
+            HoleCut cut;
+            cut.diameter = 5.0;
+            cut.through = true;
+            std::string why;
+            check(drillHole(body, {10, 0, 5}, {0, 0, -1}, cut, 900, &why),
+                  "a hole goes through the plate: " + why);
+            check(body.health().solid(), "and leaves a solid");
+            check(near(body.health(false).volume, volume - kPi * 6.25 * 10.0, 1e-6),
+                  "with a 5 mm bore's worth gone: " +
+                      std::to_string(body.health(false).volume));
+            check(body.findFace(nameId(900, IdRole::Wall, 0)) != kNoFace,
+                  "the bore's wall is named for the hole, so a chamfer can find it");
+        }
+        {
+            // Blind, and ending in the drill's cone: the straight part is
+            // 6 deep, the point adds a cone of the bore's radius over its own
+            // length.
+            Body body = plate(40, 40, 10);
+            HoleCut cut;
+            cut.diameter = 6.0;
+            cut.depth = 6.0;
+            cut.through = false;
+            cut.drillPoint = true;
+            const Real tip = 3.0 / std::tan(cut.pointAngle * 0.5);
+            std::string why;
+            check(drillHole(body, {0, 0, 5}, {0, 0, -1}, cut, 901, &why),
+                  "a blind hole is drilled: " + why);
+            const Real gone = kPi * 9.0 * 6.0 + kPi * 9.0 * tip / 3.0;
+            check(near(body.health(false).volume, volume - gone, 1e-6),
+                  "the straight part and the cone under it: " +
+                      std::to_string(body.health(false).volume));
+        }
+        {
+            // A counterbore for an M4 cap screw, which is where the table
+            // earns its keep: 4.5 clearance plus the printed allowance, and a
+            // 7 mm head with the same allowance, 4.2 deep.
+            const int m4 = fastenerNamed("M4");
+            check(m4 >= 0, "the table has an M4");
+            const HoleCut cut = holeFor(m4, HoleFit::Normal, HoleKind::Counterbore, 0, true);
+            check(near(cut.diameter, 4.7, 1e-9), "its clearance hole is cut 4.7 wide");
+            check(near(cut.headDiameter, 7.2, 1e-9), "and its pocket 7.2");
+            check(near(holeFor(m4, HoleFit::Tapped, HoleKind::Simple, 5, false).diameter, 3.3, 1e-9),
+                  "a tapped hole gets no allowance at all: the thread needs the material");
+
+            Body body = plate(40, 40, 10);
+            std::string why;
+            check(drillHole(body, {0, 0, 5}, {0, 0, -1}, cut, 902, &why),
+                  "the counterbored hole is drilled: " + why);
+            const Real gone = kPi * (cut.headDiameter * 0.5) * (cut.headDiameter * 0.5) * cut.headDepth +
+                              kPi * (cut.diameter * 0.5) * (cut.diameter * 0.5) * (10.0 - cut.headDepth);
+            check(near(body.health(false).volume, volume - gone, 1e-6),
+                  "a pocket over a bore: " + std::to_string(body.health(false).volume));
+            check(body.findFace(nameId(902, IdRole::Top, 0)) != kNoFace,
+                  "the pocket's floor has a name of its own: the head sits on it");
+        }
+        {
+            // A countersink: the cone runs from the head's diameter at the
+            // surface to the bore's, so what it takes away is a frustum.
+            Body body = plate(40, 40, 10);
+            HoleCut cut;
+            cut.kind = HoleKind::Countersink;
+            cut.diameter = 4.0;
+            cut.headDiameter = 8.0;
+            cut.sinkAngle = 90.0 * kDeg2Rad;
+            cut.through = true;
+            std::string why;
+            check(drillHole(body, {0, 0, 5}, {0, 0, -1}, cut, 903, &why),
+                  "the countersunk hole is drilled: " + why);
+            const Real drop = (4.0 - 2.0) / std::tan(cut.sinkAngle * 0.5);
+            const Real cone = kPi * drop / 3.0 * (16.0 + 8.0 + 4.0);   // r1^2 + r1 r2 + r2^2
+            const Real gone = cone + kPi * 4.0 * (10.0 - drop);
+            check(near(body.health(false).volume, volume - gone, 1e-6),
+                  "a cone over a bore: " + std::to_string(body.health(false).volume));
+        }
+        {
+            // Beside the plate rather than in it. OCCT calls that a success
+            // and hands the body back unchanged; the operation does not.
+            Body body = plate(40, 40, 10);
+            HoleCut cut;
+            cut.diameter = 5.0;
+            std::string why;
+            check(!drillHole(body, {100, 0, 5}, {0, 0, -1}, cut, 904, &why),
+                  "a hole that misses the material is refused");
+            check(why.find("misses") != std::string::npos, "and says so: " + why);
+
+            why.clear();
+            HoleCut narrow;
+            narrow.kind = HoleKind::Counterbore;
+            narrow.diameter = 6.0;
+            narrow.headDiameter = 5.0;
+            check(!drillHole(body, {0, 0, 5}, {0, 0, -1}, narrow, 905, &why),
+                  "and a counterbore narrower than its hole is refused");
+            check(!why.empty(), "with a reason: " + why);
+        }
     }
 
     std::printf("--- refusals say why ---\n");
