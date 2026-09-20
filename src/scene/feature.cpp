@@ -29,6 +29,7 @@ const char* featureKindName(FeatureKind k) {
         case FeatureKind::Reduce:     return "Reduce Mesh";
         case FeatureKind::Sketch:     return "Sketch";
         case FeatureKind::ExtrudeProfile: return "Extrude Profile";
+        case FeatureKind::RevolveProfile: return "Revolve";
         case FeatureKind::Move:       return "Move";
         case FeatureKind::Rotate:     return "Rotate";
         case FeatureKind::Scale:      return "Scale";
@@ -242,6 +243,17 @@ std::string Feature::summary() const {
             else
                 std::snprintf(buf, sizeof(buf), "Extrude Profile  %.2f mm  (%s)",
                               static_cast<double>(distance), extrudeOpName(shown));
+            break;
+        }
+        case FeatureKind::RevolveProfile: {
+            const ExtrudeOp shown = extrudeOp == ExtrudeOp::Auto ? ExtrudeOp::Join : extrudeOp;
+            const double deg = static_cast<double>(revolveAngle) * kRad2Deg;
+            if (profileKeys.size() > 1)
+                std::snprintf(buf, sizeof(buf), "Revolve  %.1f deg  (%s, %zu regions)", deg,
+                              extrudeOpName(shown), profileKeys.size());
+            else
+                std::snprintf(buf, sizeof(buf), "Revolve  %.1f deg  (%s)", deg,
+                              extrudeOpName(shown));
             break;
         }
         case FeatureKind::Divide:
@@ -571,17 +583,28 @@ bool evaluateFrom(std::vector<Feature>& features, size_t from,
             break;
         }
 
-        case FeatureKind::ExtrudeProfile: {
+        case FeatureKind::ExtrudeProfile:
+        case FeatureKind::RevolveProfile: {
+            // The two differ only in what the regions are swept into: pushed
+            // along the plane's normal, or turned about an axis lying in it.
+            // Everything else -- finding the sketch, checking that its regions
+            // still close, and what to do with the solid that comes out -- is
+            // the same, and is written once.
+            const bool turn = f.kind == FeatureKind::RevolveProfile;
             const Feature* source = nullptr;
             for (size_t j = 0; j < i; ++j)
                 if (features[j].kind == FeatureKind::Sketch && features[j].uid == f.sketchUid)
                     source = &features[j];
-            if (!source) { fail("the sketch it extrudes is not earlier in the history"); break; }
-            if (!source->enabled) { fail("the sketch it extrudes is turned off"); break; }
-            if (source->errored) { fail("the sketch it extrudes does not solve"); break; }
+            if (!source) { fail(turn ? "the sketch it turns is not earlier in the history"
+                                     : "the sketch it extrudes is not earlier in the history"); break; }
+            if (!source->enabled) { fail(turn ? "the sketch it turns is turned off"
+                                             : "the sketch it extrudes is turned off"); break; }
+            if (source->errored) { fail(turn ? "the sketch it turns does not solve"
+                                            : "the sketch it extrudes does not solve"); break; }
 
             const std::vector<SketchProfile> regions = sketchProfiles(source->sketch);
-            if (f.profileKeys.empty()) { fail("it names no region to sweep"); break; }
+            if (f.profileKeys.empty()) { fail(turn ? "it names no region to turn"
+                                                  : "it names no region to sweep"); break; }
             const bool allClose = std::all_of(f.profileKeys.begin(), f.profileKeys.end(), [&](SketchId k) {
                 return std::any_of(regions.begin(), regions.end(),
                                    [k](const SketchProfile& p) { return p.key == k; });
@@ -593,12 +616,17 @@ bool evaluateFrom(std::vector<Feature>& features, size_t from,
             }
 
             const bool cut = f.extrudeOp == ExtrudeOp::Cut ||
-                             (f.extrudeOp == ExtrudeOp::Auto && f.distance < 0.0);
+                             (!turn && f.extrudeOp == ExtrudeOp::Auto && f.distance < 0.0);
             std::string why;
-            BrepRef tool = brep::sketchSolids(source->sketch, regions, f.profileKeys, 0.0, f.distance, f.uid,
-                                              &why);
+            BrepRef tool = turn ? brep::revolveSketch(source->sketch, regions, f.profileKeys,
+                                                      f.revolveAxisAt, f.revolveAxisDir,
+                                                      f.revolveAngle, f.uid, &why)
+                                : brep::sketchSolids(source->sketch, regions, f.profileKeys, 0.0,
+                                                     f.distance, f.uid, &why);
             if (!tool) {
-                fail(why.empty() ? "the region could not be swept" : why.c_str());
+                fail(why.empty() ? (turn ? "the region could not be turned"
+                                         : "the region could not be swept")
+                                 : why.c_str());
                 break;
             }
 
@@ -623,7 +651,9 @@ bool evaluateFrom(std::vector<Feature>& features, size_t from,
                                                                      : BooleanOp::Union;
             Body combined;
             if (!booleanOp(body, Body(std::move(tool)), op, combined, f.uid, false, &why))
-                fail(why.empty() ? "the extrusion could not be combined with the body" : why.c_str());
+                fail(why.empty() ? (turn ? "the turned solid could not be combined with the body"
+                                         : "the extrusion could not be combined with the body")
+                                 : why.c_str());
             else
                 body = std::move(combined);
             break;

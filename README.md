@@ -103,6 +103,14 @@ paths first. Extruding picks the filled regions -- a letter and not the hole in
 it -- and sweeps them as one step: a drawing of 240 letters is under a second,
 not one boolean per letter.
 
+**A sketch extrudes or revolves.** Having picked the regions, Extrude pushes
+them along the plane's normal and Revolve turns them about an axis lying in it
+-- one of the sketch's own, or any line of the drawing, clicked. A turn takes
+an angle up to the whole way round, joins, cuts or stands as a new part like an
+extrusion does, and stays a step in the history with its angle and its axis: a
+handle turned from its half-section, or a groove run round a shaft. A profile
+that crosses its axis is refused rather than turned through itself.
+
 ### The interface
 
 One dark surface with the model lit in the middle of it. Along the top, the

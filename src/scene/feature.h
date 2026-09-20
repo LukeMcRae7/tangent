@@ -49,11 +49,18 @@ enum class FeatureKind {
     Move,        // puts the object somewhere else; its shape is untouched
     Rotate,      // turns the object about a point; its shape is untouched
     Scale,       // stretches the body along its own axes: a change of shape
+    RevolveProfile, // a region of a sketch turned about an axis in its plane
 
     // New kinds go on the end and nowhere else. The value is what is written
     // to a file, so inserting one in the middle renumbers every kind after it
     // and quietly turns a divide in an old project into something else.
 };
+
+// The last of them, which the loader checks a file's number against. It lives
+// here rather than in the loader so that adding a kind above is one edit and
+// not two: a kind the loader does not know about is refused as a corrupt file,
+// and that refusal is silent about why.
+inline constexpr FeatureKind kLastFeatureKind = FeatureKind::RevolveProfile;
 
 const char* featureKindName(FeatureKind k);
 
@@ -254,6 +261,15 @@ struct Feature {
     // was hundreds of booleans.
     ElementId sketchUid = 0;
     std::vector<SketchId> profileKeys;
+
+    // RevolveProfile: the axis those regions turn about, as a point and a
+    // direction in the sketch's own coordinates, and how far round in radians.
+    // Kept in the sketch's frame rather than the world's because that is where
+    // it was picked -- usually a line of the drawing -- and it has to keep
+    // meaning the same thing when the sketch's plane is a face that moves.
+    Vec2 revolveAxisAt{0, 0};
+    Vec2 revolveAxisDir{0, 1};
+    Real revolveAngle = 2.0 * kPi;
 
     // Sketch: whether its geometry is drawn in the viewport. A sketch stays in
     // the outliner once something has been built from it, but showing every

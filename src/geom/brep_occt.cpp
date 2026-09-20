@@ -90,6 +90,7 @@
 #include <BRepOffsetAPI_MakeOffsetShape.hxx>
 #include <BRepOffsetAPI_MakeThickSolid.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
+#include <BRepPrimAPI_MakeRevol.hxx>
 #include <ShapeUpgrade_UnifySameDomain.hxx>
 #include <GC_MakeArcOfCircle.hxx>
 #include <BRepCheck_Analyzer.hxx>
@@ -2293,6 +2294,229 @@ SketchId loopKey(const SketchLoop& loop) {
                                  : *std::min_element(loop.entities.begin(), loop.entities.end());
 }
 
+// The flat faces a set of regions makes on the sketch plane, lifted along its
+// normal, and every edge of them against the sketch entity it came from -- so
+// the surface each one sweeps out, straight or turned, can be named for that
+// entity.
+struct SketchFaces {
+    std::vector<TopoDS_Face> flat;
+    std::vector<std::pair<TopoDS_Edge, SketchId>> made;
+};
+
+bool buildSketchFaces(const Sketch& sk, const std::vector<SweptFace>& faces, Real lift,
+                      SketchFaces& out, std::string* reason) {
+    const SketchPlane& pl = sk.plane;
+    const Vec3 n = pl.normal();
+    const Vec3 up = n * lift;
+    const gp_Dir normal(n.x, n.y, n.z);
+    const gp_Dir xDir(pl.xAxis.x, pl.xAxis.y, pl.xAxis.z);
+    auto at3 = [&](Vec2 p) {
+        const Vec3 w = pl.toWorld(p) + up;
+        return gp_Pnt(w.x, w.y, w.z);
+    };
+    auto pointOf = [&](SketchId id, Vec2& p) {
+        const SketchPoint* q = sk.point(id);
+        if (!q) return false;
+        p = q->at;
+        return true;
+    };
+
+    // One edge per entity, as it ended up in the wire, so the wall each one
+    // sweeps can be named for the entity rather than for where it happens
+    // to sit.
+    std::vector<std::pair<TopoDS_Edge, SketchId>>& made = out.made;
+
+    auto edgeFor = [&](const SketchEntity& e, TopoDS_Edge& edge) -> bool {
+        switch (e.curve) {
+        case SketchCurve::Line: {
+            Vec2 a, b;
+            if (!pointOf(e.a, a) || !pointOf(e.b, b) || length(b - a) < 1e-9) return false;
+            edge = BRepBuilderAPI_MakeEdge(at3(a), at3(b)).Edge();
+            return true;
+        }
+        case SketchCurve::Circle: {
+            Vec2 c;
+            if (!pointOf(e.a, c) || e.radius <= 1e-9) return false;
+            edge = BRepBuilderAPI_MakeEdge(gp_Circ(gp_Ax2(at3(c), normal, xDir), e.radius)).Edge();
+            return true;
+        }
+        case SketchCurve::Arc: {
+            Vec2 c, s, t;
+            if (!pointOf(e.a, c) || !pointOf(e.b, s) || !pointOf(e.c, t)) return false;
+            const Real r = length(s - c);
+            if (r <= 1e-9) return false;
+            // Counter-clockwise about the plane's normal, start to end: the
+            // direction the sketch stores an arc in.
+            GC_MakeArcOfCircle arc(gp_Circ(gp_Ax2(at3(c), normal, xDir), r), at3(s), at3(t),
+                                   Standard_True);
+            if (!arc.IsDone()) return false;
+            edge = BRepBuilderAPI_MakeEdge(arc.Value()).Edge();
+            return true;
+        }
+        case SketchCurve::Bezier: {
+            Vec2 p0, p1, p2, p3;
+            if (!pointOf(e.a, p0) || !pointOf(e.b, p1) || !pointOf(e.c, p2) || !pointOf(e.d, p3))
+                return false;
+            TColgp_Array1OfPnt poles(1, 4);
+            poles.SetValue(1, at3(p0));
+            poles.SetValue(2, at3(p1));
+            poles.SetValue(3, at3(p2));
+            poles.SetValue(4, at3(p3));
+            Handle(Geom_BezierCurve) curve = new Geom_BezierCurve(poles);
+            edge = BRepBuilderAPI_MakeEdge(curve).Edge();
+            return true;
+        }
+        }
+        return false;
+    };
+
+    auto wireFor = [&](const SketchLoop& loop, bool counterClockwise, TopoDS_Wire& wireOut) {
+        BRepBuilderAPI_MakeWire wire;
+        for (size_t k = 0; k < loop.entities.size(); ++k) {
+            const SketchEntity* e = sk.entity(loop.entities[k]);
+            TopoDS_Edge edge;
+            if (!e || !edgeFor(*e, edge)) return false;
+            // Added the way the loop runs, so the wire's direction is the
+            // loop's and its signed area says which way round it is.
+            wire.Add(k < loop.reversed.size() && loop.reversed[k]
+                         ? TopoDS::Edge(edge.Reversed()) : edge);
+            if (!wire.IsDone()) return false;
+            // Not `edge`: joining it to the wire may have copied it onto
+            // shared vertices, and only the copy is in the face.
+            made.push_back({wire.Edge(), loop.entities[k]});
+        }
+        wireOut = wire.Wire();
+        // A face wants its outline counter-clockwise about its normal and
+        // its holes the other way.
+        if ((loop.signedArea > 0) != counterClockwise) wireOut.Reverse();
+        return true;
+    };
+
+    const Vec3 o = pl.origin + up;
+    out.flat.reserve(faces.size());
+    for (const SweptFace& f : faces) {
+        TopoDS_Wire outer;
+        if (!wireFor(*f.outer, true, outer)) {
+            if (reason) *reason = "the profile does not close";
+            return false;
+        }
+        BRepBuilderAPI_MakeFace face(gp_Pln(gp_Pnt(o.x, o.y, o.z), normal), outer, Standard_True);
+        for (const SketchLoop* hole : f.holes) {
+            TopoDS_Wire w;
+            if (!wireFor(*hole, false, w)) {
+                if (reason) *reason = "a hole in the profile does not close";
+                return false;
+            }
+            face.Add(w);
+        }
+        if (!face.IsDone()) {
+            if (reason) *reason = "the profile does not bound a face";
+            return false;
+        }
+        out.flat.push_back(face.Face());
+    }
+
+    // What can be wrong with a drawing is in its outlines -- one that
+    // crosses itself, a hole that crosses the outline around it. Found on
+    // the sketch's own curves, exactly and quickly: the kernel's check of
+    // the same faces compares every edge with every other, and took
+    // thirteen seconds on a rose of a few thousand curves -- two and a
+    // half even told to leave the geometry alone. The rest of what it
+    // would catch cannot happen here: every wire was checked closed as it
+    // was built, and every hole lies inside its outline because that is
+    // how the sketch found it to be a hole.
+    size_t bad = 0;
+    for (const SweptFace& f : faces) {
+        std::vector<std::vector<SvgSegment>> loops{sketchLoopCurves(sk, *f.outer)};
+        for (const SketchLoop* h : f.holes) loops.push_back(sketchLoopCurves(sk, *h));
+        if (outlineCrossings(loops) > 0) ++bad;
+    }
+    if (bad > 0) {
+        if (reason)
+            *reason = out.flat.size() == 1
+                          ? std::string("the profile crosses itself")
+                          : std::to_string(bad) + " of " + std::to_string(out.flat.size()) +
+                                " regions have outlines that cross: leave them out, or fix them in the sketch";
+        return false;
+    }
+    return true;
+}
+
+// One solid a face swept out, with whatever the sweep made from the face
+// itself: the two caps of a prism, or the flat ends of a part turn.
+struct Swept { TopoDS_Shape shape, first, last; };
+
+// Puts the solids together and names every face of them.
+//
+// One solid is itself; several stand in a compound. They do not touch --
+// regions picked inside one another were merged into one face before this --
+// so there is nothing to fuse. The caps are named for which end they are, and
+// each wall for the sketch entity that swept it: `walls` is what the operation
+// itself said each entity generated, and where it is empty the walls are found
+// instead through the result's own edge-to-face map, which is what a prism
+// leaves behind for any number of prisms at once.
+BrepRef assembleSwept(const std::vector<Swept>& solids,
+                      const std::vector<std::pair<TopoDS_Edge, SketchId>>& made,
+                      const std::vector<std::pair<TopoDS_Shape, SketchId>>& walls,
+                      ElementId salt, std::string* reason) {
+    TopoDS_Shape shape;
+    if (solids.size() == 1) {
+        shape = solids.front().shape;
+    } else {
+        BRep_Builder b;
+        TopoDS_Compound c;
+        b.MakeCompound(c);
+        for (const Swept& sw : solids) b.Add(c, sw.shape);
+        shape = c;
+    }
+    // The faces were checked before they were swept, and a prism of a
+    // valid flat face is valid: checking every wall of every prism again
+    // was three quarters of the time a drawing of hundreds of letters
+    // took to extrude.
+    if (shape.IsNull()) {
+        if (reason) *reason = "the profile could not be swept into a solid";
+        return {};
+    }
+
+    TopTools_IndexedMapOfShape fs;
+    TopExp::MapShapes(shape, TopAbs_FACE, fs);
+    std::vector<ElementId> names(static_cast<size_t>(fs.Extent()), kNoId);
+    auto nameFace = [&](const TopoDS_Shape& f, ElementId name) {
+        if (f.IsNull()) return;
+        const int i = fs.FindIndex(f);
+        if (i > 0 && names[static_cast<size_t>(i - 1)] == kNoId)
+            names[static_cast<size_t>(i - 1)] = name;
+    };
+    for (size_t k = 0; k < solids.size(); ++k) {
+        nameFace(solids[k].first, nameId(salt, IdRole::Cap, static_cast<ElementId>(2 * k)));
+        nameFace(solids[k].last, nameId(salt, IdRole::Cap, static_cast<ElementId>(2 * k + 1)));
+    }
+    if (!walls.empty()) {
+        for (const auto& [face, entity] : walls)
+            nameFace(face, nameId(salt, IdRole::Side, entity));
+    } else {
+        TopTools_IndexedDataMapOfShapeListOfShape edgeFaces;
+        TopExp::MapShapesAndAncestors(shape, TopAbs_EDGE, TopAbs_FACE, edgeFaces);
+        for (const auto& [edge, entity] : made) {
+            const int i = edgeFaces.FindIndex(edge);
+            if (i <= 0) continue;
+            for (TopTools_ListOfShape::Iterator it(edgeFaces(i)); it.More(); it.Next()) {
+                // Not a cap: the caps were named first, and a named face is
+                // left alone.
+                nameFace(it.Value(), nameId(salt, IdRole::Side, entity));
+            }
+        }
+    }
+
+    // Every face above should have a name by now. One that does not still
+    // gets a derived one, so the body is usable, rather than a zero that
+    // would collide with every other unnamed face.
+    for (size_t i = 0; i < names.size(); ++i)
+        if (names[i] == kNoId) names[i] = nameId(salt, IdRole::Patch, static_cast<ElementId>(i));
+
+    return makeBrep(shape, names);
+}
+
 BrepRef sweepSketchFaces(const Sketch& sk, const std::vector<SweptFace>& faces, Real from, Real to,
                          ElementId salt, std::string* reason) {
     if (reason) reason->clear();
@@ -2306,151 +2530,15 @@ BrepRef sweepSketchFaces(const Sketch& sk, const std::vector<SweptFace>& faces, 
         return {};
     }
 
-    const SketchPlane& pl = sk.plane;
-    const Vec3 n = pl.normal();
-    const Vec3 lift = n * lo;
-    const gp_Dir normal(n.x, n.y, n.z);
-    const gp_Dir xDir(pl.xAxis.x, pl.xAxis.y, pl.xAxis.z);
-    auto at3 = [&](Vec2 p) {
-        const Vec3 w = pl.toWorld(p) + lift;
-        return gp_Pnt(w.x, w.y, w.z);
-    };
-    auto pointOf = [&](SketchId id, Vec2& out) {
-        const SketchPoint* p = sk.point(id);
-        if (!p) return false;
-        out = p->at;
-        return true;
-    };
-
     try {
-        // One edge per entity, as it ended up in the wire, so the wall each one
-        // sweeps can be named for the entity rather than for where it happens
-        // to sit.
-        std::vector<std::pair<TopoDS_Edge, SketchId>> made;
+        SketchFaces built;
+        if (!buildSketchFaces(sk, faces, lo, built, reason)) return {};
 
-        auto edgeFor = [&](const SketchEntity& e, TopoDS_Edge& out) -> bool {
-            switch (e.curve) {
-            case SketchCurve::Line: {
-                Vec2 a, b;
-                if (!pointOf(e.a, a) || !pointOf(e.b, b) || length(b - a) < 1e-9) return false;
-                out = BRepBuilderAPI_MakeEdge(at3(a), at3(b)).Edge();
-                return true;
-            }
-            case SketchCurve::Circle: {
-                Vec2 c;
-                if (!pointOf(e.a, c) || e.radius <= 1e-9) return false;
-                out = BRepBuilderAPI_MakeEdge(gp_Circ(gp_Ax2(at3(c), normal, xDir), e.radius)).Edge();
-                return true;
-            }
-            case SketchCurve::Arc: {
-                Vec2 c, s, t;
-                if (!pointOf(e.a, c) || !pointOf(e.b, s) || !pointOf(e.c, t)) return false;
-                const Real r = length(s - c);
-                if (r <= 1e-9) return false;
-                // Counter-clockwise about the plane's normal, start to end: the
-                // direction the sketch stores an arc in.
-                GC_MakeArcOfCircle arc(gp_Circ(gp_Ax2(at3(c), normal, xDir), r), at3(s), at3(t),
-                                       Standard_True);
-                if (!arc.IsDone()) return false;
-                out = BRepBuilderAPI_MakeEdge(arc.Value()).Edge();
-                return true;
-            }
-            case SketchCurve::Bezier: {
-                Vec2 p0, p1, p2, p3;
-                if (!pointOf(e.a, p0) || !pointOf(e.b, p1) || !pointOf(e.c, p2) ||
-                    !pointOf(e.d, p3))
-                    return false;
-                TColgp_Array1OfPnt poles(1, 4);
-                poles.SetValue(1, at3(p0));
-                poles.SetValue(2, at3(p1));
-                poles.SetValue(3, at3(p2));
-                poles.SetValue(4, at3(p3));
-                Handle(Geom_BezierCurve) curve = new Geom_BezierCurve(poles);
-                out = BRepBuilderAPI_MakeEdge(curve).Edge();
-                return true;
-            }
-            }
-            return false;
-        };
-
-        auto wireFor = [&](const SketchLoop& loop, bool counterClockwise, TopoDS_Wire& out) {
-            BRepBuilderAPI_MakeWire wire;
-            for (size_t k = 0; k < loop.entities.size(); ++k) {
-                const SketchEntity* e = sk.entity(loop.entities[k]);
-                TopoDS_Edge edge;
-                if (!e || !edgeFor(*e, edge)) return false;
-                // Added the way the loop runs, so the wire's direction is the
-                // loop's and its signed area says which way round it is.
-                wire.Add(k < loop.reversed.size() && loop.reversed[k]
-                             ? TopoDS::Edge(edge.Reversed()) : edge);
-                if (!wire.IsDone()) return false;
-                // Not `edge`: joining it to the wire may have copied it onto
-                // shared vertices, and only the copy is in the face.
-                made.push_back({wire.Edge(), loop.entities[k]});
-            }
-            out = wire.Wire();
-            // A face wants its outline counter-clockwise about its normal and
-            // its holes the other way.
-            if ((loop.signedArea > 0) != counterClockwise) out.Reverse();
-            return true;
-        };
-
+        const Vec3 n = sk.plane.normal();
         const Real depth = hi - lo;
-        const Vec3 o = pl.origin + lift;
-        struct Swept { TopoDS_Shape shape, first, last; };
         std::vector<Swept> solids;
-        solids.reserve(faces.size());
-        std::vector<TopoDS_Face> flat;
-        flat.reserve(faces.size());
-        for (const SweptFace& f : faces) {
-            TopoDS_Wire outer;
-            if (!wireFor(*f.outer, true, outer)) {
-                if (reason) *reason = "the profile does not close";
-                return {};
-            }
-            BRepBuilderAPI_MakeFace face(gp_Pln(gp_Pnt(o.x, o.y, o.z), normal), outer, Standard_True);
-            for (const SketchLoop* hole : f.holes) {
-                TopoDS_Wire w;
-                if (!wireFor(*hole, false, w)) {
-                    if (reason) *reason = "a hole in the profile does not close";
-                    return {};
-                }
-                face.Add(w);
-            }
-            if (!face.IsDone()) {
-                if (reason) *reason = "the profile does not bound a face";
-                return {};
-            }
-            flat.push_back(face.Face());
-        }
-
-        // What can be wrong with a drawing is in its outlines -- one that
-        // crosses itself, a hole that crosses the outline around it. Found on
-        // the sketch's own curves, exactly and quickly: the kernel's check of
-        // the same faces compares every edge with every other, and took
-        // thirteen seconds on a rose of a few thousand curves -- two and a
-        // half even told to leave the geometry alone. The rest of what it
-        // would catch cannot happen here: every wire was checked closed as it
-        // was built, and every hole lies inside its outline because that is
-        // how the sketch found it to be a hole.
-        {
-            size_t bad = 0;
-            for (const SweptFace& f : faces) {
-                std::vector<std::vector<SvgSegment>> loops{sketchLoopCurves(sk, *f.outer)};
-                for (const SketchLoop* h : f.holes) loops.push_back(sketchLoopCurves(sk, *h));
-                if (outlineCrossings(loops) > 0) ++bad;
-            }
-            if (bad > 0) {
-                if (reason)
-                    *reason = flat.size() == 1
-                                  ? std::string("the profile crosses itself")
-                                  : std::to_string(bad) + " of " + std::to_string(flat.size()) +
-                                        " regions have outlines that cross: leave them out, or fix them in the sketch";
-                return {};
-            }
-        }
-
-        for (const TopoDS_Face& f : flat) {
+        solids.reserve(built.flat.size());
+        for (const TopoDS_Face& f : built.flat) {
             BRepPrimAPI_MakePrism solid(f, gp_Vec(n.x * depth, n.y * depth, n.z * depth));
             solid.Build();
             if (!solid.IsDone()) {
@@ -2459,67 +2547,111 @@ BrepRef sweepSketchFaces(const Sketch& sk, const std::vector<SweptFace>& faces, 
             }
             solids.push_back({solid.Shape(), solid.FirstShape(), solid.LastShape()});
         }
-
-        // One region is its prism; several stand together in a compound. They
-        // do not touch -- regions picked inside one another were merged into
-        // one face above -- so there is nothing to fuse.
-        TopoDS_Shape shape;
-        if (solids.size() == 1) {
-            shape = solids.front().shape;
-        } else {
-            BRep_Builder b;
-            TopoDS_Compound c;
-            b.MakeCompound(c);
-            for (const Swept& sw : solids) b.Add(c, sw.shape);
-            shape = c;
-        }
-        // The faces were checked before they were swept, and a prism of a
-        // valid flat face is valid: checking every wall of every prism again
-        // was three quarters of the time a drawing of hundreds of letters
-        // took to extrude.
-        if (shape.IsNull()) {
-            if (reason) *reason = "the profile could not be swept into a solid";
-            return {};
-        }
-
-        TopTools_IndexedMapOfShape fs;
-        TopExp::MapShapes(shape, TopAbs_FACE, fs);
-        std::vector<ElementId> names(static_cast<size_t>(fs.Extent()), kNoId);
-        auto nameFace = [&](const TopoDS_Shape& f, ElementId name) {
-            const int i = fs.FindIndex(f);
-            if (i > 0 && names[static_cast<size_t>(i - 1)] == kNoId)
-                names[static_cast<size_t>(i - 1)] = name;
-        };
-        for (size_t k = 0; k < solids.size(); ++k) {
-            nameFace(solids[k].first, nameId(salt, IdRole::Cap, static_cast<ElementId>(2 * k)));
-            nameFace(solids[k].last, nameId(salt, IdRole::Cap, static_cast<ElementId>(2 * k + 1)));
-        }
-        // A wall is the face its edge swept: the one of the prism's side faces
-        // that contains that edge. Found through the edge-to-face map of the
-        // result, which holds for any number of prisms at once.
-        TopTools_IndexedDataMapOfShapeListOfShape edgeFaces;
-        TopExp::MapShapesAndAncestors(shape, TopAbs_EDGE, TopAbs_FACE, edgeFaces);
-        for (const auto& [edge, entity] : made) {
-            const int i = edgeFaces.FindIndex(edge);
-            if (i <= 0) continue;
-            for (TopTools_ListOfShape::Iterator it(edgeFaces(i)); it.More(); it.Next()) {
-                const int fi = fs.FindIndex(it.Value());
-                // Not a cap: the caps were named first, and a named face is
-                // left alone.
-                if (fi > 0 && names[static_cast<size_t>(fi - 1)] == kNoId)
-                    names[static_cast<size_t>(fi - 1)] = nameId(salt, IdRole::Side, entity);
-            }
-        }
-
-        // Every face above should have a name by now. One that does not still
-        // gets a derived one, so the body is usable, rather than a zero that
-        // would collide with every other unnamed face.
-        for (size_t i = 0; i < names.size(); ++i)
-            if (names[i] == kNoId) names[i] = nameId(salt, IdRole::Patch, static_cast<ElementId>(i));
-
-        return makeBrep(shape, names);
+        return assembleSwept(solids, built.made, {}, salt, reason);
     } catch (const Standard_Failure& e) {
         if (reason) *reason = e.GetMessageString() ? e.GetMessageString() : "the profile threw";
+        return {};
+    }
+}
+
+// Which side of the axis a point is on, in the sketch's own coordinates. Zero
+// on the axis, and the sign says which side.
+Real sideOfAxis(Vec2 at, Vec2 dir, Vec2 p) {
+    return dir.x * (p.y - at.y) - dir.y * (p.x - at.x);
+}
+
+BrepRef revolveSketchFaces(const Sketch& sk, const std::vector<SweptFace>& faces, Vec2 axisAt,
+                           Vec2 axisDir, Real angle, ElementId salt, std::string* reason) {
+    if (reason) reason->clear();
+    if (faces.empty()) {
+        if (reason) *reason = "the profile is empty";
+        return {};
+    }
+    if (length(axisDir) < 1e-9) {
+        if (reason) *reason = "the axis has no direction";
+        return {};
+    }
+    axisDir = normalize(axisDir);
+    if (angle < 1e-6) {
+        if (reason) *reason = "a turn of nothing makes nothing";
+        return {};
+    }
+    const Real full = 2.0 * kPi;
+    if (angle > full + 1e-9) {
+        if (reason) *reason = "more than a full turn would sweep over itself";
+        return {};
+    }
+    angle = std::min(angle, full);
+
+    // A profile that straddles the axis would turn through itself, and what
+    // comes out is not a solid anybody asked for. Touching the axis is fine --
+    // that is how a half-disc makes a sphere -- so this is about crossing it.
+    //
+    // Measured on the sketch's own curves rather than on its points: a Bézier
+    // whose ends sit on one side can still bulge over the axis.
+    {
+        Real most = 0.0, least = 0.0;
+        for (const SweptFace& f : faces) {
+            std::vector<const SketchLoop*> loops{f.outer};
+            for (const SketchLoop* h : f.holes) loops.push_back(h);
+            for (const SketchLoop* loop : loops)
+                for (SketchId id : loop->entities)
+                    if (const SketchEntity* e = sk.entity(id))
+                        for (Vec2 p : sketchEntityPoints(sk, *e, 24)) {
+                            const Real s = sideOfAxis(axisAt, axisDir, p);
+                            most = std::max(most, s);
+                            least = std::min(least, s);
+                        }
+        }
+        if (most > 1e-6 && least < -1e-6) {
+            if (reason) *reason = "the profile crosses the axis it turns about";
+            return {};
+        }
+    }
+
+    try {
+        SketchFaces built;
+        if (!buildSketchFaces(sk, faces, 0.0, built, reason)) return {};
+
+        const SketchPlane& pl = sk.plane;
+        const Vec3 o = pl.toWorld(axisAt);
+        const Vec3 d = normalize(pl.toWorld(axisAt + axisDir) - o);
+        const gp_Ax1 axis(gp_Pnt(o.x, o.y, o.z), gp_Dir(d.x, d.y, d.z));
+
+        std::vector<Swept> solids;
+        std::vector<std::pair<TopoDS_Shape, SketchId>> walls;
+        solids.reserve(built.flat.size());
+        for (const TopoDS_Face& f : built.flat) {
+            BRepPrimAPI_MakeRevol solid(f, axis, angle);
+            solid.Build();
+            if (!solid.IsDone() || solid.Shape().IsNull()) {
+                if (reason) *reason = "the profile could not be turned into a solid";
+                return {};
+            }
+            // A full turn has no ends; a part turn has the profile at each.
+            const bool whole = angle >= full - 1e-9;
+            solids.push_back({solid.Shape(), whole ? TopoDS_Shape() : solid.FirstShape(),
+                              whole ? TopoDS_Shape() : solid.LastShape()});
+            // What each entity turned into, asked of the operation rather than
+            // found afterwards: a full turn closes the profile's edges into
+            // seams, and a seam is in two faces at once.
+            for (const auto& [edge, entity] : built.made) {
+                const TopTools_ListOfShape& gen = solid.Generated(edge);
+                for (TopTools_ListOfShape::Iterator it(gen); it.More(); it.Next())
+                    walls.push_back({it.Value(), entity});
+            }
+        }
+        // Nothing generated means nothing to name from; the map is the better
+        // answer then, and assembleSwept falls back to it on an empty list.
+        BrepRef out = assembleSwept(solids, built.made, walls, salt, reason);
+        if (!out) return out;
+        if (!acceptable(out->shape, reason)) {
+            if (reason && reason->empty()) *reason = "the turn produced no valid solid";
+            return {};
+        }
+        return out;
+    } catch (const Standard_Failure& e) {
+        if (reason) *reason = kernelReason(e, "the profile could not be turned into a solid");
         return {};
     }
 }
@@ -2538,16 +2670,20 @@ BrepRef sketchSolid(const Sketch& sk, const SketchProfile& profile, Real from, R
     return sweepSketchFaces(sk, {f}, from, to, salt, reason);
 }
 
-BrepRef sketchSolids(const Sketch& sk, const std::vector<SketchProfile>& profiles,
-                     const std::vector<SketchId>& keys, Real from, Real to, ElementId salt,
-                     std::string* reason) {
+namespace {
+
+// The faces the chosen regions make: a face per picked region whose
+// surrounding region is not also picked, holed by the loops inside it that
+// were not picked.
+bool facesForRegions(const std::vector<SketchProfile>& profiles, const std::vector<SketchId>& keys,
+                     std::vector<SweptFace>& out, std::string* reason) {
     std::unordered_map<SketchId, const SketchProfile*> byKey;
     for (const SketchProfile& p : profiles) byKey.emplace(p.key, &p);
     std::unordered_set<SketchId> chosen;
     for (SketchId k : keys) {
         if (!byKey.count(k)) {
             if (reason) *reason = "that region of the sketch no longer closes";
-            return {};
+            return false;
         }
         chosen.insert(k);
     }
@@ -2559,7 +2695,6 @@ BrepRef sketchSolids(const Sketch& sk, const std::vector<SketchProfile>& profile
     // A face starts at each picked region whose surrounding region is not
     // picked, and takes in every picked region inside it: its holes are the
     // loops inside it that are not picked, however deep the picked ones go.
-    std::vector<SweptFace> faces;
     std::vector<SketchId> tops(keys);
     std::sort(tops.begin(), tops.end());
     tops.erase(std::unique(tops.begin(), tops.end()), tops.end());
@@ -2579,9 +2714,27 @@ BrepRef sketchSolids(const Sketch& sk, const std::vector<SketchProfile>& profile
                 else f.holes.push_back(&h);
             }
         }
-        faces.push_back(std::move(f));
+        out.push_back(std::move(f));
     }
+    return true;
+}
+
+} // namespace
+
+BrepRef sketchSolids(const Sketch& sk, const std::vector<SketchProfile>& profiles,
+                     const std::vector<SketchId>& keys, Real from, Real to, ElementId salt,
+                     std::string* reason) {
+    std::vector<SweptFace> faces;
+    if (!facesForRegions(profiles, keys, faces, reason)) return {};
     return sweepSketchFaces(sk, faces, from, to, salt, reason);
+}
+
+BrepRef revolveSketch(const Sketch& sk, const std::vector<SketchProfile>& profiles,
+                      const std::vector<SketchId>& keys, Vec2 axisAt, Vec2 axisDir, Real angle,
+                      ElementId salt, std::string* reason) {
+    std::vector<SweptFace> faces;
+    if (!facesForRegions(profiles, keys, faces, reason)) return {};
+    return revolveSketchFaces(sk, faces, axisAt, axisDir, angle, salt, reason);
 }
 
 BrepRef prism(const std::vector<Vec3>& points, const std::vector<Real>& arcs,

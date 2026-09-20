@@ -978,12 +978,84 @@ void SketchTool::toggleRegion(SketchId key) {
         chosen_.push_back(key);
 }
 
+void SketchTool::setTurnAxis(Vec2 at, Vec2 dir, SketchId fromLine) {
+    if (length(dir) < 1e-9) return;
+    axisAt_ = at;
+    axisDir_ = normalize(dir);
+    axisLine_ = fromLine;
+}
+
+bool SketchTool::setTurnAxisLine(SketchId entity) {
+    const SketchEntity* e = sketch_.entity(entity);
+    if (!e || e->curve != SketchCurve::Line) return false;
+    const SketchPoint* a = sketch_.point(e->a);
+    const SketchPoint* b = sketch_.point(e->b);
+    if (!a || !b || length(b->at - a->at) < 1e-9) return false;
+    setTurnAxis(a->at, b->at - a->at, entity);
+    return true;
+}
+
+bool SketchTool::beginTurn() {
+    if (stage_ != SketchStage::Regions) return false;
+    if (chosen_.empty()) {
+        error_ = "Pick a region to turn";
+        return false;
+    }
+    build_ = SketchBuild::Revolve;
+    typed_.clear();
+
+    // An axis to start from, if the one standing has the profile across it: the
+    // sketch's vertical, moved out to the near side of what was chosen, so the
+    // first thing shown is something that can actually be built. The user
+    // moves it from there, or picks a line of the drawing.
+    if (!axisClears()) {
+        Vec2 lo{1e300, 1e300}, hi{-1e300, -1e300};
+        for (const SketchProfile& r : regions_) {
+            if (!contains(chosen_, r.key)) continue;
+            for (Vec2 p : sketchLoopPoints(sketch_, r.outer)) {
+                lo = {std::min(lo.x, p.x), std::min(lo.y, p.y)};
+                hi = {std::max(hi.x, p.x), std::max(hi.y, p.y)};
+            }
+        }
+        if (lo.x > hi.x) {
+            error_ = "There is nothing in those regions to turn";
+            return false;
+        }
+        setTurnAxis({lo.x, lo.y}, {0, 1});
+    }
+    stage_ = SketchStage::Turn;
+    return true;
+}
+
+// Whether the regions to be turned stay on one side of the axis as it stands.
+// The kernel refuses one that crosses, and the panel should not offer it.
+bool SketchTool::axisClears() const {
+    Real most = 0.0, least = 0.0;
+    for (const SketchProfile& r : regions_) {
+        if (!contains(chosen_, r.key)) continue;
+        std::vector<const SketchLoop*> loops{&r.outer};
+        for (const SketchLoop& h : r.holes) loops.push_back(&h);
+        for (const SketchLoop* loop : loops)
+            for (SketchId id : loop->entities) {
+                const SketchEntity* e = sketch_.entity(id);
+                if (!e) continue;
+                for (Vec2 p : sketchEntityPoints(sketch_, *e, 24)) {
+                    const Real side = axisDir_.x * (p.y - axisAt_.y) - axisDir_.y * (p.x - axisAt_.x);
+                    most = std::max(most, side);
+                    least = std::min(least, side);
+                }
+            }
+    }
+    return !(most > 1e-6 && least < -1e-6);
+}
+
 bool SketchTool::beginDepth() {
     if (stage_ != SketchStage::Regions) return false;
     if (chosen_.empty()) {
         error_ = "Pick a region to extrude";
         return false;
     }
+    build_ = SketchBuild::Extrude;
     typed_.clear();
     depthTyped_ = false;
     depthBase_ = depth_;
@@ -1004,7 +1076,7 @@ Vec2 SketchTool::chosenCentre() const {
 
 bool SketchTool::finish(Scene& scene, Camera& camera, UndoStack& undo, bool extrude) {
     if (stage_ != SketchStage::Draw && stage_ != SketchStage::Regions &&
-        stage_ != SketchStage::Depth)
+        stage_ != SketchStage::Depth && stage_ != SketchStage::Turn)
         return false;
     endDrag();
     clearPending();
@@ -1118,13 +1190,16 @@ void SketchTool::dismissApplied() {
 
 Body SketchTool::sweptRegions(std::string* why) const {
     if (chosen_.empty()) return Body{};
-    BrepRef all = brep::sketchSolids(sketch_, regions_, chosen_, 0.0, depth_, 0, why);
+    BrepRef all = build_ == SketchBuild::Revolve
+                      ? brep::revolveSketch(sketch_, regions_, chosen_, axisAt_, axisDir_, angle_, 0,
+                                            why)
+                      : brep::sketchSolids(sketch_, regions_, chosen_, 0.0, depth_, 0, why);
     return all ? Body(std::move(all)) : Body{};
 }
 
 void SketchTool::refreshReach(const Scene& scene, bool now) {
     if (choice_.op == ExtrudeOp::NewBody || !brep::available() || chosen_.empty()) {
-        reach_.refresh(scene, Body{}, owner(), choice_.op, depth_, "none");
+        reach_.refresh(scene, Body{}, owner(), choice_.op, reachDepth(), "none");
         return;
     }
 
@@ -1132,8 +1207,20 @@ void SketchTool::refreshReach(const Scene& scene, bool now) {
     // from the plane to the depth. With no body near that box there is
     // nothing to reach, and nothing needs sweeping to know it -- the usual
     // case for a drawing brought in to be a part of its own.
+    //
+    // A turn sweeps a circle about its axis rather than a box along the
+    // normal, so the same box is taken from the solid itself; it is one
+    // region's worth of geometry, not a drawing's.
     AABB swept;
-    {
+    if (build_ == SketchBuild::Revolve) {
+        std::string why;
+        const Body turned = sweptRegions(&why);
+        if (turned.empty()) {
+            reach_.refresh(scene, Body{}, owner(), choice_.op, 1.0, "none");
+            return;
+        }
+        swept = turned.bounds();
+    } else {
         std::vector<SketchId> chosen = chosen_;
         std::sort(chosen.begin(), chosen.end());
         Vec2 lo{1e300, 1e300}, hi{-1e300, -1e300};
@@ -1162,16 +1249,17 @@ void SketchTool::refreshReach(const Scene& scene, bool now) {
         return o->visible && !o->body.empty() && !o->body.isMesh() && swept.overlaps(o->worldBounds(), 1e-3);
     });
     if (!near) {
-        reach_.refresh(scene, Body{}, owner(), choice_.op, depth_, "clear");
+        reach_.refresh(scene, Body{}, owner(), choice_.op, reachDepth(), "clear");
         return;
     }
 
     // The same regions at the same depth are the same tool, and the bodies it
     // reaches need not be measured again.
     std::string key;
-    char b[96];
-    std::snprintf(b, sizeof b, "%.9g|%.6g,%.6g,%.6g", depth_, plane_.origin.x, plane_.origin.y,
-                  plane_.origin.z);
+    char b[160];
+    std::snprintf(b, sizeof b, "%d|%.9g|%.9g|%.6g,%.6g|%.6g,%.6g|%.6g,%.6g,%.6g",
+                  static_cast<int>(build_), depth_, angle_, axisAt_.x, axisAt_.y, axisDir_.x,
+                  axisDir_.y, plane_.origin.x, plane_.origin.y, plane_.origin.z);
     key = b;
     for (SketchId k : chosen_) key += "|" + std::to_string(k);
     if (reachToolKey_ != key) {
@@ -1187,13 +1275,14 @@ void SketchTool::refreshReach(const Scene& scene, bool now) {
         reachBuiltAt_ = std::chrono::steady_clock::now();
         reachBuildMs_ = std::chrono::duration<double, std::milli>(reachBuiltAt_ - t).count();
     }
-    reach_.refresh(scene, reachTool_, owner(), choice_.op, depth_, key);
+    reach_.refresh(scene, reachTool_, owner(), choice_.op, reachDepth(), key);
 }
 
 bool SketchTool::commitExtrusion(Scene& scene, UndoStack& undo) {
     // Measured now rather than trusted from the last frame: this is what the
     // extrusion is about to act on.
-    choice_.follow(depth_, owner() != kNoObject);
+    const bool turn = build_ == SketchBuild::Revolve;
+    choice_.follow(reachDepth(), owner() != kNoObject);
     refreshReach(scene, true);
     ExtrudeOp op = choice_.op;
     std::vector<ObjectId> bodies = reach_.included();
@@ -1215,7 +1304,7 @@ bool SketchTool::commitExtrusion(Scene& scene, UndoStack& undo) {
     // own -- as it is in Fusion.
     const bool asNewBody = op == ExtrudeOp::NewBody || (op == ExtrudeOp::Join && bodies.empty());
     if (asNewBody && editing()) {
-        error_ = "A sketch already in a part extrudes into that part: leave the part in, or pick Cut or Intersect";
+        error_ = "A sketch already in a part builds into that part: leave the part in, or pick Cut or Intersect";
         return false;
     }
     if (!asNewBody && bodies.empty()) {
@@ -1229,12 +1318,15 @@ bool SketchTool::commitExtrusion(Scene& scene, UndoStack& undo) {
     std::sort(keys.begin(), keys.end());
     auto sweep = [&](ElementId sketchUid, ExtrudeOp how) {
         Feature f;
-        f.kind = FeatureKind::ExtrudeProfile;
+        f.kind = turn ? FeatureKind::RevolveProfile : FeatureKind::ExtrudeProfile;
         f.uid = scene.takeFeatureUid();
         f.sketchUid = sketchUid;
         f.profileKeys = keys;
         f.distance = depth_;
         f.extrudeOp = how;
+        f.revolveAxisAt = axisAt_;
+        f.revolveAxisDir = axisDir_;
+        f.revolveAngle = angle_;
         return f;
     };
 
@@ -1253,7 +1345,8 @@ bool SketchTool::commitExtrusion(Scene& scene, UndoStack& undo) {
         std::string why;
         const ObjectId id = scene.addFeatureChain(std::move(chain), "Part", &why);
         if (id == kNoObject) {
-            error_ = "Extrude failed: " + (why.empty() ? std::string("no solid came out of it") : why);
+            error_ = std::string(turn ? "Revolve failed: " : "Extrude failed: ") +
+                     (why.empty() ? std::string("no solid came out of it") : why);
             return false;
         }
         undo.push(ExistenceCommand::forCreate(scene, {id}));
@@ -1281,8 +1374,10 @@ bool SketchTool::commitExtrusion(Scene& scene, UndoStack& undo) {
         return false;
     }
 
-    const char* label = op == ExtrudeOp::Join ? "Extrude Join"
-                      : op == ExtrudeOp::Cut  ? "Extrude Cut" : "Extrude Intersect";
+    const char* label = turn ? (op == ExtrudeOp::Join ? "Revolve Join"
+                              : op == ExtrudeOp::Cut  ? "Revolve Cut" : "Revolve Intersect")
+                             : (op == ExtrudeOp::Join ? "Extrude Join"
+                              : op == ExtrudeOp::Cut  ? "Extrude Cut" : "Extrude Intersect");
     const std::vector<Feature> before = obj->features;
     std::vector<Feature> chain = obj->features;
     Sketch local = sketch_;
@@ -1312,7 +1407,8 @@ bool SketchTool::commitExtrusion(Scene& scene, UndoStack& undo) {
 
     std::string why;
     if (!scene.setFeatures(home, std::move(chain), &why)) {
-        error_ = std::string(editing() ? "The edit was not kept: " : "Extrude failed: ") +
+        error_ = std::string(editing() ? "The edit was not kept: "
+                             : turn    ? "Revolve failed: " : "Extrude failed: ") +
                  (why.empty() ? std::string("the history would not evaluate") : why);
         return false;
     }
@@ -1325,7 +1421,8 @@ bool SketchTool::commitExtrusion(Scene& scene, UndoStack& undo) {
         std::string error;
         if (tool.empty()) {
             unwind(scene, parts);
-            error_ = "Extrude failed: " + (why.empty() ? std::string("the regions could not be swept") : why);
+            error_ = std::string(turn ? "Revolve failed: " : "Extrude failed: ") +
+                     (why.empty() ? std::string("the regions could not be swept") : why);
             return false;
         }
         if (!applyExtrude(scene, tool, op, bodies, homeActs ? home : kNoObject, "Sketch", label, parts,
@@ -1555,6 +1652,26 @@ void SketchTool::update(const Scene& scene, const Camera& camera, Vec2 mousePx, 
         return;
     }
 
+    if (stage_ == SketchStage::Turn) {
+        // What the pointer is over, so a line of the drawing can be clicked to
+        // stand the axis on it.
+        hoverEntity_ = kNoSketchId;
+        if (cursorValid_) {
+            Real best = kEntityPickPx * (1.0 / pixelsPerMm(camera, plane_));
+            for (const EntityDraw& d : entityDraw_) {
+                const SketchEntity* e = sketch_.entity(d.id);
+                if (!e || e->curve != SketchCurve::Line) continue;
+                for (size_t i = 0; i + 1 < d.line.size(); ++i) {
+                    const Real dist = distanceToSegment(raw, d.line[i], d.line[i + 1]);
+                    if (dist <= best) { best = dist; hoverEntity_ = d.id; }
+                }
+            }
+        }
+        choice_.follow(reachDepth(), owner() != kNoObject);
+        refreshReach(scene);
+        return;
+    }
+
     if (stage_ == SketchStage::Depth) {
         if (!depthTyped_) {
             Real d = depthFromPointer(camera, mousePx);
@@ -1601,6 +1718,12 @@ void SketchTool::handleMouseDown(Scene& scene, Camera& camera, UndoStack& undo) 
     case SketchStage::Depth:
         finish(scene, camera, undo, true);
         break;
+    case SketchStage::Turn:
+        // A click on a line of the drawing stands the axis on it; the panel's
+        // buttons are the way to any other axis, and a click on nothing is not
+        // a commit here -- there is no drag to end.
+        if (hoverEntity_ != kNoSketchId) setTurnAxisLine(hoverEntity_);
+        break;
     case SketchStage::Applied:
     case SketchStage::None:
         break;
@@ -1625,6 +1748,7 @@ void SketchTool::handleRightClick(Camera& camera) {
         squareUp(camera);
         break;
     case SketchStage::Depth:
+    case SketchStage::Turn:
         stage_ = SketchStage::Regions;
         break;
     case SketchStage::SelectPlane:
@@ -1673,6 +1797,7 @@ bool SketchTool::handleKey(int key, bool shift, bool ctrl, Scene& scene, Camera&
             squareUp(camera);
             break;
         case SketchStage::Depth:
+        case SketchStage::Turn:
             stage_ = SketchStage::Regions;
             break;
         case SketchStage::Applied:
@@ -1728,8 +1853,22 @@ bool SketchTool::handleKey(int key, bool shift, bool ctrl, Scene& scene, Camera&
         return typeKey(key);
 
     case SketchStage::Regions:
-        if (key == 13 || key == 'E') { beginDepth(); return true; }
+        if (key == 'R') { beginTurn(); return true; }
+        if (key == 13 || key == 'E') { build_ = SketchBuild::Extrude; beginDepth(); return true; }
         return false;
+
+    case SketchStage::Turn:
+        if (key == 13 || key == 'R') { finish(scene, camera, undo, true); return true; }
+        if (key == 'F') { angle_ = 2.0 * kPi; return true; }
+        {
+            ExtrudeOp picked;
+            if (extrudeOpForKey(key, picked) && !(picked == ExtrudeOp::NewBody && editing())) {
+                choice_.pick(picked);
+                refreshReach(scene);
+                return true;
+            }
+        }
+        return typeKey(key);
 
     case SketchStage::Depth:
         if (key == 13 || key == 'E') { finish(scene, camera, undo, true); return true; }
@@ -2193,6 +2332,41 @@ void SketchTool::drawOverlay(const Scene& scene, const Camera& camera, Renderer&
             }
         }
     }
+
+    // What it turns about, and the circle the far side of it travels: enough
+    // to see which way the solid will come out before it is built.
+    if (stage_ == SketchStage::Turn) {
+        const bool removes = choice_.op == ExtrudeOp::Cut || choice_.op == ExtrudeOp::Intersect;
+        const Vec4 col = removes ? Vec4{1.0f, 0.4f, 0.3f, 0.9f} : brand;
+        const Vec3 on = plane_.toWorld(axisAt_);
+        const Vec3 along = plane_.toWorld(axisAt_ + axisDir_) - on;
+        renderer.addFrontDashes(camera, on - along * span, on + along * span, col, 1.6, 6.0, 4.0);
+
+        // The furthest point of what was picked, swept round: the outline of
+        // the solid, at the angle asked for.
+        Real far = 0.0;
+        Vec2 furthest = axisAt_;
+        for (const SketchProfile& r : regions_) {
+            if (!contains(chosen_, r.key)) continue;
+            for (Vec2 p : sketchLoopPoints(sketch_, r.outer)) {
+                const Vec2 d = p - axisAt_;
+                const Real off = std::fabs(d.x * axisDir_.y - d.y * axisDir_.x);
+                if (off > far) { far = off; furthest = p; }
+            }
+        }
+        if (far > 1e-6) {
+            const Vec3 centre = on + along * dot(plane_.toWorld(furthest) - on, along);
+            const Vec3 arm = plane_.toWorld(furthest) - centre;
+            const Vec3 side = cross(normalize(along), arm);
+            const int n = 64;
+            for (int i = 0; i < n; ++i) {
+                const Real t0 = angle_ * i / n, t1 = angle_ * (i + 1) / n;
+                const Vec3 a = centre + arm * std::cos(t0) + side * std::sin(t0);
+                const Vec3 b = centre + arm * std::cos(t1) + side * std::sin(t1);
+                renderer.addFrontLine(camera, a, b, col, 1.6);
+            }
+        }
+    }
 }
 
 // The drawing just imported: how big it is, where its middle is, which way
@@ -2497,14 +2671,89 @@ void SketchTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& fi
         ImGui::SameLine();
         if (ui::quietButton("None")) chooseNoRegions();
         ui::commandHint("Click a region to add it or take it out.");
+
+        // What the regions become. Turning needs an axis they all stay on one
+        // side of, which most drawings have and a logo across the origin does
+        // not, so the tile says so rather than refusing after the fact.
+        {
+            static const ui::Choice kBuild[2] = {
+                {Glyph::Extrude, "Extrude", "E", "Push the regions along the plane's normal  (E)"},
+                {Glyph::Revolve, "Revolve", "R", "Turn the regions about an axis in the plane  (R)"},
+            };
+            const int pick = ui::commandChoices("Build", kBuild, 2,
+                                                build_ == SketchBuild::Revolve ? 1 : 0);
+            if (pick == 0) build_ = SketchBuild::Extrude;
+            if (pick == 1) build_ = SketchBuild::Revolve;
+        }
         footer = ui::commandFooter("Next", !chosen_.empty(), "Back");
+        break;
+    }
+
+    case SketchStage::Turn: {
+        {
+            double deg = angle_ * kRad2Deg;
+            const ui::NumberEdit e = ui::commandNumber("Angle", deg, "\xC2\xB0", !typed_.empty(),
+                                                       !typed_.empty(), typed_.c_str(), 1.0, 360.0);
+            pulled(e, 0);
+            if (e.dragged) angle_ = clampf(e.value, 1.0, 360.0) * kDeg2Rad;
+        }
+        ui::commandRow("");
+        if (ui::quietButton("Full turn")) { angle_ = 2.0 * kPi; typed_.clear(); }
+        ui::hoverTip("All the way round  (F)");
+
+        // The axis. Either of the sketch's own, or a line of the drawing --
+        // which is what a part drawn as a half-section wants, and is picked by
+        // clicking that line.
+        {
+            const bool onLine = axisLine_ != kNoSketchId;
+            const bool vertical = !onLine && std::fabs(axisDir_.x) < 1e-9;
+            static const ui::Choice kAxis[3] = {
+                {Glyph::Line, "Up",   nullptr, "The sketch's vertical, through the near side of what was picked"},
+                {Glyph::Line, "Across", nullptr, "The sketch's horizontal, through the near side of what was picked"},
+                {Glyph::Line, "A line", nullptr, "A line of the drawing: click it in the viewport"},
+            };
+            const int pick = ui::commandChoices("Axis", kAxis, 3, onLine ? 2 : vertical ? 0 : 1);
+            if (pick == 0 || pick == 1) {
+                // Stood on the near side of what is being turned, so the axis
+                // starts somewhere it can be built from.
+                Vec2 lo{1e300, 1e300}, hi{-1e300, -1e300};
+                for (const SketchProfile& r : regions_) {
+                    if (!contains(chosen_, r.key)) continue;
+                    for (Vec2 p : sketchLoopPoints(sketch_, r.outer)) {
+                        lo = {std::min(lo.x, p.x), std::min(lo.y, p.y)};
+                        hi = {std::max(hi.x, p.x), std::max(hi.y, p.y)};
+                    }
+                }
+                if (lo.x <= hi.x)
+                    setTurnAxis(lo, pick == 0 ? Vec2{0, 1} : Vec2{1, 0});
+            }
+        }
+        if (!axisClears())
+            ui::commandRefused("The profile crosses that axis: it would turn through itself");
+
+        if (drawExtrudeChoice(choice_, !editing())) refreshReach(scene);
+        const ObjectId toggled = drawReachedBodies(scene, reach_, choice_.op, owner());
+        if (toggled != kNoObject) reach_.toggle(toggled);
+        ui::commandHint("Click a line of the drawing to turn about it, or type an angle.");
+        footer = ui::commandFooter("Finish", axisClears(), "Back");
         break;
     }
 
     case SketchStage::Depth:
     case SketchStage::Applied: {
         const bool applied = stage_ == SketchStage::Applied;
-        {
+        // A turn that has been applied adjusts its angle where an extrusion
+        // adjusts its depth. Everything below -- the operation, the bodies, the
+        // Done button -- is the same either way, and is not written twice.
+        if (applied && build_ == SketchBuild::Revolve) {
+            double deg = angle_ * kRad2Deg;
+            const ui::NumberEdit e = ui::commandNumber("Angle", deg, "\xC2\xB0", false, false,
+                                                       nullptr, 1.0, 360.0);
+            if (e.dragged && std::fabs(e.value * kDeg2Rad - angle_) > 1e-9) {
+                angle_ = clampf(e.value, 1.0, 360.0) * kDeg2Rad;
+                adjusted_ = true;
+            }
+        } else {
             const double span = std::max(extent, std::fabs(depth_));
             const ui::NumberEdit e = ui::commandNumber("Depth", depth_, "mm", depthTyped_,
                                                        !applied && !typed_.empty(), typed_.c_str(),
@@ -2531,8 +2780,10 @@ void SketchTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& fi
             reach_.toggle(toggled);
             if (applied) adjusted_ = true;
         }
-        if (applied) ui::commandApplied("Extrude");
-        ui::commandHint(applied ? "Change the depth, the operation or the bodies, and it is made again."
+        if (applied) ui::commandApplied(build_ == SketchBuild::Revolve ? "Revolve" : "Extrude");
+        ui::commandHint(applied ? (build_ == SketchBuild::Revolve
+                                       ? "Change the angle, the operation or the bodies, and it is made again."
+                                       : "Change the depth, the operation or the bodies, and it is made again.")
                                 : "Move to set the depth, drag the bar, or type one.  Click a body above to leave it out.");
         footer = applied ? ui::commandFooter("Done", true, nullptr) : ui::commandFooter("Finish", true, "Back");
         break;
@@ -2551,15 +2802,20 @@ void SketchTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& fi
             if (editing())            finish(scene, camera, undo, false);
             else                      beginExtrude(&camera);
             break;
-        case SketchStage::Regions: beginDepth(); break;
-        case SketchStage::Depth:   finish(scene, camera, undo, true); break;
+        case SketchStage::Regions:
+            if (build_ == SketchBuild::Revolve) beginTurn();
+            else                                beginDepth();
+            break;
+        case SketchStage::Depth:
+        case SketchStage::Turn:    finish(scene, camera, undo, true); break;
         case SketchStage::Applied: dismissApplied(); break;
         case SketchStage::SelectPlane:
         case SketchStage::None:    break;
         }
         if (stage_ == SketchStage::None) finished = true;
     } else if (footer < 0) {
-        if (stage_ == SketchStage::Regions || stage_ == SketchStage::Depth) {
+        if (stage_ == SketchStage::Regions || stage_ == SketchStage::Depth ||
+            stage_ == SketchStage::Turn) {
             handleKey(27, false, false, scene, camera, undo);
         } else {
             cancel(camera);

@@ -143,6 +143,11 @@ public:
     // a line half-drawn, 2 choosing regions, 3 setting the depth, 4 the part it
     // made, re-opened for editing.
     void setSketchDemo(int step) { sketchDemo_ = step; }
+    // Turns a profile about an axis, the whole way through the tool: 1 a ring
+    // as a new part, 2 the same as a part turn, 3 a groove cut round a
+    // cylinder. Each prints the volume it made, against the one arithmetic
+    // says it should be.
+    void setRevolveDemo(int step) { revolveDemo_ = step; }
     // An SVG onto the top plane: 1 placed in the sketch, 2 its filled regions
     // picked, 3 extruded 3 mm, 4 cut 3 mm into a plate under it, 5 with the
     // busiest face of the result selected -- what the highlight costs to draw.
@@ -219,6 +224,7 @@ private:
     Vec2 mouseOverride_{-1.0, -1.0};
     int  snapDemo_ = 0;
     int  sketchDemo_ = 0;
+    int  revolveDemo_ = 0;
     std::string svgDemo_;
     int  svgDemoStep_ = 1;
     int  svgDemoFrames_ = 0;

@@ -15,6 +15,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <set>
 #include <string>
 
 using namespace tg;
@@ -522,6 +523,99 @@ int main() {
             check(!why.empty(), "and says why: " + why);
         }
 
+        std::printf("--- a profile turned about an axis ---\n");
+        {
+            // A ring: a 10 x 10 square standing 20 mm off the axis, turned all
+            // the way round. Pappus gives the volume without the kernel having
+            // any say in it -- the area times the circle its centroid travels.
+            Sketch sk;
+            sk.addRectangle({20, 0}, 10, 10);
+            solveSketch(sk);
+            const std::vector<SketchProfile> rs = sketchProfiles(sk);
+            check(rs.size() == 1, "the square is one region");
+            std::string why;
+            BrepRef ring = brep::revolveSketch(sk, rs, {rs.front().key}, {0, 0}, {0, 1},
+                                               2.0 * kPi, 11, &why);
+            check(ring != nullptr, "a square off the axis turns into a ring: " + why);
+            if (ring) {
+                const Body b(std::move(ring));
+                check(b.health().solid(), "and it is a solid");
+                check(near(b.health(false).volume, 2.0 * kPi * 25.0 * 100.0, 1.0),
+                      "with the volume Pappus says: " +
+                          std::to_string(b.health(false).volume));
+                std::vector<FaceId> fs;
+                b.allFaces(fs);
+                check(fs.size() == 4, "four faces: two round, two flat");
+                int cyl = 0;
+                for (FaceId f : fs)
+                    if (b.faceKind(f) == SurfaceKind::Cylinder) ++cyl;
+                check(cyl == 2, "the inside and the outside are cylinders");
+                std::set<ElementId> names;
+                for (FaceId f : fs) names.insert(b.faceName(f));
+                check(names.size() == fs.size() && !names.count(0),
+                      "every face has a name of its own");
+            }
+        }
+        {
+            // A part turn is that ring's quarter, and the profile itself stands
+            // at each end of it.
+            Sketch sk;
+            sk.addRectangle({20, 0}, 10, 10);
+            solveSketch(sk);
+            const std::vector<SketchProfile> rs = sketchProfiles(sk);
+            std::string why;
+            BrepRef part = brep::revolveSketch(sk, rs, {rs.front().key}, {0, 0}, {0, 1},
+                                               kPi * 0.5, 12, &why);
+            check(part != nullptr, "a quarter turn builds: " + why);
+            if (part) {
+                const Body b(std::move(part));
+                check(near(b.health(false).volume, 2.0 * kPi * 25.0 * 100.0 * 0.25, 1.0),
+                      "a quarter of the volume: " + std::to_string(b.health(false).volume));
+                std::vector<FaceId> fs;
+                b.allFaces(fs);
+                check(fs.size() == 6, "six faces: the four walls and the two ends");
+            }
+        }
+        {
+            // Touching the axis is not crossing it: this is how a half-disc
+            // becomes a sphere, and the test the refusal below must not catch.
+            Sketch sk;
+            const SketchId c = sk.addPoint({0, 0});
+            const SketchId top = sk.addPoint({0, 10}), bottom = sk.addPoint({0, -10});
+            sk.addArc(c, bottom, top);          // counter-clockwise, out through +x
+            sk.addLine(top, bottom);
+            solveSketch(sk);
+            const std::vector<SketchProfile> rs = sketchProfiles(sk);
+            check(rs.size() == 1, "the half-disc is one region");
+            std::string why;
+            BrepRef ball = rs.empty() ? BrepRef{}
+                                      : brep::revolveSketch(sk, rs, {rs.front().key}, {0, 0},
+                                                            {0, 1}, 2.0 * kPi, 13, &why);
+            check(ball != nullptr, "a half-disc on the axis turns into a ball: " + why);
+            if (ball) {
+                const Body b(std::move(ball));
+                check(near(b.health(false).volume, 4.0 / 3.0 * kPi * 1000.0, 1.0),
+                      "with a sphere's volume: " + std::to_string(b.health(false).volume));
+            }
+        }
+        {
+            // Straddling the axis would turn the profile through itself. The
+            // ends of this square are on both sides of x = 0.
+            Sketch sk;
+            sk.addRectangle({-5, 0}, 10, 10);
+            solveSketch(sk);
+            const std::vector<SketchProfile> rs = sketchProfiles(sk);
+            std::string why;
+            check(!brep::revolveSketch(sk, rs, {rs.front().key}, {0, 0}, {0, 1}, 2.0 * kPi, 14, &why),
+                  "a profile across the axis is refused");
+            check(why.find("crosses the axis") != std::string::npos, "and says why: " + why);
+
+            why.clear();
+            check(!brep::revolveSketch(sk, rs, {rs.front().key}, {-20, 0}, {0, 1}, 0.0, 15, &why),
+                  "and a turn of no angle is refused");
+            check(!why.empty(), "with a reason: " + why);
+        }
+
         std::printf("--- a dimension changes, and nothing is renamed ---\n");
         {
             // The reason a sketch is in the history at all. Widen the rectangle
@@ -599,6 +693,82 @@ int main() {
             const FaceId right = wider.findFace(rightWall);
             check(right != kNoFace && near(wider.faceCentroid(right).x, 55.0, 1e-6),
                   "with the same right wall, moved rather than renamed");
+        }
+
+        auto revolveStep = [](ElementId uid, ElementId sketchUid, SketchId key, Vec2 at, Vec2 dir,
+                              Real angle, ExtrudeOp op = ExtrudeOp::Auto) {
+            Feature f;
+            f.kind = FeatureKind::RevolveProfile;
+            f.uid = uid;
+            f.sketchUid = sketchUid;
+            f.profileKeys = {key};
+            f.revolveAxisAt = at;
+            f.revolveAxisDir = dir;
+            f.revolveAngle = angle;
+            f.extrudeOp = op;
+            return f;
+        };
+
+        std::printf("--- a part that begins as a turn ---\n");
+        {
+            // The same square, turned rather than pushed: a ring, with the
+            // volume Pappus gives and walls still named for the lines that
+            // swept them.
+            Sketch plan;
+            const Sketch::Rectangle r = plan.addRectangle({20, 0}, 10, 10);
+            std::vector<Feature> chain{sketchStep(10, plan),
+                                       revolveStep(20, 10, r.bottom, {0, 0}, {0, 1}, 2.0 * kPi)};
+            Body body;
+            check(evaluateFeatures(chain, body), "a sketch and a turn make a body: " + chain[1].error);
+            check(near(body.health(false).volume, 2.0 * kPi * 25.0 * 100.0, 1e-3),
+                  "of the volume the profile sweeps: " + std::to_string(body.health(false).volume));
+            check(body.findFace(nameId(20, IdRole::Side, r.right)) != kNoFace,
+                  "its outer wall is named for the line that swept it");
+
+            // The angle is a parameter like any other, and the history edits it.
+            chain[1].revolveAngle = kPi;
+            Body half;
+            check(evaluateFeatures(chain, half), "re-runs at half a turn");
+            check(near(half.health(false).volume, kPi * 25.0 * 100.0, 1e-3),
+                  "for half the material");
+
+            // And a turn whose profile straddles the axis is the step that
+            // fails, with a reason, rather than a body that is wrong.
+            chain[1].revolveAngle = 2.0 * kPi;
+            chain[1].revolveAxisAt = {25, 0};
+            Body none;
+            evaluateFeatures(chain, none);
+            check(chain[1].errored && chain[1].error.find("crosses the axis") != std::string::npos,
+                  "a profile across the axis fails the step: " + chain[1].error);
+        }
+
+        std::printf("--- a turn cuts a groove ---\n");
+        {
+            // A ring cut out of a block: the tool crosses the block's own face
+            // on purpose, so what comes away is the part inside it.
+            Sketch plan;
+            // Centred on the axis, so the ring cut out of it is wholly inside.
+            const Sketch::Rectangle r = plan.addRectangle({-20, -20}, 40, 40);
+            Sketch side;
+            // Standing up, through the block: x across, z up.
+            side.plane.origin = {0, 0, 0};
+            side.plane.xAxis = {1, 0, 0};
+            side.plane.yAxis = {0, 0, 1};
+            const Sketch::Rectangle g = side.addRectangle({8, 5}, 6, 6);
+            std::vector<Feature> chain{sketchStep(1, plan), extrudeStep(2, 1, r.bottom, 20),
+                                       sketchStep(3, side),
+                                       revolveStep(4, 3, g.bottom, {0, 0}, {0, 1}, 2.0 * kPi,
+                                                   ExtrudeOp::Cut)};
+            Body body;
+            check(evaluateFeatures(chain, body), "the chain evaluates");
+            for (const Feature& f : chain)
+                check(!f.errored, std::string(featureKindName(f.kind)) + " did not fail: " + f.error);
+            // The groove is a ring 8 to 14 out and 6 tall, all of it inside a
+            // block 40 square and 20 high: 2 pi * 11 * 36 gone from 32000.
+            const Real exact = 40.0 * 40.0 * 20.0 - 2.0 * kPi * 11.0 * 36.0;
+            check(near(body.health(false).volume, exact, 1e-3),
+                  "and a ring is gone from it: " + std::to_string(body.health(false).volume));
+            check(body.health().solid(), "leaving a solid");
         }
 
         std::printf("--- a second sketch cuts a hole ---\n");
@@ -714,6 +884,48 @@ int main() {
             }
             std::remove(path.c_str());
             std::printf("[sketch] a sketched part round-trips at version %u\n", kProjectVersion);
+        }
+        {
+            // A turn carries an axis and an angle that nothing else in the
+            // file has, so it goes through one of its own.
+            Scene scene;
+            Sketch plan;
+            const Sketch::Rectangle r = plan.addRectangle({20, 0}, 10, 10);
+            Feature sk;
+            sk.kind = FeatureKind::Sketch;
+            sk.uid = 1;
+            sk.sketch = plan;
+            Feature turn;
+            turn.kind = FeatureKind::RevolveProfile;
+            turn.uid = 2;
+            turn.sketchUid = 1;
+            turn.profileKeys = {r.bottom};
+            turn.revolveAxisAt = {-3, 1.5};
+            turn.revolveAxisDir = {0, 1};
+            turn.revolveAngle = kPi * 0.75;
+            std::string why;
+            const ObjectId id = scene.addFeatureChain({sk, turn}, "Turned", &why);
+            check(id != kNoObject, "a turned part is made from a chain: " + why);
+            const Real volume = id == kNoObject ? 0.0 : scene.find(id)->body.health(false).volume;
+
+            const std::string path = tempPath("revolve.tng");
+            check(saveProject(scene, path).ok, "saved");
+            Scene back;
+            const ProjectResult loaded = loadProject(back, path);
+            check(loaded.ok, "loaded: " + loaded.error);
+            if (loaded.ok && back.objectCount() == 1) {
+                const SceneObject* o = back.objects().front().get();
+                check(o->features.size() == 2 &&
+                          o->features[1].kind == FeatureKind::RevolveProfile,
+                      "the turn came back as a turn");
+                check(near(o->features[1].revolveAngle, kPi * 0.75) &&
+                          near(o->features[1].revolveAxisAt.x, -3.0) &&
+                          near(o->features[1].revolveAxisAt.y, 1.5),
+                      "with the axis and the angle it was saved with");
+                check(near(o->body.health(false).volume, volume, 1e-6),
+                      "and it re-evaluates to the same part");
+            }
+            std::remove(path.c_str());
         }
     }
 

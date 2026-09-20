@@ -393,7 +393,7 @@ float drawTopBar(UiContext& ctx) {
     }
     ImGui::SameLine();
     if (barButton(ctx, "sketch", Glyph::Sketch,
-                  brep::available() ? "Sketch  (Shift+S): lines, circles and arcs on a plane, then extrude"
+                  brep::available() ? "Sketch  (Shift+S): lines, circles and arcs on a plane, then extrude or revolve"
                                     : "Sketching needs the exact kernel, which this build does not have",
                   brep::available()))
         ctx.actions.sketch = true;

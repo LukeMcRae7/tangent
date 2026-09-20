@@ -349,6 +349,11 @@ void writeFeature(Writer& w, const Feature& f) {
     for (size_t i = 1; i < f.profileKeys.size(); ++i) w.u32(f.profileKeys[i]);
     // v16: whether a face was pulled along an axis rather than its own normal.
     w.u8(f.alongAxis ? 1 : 0);
+    // v17: the axis a revolve turns about, in its sketch's own coordinates,
+    // and how far round.
+    w.f64(f.revolveAxisAt.x);  w.f64(f.revolveAxisAt.y);
+    w.f64(f.revolveAxisDir.x); w.f64(f.revolveAxisDir.y);
+    w.f64(f.revolveAngle);
 }
 
 // `version` is the file's, not this build's: a project written before bodies
@@ -357,9 +362,9 @@ void writeFeature(Writer& w, const Feature& f) {
 // has one possible value.
 bool readFeature(Reader& r, Feature& f, uint32_t version) {
     const uint32_t kind = r.u32();
-    // The last of the enum, not a name from the middle of it: a kind added
-    // later would otherwise be rejected by a build that has it.
-    if (kind > static_cast<uint32_t>(FeatureKind::Scale)) return false;
+    // The last of the enum, kept beside it: a kind added later and not added
+    // here would be read as a corrupt file by the build that has it.
+    if (kind > static_cast<uint32_t>(kLastFeatureKind)) return false;
     f.kind = static_cast<FeatureKind>(kind);
     f.enabled = r.u8() != 0;
     if (!readSpec(r, f.primitive)) return false;
@@ -476,6 +481,13 @@ bool readFeature(Reader& r, Feature& f, uint32_t version) {
     }
     // Before this, an extrusion always went along the face's own normal.
     if (version >= 16) f.alongAxis = r.u8() != 0;
+    // Before this there were no revolves to read one for.
+    if (version >= 17) {
+        f.revolveAxisAt.x  = r.f64(); f.revolveAxisAt.y  = r.f64();
+        f.revolveAxisDir.x = r.f64(); f.revolveAxisDir.y = r.f64();
+        f.revolveAngle = r.f64();
+        if (!(f.revolveAngle > 0.0) || length(f.revolveAxisDir) < 1e-9) return false;
+    }
     return !r.bad;
 }
 

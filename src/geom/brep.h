@@ -325,6 +325,19 @@ BrepRef sketchSolids(const Sketch& sketch, const std::vector<SketchProfile>& pro
                      const std::vector<SketchId>& keys, Real from, Real to, ElementId salt,
                      std::string* reason);
 
+// The same regions turned about an axis instead of pushed along the normal:
+// a revolve. The axis is a point and a direction in the sketch's own
+// coordinates -- what a user picks by pointing at a line in the drawing -- and
+// `angle` is in radians, up to a full turn.
+//
+// A profile that crosses the axis is refused: it would turn through itself.
+// Touching the axis is not crossing it, since that is how a half-disc becomes
+// a sphere. Faces are named as a sweep names them: the ends of a part turn are
+// its caps, and every other face is named for the sketch entity that swept it.
+BrepRef revolveSketch(const Sketch& sketch, const std::vector<SketchProfile>& profiles,
+                      const std::vector<SketchId>& keys, Vec2 axisAt, Vec2 axisDir, Real angle,
+                      ElementId salt, std::string* reason);
+
 // A solid from a closed outline on a plane, swept between two heights along the
 // plane's normal. The create tool's profiles arrive this way.
 //

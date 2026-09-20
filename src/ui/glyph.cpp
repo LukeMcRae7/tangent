@@ -77,6 +77,7 @@ ImWchar glyphCodepoint(Glyph g) {
     case Glyph::Chamfer:       return 0xff4c;   // join-bevel: the corner cut flat
     case Glyph::Shell:         return 0xee0c;   // box-model: a hollow tray
     case Glyph::Inset:         return 0xef23;   // box-model-2: a face inside a face
+    case Glyph::Revolve:       return 0xef85;   // rotate-360
     case Glyph::Divide:        return 0xebdb;   // slice
     case Glyph::Merge:         return 0xedaf;   // arrows-join
     case Glyph::Pattern:       return 0xedba;   // layout-grid

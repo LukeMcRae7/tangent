@@ -85,6 +85,12 @@ BrepRef sketchSolids(const Sketch&, const std::vector<SketchProfile>&, const std
     if (reason) *reason = "built without OpenCASCADE";
     return {};
 }
+BrepRef revolveSketch(const Sketch&, const std::vector<SketchProfile>&,
+                      const std::vector<SketchId>&, Vec2, Vec2, Real, ElementId,
+                      std::string* reason) {
+    if (reason) *reason = "built without OpenCASCADE";
+    return {};
+}
 BrepRef prism(const std::vector<Vec3>&, const std::vector<Real>&, Vec3, Real, Real,
               ElementId, std::string* reason) {
     if (reason) *reason = "built without OpenCASCADE";

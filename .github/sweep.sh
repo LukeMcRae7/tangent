@@ -12,6 +12,7 @@ modes=(
   "--preview-check 1" "--preview-check 2" "--preview-check 3"
   "--preview-check 4" "--preview-check 5" "--preview-check 6"
   "--preview-check 7"
+  "--revolve-demo 1" "--revolve-demo 2" "--revolve-demo 3"
   "--pattern-demo 1" "--pattern-demo 2" "--pattern-demo 3" "--pattern-demo 4"
   "--pattern-demo 5" "--pattern-demo 6" "--pattern-demo 7" "--pattern-demo 8"
   "--step-demo /tmp/tg_sweep.step"
@@ -41,6 +42,20 @@ for m in 1 2 3 4 5 7; do
   if ! echo "$out" | grep -q "SAME"; then
     printf '  FAIL  preview-check %s: the preview did not match the commit\n' "$m"
     fail=1
+  fi
+done
+
+# A turn has to make the volume arithmetic says it makes. The demo prints what
+# it built and what Pappus gives for the same profile, so the check is that the
+# two agree rather than that the run finished.
+for m in 1 2 3; do
+  out=$(timeout 200 ./build/tangent --revolve-demo $m --smoke-test 20 2>&1)
+  line=$(echo "$out" | grep "\[revolve-demo\]" | head -1)
+  if ! echo "$line" | grep -q "agrees=1"; then
+    printf '  FAIL  revolve-demo %s: %s\n' "$m" "$line"
+    fail=1
+  else
+    printf '  ok    --revolve-demo %s\n' "$m"
   fi
 done
 

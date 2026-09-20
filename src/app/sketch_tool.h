@@ -44,8 +44,14 @@
 
 namespace tg {
 
-// Applied: extruded, and the panel adjusts the extrusion until Done.
-enum class SketchStage { None, SelectPlane, Draw, Regions, Depth, Applied };
+// Applied: built, and the panel adjusts what was built until Done.
+enum class SketchStage { None, SelectPlane, Draw, Regions, Depth, Turn, Applied };
+
+// What the chosen regions become: pushed along the plane's normal, or turned
+// about an axis lying in it. The two share everything but the solid they make
+// -- the regions, the bodies reached, the operation, the step in the history --
+// so they are one path with this to say which.
+enum class SketchBuild { Extrude, Revolve };
 
 // Select comes first because it is what editing a sketch that already exists is
 // mostly made of: taking hold of something and moving it.
@@ -191,6 +197,26 @@ public:
     void setDepth(Real depth) { depth_ = depth; }
     Real depth() const { return depth_; }
 
+    // ---- Turning ------------------------------------------------------------
+    // From regions to the axis and the angle. False, with an error, when the
+    // chosen regions have nothing to turn about or straddle the axis.
+    bool beginTurn();
+    SketchBuild build() const { return build_; }
+    void setBuild(SketchBuild b) { build_ = b; }
+
+    // The axis, in the sketch's own coordinates: a point on it and a direction
+    // along it. `axisLine` is the sketch line it was taken from, or
+    // kNoSketchId for one of the sketch's own axes.
+    Vec2 turnAxisAt() const { return axisAt_; }
+    Vec2 turnAxisDir() const { return axisDir_; }
+    SketchId turnAxisLine() const { return axisLine_; }
+    void setTurnAxis(Vec2 at, Vec2 dir, SketchId fromLine = kNoSketchId);
+    // Takes the axis from a line of the drawing. False if that is not a line.
+    bool setTurnAxisLine(SketchId entity);
+
+    Real turnAngle() const { return angle_; }
+    void setTurnAngle(Real radians) { angle_ = radians; }
+
     // What the regions do to the bodies they reach. Until one is picked the
     // depth decides -- see ExtrudeChoice -- and op() says what it decided.
     ExtrudeOp op() const {
@@ -301,6 +327,14 @@ private:
     bool dragMoved_ = false;
 
     std::vector<SketchId> chosen_;
+    SketchBuild build_ = SketchBuild::Extrude;
+    // The axis a turn goes about, and how far round. The sketch's vertical
+    // axis to start with, which is the one a profile drawn to the right of the
+    // origin turns about.
+    Vec2 axisAt_{0, 0};
+    Vec2 axisDir_{0, 1};
+    SketchId axisLine_ = kNoSketchId;
+    Real angle_ = 2.0 * kPi;
     Real depth_ = 10.0;
     Real depthBase_ = 10.0;
     bool depthTyped_ = false;
@@ -316,8 +350,17 @@ private:
     // face it was drawn on. kNoObject for a sketch on a plane of its own.
     ObjectId owner() const { return editObject_ != kNoObject ? editObject_ : faceObject_; }
 
-    // The chosen regions swept to the depth, in the world.
+    // The chosen regions swept to the depth, or turned about the axis, in the
+    // world.
     Body sweptRegions(std::string* why) const;
+
+    // Whether what is chosen stays on one side of the axis as it stands.
+    bool axisClears() const;
+
+    // What the reach is told the sweep's depth is: the depth itself, or -- for
+    // a turn, which has none -- simply a positive one, since all the depth
+    // decides there is which side of a body the solid grows on.
+    Real reachDepth() const { return build_ == SketchBuild::Revolve ? Real(1) : depth_; }
     bool commitExtrusion(Scene& scene, UndoStack& undo);
 
     bool escapeArmed_ = false;

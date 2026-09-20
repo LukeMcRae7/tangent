@@ -39,6 +39,7 @@ Glyph glyphFor(const Feature& f) {
         case FeatureKind::Primitive:      return glyphFor(f.primitive.kind);
         case FeatureKind::Extrude:        return f.mergeFlush ? Glyph::PushPull : Glyph::Extrude;
         case FeatureKind::ExtrudeProfile: return Glyph::Extrude;
+        case FeatureKind::RevolveProfile: return Glyph::Revolve;
         case FeatureKind::Bevel:          return f.chamfer ? Glyph::Chamfer : Glyph::Fillet;
         case FeatureKind::Shell:          return Glyph::Shell;
         case FeatureKind::FaceRotate:     return Glyph::RotateFace;
@@ -349,6 +350,32 @@ void featureDetails(UiContext& ctx, SceneObject& obj, Feature& f, bool& changed)
         ImGui::TextColored(f.sketchFreedoms == 0 ? im(palette::kValid) : im(palette::kInfo), "%s",
                            f.sketchFreedoms == 0 ? "fully constrained"
                                                  : "not fully constrained: some of it can still move");
+        break;
+    }
+    case FeatureKind::RevolveProfile: {
+        double deg = f.revolveAngle * kRad2Deg;
+        if (labelledNumber("Angle", deg, 1.0f, 1.0f, 360.0f)) {
+            f.revolveAngle = clampf(deg, 1.0, 360.0) * kDeg2Rad;
+            changed = true;
+        }
+        static const char* const kOps[] = {"Join", "Cut", "Intersect"};
+        static const ExtrudeOp kOf[] = {ExtrudeOp::Join, ExtrudeOp::Cut, ExtrudeOp::Intersect};
+        const ExtrudeOp shown = f.extrudeOp == ExtrudeOp::Auto ? ExtrudeOp::Join : f.extrudeOp;
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextColored(dim, "Operation");
+        ImGui::SameLine(ui::labelColumn());
+        for (int i = 0; i < 3; ++i) {
+            if (i) ImGui::SameLine(0.0f, 3.0f);
+            if (ui::pillButton(kOps[i], shown == kOf[i]) && f.extrudeOp != kOf[i]) {
+                f.extrudeOp = kOf[i];
+                changed = true;
+            }
+        }
+        // The axis is picked by pointing at the drawing, not typed here: two
+        // numbers and a direction in the sketch's own frame are not something
+        // anyone can read off and check. What the step can say is where it is.
+        ImGui::TextColored(dim, "turns about the line through (%.2f, %.2f) in the sketch",
+                           f.revolveAxisAt.x, f.revolveAxisAt.y);
         break;
     }
     case FeatureKind::ExtrudeProfile:

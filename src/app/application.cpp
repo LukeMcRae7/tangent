@@ -645,10 +645,80 @@ bool Application::init() {
                      sketchTool_.regions().size(), sketchTool_.solveState().freedoms);
     }
 
+    if (revolveDemo_ > 0) {
+        // A profile turned about an axis, driven the way the panel drives it,
+        // and checked against Pappus: the area of what was drawn times the
+        // circle its centroid travels. A volume that is right for the wrong
+        // reason still looks correct, so the demo prints both numbers.
+        scene_.clear();
+        camera_.yaw = 0.7f;
+        camera_.pitch = 0.5f;
+        camera_.distance = 180.0f;
+        camera_.target = {0, 0, 0};
+        camera_.snapToGoal();
+
+        const bool cutting = revolveDemo_ == 3;
+        if (cutting) {
+            // Something to cut the groove into: a cylinder standing on the axis.
+            PrimitiveSpec spec;
+            spec.kind = PrimitiveKind::Cylinder;
+            spec.cylinder = {20.0, 40.0, 64};
+            scene_.addPrimitive(PrimitiveKind::Cylinder, spec, {0, 0, 0});
+        }
+
+        sketchTool_.start();
+        sketchTool_.choosePlane(PlaneChoice::XZ, camera_);
+        sketchTool_.setMode(SketchMode::Rectangle);
+        // Standing off the axis: 10 x 20 at twenty out for a ring, 4 x 4 at
+        // eighteen for a groove that bites into the cylinder's wall.
+        const Vec2 lo = cutting ? Vec2{18, 10} : Vec2{20, -10};
+        const Vec2 hi = cutting ? Vec2{22, 14} : Vec2{30, 10};
+        sketchTool_.clickAt(lo);
+        sketchTool_.clickAt(hi);
+
+        if (!sketchTool_.beginExtrude(&camera_)) {
+            std::fprintf(stderr, "[revolve-demo] nothing closed to turn\n");
+        } else if (!sketchTool_.beginTurn()) {
+            std::fprintf(stderr, "[revolve-demo] %s\n", sketchTool_.takeError().c_str());
+        } else {
+            sketchTool_.setTurnAxis({0, 0}, {0, 1});
+            const Real turn = revolveDemo_ == 2 ? kPi * 0.5 : 2.0 * kPi;
+            sketchTool_.setTurnAngle(turn);
+            sketchTool_.setOp(cutting ? ExtrudeOp::Cut : ExtrudeOp::NewBody);
+            sketchTool_.refreshReach(scene_, true);
+            const bool ok = sketchTool_.finish(scene_, camera_, undo_, true);
+            const std::string why = sketchTool_.takeError();
+            // What the turn should make. For the groove, only the part of the
+            // square inside the cylinder's wall takes anything away -- it is
+            // drawn across the surface on purpose, so the cut is not a
+            // coincident face -- so the ring measured is the one from 18 to
+            // the wall at 20.
+            const Real outer = cutting ? std::min(hi.x, Real(20)) : hi.x;
+            const Real area = (outer - lo.x) * (hi.y - lo.y);
+            const Real radius = (outer + lo.x) * 0.5;
+            const Real wants = turn * radius * area;
+            const SceneObject* o = scene_.objects().empty() ? nullptr
+                                                            : scene_.objects().back().get();
+            const Real got = o ? o->body.health(false).volume : 0.0;
+            // What arithmetic says it should be: Pappus for the ring, and the
+            // cylinder less that ring for the groove.
+            const Real expected = cutting ? kPi * 400.0 * 40.0 - wants : wants;
+            const bool agrees = ok && std::fabs(got - expected) < std::fabs(expected) * 0.005;
+            std::fprintf(stderr,
+                         "[revolve-demo] %s %.0f deg about the axis: %s, %zu features, "
+                         "%d faces, %.1f mm3, arithmetic says %.1f, agrees=%d%s%s\n",
+                         cutting ? "groove" : "ring", static_cast<double>(turn * kRad2Deg),
+                         ok ? "built" : "refused", o ? o->features.size() : 0,
+                         o ? o->body.faceCount() : 0, static_cast<double>(got),
+                         static_cast<double>(expected), agrees ? 1 : 0,
+                         why.empty() ? "" : "  ", why.c_str());
+        }
+    }
+
     if (shellFilletDemo_ && !scene_.objects().empty()) {
         const ObjectId id = scene_.objects().front()->id;
         // The ordinary case first, on solid material: one edge of the untouched
-        // cube, where the bound is half the body and not a wall thickness.
+        // cube, where the bound is the face it runs along and not a wall.
         {
             SceneObject* o = scene_.find(id);
             std::vector<EdgeId> es;
@@ -7408,7 +7478,13 @@ int Application::run() {
                                  "   L R C A D tools   X delete   E extrude   Esc cancel";
                 break;
             case SketchStage::Regions:
-                ui_.toolStatus = "Extrude: click the regions to sweep, Enter for the depth   Esc back";
+                ui_.toolStatus = "Pick the regions to build from   E extrude  R revolve   Esc back";
+                break;
+            case SketchStage::Turn:
+                ui_.toolStatus = std::string("Revolve: click a line to turn about it, ") +
+                                 extrudeOpName(sketchTool_.op()) +
+                                 "   F full turn  J join  D cut  I intersect  N new body   "
+                                 "Enter finish   Esc back";
                 break;
             case SketchStage::Depth:
                 ui_.toolStatus = std::string("Extrude: move to set the depth, ") +
