@@ -925,6 +925,11 @@ private:
         Body before;
         std::vector<Feature> chainBefore;
         std::string typedValue;
+        // Open, with nothing applied: the number it was asked for was refused,
+        // so the panel stays and the next number is tried. Better than a
+        // notice and no way to pick a number that works.
+        bool pending = false;
+        std::string refusal;
         bool active = false;                // only while it is being made
 
         void reset() {
@@ -933,6 +938,8 @@ private:
             before = Body();
             chainBefore.clear();
             typedValue.clear();
+            pending = false;
+            refusal.clear();
             active = false;
         }
     };
@@ -952,9 +959,13 @@ private:
         Body before;
         std::vector<Feature> chainBefore;
         std::string typedValue;
+        bool pending = false;               // open with nothing cut yet
+        std::string refusal;
         bool active = false;
 
         void reset() {
+            pending = false;
+            refusal.clear();
             objectId = toolObject = kNoObject;
             face = kInvalid;
             by = By::Z;

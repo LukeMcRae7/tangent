@@ -646,7 +646,8 @@ void Application::drawPatternPanel() {
 // number, made as soon as it is asked for and adjusted here until Done. That
 // is the difference between choosing a wall thickness and guessing one.
 void Application::drawInsetPanel() {
-    if (!settledIs(Settled::Inset)) return;
+    const bool settled = settledIs(Settled::Inset);
+    if (!settled && !insetTool_.pending) return;
     const double was = insetTool_.amount;
 
     if (!ui::beginCommand("##inset", "Inset Face", Glyph::Inset,
@@ -673,18 +674,29 @@ void Application::drawInsetPanel() {
                   insetTool_.faces.size() == 1 ? "" : "s");
     ui::commandValue("Selection", sel);
 
-    ui::commandApplied("Inset");
+    if (settled) ui::commandApplied("Inset");
+    else         ui::commandRefused(insetTool_.refusal.c_str());
     ui::commandHint("A ring inside the face, the same distance in from every edge of it. "
                     "What is left inside is a face of its own, to push or pull.");
 
-    const int footer = ui::commandFooter("Done", true, nullptr);
+    const int footer = settled ? ui::commandFooter("Done", true, nullptr)
+                               : ui::commandFooter("Try again", true, "Cancel");
     ui::endCommand();
-    if (footer > 0)                            dismissSettled();
-    else if (insetTool_.amount != was)         recommitSettled();
+    if (insetTool_.amount != was) {
+        // A number that was refused is tried again as soon as it changes;
+        // one that worked re-applies what is already there.
+        if (settled) recommitSettled();
+        else         { insetTool_.active = true; commitInset(); }
+        return;
+    }
+    if (footer > 0 && settled)       dismissSettled();
+    else if (footer > 0)             { insetTool_.active = true; commitInset(); }
+    else if (footer < 0)             insetTool_.reset();
 }
 
 void Application::drawShellPanel() {
-    if (!settledIs(Settled::Shell)) return;
+    const bool settled = settledIs(Settled::Shell);
+    if (!settled && !shellTool_.pending) return;
     const double was = shellTool_.amount;
 
     if (!ui::beginCommand("##shell", "Shell", Glyph::Shell,
@@ -731,22 +743,31 @@ void Application::drawShellPanel() {
         }
     }
 
-    ui::commandApplied("Shell");
+    if (settled) ui::commandApplied("Shell");
+    else         ui::commandRefused(shellTool_.refusal.c_str());
     ui::commandHint(shellTool_.faces.empty()
                         ? "Hollowed out and closed. Select a face before shelling to leave it open."
                         : "Hollowed out, with the faces that were selected left open.");
 
-    const int footer = ui::commandFooter("Done", true, nullptr);
+    const int footer = settled ? ui::commandFooter("Done", true, nullptr)
+                               : ui::commandFooter("Try again", true, "Cancel");
     ui::endCommand();
-    if (footer > 0)                     dismissSettled();
-    else if (shellTool_.amount != was)  recommitSettled();
+    if (shellTool_.amount != was) {
+        if (settled) recommitSettled();
+        else         { shellTool_.active = true; commitShell(); }
+        return;
+    }
+    if (footer > 0 && settled)       dismissSettled();
+    else if (footer > 0)             { shellTool_.active = true; commitShell(); }
+    else if (footer < 0)             shellTool_.reset();
 }
 
 // Split: what the cut is made with, and where it sits. Every answer it used to
 // pick for itself is a choice here, and the ones this body cannot offer are
 // shown dimmed rather than left out.
 void Application::drawSplitPanel() {
-    if (!settledIs(Settled::Split)) return;
+    const bool settled = settledIs(Settled::Split);
+    if (!settled && !splitTool_.pending) return;
     const auto was = std::make_pair(static_cast<int>(splitTool_.by), splitTool_.offset);
 
     if (!ui::beginCommand("##split", "Split Body", Glyph::Split,
@@ -819,17 +840,24 @@ void Application::drawSplitPanel() {
     std::snprintf(result, sizeof result, "%d bodies", splitTool_.pieces);
     ui::commandValue("Result", splitTool_.pieces >= 2 ? result : "nothing cut");
 
-    ui::commandApplied("Split");
+    if (settled) ui::commandApplied("Split");
+    else         ui::commandRefused(splitTool_.refusal.c_str());
     ui::commandHint(splitTool_.by == By::Pieces
                         ? "The body was already in separate pieces; each is its own body now."
                         : "The pieces keep the geometry, not the steps that made it: a split is "
                           "where a history ends.");
 
-    const int footer = ui::commandFooter("Done", true, nullptr);
+    const int footer = settled ? ui::commandFooter("Done", true, nullptr)
+                               : ui::commandFooter("Try again", true, "Cancel");
     ui::endCommand();
-    if (footer > 0) dismissSettled();
-    else if (was != std::make_pair(static_cast<int>(splitTool_.by), splitTool_.offset))
-        recommitSettled();
+    if (was != std::make_pair(static_cast<int>(splitTool_.by), splitTool_.offset)) {
+        if (settled) recommitSettled();
+        else         { splitTool_.active = true; commitSplit(); }
+        return;
+    }
+    if (footer > 0 && settled)      dismissSettled();
+    else if (footer > 0)            { splitTool_.active = true; commitSplit(); }
+    else if (footer < 0)            splitTool_.reset();
 }
 
 void Application::drawDividePanel() {

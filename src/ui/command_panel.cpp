@@ -309,6 +309,17 @@ void commandApplied(const char* what) {
     ImGui::PopFont();
 }
 
+void commandRefused(const char* why) {
+    ImGui::Dummy(ImVec2(0, 1));
+    pushFont(FontWeight::Medium, uiFonts().size * 0.9f);
+    ImGui::PushStyleColor(ImGuiCol_Text, im(palette::kBrand));
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::Text("Not made: %s. Change it and it is tried again.", why && *why ? why : "the kernel refused");
+    ImGui::PopTextWrapPos();
+    ImGui::PopStyleColor();
+    ImGui::PopFont();
+}
+
 int commandFooter(const char* commitLabel, bool commitEnabled, const char* cancelLabel) {
     ImGui::Dummy(ImVec2(0, 4));
     int result = 0;

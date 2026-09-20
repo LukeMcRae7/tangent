@@ -995,7 +995,9 @@ Vec2 Application::mouseInViewport() const {
 
 bool Application::editToolActive() const {
     return filletTool_.active || faceTool_.active || divideTool_.active || patternTool_.active ||
-           reduceTool_.active || combineTool_.active;
+           reduceTool_.active || combineTool_.active ||
+           // Open with nothing applied, waiting for a number that works.
+           insetTool_.pending || shellTool_.pending || splitTool_.pending;
 }
 
 bool Application::refuseMeshEdit(const SceneObject& obj, const char* what) {
@@ -1872,6 +1874,34 @@ void Application::handleShortcuts() {
         return;
     }
 
+    // The panels that are open with nothing applied: a number that was refused
+    // is theirs to change, Escape puts them away, and Enter tries again.
+    if (insetTool_.pending || shellTool_.pending || splitTool_.pending) {
+        AmountToolState* amount = insetTool_.pending ? &insetTool_ : shellTool_.pending ? &shellTool_ : nullptr;
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+            insetTool_.reset();
+            shellTool_.reset();
+            splitTool_.reset();
+            return;
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_Enter, false) ||
+            ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false)) {
+            if (insetTool_.pending)      { insetTool_.active = true; commitInset(); }
+            else if (shellTool_.pending) { shellTool_.active = true; commitShell(); }
+            else                         { splitTool_.active = true; commitSplit(); }
+            return;
+        }
+        if (amount)
+            typedInto(amount->typedValue, [&] {
+                try {
+                    const Real v = std::stod(amount->typedValue);
+                    if (v > 0.0) amount->amount = v;
+                } catch (...) {
+                }
+            });
+        return;
+    }
+
     if (divideTool_.active) {
         if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) { abortDivide(); return; }
         if (ImGui::IsKeyPressed(ImGuiKey_Enter, false) ||
@@ -2514,12 +2544,17 @@ void Application::commitInset() {
         undo_.push(std::make_unique<FeatureCommand>(id, std::move(chainBefore), obj->features,
                                                     "Inset"),
                    /*merge=*/recommitting_);
+        insetTool_.pending = false;
+        insetTool_.refusal.clear();
         settleCommand(Settled::Inset, id);
     } else {
         obj->features = std::move(chainBefore);
         obj->body = insetTool_.before;
         obj->refreshDerived();
-        setNotice(why.empty() ? "The inset could not be made" : "Inset refused: " + why);
+        // The panel stays open with nothing applied, so another distance can
+        // be tried without starting again.
+        insetTool_.pending = true;
+        insetTool_.refusal = why.empty() ? "that distance leaves nothing of the face" : why;
     }
 }
 
@@ -2571,12 +2606,15 @@ void Application::commitShell() {
         undo_.push(std::make_unique<FeatureCommand>(id, std::move(chainBefore), obj->features,
                                                     "Shell"),
                    /*merge=*/recommitting_);
+        shellTool_.pending = false;
+        shellTool_.refusal.clear();
         settleCommand(Settled::Shell, id);
     } else {
         obj->features = std::move(chainBefore);
         obj->body = shellTool_.before;
         obj->refreshDerived();
-        setNotice(why.empty() ? "The shell could not be built" : "Shell refused: " + why);
+        shellTool_.pending = true;
+        shellTool_.refusal = why.empty() ? "that wall is too thick for this body" : why;
     }
 }
 
@@ -6160,12 +6198,15 @@ void Application::commitSplit() {
         obj->body = splitTool_.before;
         obj->refreshDerived();
         splitTool_.pieces = 0;
-        setNotice(splitTool_.by == SplitToolState::By::Pieces
-                      ? "That body is all one piece"
-                      : "The plane does not cut this body");
+        splitTool_.pending = true;
+        splitTool_.refusal = splitTool_.by == SplitToolState::By::Pieces
+                                 ? "this body is all one piece"
+                                 : "the plane misses the body";
         return;
     }
     splitTool_.pieces = static_cast<int>(pieces.size());
+    splitTool_.pending = false;
+    splitTool_.refusal.clear();
     settleCommand(Settled::Split, id);
 }
 

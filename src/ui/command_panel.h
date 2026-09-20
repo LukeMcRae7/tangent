@@ -92,6 +92,11 @@ void commandHint(const char* text);
 // it rather than building it.
 void commandApplied(const char* what);
 
+// The other answer: it was asked for and the kernel would not. Said here, in
+// the panel that asked, so the number can be changed rather than the whole
+// operation started again.
+void commandRefused(const char* why);
+
 // The commit and the cancel. Returns 1 for commit, -1 for cancel, 0 for
 // neither. A null `cancelLabel` leaves the cancel out, for a panel whose
 // operation has already been applied; a null `commitLabel` leaves that out.
