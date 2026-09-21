@@ -982,6 +982,7 @@ private:
         FaceId face = kInvalid;          // the face it goes into, as it stands
         Vec3 at{0, 0, 0};                // its mouth, in the body's own space
         Vec3 into{0, 0, -1};             // the way it goes in, likewise
+        PlaneSnap snap;                  // what the mouth caught, in world
         HoleCut cut;
         int fastener = 2;                // M3, the one most printed parts use
         HoleFit fit = HoleFit::Normal;
@@ -996,6 +997,7 @@ private:
         void reset() {
             objectId = kNoObject;
             face = kInvalid;
+            snap = PlaneSnap{};
             before = Body();
             chainBefore.clear();
             typedValue.clear();
@@ -1102,7 +1104,7 @@ private:
     void draftPlane(Vec3& neutralPoint, Vec3& pull) const;
 
     void beginHole();
-    void updateHole();
+    void updateHole(bool snap);
     void commitHole();
     void abortHole();
     void drawHolePanel();

@@ -7,6 +7,7 @@
 #include "render/lod.h"
 #include "ui/command_panel.h"
 #include "app/printability.h"
+#include "app/snap_overlay.h"
 #include "ui/glyph.h"
 #include "ui/icons.h"
 #include "ui/view_cube.h"
@@ -1608,7 +1609,7 @@ void Application::handleViewportMouse() {
     // Placing a hole: it follows the pointer over the body, and the click
     // drills it.
     if (holeTool_.placing) {
-        updateHole();
+        updateHole(!io.KeyCtrl);
         if (!io.WantCaptureMouse && overViewport) {
             if (ImGui::IsMouseClicked(ImGuiMouseButton_Left))       commitHole();
             else if (ImGui::IsMouseClicked(ImGuiMouseButton_Right))  abortHole();
@@ -3104,13 +3105,18 @@ void Application::beginHole() {
         const Vec3 n = obj->body.faceNormal(faces.front());
         if (length(n) > 1e-9) holeTool_.into = normalize(n) * Real(-1.0);
     }
-    updateHole();
+    updateHole(true);
 }
 
 // Follows the pointer: the hole goes where it is and square to what is under
 // it. Nothing is built until the click -- a hole is a boolean, and one a frame
 // while the pointer moves across a part is not something to pay for.
-void Application::updateHole() {
+//
+// On a flat face the mouth snaps the way a sketch point does -- to a centre, a
+// corner, level with either, or a grid line -- and Ctrl releases it. A hole is
+// nearly always put somewhere measured from something, and a pointer alone
+// cannot land there.
+void Application::updateHole(bool snap) {
     if (!holeTool_.placing) return;
     SceneObject* obj = scene_.find(holeTool_.objectId);
     if (!obj) { abortHole(); return; }
@@ -3118,14 +3124,39 @@ void Application::updateHole() {
     const Vec2 m = mouseInViewport();
     const RayHit hit = scene_.raycast(camera_.rayThroughPixel(static_cast<float>(m.x),
                                                               static_cast<float>(m.y)));
-    if (!hit.hit() || hit.object != holeTool_.objectId || hit.face == kInvalid) return;
+    if (!hit.hit() || hit.object != holeTool_.objectId || hit.face == kInvalid) {
+        holeTool_.snap = PlaneSnap{};
+        return;
+    }
 
     const Mat4 model = obj->modelMatrix();
     const Mat4 toLocal = inverse(model);
     holeTool_.face = hit.face;
-    holeTool_.at = transformPoint(toLocal, hit.point);
     const Vec3 n = obj->body.faceNormal(hit.face);
     if (length(n) > 1e-9) holeTool_.into = normalize(n) * Real(-1.0);
+
+    Vec3 mouth = hit.point;
+    holeTool_.snap = PlaneSnap{};
+    if (snap && length(n) > 1e-9 && obj->body.faceKind(hit.face) == SurfaceKind::Plane) {
+        // The face's plane, with its origin where the world's projects onto it,
+        // so the grid lines it snaps to are the world's and hold still as the
+        // pointer moves -- the create tool's axes, so both land alike.
+        PlaneFrame plane;
+        plane.normal = normalize(transformVector(model, n));
+        plane.origin = plane.normal * dot(hit.point, plane.normal);
+        if (std::fabs(plane.normal.z) > 0.9 || std::fabs(plane.normal.y) > 0.9)
+            plane.u = Vec3{1, 0, 0};
+        else if (std::fabs(plane.normal.x) > 0.9)
+            plane.u = Vec3{0, 1, 0};
+        else
+            plane.u = cross(Vec3{0, 0, 1}, plane.normal);
+        plane.u = normalize(plane.u - plane.normal * dot(plane.u, plane.normal));
+        plane.v = cross(plane.normal, plane.u);
+
+        holeTool_.snap = snapOnPlane(scene_, camera_, plane, m, plane.toUV(hit.point));
+        if (holeTool_.snap.valid()) mouth = holeTool_.snap.point;
+    }
+    holeTool_.at = transformPoint(toLocal, mouth);
 }
 
 void Application::commitHole() {
@@ -3214,6 +3245,8 @@ void Application::drawHoleOverlay() {
     // How deep it goes, down the axis.
     const Real depth = cut.through ? length(obj->localBounds.size()) : cut.depth;
     renderer_.addFrontDashes(camera_, at, at + dir * depth, col, 1.6, 4.0, 3.0);
+    // What the mouth caught, drawn the way every other snap is.
+    drawSnapIndicator(renderer_, camera_, holeTool_.snap);
 }
 
 // A thread on the round face that is selected.

@@ -1788,7 +1788,6 @@ bool CreateTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& ou
         char at[64];
         std::snprintf(at, sizeof at, "%.2f, %.2f", pt1_.x, pt1_.y);
         ui::commandValue(kind_ == PrimitiveKind::Cylinder ? "Centre" : "Corner", at);
-        if (activeSnap_.valid()) ui::commandValue("Snapped", describeSnap(activeSnap_).c_str());
         ui::commandHint("Click to place it.  Ctrl for free placement.");
         footer = ui::commandFooter(nullptr);
         break;
@@ -1800,7 +1799,6 @@ bool CreateTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& ou
             pulled(f, ui::commandNumber(fieldName(f), fieldDisplay(f), "mm", fieldFixed_[f],
                                         f == typedField_ && typing(), typedValue_.c_str(),
                                         0.0, fieldMax));
-        if (activeSnap_.valid()) ui::commandValue("Snapped", describeSnap(activeSnap_).c_str());
         ui::commandHint(fieldCount() > 1
             ? "Type a number to fix a side; the other still follows the mouse.  Tab next, Enter confirm."
             : "Type a number to fix the radius.  Enter confirms.");
