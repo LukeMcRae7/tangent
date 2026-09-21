@@ -5472,7 +5472,8 @@ void Application::stepFaceDemo() {
             if (o->body.faceKind(f) == SurfaceKind::Cylinder && c.z > -4.25 && c.z < -1.75)
                 band = f;
         }
-        camera_.distance = 110.0f;
+        camera_.distance = 190.0f;
+        camera_.pitch = 0.35f;
         camera_.snapToGoal();
         scene_.select(cyl);
         scene_.clearElementSelection();

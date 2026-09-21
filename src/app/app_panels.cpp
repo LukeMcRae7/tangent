@@ -267,7 +267,15 @@ void Application::drawFacePanel() {
                     normal += normalize(transformVector(nm, faceTool_.before.faceNormal(f)));
         }
         if (lengthSq(normal) > 1e-12) normal = normalize(normal);
+        // A curved face has no one direction to be pushed along: what it does
+        // is move along its own surface, so a world axis means nothing there.
+        bool curved = false;
+        for (FaceId f : faceTool_.faces)
+            if (faceTool_.before.hasFace(f) &&
+                faceTool_.before.faceKind(f) != SurfaceKind::Plane)
+                curved = true;
         auto axisWorks = [&](int axis) {
+            if (curved) return false;
             if (lengthSq(normal) < 1e-12) return true;
             Vec3 a{};
             (&a.x)[axis] = 1.0;
@@ -291,8 +299,12 @@ void Application::drawFacePanel() {
             kAlong[axis + 1].enabled = works;
             kPivot[axis + 1].enabled = works;
             if (works) continue;
-            kAlong[axis + 1].tip = "That axis lies along the face: it would sweep nothing";
-            kPivot[axis + 1].tip = "That axis is square to the face: it would turn it in its own plane";
+            kAlong[axis + 1].tip = curved
+                ? "A curved face moves along its own surface, not along an axis"
+                : "That axis lies along the face: it would sweep nothing";
+            kPivot[axis + 1].tip = curved
+                ? "A curved face has no one plane to be turned in"
+                : "That axis is square to the face: it would turn it in its own plane";
         }
         const int pick = ui::commandChoices(rotate ? "Pivot" : "Along", rotate ? kPivot : kAlong, 4,
                                             faceTool_.lockedAxis + 1, /*compact=*/true);
