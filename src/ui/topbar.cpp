@@ -133,6 +133,9 @@ void modifyMenu(UiContext& ctx) {
     menuNote("Cuts a ring inside the face, the same distance in from every edge. What is left inside is a face of its own.");
     if (menuEntry(Glyph::Hole, "Hole...", "H", hasObject)) ctx.actions.hole = true;
     menuNote("Point at the face it goes into and click. Chosen by the screw it takes, not typed in millimetres.");
+    if (menuEntry(Glyph::Thread, "Thread...", nullptr, selFaces > 0)) ctx.actions.thread = true;
+    menuNote("Cuts a real helical thread on the selected bore or shaft, sized for a screw and "
+             "with the allowance a printed one needs.");
     if (menuEntry(Glyph::Draft, "Draft...", nullptr, selFaces > 0)) ctx.actions.draft = true;
     if (menuEntry(Glyph::DeleteFace, "Delete Face", nullptr, selFaces > 0))
         ctx.actions.deleteFace = true;

@@ -90,6 +90,10 @@ bool pinAcross(BrepRef&, BrepRef&, Vec3, Vec3, const SplitPins&, ElementId,
     if (reason) *reason = "built without OpenCASCADE";
     return false;
 }
+BrepRef threadFace(const BrepRef&, FaceId, Real, Real, bool, ElementId, std::string* reason) {
+    if (reason) *reason = "built without OpenCASCADE";
+    return {};
+}
 BrepRef offsetBody(const BrepRef&, Real, ElementId, std::string* reason) {
     if (reason) *reason = "built without OpenCASCADE";
     return {};

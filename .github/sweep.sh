@@ -21,6 +21,7 @@ modes=(
   "--pattern-demo 5" "--pattern-demo 6" "--pattern-demo 7" "--pattern-demo 8"
   "--step-demo /tmp/tg_sweep.step"
   "--inset-demo 2" "--shell-demo 2" "--split-demo 3" "--offset-demo 1"
+  "--thread-demo 1" "--thread-demo 2" "--thread-demo 3"
   "--split-demo 4" "--split-demo 5"
 )
 
@@ -140,6 +141,19 @@ if echo "$out" | grep "\[offset-demo\]" | grep -q "agrees=0"; then
 else
   printf '  ok    --offset-demo 1\n'
 fi
+
+# A thread has to come out the size it says: the crest and the root of what was
+# cut, measured off the body, against the screw it was cut for.
+for m in 1 2 3; do
+  out=$(timeout 300 ./build/tangent --thread-demo $m --smoke-test 30 2>&1)
+  if echo "$out" | grep "\[thread-demo\]" | grep -q "agrees=0"; then
+    printf '  FAIL  thread-demo %s\n' "$m"
+    echo "$out" | grep "\[thread-demo\]" | sed 's/^/        /'
+    fail=1
+  else
+    printf '  ok    --thread-demo %s\n' "$m"
+  fi
+done
 
 # A large mesh has to get all the way to being useful: reduced to fit, turned
 # into a solid, bored, and split -- each step checked for what it made, not

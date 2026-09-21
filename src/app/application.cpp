@@ -715,6 +715,96 @@ bool Application::init() {
         }
     }
 
+    if (threadDemo_ > 0) {
+        // A thread cut the way the panel cuts one: a hole is drilled, its wall
+        // selected, and the thread taken out of it. What comes away is the
+        // helix, and the crest and root say the size it came to.
+        scene_.clear();
+        camera_.yaw = 0.7f;
+        camera_.pitch = 0.5f;
+        camera_.distance = 90.0f;
+        camera_.target = {0, 0, 0};
+        camera_.snapToGoal();
+
+        const bool onShaft = threadDemo_ == 2;
+        ObjectId id = kNoObject;
+        if (onShaft) {
+            PrimitiveSpec spec;
+            spec.kind = PrimitiveKind::Cylinder;
+            spec.cylinder = {3.0, 14.0, 48};
+            id = scene_.addPrimitive(PrimitiveKind::Cylinder, spec, {0, 0, 0});
+        } else {
+            PrimitiveSpec spec;
+            spec.kind = PrimitiveKind::Box;
+            spec.box = {24.0, 24.0, 10.0};
+            id = scene_.addPrimitive(PrimitiveKind::Box, spec, {0, 0, 0});
+            SceneObject* o = scene_.find(id);
+            Feature h;
+            h.kind = FeatureKind::Hole;
+            h.holeFastener = fastenerNamed(threadDemo_ == 3 ? "M4" : "M6");
+            h.holeFit = HoleFit::Tapped;
+            h.hole = holeFor(h.holeFastener, HoleFit::Tapped, HoleKind::Simple, 0, true);
+            // A thread is cut at the minor diameter, not the tapping drill.
+            h.hole.diameter = fastenerAt(h.holeFastener).nominal -
+                              1.0825 * fastenerAt(h.holeFastener).pitch;
+            h.axisPoint = {0, 0, 5};
+            h.axisDir = {0, 0, -1};
+            std::vector<FaceId> fs;
+            o->body.allFaces(fs);
+            for (FaceId f : fs)
+                if (o->body.faceNormal(f).z > 0.99) h.faces = nameFaces(o->body, {f});
+            std::string why;
+            if (!scene_.addFeature(id, std::move(h), &why))
+                std::fprintf(stderr, "[thread-demo] the hole refused: %s\n", why.c_str());
+        }
+
+        SceneObject* o = scene_.find(id);
+        const Real before = o->body.health(false).volume;
+        FaceId round = kInvalid;
+        std::vector<FaceId> fs;
+        o->body.allFaces(fs);
+        for (FaceId f : fs)
+            if (o->body.faceKind(f) == SurfaceKind::Cylinder) round = f;
+        scene_.select(id);
+        scene_.clearElementSelection();
+        if (round != kInvalid) scene_.selectElement({id, ElementKind::Face, round}, true);
+
+        beginThread();
+        const SceneObject* after = scene_.find(id);
+        RenderMesh rm;
+        after->body.tessellate(rm);
+        Real rmin = 1e9, rmax = 0;
+        for (const Vec3& p : rm.positions) {
+            if (std::fabs(p.z) > 3.0) continue;
+            const Real at = std::hypot(p.x, p.y);
+            if (at > 9.0) continue;
+            rmin = std::min(rmin, at);
+            rmax = std::max(rmax, at);
+        }
+        // What the thread should measure. The face it was cut on is where one
+        // end of it is -- the bore for an inside thread, the shaft for an
+        // outside one -- and the other end is a thread's depth away, less the
+        // skin the cut takes off the face itself.
+        const Fastener& screw = fastenerAt(threadTool_.fastener);
+        const Real skin = threadTool_.external ? 0.02 : 0.01;
+        const Real was = threadTool_.external ? screw.nominal
+                                              : screw.nominal - 1.0825 * screw.pitch;
+        const Real wantCrest = threadTool_.external ? was - 2.0 * skin
+                                                    : was + 2.0 * threadTool_.height;
+        const Real wantRoot = threadTool_.external ? was - 2.0 * skin - 2.0 * threadTool_.height
+                                                   : was + 2.0 * skin;
+        const bool agrees = std::fabs(rmax * 2.0 - wantCrest) < 0.1 &&
+                            std::fabs(rmin * 2.0 - wantRoot) < 0.1;
+        std::fprintf(stderr,
+                     "[thread-demo] %s %s x %.2f: %.3f mm3 came away, crest %.2f root %.2f "
+                     "(wants %.2f and %.2f), agrees=%d, solid=%d%s%s\n",
+                     threadTool_.external ? "outside" : "inside", screw.name, threadTool_.pitch,
+                     before - after->body.health(false).volume, rmax * 2.0, rmin * 2.0, wantCrest,
+                     wantRoot, agrees ? 1 : 0, (int)after->body.health().solid(),
+                     threadTool_.refusal.empty() ? "" : "  ", threadTool_.refusal.c_str());
+        dismissSettled();
+    }
+
     if (deleteFaceDemo_ > 0) {
         // A body with a feature on it and no history that made it: what an
         // imported STEP file is. The face is picked and taken off, and what
@@ -1366,7 +1456,7 @@ bool Application::editToolActive() const {
            draftTool_.pending ||
            // Open with nothing applied, waiting for a number that works.
            insetTool_.pending || shellTool_.pending || splitTool_.pending ||
-           holeTool_.pending || offsetTool_.pending;
+           holeTool_.pending || offsetTool_.pending || threadTool_.pending;
 }
 
 bool Application::refuseMeshEdit(const SceneObject& obj, const char* what) {
@@ -3126,6 +3216,105 @@ void Application::drawHoleOverlay() {
     renderer_.addFrontDashes(camera_, at, at + dir * depth, col, 1.6, 4.0, 3.0);
 }
 
+// A thread on the round face that is selected.
+//
+// Which kind it is is not a question: a bore takes an inside thread and a
+// shaft an outside one, and the face knows which it is. What the panel asks
+// is which screw, and whether to allow for the part being printed.
+void Application::beginThread() {
+    dismissSettled();
+    if (tool_.active() || createTool_.active() || sketchTool_.active() || editToolActive()) {
+        setNotice("Finish the current operation first");
+        return;
+    }
+    const ObjectId id = scene_.contextObject();
+    SceneObject* obj = scene_.find(id);
+    if (!obj) { setNotice("Select an object first"); return; }
+    if (refuseMeshEdit(*obj, "Cutting a thread")) return;
+
+    const std::vector<FaceId> faces = scene_.selectedFaces(id);
+    if (faces.empty()) { setNotice("Select the bore or the shaft to thread"); return; }
+    if (obj->body.faceKind(faces.front()) != SurfaceKind::Cylinder) {
+        setNotice("A thread goes on a round face: select a bore or a shaft");
+        return;
+    }
+
+    threadTool_.reset();
+    threadTool_.objectId = id;
+    threadTool_.face = faces.front();
+    threadTool_.before = obj->body;
+    threadTool_.chainBefore = obj->features;
+
+    // Which kind the face is, and the nearest screw to the size it already is:
+    // a 5 mm bore is asking for an M6 thread, a 6 mm shaft for the same.
+    Vec3 axisPoint{}, axis{};
+    Real radius = 0.0;
+    if (brep::faceCylinder(obj->body.brep(), faces.front(), axisPoint, axis, radius)) {
+        const Vec3 on = obj->body.facePoint(faces.front());
+        Vec3 radial = on - axisPoint;
+        radial = radial - axis * dot(radial, axis);
+        threadTool_.external = dot(radial, obj->body.faceNormal(faces.front())) > 0.0;
+        // A bore is drilled at the minor diameter and a shaft turned at the
+        // major one, so the screw each is asking for is found from its own end
+        // of the thread.
+        int best = 0;
+        Real closest = 1e30;
+        for (int i = 0; i < fastenerCount(); ++i) {
+            const ThreadCut t = threadFor(i, threadTool_.external, threadTool_.printed);
+            const Real wants = threadTool_.external ? fastenerAt(i).nominal * 0.5
+                                                    : fastenerAt(i).nominal * 0.5 - t.height;
+            if (std::fabs(wants - radius) < closest) { closest = std::fabs(wants - radius); best = i; }
+        }
+        threadTool_.fastener = best;
+    }
+    const ThreadCut cut = threadFor(threadTool_.fastener, threadTool_.external, threadTool_.printed);
+    threadTool_.pitch = cut.pitch;
+    threadTool_.height = cut.height;
+    threadTool_.active = true;
+    preEditSolid_ = obj->healthVersion == obj->geometryVersion && obj->health.solid();
+    commitThread();
+}
+
+void Application::commitThread() {
+    if (!threadTool_.active) return;
+    const ObjectId id = threadTool_.objectId;
+    threadTool_.active = false;
+    SceneObject* obj = scene_.find(id);
+    if (!obj) return;
+
+    std::vector<Feature> chainBefore = threadTool_.chainBefore;
+    obj->features = threadTool_.chainBefore;
+    obj->body = threadTool_.before;
+
+    const ThreadCut cut = threadFor(threadTool_.fastener, threadTool_.external, threadTool_.printed);
+    threadTool_.pitch = cut.pitch;
+    threadTool_.height = cut.height;
+
+    Feature f;
+    f.kind = FeatureKind::Thread;
+    f.faces = nameFaces(threadTool_.before, {threadTool_.face});
+    f.threadPitch = cut.pitch;
+    f.threadHeight = cut.height;
+    f.threadExternal = threadTool_.external;
+    f.threadFastener = threadTool_.fastener;
+
+    std::string why;
+    if (scene_.addFeature(id, std::move(f), &why) && editKeepsSolid(id)) {
+        undo_.push(std::make_unique<FeatureCommand>(id, std::move(chainBefore), obj->features,
+                                                    "Thread"),
+                   /*merge=*/recommitting_);
+        threadTool_.pending = false;
+        threadTool_.refusal.clear();
+        settleCommand(Settled::Thread, id);
+    } else {
+        obj->features = std::move(chainBefore);
+        obj->body = threadTool_.before;
+        obj->refreshDerived();
+        threadTool_.pending = true;
+        threadTool_.refusal = why.empty() ? "that thread could not be cut" : why;
+    }
+}
+
 // The whole body, grown or shrunk. One number, and the same settled panel as
 // Inset and Shell: the size of a clearance is chosen by looking at the result.
 void Application::beginOffset() {
@@ -4165,6 +4354,7 @@ void Application::recommitSettled() {
         case Settled::Inset:   insetTool_.active = true;   commitInset();    break;
         case Settled::Shell:   shellTool_.active = true;   commitShell();    break;
         case Settled::Offset:  offsetTool_.active = true;  commitOffset();   break;
+        case Settled::Thread:  threadTool_.active = true;  commitThread();   break;
         case Settled::Hole:    holeTool_.active = true;    commitHole();     break;
         case Settled::Draft:   draftTool_.active = true;   commitDraft();    break;
         default:               break;
@@ -7641,7 +7831,7 @@ void Application::applyActions() {
     if (a.addRequested || a.sketch || a.editSketchObject != kNoObject ||
         a.deleteSelected || a.duplicateSelected || a.mergeFaces || a.deleteFace ||
         a.booleanRequested || a.split || a.shell || a.inset || a.hole || a.draft ||
-        a.offset ||
+        a.offset || a.thread ||
         a.undo || a.redo ||
         a.importStep || a.importMesh || a.importSvg || a.convertToSolid || a.reduceMesh ||
         a.newProject || a.openProject || a.rebuildObject != kNoObject ||
@@ -7757,6 +7947,7 @@ void Application::applyActions() {
     if (a.hole)    beginHole();
     if (a.draft)   beginDraft();
     if (a.offset)  beginOffset();
+    if (a.thread)  beginThread();
     if (a.booleanRequested) beginCombine(a.booleanOp);
 
     if (a.rebuildObject != kNoObject) {
@@ -7925,6 +8116,7 @@ void Application::buildUi() {
     drawHolePanel();
     drawDraftPanel();
     drawOffsetPanel();
+    drawThreadPanel();
     drawPatternPanel();
     drawReducePanel();
 

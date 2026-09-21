@@ -114,6 +114,13 @@ drill leaves, which is also the shape a printer wants: a flat ceiling over a
 hole has nothing to print onto. The hole belongs to its face, so when that face
 moves the hole goes with it.
 
+**A thread is cut, not drawn on.** Select a bore or a shaft, Modify > Thread,
+and pick the screw: the helix is real geometry, because a printed part has no
+second operation to cut it with. The face decides which kind it is -- a bore
+takes an inside thread and a shaft an outside one -- and the fit allows for
+printing by default, cutting an inside thread a tenth deeper and an outside one
+a tenth shallower, so a steel screw turns into plastic instead of splitting it.
+
 **A body can be grown or shrunk whole.** Modify > Offset moves every face along
 its own normal, corners staying corners, so a 20 mm cube offset by 1 mm is a
 22 mm cube rather than one with a round on every edge. It is how a clearance

@@ -16,6 +16,8 @@
 #include "geom/brep.h"
 
 #include <cstdlib>
+
+#include <cstdlib>
 #include "geom/brep_valid.h"
 #include "geom/kernel_guard.h"
 #include "sketch/sketch.h"
@@ -93,6 +95,7 @@
 #include <BRepTools_ReShape.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepOffsetAPI_MakeOffset.hxx>
+#include <BRepOffsetAPI_MakePipeShell.hxx>
 #include <BRepOffsetAPI_MakeOffsetShape.hxx>
 #include <BRepOffsetAPI_MakeThickSolid.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
@@ -2686,6 +2689,222 @@ std::vector<ElementId> nameHoleTool(const TopoDS_Shape& shape, Vec3 at, Vec3 dir
 }
 
 } // namespace
+
+
+namespace {
+
+// The groove a thread is, as a solid: a triangle swept along a helix.
+//
+// A thread is not a texture. On a printed part the helix has to be there --
+// there is nothing to cut it with afterwards -- so what is built is the
+// material the tap or the die would take out, and the body has it subtracted.
+//
+// `radius` is the surface the thread is cut on: the bore of a tapped hole, or
+// the outside of a shaft. `height` is how far the groove reaches from it, into
+// the material, and is positive for both -- which way it reaches is `outward`.
+TopoDS_Shape threadGroove(const gp_Ax3& frame, Real radius, Real from, Real to, Real pitch,
+                          Real height, bool outward, Real bite, std::string* reason) {
+    const Real length = to - from;
+    if (!(pitch > 1e-6) || !(height > 1e-6) || !(length > pitch * 0.5)) {
+        if (reason) *reason = "there is not room on that face for a thread";
+        return {};
+    }
+    try {
+        // The helix: a straight line in the cylinder's own (angle, height)
+        // parameters is a helix on it. One turn is 2 pi of angle and a pitch
+        // of height, and the line is parametrised by its length in that
+        // space, so the end parameter is scaled to match.
+        const gp_Ax3 at(frame.Location().Translated(gp_Vec(frame.Direction()) * (from - pitch)),
+                        frame.Direction(), frame.XDirection());
+        Handle(Geom_CylindricalSurface) surf = new Geom_CylindricalSurface(at, radius);
+        const Real slope = pitch / (2.0 * M_PI);
+        gp_Dir2d dir(1.0, slope);
+        Handle(Geom2d_Line) line = new Geom2d_Line(gp_Pnt2d(0.0, 0.0), dir);
+        // A turn before the start and one after the end, so the thread runs
+        // off both ends of the face rather than stopping in mid-air.
+        const Real turns = (length + pitch * 2.0) / pitch;
+        const Real end = 2.0 * M_PI * turns / dir.X();
+
+        BRepBuilderAPI_MakeEdge mkEdge(line, surf, 0.0, end);
+        if (!mkEdge.IsDone()) {
+            if (reason) *reason = "the thread's helix could not be made";
+            return {};
+        }
+        TopoDS_Edge helix = mkEdge.Edge();
+        BRepLib::BuildCurves3d(helix);
+        const TopoDS_Wire spine = BRepBuilderAPI_MakeWire(helix).Wire();
+
+        // The profile, standing on the surface at the helix's start: a
+        // triangle a pitch tall and `height` deep, pointing the way the groove
+        // eats. A little flat is left between the turns, as a real thread has.
+        const gp_Pnt origin = at.Location();
+        const gp_Dir axis = at.Direction();
+        const gp_Dir out = at.XDirection();
+        const Real reach = outward ? height : -height;
+        const Real half = pitch * 0.5;
+        auto pointAt = [&](Real along, Real deep) {
+            return gp_Pnt(origin.XYZ() + out.XYZ() * (radius + deep) + axis.XYZ() * along);
+        };
+        // `bite` moves the profile's base off the surface it stands on. It
+        // has to end up inside the skin this groove will be fused to -- see
+        // threadFace, where the two are chosen together -- because a fuse
+        // that has to cut a helix through two surfaces at once is a fuse that
+        // comes back with nothing.
+        const gp_Pnt a = pointAt(-half * 0.94, bite);
+        const gp_Pnt b = pointAt(0.0, reach);
+        const gp_Pnt c = pointAt(half * 0.94, bite);
+        BRepBuilderAPI_MakePolygon poly(a, b, c, Standard_True);
+        if (!poly.IsDone()) {
+            if (reason) *reason = "the thread's profile could not be made";
+            return {};
+        }
+
+        BRepOffsetAPI_MakePipeShell sweep(spine);
+        // The profile turns with the helix so that it always points at the
+        // axis, which is what a thread's cross-section does. Given a fixed
+        // direction instead, it keeps pointing one way in space and sweeps a
+        // shape that is half in the void: the groove came out the right
+        // volume and took nothing off the part.
+        const gp_Pnt axisFrom = at.Location();
+        const gp_Pnt axisTo(axisFrom.XYZ() + axis.XYZ() * (turns * pitch));
+        const TopoDS_Wire guide =
+            BRepBuilderAPI_MakeWire(BRepBuilderAPI_MakeEdge(axisFrom, axisTo).Edge()).Wire();
+        sweep.SetMode(guide, Standard_True);
+        sweep.Add(poly.Wire(), Standard_False, Standard_False);
+        sweep.Build();
+        if (!sweep.IsDone() || !sweep.MakeSolid()) {
+            if (reason) *reason = "the thread could not be swept";
+            return {};
+        }
+        TopoDS_Shape made = sweep.Shape();
+        // A swept solid can come back inside out -- its faces pointing into
+        // the material instead of out of it -- and a boolean against one of
+        // those does nothing, or takes away the wrong half. Turning the shape
+        // over is not enough: the shell itself has to be put the right way
+        // round, which is what OrientClosedSolid does.
+        if (made.ShapeType() == TopAbs_SOLID) {
+            TopoDS_Solid solid = TopoDS::Solid(made);
+            BRepLib::OrientClosedSolid(solid);
+            made = solid;
+        }
+        GProp_GProps props;
+        BRepGProp::VolumeProperties(made, props);
+        if (props.Mass() < 0.0) made.Reverse();
+        return made;
+    } catch (const Standard_Failure& e) {
+        if (reason) *reason = kernelReason(e, "the thread could not be cut");
+        return {};
+    }
+}
+
+} // namespace
+
+BrepRef threadFace(const BrepRef& s, FaceId face, Real pitch, Real height, bool external,
+                   ElementId salt, std::string* reason) {
+    if (reason) reason->clear();
+    if (!s || s->shape.IsNull() || !validFace(*s, face)) {
+        if (reason) *reason = "there is no face to thread";
+        return {};
+    }
+    const TopoDS_Face& f = faceAt(*s, face);
+    BRepAdaptor_Surface surf(f);
+    if (surf.GetType() != GeomAbs_Cylinder) {
+        if (reason) *reason = "a thread goes on a round face: pick a bore or a shaft";
+        return {};
+    }
+    const gp_Cylinder cyl = surf.Cylinder();
+    Standard_Real u0 = 0, u1 = 0, v0 = 0, v1 = 0;
+    BRepTools::UVBounds(f, u0, u1, v0, v1);
+    if (u1 - u0 < 2.0 * M_PI - 1e-6) {
+        if (reason) *reason = "that face is only part of the way round";
+        return {};
+    }
+
+    // Which way the groove eats: into the material, which is away from the
+    // hole for a bore and into the shaft for a boss.
+    const Vec3 on = facePoint(*s, face);
+    const Vec3 axisPoint = toVec3(cyl.Position().Location());
+    const gp_Dir d = cyl.Position().Direction();
+    const Vec3 axisDir{d.X(), d.Y(), d.Z()};
+    Vec3 radial = on - axisPoint;
+    radial = radial - axisDir * dot(radial, axisDir);
+    const bool bore = dot(radial, faceNormal(*s, face)) < 0.0;
+    if (bore == external) {
+        if (reason)
+            *reason = external ? "that face is a hole: its thread is an inside one"
+                               : "that face is a shaft: its thread is an outside one";
+        return {};
+    }
+
+    const TopoDS_Shape groove =
+        threadGroove(cyl.Position(), cyl.Radius(), v0, v1, pitch, height, bore,
+                     bore ? -0.05 : 0.0, reason);
+    if (groove.IsNull()) return {};
+
+    // The groove alone will not cut. Its flanks meet the body exactly on the
+    // round face they were built from, and asked to intersect a helical
+    // surface with the cylinder it spirals around, OpenCASCADE hands back the
+    // body unchanged -- or something worse. The same groove cuts a plain block
+    // perfectly, and fuses onto a rod of the same radius perfectly.
+    //
+    // So the round face is taken out of the question. The groove is fused to a
+    // skin of the surface it sits on -- the bore filled in for an inside
+    // thread, a hundredth of sleeve for an outside one -- and the two are cut
+    // away together. The faces the cut has to meet are then the tool's own,
+    // parallel to the body's and a hundredth of a millimetre off them, and the
+    // helix never has to be intersected with the round face at all.
+    const Real skin = bore ? 0.01 : 0.02;
+    const Real span = (v1 - v0) + pitch * 2.0;
+    const gp_Ax3& frame = cyl.Position();
+    const gp_Ax2 base(frame.Location().Translated(gp_Vec(frame.Direction()) * (v0 - pitch)),
+                      frame.Direction(), frame.XDirection());
+    TopoDS_Shape sleeve;
+    try {
+        if (bore) {
+            sleeve = BRepPrimAPI_MakeCylinder(base, cyl.Radius() + skin, span).Shape();
+        } else {
+            const TopoDS_Shape outer =
+                BRepPrimAPI_MakeCylinder(base, cyl.Radius() + skin, span).Shape();
+            const TopoDS_Shape inner =
+                BRepPrimAPI_MakeCylinder(base, cyl.Radius() - skin, span).Shape();
+            BrepRef o = makeBrep(outer, {}), i = makeBrep(inner, {});
+            BrepRef tube = o && i ? booleanOp(*o, *i, BooleanOp::Difference, salt, reason)
+                                  : BrepRef{};
+            if (!tube) {
+                if (reason && reason->empty()) *reason = "the thread's sleeve could not be made";
+                return {};
+            }
+            sleeve = tube->shape;
+        }
+    } catch (const Standard_Failure& e) {
+        if (reason) *reason = kernelReason(e, "the thread could not be made");
+        return {};
+    }
+
+    BrepRef sleeveRef = makeBrep(sleeve, {});
+    BrepRef grooveRef = makeBrep(groove, {});
+    if (!sleeveRef || !grooveRef) {
+        if (reason) *reason = "the thread could not be made";
+        return {};
+    }
+    BrepRef tool = booleanOp(*sleeveRef, *grooveRef, BooleanOp::Union, salt, reason);
+    if (!tool) {
+        if (reason && reason->empty()) *reason = "the thread could not be made";
+        return {};
+    }
+
+    BrepRef out = booleanOp(*s, *tool, BooleanOp::Difference, salt, reason);
+    if (!out) return {};
+
+    GProp_GProps was, now;
+    BRepGProp::VolumeProperties(s->shape, was);
+    BRepGProp::VolumeProperties(out->shape, now);
+    if (now.Mass() > was.Mass() * 0.999999) {
+        if (reason) *reason = "the thread took nothing away";
+        return {};
+    }
+    return out;
+}
 
 BrepRef offsetBody(const BrepRef& s, Real distance, ElementId salt, std::string* reason) {
     if (reason) reason->clear();

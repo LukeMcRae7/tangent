@@ -124,6 +124,9 @@ public:
     // Grows the body by `mm`, then adjusts it in the panel to half that: what
     // a clearance copy is made with.
     void setOffsetDemo(float mm) { offsetDemo_ = mm; }
+    // Cuts a thread the way the panel cuts one: 1 an M6 in a drilled hole,
+    // 2 the same on a shaft, 3 the hole again at another size.
+    void setThreadDemo(int step) { threadDemo_ = step; }
     // 1 cuts through the middle, 2 moves the plane, 3 cuts by another axis,
     // 4 puts two pins across that cut, 5 two sockets for a dowel instead.
     void setSplitDemo(int step) { splitDemo_ = step; }
@@ -1108,6 +1111,41 @@ private:
     // fastener, or what was typed when there is none.
     HoleCut holeCutNow() const;
 
+    // Thread: a helical groove on a round face, sized for a screw.
+    //
+    // The face says which kind it is -- a bore takes an inside thread, a shaft
+    // an outside one -- so there is nothing to pick there; what the panel asks
+    // for is the screw and whether the fit allows for printing.
+    struct ThreadToolState {
+        ObjectId objectId = kNoObject;
+        FaceId face = kInvalid;
+        int  fastener = 2;               // M3
+        bool printed = true;             // the allowance a printed thread wants
+        bool external = false;           // decided by the face, not the panel
+        Real pitch = 0.5;
+        Real height = 0.27;
+        Body before;
+        std::vector<Feature> chainBefore;
+        bool pending = false;
+        std::string refusal;
+        bool active = false;
+
+        void reset() {
+            objectId = kNoObject;
+            face = kInvalid;
+            before = Body();
+            chainBefore.clear();
+            pending = false;
+            refusal.clear();
+            active = false;
+        }
+    };
+    ThreadToolState threadTool_;
+
+    void beginThread();
+    void commitThread();
+    void drawThreadPanel();
+
     // Offset: the whole body grown or shrunk, adjusted in its panel until Done.
     void beginOffset();
     void commitOffset();
@@ -1185,7 +1223,7 @@ private:
     // viewport click in the first place. This is the first of those, because
     // this app does confirm on a click.
     enum class Settled { None, Fillet, Divide, Face, Pattern, Create, Sketch, Combine, Inset, Shell,
-                         Split, Hole, Draft, Offset };
+                         Split, Hole, Draft, Offset, Thread };
     Settled  settled_ = Settled::None;
     ObjectId settledObject_ = kNoObject;
 
@@ -1342,6 +1380,7 @@ private:
     int         splitDemo_ = 0;
     float       insetDemo_ = 0.0f;      // distance in mm; 0 means do not
     float       offsetDemo_ = 0.0f;     // likewise, for the whole-body offset
+    int         threadDemo_ = 0;
     float       shellDemo_ = 0.0f;      // wall in mm; 0 means do not
     bool        holdTransform_ = false;
 

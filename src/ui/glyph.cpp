@@ -84,6 +84,7 @@ ImWchar glyphCodepoint(Glyph g) {
     case Glyph::Draft:         return 0xef20;   // angle
     case Glyph::DeleteFace:    return 0xeb8b;   // eraser
     case Glyph::Offset:        return 0xee0b;   // box-margin
+    case Glyph::Thread:        return 0xf294;   // spiral
     case Glyph::Help:          return 0xeabf;   // help
     case Glyph::Divide:        return 0xebdb;   // slice
     case Glyph::Merge:         return 0xedaf;   // arrows-join

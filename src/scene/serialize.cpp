@@ -366,6 +366,11 @@ void writeFeature(Writer& w, const Feature& f) {
     w.f64(f.hole.sinkAngle);
     w.i32(f.holeFastener);
     w.u32(static_cast<uint32_t>(f.holeFit));
+    // v19: a thread, and the screw it was cut for.
+    w.f64(f.threadPitch);
+    w.f64(f.threadHeight);
+    w.u8(f.threadExternal ? 1 : 0);
+    w.i32(f.threadFastener);
 }
 
 // `version` is the file's, not this build's: a project written before bodies
@@ -518,6 +523,14 @@ bool readFeature(Reader& r, Feature& f, uint32_t version) {
         if (fit > static_cast<uint32_t>(HoleFit::Tapped)) return false;
         f.holeFit = static_cast<HoleFit>(fit);
         if (!(f.hole.diameter > 0.0)) return false;
+    }
+    // Before this there were no threads to read one for.
+    if (version >= 19) {
+        f.threadPitch = r.f64();
+        f.threadHeight = r.f64();
+        f.threadExternal = r.u8() != 0;
+        f.threadFastener = r.i32();
+        if (!(f.threadPitch > 0.0) || !(f.threadHeight > 0.0)) return false;
     }
     return !r.bad;
 }

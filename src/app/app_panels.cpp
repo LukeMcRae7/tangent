@@ -8,6 +8,8 @@
 // the arrow follows.
 #include "app/application.h"
 
+#include "geom/fasteners.h"
+
 #include "mesh/import_mesh.h"
 #include "ui/command_panel.h"
 #include "ui/drag_guide.h"
@@ -1037,6 +1039,71 @@ void Application::drawInsetPanel() {
 // The whole body, grown or shrunk. The one number is signed, because out and
 // in are the same operation and a panel with two buttons for it would be two
 // ways of saying the same thing.
+// A thread on a round face: which screw, and whether the part is printed.
+//
+// There is no "inside or outside" to pick -- the face knows which it is -- and
+// no pitch to type unless the thread is not for a screw at all. What is worth
+// saying is what it comes to, because a thread that a screw will not turn in
+// is scrap.
+void Application::drawThreadPanel() {
+    const bool settled = settledIs(Settled::Thread);
+    if (!settled && !threadTool_.pending) return;
+    if (!scene_.find(threadTool_.objectId)) { threadTool_.reset(); return; }
+    const auto was = std::make_pair(threadTool_.fastener, static_cast<int>(threadTool_.printed));
+
+    if (!ui::beginCommand("##thread", "Thread", Glyph::Thread,
+                          objectName(scene_, threadTool_.objectId)))
+        return;
+
+    {
+        ui::commandRow("Size");
+        for (int i = 0; i < fastenerCount(); ++i) {
+            if (i) ImGui::SameLine(0.0f, 3.0f);
+            if (ui::pillButton(fastenerAt(i).name, threadTool_.fastener == i) &&
+                threadTool_.fastener != i)
+                threadTool_.fastener = i;
+        }
+    }
+    {
+        static const ui::Choice kFit[2] = {
+            {Glyph::Count, "Printed", nullptr,
+             "Cut with the allowance a printed thread needs: a little deeper inside, a "
+             "little shallower outside"},
+            {Glyph::Count, "Exact",   nullptr, "Cut to the standard, with no allowance"},
+        };
+        const int on = threadTool_.printed ? 0 : 1;
+        const int pick = ui::commandChoices("Fit", kFit, 2, on, /*compact=*/true);
+        if (pick >= 0 && pick != on) threadTool_.printed = pick == 0;
+    }
+
+    {
+        const ThreadCut cut =
+            threadFor(threadTool_.fastener, threadTool_.external, threadTool_.printed);
+        char what[96];
+        std::snprintf(what, sizeof what, "%.2f mm a turn, %.2f mm deep", cut.pitch, cut.height);
+        ui::commandValue("Cut", what);
+        ui::commandValue("Kind", threadTool_.external ? "outside, on a shaft" : "inside, in a bore");
+    }
+
+    if (settled) ui::commandApplied("Thread");
+    else         ui::commandRefused(threadTool_.refusal.c_str());
+    ui::commandHint("The helix is cut, not drawn on: a printed part has no second operation to "
+                    "cut it with. A bore takes an inside thread and a shaft an outside one, so "
+                    "the face decides which this is.");
+
+    const int footer = settled ? ui::commandFooter("Done", true, nullptr)
+                               : ui::commandFooter("Try again", true, "Cancel");
+    ui::endCommand();
+    if (was != std::make_pair(threadTool_.fastener, static_cast<int>(threadTool_.printed))) {
+        if (settled) recommitSettled();
+        else         { threadTool_.active = true; commitThread(); }
+        return;
+    }
+    if (footer > 0 && settled)  dismissSettled();
+    else if (footer > 0)        { threadTool_.active = true; commitThread(); }
+    else if (footer < 0)        threadTool_.reset();
+}
+
 void Application::drawOffsetPanel() {
     const bool settled = settledIs(Settled::Offset);
     if (!settled && !offsetTool_.pending) return;

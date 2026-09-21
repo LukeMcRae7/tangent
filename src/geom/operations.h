@@ -131,6 +131,13 @@ struct FilletSpec {
 // Rounds edges. `reason` gets a short phrase on refusal; see the note above.
 bool filletEdges(Body& body, const FilletSpec& spec, std::string* reason = nullptr);
 
+// Cuts a thread on a round face: the helical groove a tap or a die would leave.
+// Not a cosmetic thread -- the helix is there, because a printed part has no
+// second operation to cut it. Refused on a mesh, and refused with a reason for
+// a face that is not round, or for the wrong kind of thread on it.
+bool threadFace(Body& body, FaceId face, Real pitch, Real height, bool external,
+                ElementId salt = 0, std::string* reason = nullptr);
+
 // Grows or shrinks the whole body, every face moving along its own normal and
 // the corners staying corners: a clearance copy of a part, or the void it has
 // to fit into. Refused on a mesh.

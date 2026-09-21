@@ -46,6 +46,7 @@ Glyph glyphFor(const Feature& f) {
         case FeatureKind::Draft:          return Glyph::Draft;
         case FeatureKind::DeleteFace:     return Glyph::DeleteFace;
         case FeatureKind::Offset:         return Glyph::Offset;
+        case FeatureKind::Thread:         return Glyph::Thread;
         case FeatureKind::Bevel:          return f.chamfer ? Glyph::Chamfer : Glyph::Fillet;
         case FeatureKind::Shell:          return Glyph::Shell;
         case FeatureKind::FaceRotate:     return Glyph::RotateFace;
@@ -356,6 +357,24 @@ void featureDetails(UiContext& ctx, SceneObject& obj, Feature& f, bool& changed)
         ImGui::TextColored(f.sketchFreedoms == 0 ? im(palette::kValid) : im(palette::kInfo), "%s",
                            f.sketchFreedoms == 0 ? "fully constrained"
                                                  : "not fully constrained: some of it can still move");
+        break;
+    }
+    case FeatureKind::Thread: {
+        if (f.threadFastener >= 0)
+            ui::commandValue("Size", fastenerAt(f.threadFastener).name);
+        double p = f.threadPitch;
+        if (labelledNumber("Pitch", p, 0.05f, 0.1f, 10.0f)) {
+            f.threadPitch = p;
+            f.threadFastener = -1;          // no longer the table's
+            changed = true;
+        }
+        double h = f.threadHeight;
+        if (labelledNumber("Depth", h, 0.01f, 0.05f, 10.0f)) {
+            f.threadHeight = h;
+            changed = true;
+        }
+        ImGui::TextColored(dim, "%s thread, cut on %s", f.threadExternal ? "an outside" : "an inside",
+                           f.faces.describe("face").c_str());
         break;
     }
     case FeatureKind::Offset: {

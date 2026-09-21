@@ -683,6 +683,147 @@ int main() {
                     body.faceCount(), rm.triangles.size() / 3, rm.edgeLines.size() / 2);
     }
 
+    std::printf("--- a thread that is actually there ---\n");
+    {
+        // Not a cosmetic thread: the helix is cut, because on a printed part
+        // there is nothing to cut it with afterwards. An M6 hole is drilled at
+        // the minor diameter and the groove taken out to the major one.
+        //
+        // What comes away is arithmetic. The groove is a triangle carried
+        // round a helix, so Pappus gives its volume -- the part of it that is
+        // in the material, times the circle its centre of area travels -- and
+        // to that is added the hundredth of a millimetre of skin the cut takes
+        // off the bore, which is how the helix is kept away from the round
+        // face it spirals on (see threadFace).
+        const Real pitch = 1.0;                 // M6 coarse
+        const Real height = 0.5413 * pitch;     // ISO thread engagement
+        const Real minor = 4.917;               // M6 minor diameter
+        const Real skin = 0.01;
+        const Real base = 0.94 * pitch;         // the groove's width at its foot
+        const Real bite = 0.05;                 // how far under the face it starts
+        Body body = plate(30, 30, 10);
+        const Real bare = body.health(false).volume;
+        HoleCut cut;
+        cut.diameter = minor;
+        cut.through = true;
+        std::string why;
+        check(drillHole(body, {0, 0, 5}, {0, 0, -1}, cut, 950, &why), "the hole is drilled: " + why);
+        const Real bored = body.health(false).volume;
+        check(near(bored, bare - kPi * minor * minor * 0.25 * 10.0, 1e-3),
+              "at the minor diameter");
+
+        FaceId wall = kInvalid;
+        std::vector<FaceId> fs;
+        body.allFaces(fs);
+        for (FaceId f : fs)
+            if (body.faceKind(f) == SurfaceKind::Cylinder) wall = f;
+        check(wall != kInvalid, "the bore is one face");
+
+        why.clear();
+        BrepRef threaded = wall == kInvalid
+                               ? BrepRef{}
+                               : brep::threadFace(body.brepRef(), wall, pitch, height,
+                                                  /*external=*/false, 951, &why);
+        check(threaded != nullptr, "and it threads: " + why);
+        if (threaded) {
+            Body out(std::move(threaded));
+            check(out.health().solid(), "the threaded plate is a solid");
+
+            const Real r = minor * 0.5;
+            const Real sleeve = kPi * ((r + skin) * (r + skin) - r * r) * 10.0;
+            const Real reach = height - skin;                    // the groove, past the skin
+            const Real wide = base * reach / (height + bite);    // its width there
+            const Real area = 0.5 * wide * reach;
+            const Real centre = r + skin + reach / 3.0;
+            const Real turns = 10.0;                             // the plate, in pitches
+            const Real expect = sleeve + area * kTwoPi * centre * turns;
+            const Real gone = bored - out.health(false).volume;
+            std::printf("  M6 x 1 inside: %.3f mm3 came away, arithmetic says %.3f\n", gone,
+                        expect);
+            check(std::fabs(gone - expect) < expect * 0.01,
+                  "and what came away is the helix, within a hundredth");
+
+            // The shape of it, not just the size: the bore now runs from the
+            // root out to the major diameter.
+            RenderMesh rm;
+            out.tessellate(rm);
+            Real rmin = 1e9, rmax = 0;
+            for (const Vec3& p : rm.positions) {
+                if (std::fabs(p.z) > 3.0) continue;
+                const Real at = std::hypot(p.x, p.y);
+                if (at < 8.0) { rmin = std::min(rmin, at); rmax = std::max(rmax, at); }
+            }
+            check(near(rmin, r + skin, 1e-3), "the root is the hole it was drilled at");
+            check(near(rmax, r + height, 1e-3),
+                  "and the crest is the major diameter: " + std::to_string(rmax * 2.0));
+        }
+
+        // The other kind, on the outside of a shaft: an M6 bolt.
+        PrimitiveSpec spec;
+        spec.kind = PrimitiveKind::Cylinder;
+        spec.cylinder = {3.0, 12.0, 32};
+        Body shaft;
+        makePrimitive(spec, shaft, Backend::Brep);
+        const Real solidShaft = shaft.health(false).volume;
+        FaceId side = kInvalid;
+        std::vector<FaceId> sf;
+        shaft.allFaces(sf);
+        for (FaceId f : sf)
+            if (shaft.faceKind(f) == SurfaceKind::Cylinder) side = f;
+        why.clear();
+        BrepRef bolt = side == kInvalid
+                           ? BrepRef{}
+                           : brep::threadFace(shaft.brepRef(), side, pitch, height,
+                                              /*external=*/true, 952, &why);
+        check(bolt != nullptr, "a shaft takes an outside thread: " + why);
+        if (bolt) {
+            Body out(std::move(bolt));
+            check(out.health().solid(), "and stays a solid");
+
+            const Real r = 3.0;
+            const Real skinOut = 0.02;      // an outside thread is fused to a sleeve
+            const Real sleeve = kPi * (r * r - (r - skinOut) * (r - skinOut)) * 12.0;
+            const Real reach = height - skinOut;
+            const Real wide = base * reach / height;
+            const Real area = 0.5 * wide * reach;
+            const Real centre = r - skinOut - reach / 3.0;
+            const Real expect = sleeve + area * kTwoPi * centre * 12.0;
+            const Real gone = solidShaft - out.health(false).volume;
+            std::printf("  M6 x 1 outside: %.3f mm3 came away, arithmetic says %.3f\n", gone,
+                        expect);
+            check(std::fabs(gone - expect) < expect * 0.01,
+                  "the groove round a bolt is the helix too, within a hundredth");
+
+            RenderMesh rm;
+            out.tessellate(rm);
+            Real rmin = 1e9, rmax = 0;
+            for (const Vec3& p : rm.positions) {
+                if (std::fabs(p.z) > 3.0) continue;
+                const Real at = std::hypot(p.x, p.y);
+                rmin = std::min(rmin, at);
+                rmax = std::max(rmax, at);
+            }
+            check(near(rmax, r - skinOut, 1e-3), "its crest is the shaft it was cut on");
+            check(near(rmin, r - height, 1e-3),
+                  "and its root is a thread's depth in: " + std::to_string(rmin * 2.0));
+        }
+
+        // Asking for the wrong kind is refused rather than threaded inside out.
+        why.clear();
+        check(!brep::threadFace(body.brepRef(), wall, pitch, height, /*external=*/true, 953, &why),
+              "an outside thread on a bore is refused");
+        check(why.find("hole") != std::string::npos, "and says which it is: " + why);
+
+        // And a face that is not round at all.
+        FaceId flat = kInvalid;
+        for (FaceId f : fs)
+            if (body.faceKind(f) == SurfaceKind::Plane) flat = f;
+        why.clear();
+        check(!brep::threadFace(body.brepRef(), flat, pitch, height, false, 954, &why),
+              "a flat face cannot be threaded");
+        check(!why.empty(), "with a reason: " + why);
+    }
+
     std::printf("--- the whole body grown and shrunk ---\n");
     {
         // A clearance copy: the part, 1 mm bigger all round. The corners have

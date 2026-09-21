@@ -338,6 +338,17 @@ BrepRef shell(const BrepRef& s, const std::vector<FaceId>& openFaces, Real thick
 // past nothing.
 BrepRef offsetBody(const BrepRef& s, Real distance, ElementId salt, std::string* reason);
 
+// Cuts a thread on a round face: the helical groove a tap or a die would leave,
+// taken out of the body.
+//
+// Not a cosmetic thread. On a printed part the helix has to actually be there,
+// because there is nothing to cut it with afterwards. `pitch` is the rise per
+// turn and `height` how far the groove reaches into the material; `external`
+// says which kind is being asked for, and a face that is the other kind is
+// refused rather than threaded inside out.
+BrepRef threadFace(const BrepRef& s, FaceId face, Real pitch, Real height, bool external,
+                   ElementId salt, std::string* reason);
+
 // Drills a hole into the solid: a cylinder from `at`, going `into` the
 // material, with a counterbore or a countersink at its mouth when the cut asks
 // for one. `at` and `into` are in the body's own space.

@@ -37,6 +37,7 @@ const char* holeFitName(HoleFit fit);
 struct Fastener {
     const char* name;      // "M4"
     Real nominal;          // 4.0: the thread's outside diameter
+    Real pitch;            // the coarse pitch: how far a turn advances
     Real close, normal, loose;   // ISO 273 clearance holes
     Real tap;              // the hole a thread is cut in (ISO 2306 tapping drill)
     Real capHead;          // ISO 4762 socket head: diameter, then height
@@ -58,6 +59,16 @@ Real printedAllowance(HoleFit fit);
 // The hole for `i` at `fit`, as a printed part wants it: the clearance from
 // the table plus the allowance.
 Real holeDiameter(int i, HoleFit fit);
+
+// The thread for that screw, as the kernel wants it: how far a turn advances
+// and how deep the groove goes. `printed` adds the allowance a printed thread
+// needs -- a little deeper inside, a little shallower outside -- so a metal
+// screw turns into a plastic part without being forced.
+struct ThreadCut {
+    Real pitch = 1.0;
+    Real height = 0.54;
+};
+ThreadCut threadFor(int i, bool external, bool printed);
 
 // A whole hole for that screw and that head, `depth` deep (or through), ready
 // for the kernel. `head` says what the mouth looks like; the head's own

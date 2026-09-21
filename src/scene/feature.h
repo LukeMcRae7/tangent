@@ -55,6 +55,7 @@ enum class FeatureKind {
     Draft,       // named faces leant away from a pull direction
     DeleteFace,  // named faces taken off, the gap closed behind them
     Offset,      // every face moved along its own normal: the whole body grows
+    Thread,      // a helical groove cut on a named round face
 
     // New kinds go on the end and nowhere else. The value is what is written
     // to a file, so inserting one in the middle renumbers every kind after it
@@ -65,7 +66,7 @@ enum class FeatureKind {
 // here rather than in the loader so that adding a kind above is one edit and
 // not two: a kind the loader does not know about is refused as a corrupt file,
 // and that refusal is silent about why.
-inline constexpr FeatureKind kLastFeatureKind = FeatureKind::Offset;
+inline constexpr FeatureKind kLastFeatureKind = FeatureKind::Thread;
 
 const char* featureKindName(FeatureKind k);
 
@@ -288,6 +289,15 @@ struct Feature {
     HoleCut hole;
     int     holeFastener = -1;
     HoleFit holeFit = HoleFit::Normal;
+
+    // Thread: the groove cut on the face in `faces`. How far a turn advances
+    // and how deep it goes are kept rather than derived, so a thread stays the
+    // thread it was cut even if the table it came from changes; the fastener
+    // is remembered for the panel to show and for the step to say.
+    Real threadPitch = 1.0;
+    Real threadHeight = 0.5413;
+    bool threadExternal = false;
+    int  threadFastener = -1;
 
     // Sketch: whether its geometry is drawn in the viewport. A sketch stays in
     // the outliner once something has been built from it, but showing every

@@ -16,16 +16,16 @@ const char* holeFitName(HoleFit fit) {
 
 namespace {
 
-// name  nominal  close  normal  loose   tap   capHead capHeight sinkHead
+// name  nominal pitch  close  normal  loose   tap   capHead capHeight sinkHead
 const Fastener kFasteners[] = {
-    {"M2",   2.0,  2.2,  2.4,  2.6,  1.6,  3.8,  2.0,  4.4},
-    {"M2.5", 2.5,  2.7,  2.9,  3.1,  2.05, 4.5,  2.5,  5.5},
-    {"M3",   3.0,  3.2,  3.4,  3.6,  2.5,  5.5,  3.0,  6.3},
-    {"M4",   4.0,  4.3,  4.5,  4.8,  3.3,  7.0,  4.0,  9.4},
-    {"M5",   5.0,  5.3,  5.5,  5.8,  4.2,  8.5,  5.0, 10.4},
-    {"M6",   6.0,  6.4,  6.6,  7.0,  5.0, 10.0,  6.0, 12.6},
-    {"M8",   8.0,  8.4,  9.0, 10.0,  6.8, 13.0,  8.0, 17.3},
-    {"M10", 10.0, 10.5, 11.0, 12.0,  8.5, 16.0, 10.0, 20.0},
+    {"M2",   2.0, 0.40,  2.2,  2.4,  2.6,  1.6,  3.8,  2.0,  4.4},
+    {"M2.5", 2.5, 0.45,  2.7,  2.9,  3.1,  2.05, 4.5,  2.5,  5.5},
+    {"M3",   3.0, 0.50,  3.2,  3.4,  3.6,  2.5,  5.5,  3.0,  6.3},
+    {"M4",   4.0, 0.70,  4.3,  4.5,  4.8,  3.3,  7.0,  4.0,  9.4},
+    {"M5",   5.0, 0.80,  5.3,  5.5,  5.8,  4.2,  8.5,  5.0, 10.4},
+    {"M6",   6.0, 1.00,  6.4,  6.6,  7.0,  5.0, 10.0,  6.0, 12.6},
+    {"M8",   8.0, 1.25,  8.4,  9.0, 10.0,  6.8, 13.0,  8.0, 17.3},
+    {"M10", 10.0, 1.50, 10.5, 11.0, 12.0,  8.5, 16.0, 10.0, 20.0},
 };
 
 } // namespace
@@ -60,6 +60,21 @@ Real holeDiameter(int i, HoleFit fit) {
                     : fit == HoleFit::Tapped ? f.tap
                                              : f.normal;
     return base + printedAllowance(fit);
+}
+
+ThreadCut threadFor(int i, bool external, bool printed) {
+    const Fastener& f = fastenerAt(i);
+    ThreadCut cut;
+    cut.pitch = f.pitch;
+    // ISO's thread engagement: five eighths of the triangle's height, which
+    // for a 60 degree thread is 0.5413 of the pitch.
+    cut.height = 0.5413 * f.pitch;
+    // What a printed thread needs on top. A hole comes out undersize and a
+    // shaft oversize, so an inside thread is cut a little deeper and an
+    // outside one a little shallower: either way the screw turns instead of
+    // splitting the part.
+    if (printed) cut.height += external ? -0.1 : 0.1;
+    return cut;
 }
 
 HoleCut holeFor(int i, HoleFit fit, HoleKind head, Real depth, bool through) {

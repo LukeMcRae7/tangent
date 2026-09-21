@@ -34,6 +34,7 @@ const char* featureKindName(FeatureKind k) {
         case FeatureKind::Draft:      return "Draft";
         case FeatureKind::DeleteFace: return "Delete Face";
         case FeatureKind::Offset:     return "Offset";
+        case FeatureKind::Thread:     return "Thread";
         case FeatureKind::Move:       return "Move";
         case FeatureKind::Rotate:     return "Rotate";
         case FeatureKind::Scale:      return "Scale";
@@ -266,6 +267,18 @@ std::string Feature::summary() const {
         case FeatureKind::Offset:
             std::snprintf(buf, sizeof(buf), "Offset  %+.2f mm", static_cast<double>(distance));
             break;
+        case FeatureKind::Thread: {
+            const char* what = threadFastener >= 0 ? fastenerAt(threadFastener).name : "";
+            if (*what)
+                std::snprintf(buf, sizeof(buf), "Thread  %s x %.2f  (%s)", what,
+                              static_cast<double>(threadPitch),
+                              threadExternal ? "outside" : "inside");
+            else
+                std::snprintf(buf, sizeof(buf), "Thread  %.2f mm pitch  (%s)",
+                              static_cast<double>(threadPitch),
+                              threadExternal ? "outside" : "inside");
+            break;
+        }
         case FeatureKind::Draft: {
             const Vec3 d = axisDir;
             const char* way = std::fabs(d.x) > 0.9 ? "X" : std::fabs(d.y) > 0.9 ? "Y" : "Z";
@@ -694,6 +707,20 @@ bool evaluateFrom(std::vector<Feature>& features, size_t from,
                                  : why.c_str());
             else
                 body = std::move(combined);
+            break;
+        }
+
+        case FeatureKind::Thread: {
+            if (body.empty()) { fail("there is no body to thread"); break; }
+            std::vector<FaceId> fs;
+            if (!f.faces.resolveFaces(body, fs) || fs.empty()) {
+                fail("the face it was cut on is gone");
+                break;
+            }
+            std::string why;
+            if (!threadFace(body, fs.front(), f.threadPitch, f.threadHeight, f.threadExternal,
+                            f.uid, &why))
+                fail(why.empty() ? "the thread could not be cut" : why.c_str());
             break;
         }
 
