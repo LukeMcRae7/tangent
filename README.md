@@ -114,6 +114,15 @@ drill leaves, which is also the shape a printer wants: a flat ceiling over a
 hole has nothing to print onto. The hole belongs to its face, so when that face
 moves the hole goes with it.
 
+**A curved face is pushed along itself.** Divide a cylinder twice and the band
+of wall between the cuts is a face like any other: Push/Pull (G) moves it out
+into a collar or in into a groove, Extrude (E) raises it keeping its outline,
+and Scale (S) reads as what scaling a round face means -- 120 per cent of a
+15 mm wall is an 18 mm one. There is no single direction to sweep a curved face
+along, so what is built is the face moved along its own surface, and a bore
+widened this way stays a cylinder rather than becoming a prism leaning off in
+whichever direction the middle of it happened to face.
+
 **Walls can be leant off the bed.** Modify > Draft takes the selected walls and
 tips them a few degrees away from the direction the part is pulled, which for a
 printed part is up off the bed and for a moulded one is out of its tool. Each

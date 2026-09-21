@@ -124,6 +124,11 @@ void vertexEdges(const BrepShape& s, VertexId v, std::vector<EdgeId>& out);
 // direction from its curve, which is the whole point of the backend.
 Vec3 faceNormal(const BrepShape& s, FaceId f);
 Vec3 faceCentroid(const BrepShape& s, FaceId f);
+// A point that is actually on the face, taken at the middle of its parameter
+// range. The centroid of a curved face need not be on it at all -- the centre
+// of mass of a whole cylinder's wall is on its axis -- so anything that has to
+// stand something *on* a face wants this rather than the centroid.
+Vec3 facePoint(const BrepShape& s, FaceId f);
 Real faceArea(const BrepShape& s, FaceId f);
 AABB faceBounds(const BrepShape& s, FaceId f);
 Vec3 vertexPosition(const BrepShape& s, VertexId v);

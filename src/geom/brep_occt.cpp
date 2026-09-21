@@ -14,6 +14,8 @@
 // backend uses (see element_id.h) and which gives the right answer for the
 // elements a boolean invents.
 #include "geom/brep.h"
+
+#include <cstdlib>
 #include "geom/brep_valid.h"
 #include "geom/kernel_guard.h"
 #include "sketch/sketch.h"
@@ -86,6 +88,9 @@
 #include <BRepOffsetAPI_DraftAngle.hxx>
 #include <BRepFilletAPI_MakeChamfer.hxx>
 #include <BRepFilletAPI_MakeFillet.hxx>
+#include <BRepOffset_MakeSimpleOffset.hxx>
+#include <BRepTools_ReShape.hxx>
+#include <BRepBndLib.hxx>
 #include <BRepOffsetAPI_MakeOffset.hxx>
 #include <BRepOffsetAPI_MakeOffsetShape.hxx>
 #include <BRepOffsetAPI_MakeThickSolid.hxx>
@@ -554,6 +559,15 @@ Vec3 faceNormal(const BrepShape& s, FaceId f) {
     // its surface's own sense.
     if (face.Orientation() == TopAbs_REVERSED) n.Reverse();
     return {static_cast<Real>(n.X()), static_cast<Real>(n.Y()), static_cast<Real>(n.Z())};
+}
+
+Vec3 facePoint(const BrepShape& s, FaceId f) {
+    if (!validFace(s, f)) return {0, 0, 0};
+    const TopoDS_Face& face = faceAt(s, f);
+    Standard_Real u0 = 0, u1 = 0, v0 = 0, v1 = 0;
+    BRepTools::UVBounds(face, u0, u1, v0, v1);
+    BRepAdaptor_Surface surf(face);
+    return toVec3(surf.Value((u0 + u1) * 0.5, (v0 + v1) * 0.5));
 }
 
 Vec3 faceCentroid(const BrepShape& s, FaceId f) {
@@ -1240,7 +1254,21 @@ bool closedShell(const BrepShape& s) {
     for (int i = 1; i <= s.edgeFaces.Extent(); ++i) {
         const TopoDS_Edge& e = TopoDS::Edge(s.edgeFaces.FindKey(i));
         if (BRep_Tool::Degenerated(e)) continue;
-        if (s.edgeFaces(i).Extent() != 2) return false;
+        const int bounds = s.edgeFaces(i).Extent();
+        if (bounds == 2) continue;
+        // A seam bounds one face on both sides: the slit where a face that
+        // closes on itself is cut open -- down a cylinder, or across the ring
+        // left round a collar. The ancestor map counts that face once, and
+        // reading it as a hole in the body would call a perfectly closed
+        // collar open. So ask the face: an edge it uses twice is a seam, not a
+        // boundary, whether or not its surface is periodic.
+        if (bounds == 1) {
+            int uses = 0;
+            for (TopExp_Explorer ex(s.edgeFaces(i).First(), TopAbs_EDGE); ex.More(); ex.Next())
+                if (ex.Current().IsSame(e)) ++uses;
+            if (uses >= 2) continue;
+        }
+        return false;
     }
     return true;
 }
@@ -1534,6 +1562,54 @@ namespace {
 // One face swept `distance` along its normal, or along `along` when given, as a
 // solid of its own -- named from the face it came from, so that whatever it is
 // combined with has something to carry.
+// The solid between a face and that face moved along its own surface.
+//
+// This is what pushing a *curved* face means. A cylinder's wall has a
+// different normal at every point of it, so there is no one vector to sweep: a
+// band of it pulled out two millimetres is a band of a cylinder two
+// millimetres wider, and what stands between the two is a ring. Thickening the
+// face is exactly that ring, whatever the surface -- cylinder, cone, sphere or
+// a freeform patch -- and it comes back as an ordinary solid to be fused onto
+// the body or cut out of it, like the prism a flat face sweeps.
+TopoDS_Shape thickenFace(const TopoDS_Face& face, Real distance, std::string* reason) {
+    try {
+        // Started a hair the other side of the face rather than exactly on it.
+        // A tool whose surface is the body's own surface is the boolean's
+        // worst case -- here it came back with nothing at all -- and the hair
+        // is inside the material for a push and outside it for a cut, so what
+        // the boolean makes of it is exact either way.
+        const Real eps = 1e-2;
+        const Real back = distance > 0.0 ? -eps : eps;
+        TopoDS_Face from = face;
+        BRepOffset_MakeSimpleOffset simple(face, back);
+        simple.Perform();
+        if (simple.IsDone() && !simple.GetResultShape().IsNull() &&
+            simple.GetResultShape().ShapeType() == TopAbs_FACE)
+            from = TopoDS::Face(simple.GetResultShape());
+
+        BRepOffsetAPI_MakeThickSolid ms;
+        ms.MakeThickSolidBySimple(from, distance - back);
+        ms.Build();
+        if (!ms.IsDone() || ms.Shape().IsNull()) {
+            if (reason) *reason = "that face will not move that far";
+            return {};
+        }
+        TopoDS_Shape made = ms.Shape();
+        // Thickening outward hands back a solid that is inside out: its
+        // volume comes back negative and a fuse with it does nothing at all.
+        // Turned the right way round here, where it can be seen, rather than
+        // leaving every caller to wonder why its boolean was a no-op.
+        GProp_GProps props;
+        BRepGProp::VolumeProperties(made, props);
+        if (props.Mass() < 0.0) made.Reverse();
+        return made;
+    } catch (const Standard_Failure& e) {
+        if (reason) *reason = kernelReason(e, "that face will not move that far");
+        return {};
+    }
+}
+
+
 BrepRef sweepFace(const BrepShape& step, FaceId use, ElementId target, Real distance, Vec3 along,
                   ElementId salt, std::string* reason) {
     const Vec3 n = faceNormal(step, use);
@@ -1554,30 +1630,58 @@ BrepRef sweepFace(const BrepShape& step, FaceId use, ElementId target, Real dist
     }
     const gp_Vec sweep(push.x * distance, push.y * distance, push.z * distance);
 
+    // A flat face sweeps; a curved one thickens. The difference is not a
+    // refinement: a prism off a cylinder's wall leans away in whichever
+    // direction the middle of it happened to face, and what the user asked for
+    // was a wall two millimetres further out all the way round.
+    const bool curved = BRepAdaptor_Surface(faceAt(step, use)).GetType() != GeomAbs_Plane;
     TopoDS_Shape solid;
-    try {
-        BRepPrimAPI_MakePrism prism(faceAt(step, use), sweep);
-        prism.Build();
-        if (!prism.IsDone()) {
-            if (reason) *reason = "the face could not be swept";
+    if (curved) {
+        if (lengthSq(along) > 1e-12) {
+            if (reason) *reason = "a curved face moves along itself, not along an axis";
             return {};
         }
-        solid = prism.Shape();
-    } catch (const Standard_Failure& e) {
-        if (reason) *reason = kernelReason(e, "the face could not be swept that far");
-        return {};
+        solid = thickenFace(faceAt(step, use), distance, reason);
+        if (solid.IsNull()) return {};
+    } else {
+        try {
+            BRepPrimAPI_MakePrism prism(faceAt(step, use), sweep);
+            prism.Build();
+            if (!prism.IsDone()) {
+                if (reason) *reason = "the face could not be swept";
+                return {};
+            }
+            solid = prism.Shape();
+        } catch (const Standard_Failure& e) {
+            if (reason) *reason = kernelReason(e, "the face could not be swept that far");
+            return {};
+        }
     }
 
     TopTools_IndexedMapOfShape pf;
     TopExp::MapShapes(solid, TopAbs_FACE, pf);
     std::vector<ElementId> prismNames(static_cast<size_t>(pf.Extent()), kNoId);
     const Vec3 startCentre = faceCentroid(step, use);
+    // How far each face of the tool has travelled from the one that was
+    // pushed. Along the normal for a prism; for a thickened face the two are
+    // the same surface at two sizes -- a band of a cylinder and its centroid
+    // both sit on the axis -- so the measure is the distance from a point of
+    // the original face to the other surface, not a projection onto a normal
+    // that means nothing there.
+    const TopoDS_Face& pushed = faceAt(step, use);
+    BRepAdaptor_Surface probe(pushed);
+    const gp_Pnt on = probe.Value((probe.FirstUParameter() + probe.LastUParameter()) * 0.5,
+                                  (probe.FirstVParameter() + probe.LastVParameter()) * 0.5);
     for (int k = 0; k < pf.Extent(); ++k) {
         const TopoDS_Face& face = TopoDS::Face(pf(k + 1));
         GProp_GProps props;
         BRepGProp::SurfaceProperties(face, props);
         const Vec3 c = toVec3(props.CentreOfMass());
-        const Real travelled = dot(c - startCentre, n);
+        Real travelled = dot(c - startCentre, n);
+        if (curved) {
+            BRepExtrema_DistShapeShape gap(BRepBuilderAPI_MakeVertex(on).Vertex(), face);
+            travelled = gap.IsDone() && gap.NbSolution() > 0 ? gap.Value() : 0.0;
+        }
         // The cap at the far end carries the *original* face's name,
         // because that is what it is: the face the user selected, moved.
         // A feature that referred to it before the extrude has to go on
@@ -1592,6 +1696,70 @@ BrepRef sweepFace(const BrepShape& step, FaceId use, ElementId target, Real dist
                 nameId(salt, IdRole::Wall, target, static_cast<ElementId>(k));
     }
     return makeBrep(solid, prismNames);
+}
+
+} // namespace
+
+
+namespace {
+
+// Is this wire a loop? A face's wires are supposed to be: its outline and the
+// holes in it. A wire that starts somewhere and stops somewhere else bounds
+// nothing.
+bool wireIsClosed(const TopoDS_Wire& wire) {
+    TopTools_IndexedDataMapOfShapeListOfShape ends;
+    TopExp::MapShapesAndAncestors(wire, TopAbs_VERTEX, TopAbs_EDGE, ends);
+    for (int i = 1; i <= ends.Extent(); ++i) {
+        int uses = 0;
+        for (TopExp_Explorer ex(wire, TopAbs_EDGE); ex.More(); ex.Next())
+            for (TopExp_Explorer vx(ex.Current(), TopAbs_VERTEX); vx.More(); vx.Next())
+                if (vx.Current().IsSame(ends.FindKey(i))) ++uses;
+        if (uses < 2) return false;
+    }
+    return ends.Extent() > 0;
+}
+
+// A boolean against a curved tool can leave a face carrying a wire that is not
+// a loop: a single edge lying across the ring left round a collar, where the
+// tool's seam met the body's. It bounds nothing -- the face has the area it
+// should -- but it is an edge with one face on it, which is what an open shell
+// looks like to everything downstream.
+//
+// So the face is rebuilt from the wires that are loops. Asked for only when
+// the shell does not close, and kept only if it closes it: a repair that does
+// not repair is not applied.
+BrepRef mendShell(const BrepRef& made) {
+    if (!made || made->shape.IsNull() || closedShell(*made)) return made;
+    try {
+        Handle(BRepTools_ReShape) reshape = new BRepTools_ReShape();
+        bool any = false;
+        for (int i = 0; i < made->faces.Extent(); ++i)
+            for (TopExp_Explorer wx(made->faces(i + 1), TopAbs_WIRE); wx.More(); wx.Next())
+                if (!wireIsClosed(TopoDS::Wire(wx.Current()))) {
+                    reshape->Remove(wx.Current());
+                    any = true;
+                }
+        if (!any) return made;
+
+        const TopoDS_Shape out = reshape->Apply(made->shape);
+        if (out.IsNull() || !shapeIsValid(out)) return made;
+
+        // The names, carried by what each face became: ReShape hands back the
+        // new shape for every old one it touched, and left the rest alone.
+        TopTools_IndexedMapOfShape after;
+        TopExp::MapShapes(out, TopAbs_FACE, after);
+        std::vector<ElementId> names(static_cast<size_t>(after.Extent()), kNoId);
+        for (int k = 0; k < made->faces.Extent(); ++k) {
+            const TopoDS_Shape& was = made->faces(k + 1);
+            const TopoDS_Shape now = reshape->Value(was);
+            const int at = after.FindIndex(now.IsNull() ? was : now);
+            if (at > 0) names[static_cast<size_t>(at - 1)] = made->faceNames[static_cast<size_t>(k)];
+        }
+        BrepRef fixed = makeBrep(out, names);
+        return fixed && closedShell(*fixed) ? fixed : made;
+    } catch (const Standard_Failure&) {
+        return made;
+    }
 }
 
 } // namespace
@@ -1644,6 +1812,7 @@ BrepRef extrudeFaces(const BrepRef& s, const std::vector<FaceId>& faces, Real di
         current = mergeFlush && !intersect
                       ? unifyFlush(combined, current, nameId(salt, IdRole::Patch, targets[i]))
                       : combined;
+        current = mendShell(current);
         if (newFaces) newFaces->push_back(targets[i]);
     }
     return current;
@@ -1845,6 +2014,52 @@ BrepRef scaleFaces(const BrepRef& s, const std::vector<FaceId>& faces, Real fact
     if (factor <= 0.0) {
         if (reason) *reason = "a face cannot be scaled to nothing";
         return {};
+    }
+
+    // A round face has no plane to grow in. A cylinder scaled is a cylinder of
+    // another radius -- the face moved along its own surface -- so that is what
+    // scaling one means, and a bore scaled up is a wider hole rather than a
+    // narrower one. Decided here rather than in the panel, so that a scale
+    // saved in a history still means the same thing when it is re-run.
+    bool round = true;
+    for (FaceId f : faces)
+        if (!validFace(*s, f) ||
+            BRepAdaptor_Surface(faceAt(*s, f)).GetType() != GeomAbs_Cylinder)
+            round = false;
+    if (round) {
+        std::vector<ElementId> targets;
+        for (FaceId f : faces) targets.push_back(faceName(*s, f));
+        BrepRef current = s;
+        for (ElementId id : targets) {
+            std::vector<FaceId> at;
+            findFaces(*current, id, at);
+            if (at.empty()) {
+                if (reason) *reason = "a face to scale no longer exists";
+                return {};
+            }
+            Vec3 axisPoint{}, axis{};
+            Real radius = 0.0;
+            if (!faceCylinder(*current, at.front(), axisPoint, axis, radius) || radius < 1e-9) {
+                if (reason) *reason = "that face has no radius to scale";
+                return {};
+            }
+            // Which way its own normal points: out of the material on a boss,
+            // into the hole on a bore. Scaling up means a bigger radius either
+            // way, so the two go opposite ways along the normal.
+            const Vec3 on = facePoint(*current, at.front());
+            Vec3 radial = on - axisPoint;
+            radial = radial - axis * dot(radial, axis);
+            const Real sense = dot(radial, faceNormal(*current, at.front())) >= 0.0 ? 1.0 : -1.0;
+            const Real distance = sense * radius * (factor - 1.0);
+            if (std::fabs(distance) < 1e-9) {
+                if (reason) *reason = "that is the size it already is";
+                return {};
+            }
+            current = extrudeFaces(current, at, distance, salt, nullptr, reason,
+                                   /*mergeFlush=*/true, Vec3{}, /*intersect=*/false);
+            if (!current) return {};
+        }
+        return current;
     }
 
     try {

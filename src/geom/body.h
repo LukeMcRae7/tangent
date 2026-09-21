@@ -108,6 +108,14 @@ public:
         if (brep_) return brep::faceCentroid(*brep_, f);
         return hasFace(f) ? mesh_.faceCentroid(f) : Vec3{};
     }
+    // A point on the face itself. For a flat face that is its centroid; for a
+    // curved one the centroid can be somewhere else entirely -- the centre of
+    // mass of a cylinder's wall is on its axis -- and anything standing an
+    // arrow or a label on the face wants a point that is on it.
+    Vec3 facePoint(FaceId f) const {
+        if (brep_) return brep::facePoint(*brep_, f);
+        return hasFace(f) ? mesh_.faceCentroid(f) : Vec3{};
+    }
     Real faceArea(FaceId f)     const {
         if (brep_) return brep::faceArea(*brep_, f);
         return hasFace(f) ? mesh_.faceArea(f) : Real(0);

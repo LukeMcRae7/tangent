@@ -132,6 +132,7 @@ void vertexEdges(const BrepShape&, VertexId, std::vector<EdgeId>& out) { out.cle
 
 Vec3 faceNormal(const BrepShape&, FaceId) { return {0, 0, 0}; }
 Vec3 faceCentroid(const BrepShape&, FaceId) { return {0, 0, 0}; }
+Vec3 facePoint(const BrepShape&, FaceId) { return {0, 0, 0}; }
 Real faceArea(const BrepShape&, FaceId) { return 0.0; }
 AABB faceBounds(const BrepShape&, FaceId) { return {}; }
 Vec3 vertexPosition(const BrepShape&, VertexId) { return {0, 0, 0}; }

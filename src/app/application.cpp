@@ -3246,7 +3246,10 @@ void Application::beginFaceMove(FaceOp op) {
     Vec3 anchor{};
     for (FaceId f : faces) {
         dir += normalize(transformVector(normalMatrix(model), obj->body.faceNormal(f)));
-        anchor += transformPoint(model, obj->body.faceCentroid(f));
+        // A point on the face, not its centre of mass: the centre of mass of a
+        // band round a cylinder is on the axis, and an arrow standing there
+        // starts inside the part.
+        anchor += transformPoint(model, obj->body.facePoint(f));
     }
     anchor *= 1.0 / static_cast<Real>(faces.size());
     if (lengthSq(dir) < 1e-12) { faceTool_.active = false; return; }
@@ -5434,6 +5437,68 @@ void Application::stepFaceDemo() {
         std::fprintf(stderr, "[face-demo] after joining: %zu objects\n",
                      scene_.objects().size());
         report("joined on the way");
+        return;
+    }
+
+    // 15-17: the band round a cylinder. A curved face has no one direction to
+    // be swept along, so pushing it is the face moved along its own surface --
+    // a collar, a groove, or the same thing asked for as a scale.
+    if (faceDemo_ >= 15 && faceDemo_ <= 17) {
+        scene_.clear();
+        PrimitiveSpec spec;
+        spec.kind = PrimitiveKind::Cylinder;
+        spec.cylinder = {15.0, 27.5, 32};
+        const ObjectId cyl = scene_.addPrimitive(PrimitiveKind::Cylinder, spec, {0, 0, 0});
+        SceneObject* o = scene_.find(cyl);
+        const Real before = o->body.health(false).volume;
+        // Two divides, as steps in the history -- the way the Divide command
+        // leaves them, so what follows is acting on the real chain.
+        for (Real z : {-4.25, -1.75}) {
+            Feature d;
+            d.kind = FeatureKind::Divide;
+            d.axisPoint = {0, 0, z};
+            d.axisDir = {0, 0, 1};
+            std::string why;
+            if (!scene_.addFeature(cyl, std::move(d), &why))
+                std::fprintf(stderr, "[face-demo] divide refused: %s\n", why.c_str());
+        }
+        o = scene_.find(cyl);
+
+        FaceId band = kInvalid;
+        std::vector<FaceId> fs;
+        o->body.allFaces(fs);
+        for (FaceId f : fs) {
+            const Vec3 c = o->body.faceCentroid(f);
+            if (o->body.faceKind(f) == SurfaceKind::Cylinder && c.z > -4.25 && c.z < -1.75)
+                band = f;
+        }
+        camera_.distance = 110.0f;
+        camera_.snapToGoal();
+        scene_.select(cyl);
+        scene_.clearElementSelection();
+        if (band != kInvalid) scene_.selectElement({cyl, ElementKind::Face, band}, true);
+
+        const bool scaling = faceDemo_ == 17;
+        beginFaceMove(scaling ? FaceOp::Scale : FaceOp::Move);
+        faceTool_.typedValue = faceDemo_ == 15 ? "2" : faceDemo_ == 16 ? "-2" : "20";
+        updateFaceMove(false);
+        while (faceTool_.preview.busy()) updateFaceMove(false);
+        updateFaceMove(false);
+        commitFaceMove();
+
+        const SceneObject* after = scene_.find(cyl);
+        const Real r = faceDemo_ == 15 ? 17.0 : faceDemo_ == 16 ? 13.0 : 18.0;
+        const Real ring = kPi * (r * r - 225.0) * 2.5;
+        const Real want = before + ring;
+        const Real got = after->body.health(false).volume;
+        std::fprintf(stderr,
+                     "[face-demo] band %s: %d faces, %.3f mm3, arithmetic says %.3f, "
+                     "agrees=%d, solid=%d\n",
+                     faceDemo_ == 15 ? "pushed out 2 mm"
+                     : faceDemo_ == 16 ? "pushed in 2 mm" : "scaled to 120 per cent",
+                     after->body.faceCount(), got, want,
+                     std::fabs(got - want) < std::fabs(want) * 1e-5 ? 1 : 0,
+                     (int)after->body.health().solid());
         return;
     }
 

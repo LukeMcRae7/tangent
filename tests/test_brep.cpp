@@ -5,6 +5,7 @@
 // The parts are the ones the mesh kernel refuses, because that is the whole
 // argument for the backend existing.
 #include "geom/body.h"
+#include "geom/brep.h"
 #include "geom/fasteners.h"
 #include "geom/operations.h"
 
@@ -680,6 +681,112 @@ int main() {
         check(acrossTheBore == 0, "no seam line is drawn across the bore");
         std::printf("  rounded cube with a bore: %d faces, %zu triangles, %zu lines\n",
                     body.faceCount(), rm.triangles.size() / 3, rm.edgeLines.size() / 2);
+    }
+
+    std::printf("--- a band round a cylinder, pushed out and in ---\n");
+    {
+        // What a person actually does: divide a cylinder twice and push the
+        // band of wall between the cuts. There is no one direction to push a
+        // curved face in, so what has to come out is a collar -- the same
+        // cylinder, two millimetres wider, over the band's own height.
+        auto banded = [](Body& body, Real& before) {
+            PrimitiveSpec spec;
+            spec.kind = PrimitiveKind::Cylinder;
+            spec.cylinder = {15.0, 27.5, 32};
+            makePrimitive(spec, body, Backend::Brep);
+            before = body.health(false).volume;
+            std::string why;
+            if (!divideBody(body, {0, 0, -4.25}, {0, 0, 1}, 800, &why)) return kInvalid;
+            if (!divideBody(body, {0, 0, -1.75}, {0, 0, 1}, 801, &why)) return kInvalid;
+            std::vector<FaceId> fs;
+            body.allFaces(fs);
+            for (FaceId f : fs) {
+                const Vec3 c = body.faceCentroid(f);
+                if (body.faceKind(f) == SurfaceKind::Cylinder && c.z > -4.25 && c.z < -1.75)
+                    return f;
+            }
+            return kInvalid;
+        };
+
+        {
+            Body body;
+            Real before = 0;
+            const FaceId band = banded(body, before);
+            check(band != kInvalid, "the band is a cylindrical face of its own");
+            check(near(body.health(false).volume, before, 1e-6), "the divides took nothing away");
+            check(near(body.faceArea(band), 2.0 * kPi * 15.0 * 2.5, 1e-6),
+                  "and it is 2.5 mm of the wall");
+
+            std::vector<FaceId> moved;
+            std::string why;
+            check(extrudeFaces(body, {band}, 2.0, &moved, 802, ExtrudeOp::Auto, &why),
+                  "the band pushes out: " + why);
+            check(body.health().solid(), "leaving a solid");
+            const Real collar = kPi * (17.0 * 17.0 - 15.0 * 15.0) * 2.5;
+            check(near(body.health(false).volume, before + collar, 1e-3),
+                  "a collar of exactly the ring between 15 and 17: " +
+                      std::to_string(body.health(false).volume));
+            check(!moved.empty(), "and the face that moved is reported");
+            std::printf("  collar: %d faces, %.3f mm3\n", body.faceCount(),
+                        body.health(false).volume);
+        }
+        {
+            // The other way: a groove, not a collar.
+            Body body;
+            Real before = 0;
+            const FaceId band = banded(body, before);
+            std::vector<FaceId> moved;
+            std::string why;
+            check(band != kInvalid && extrudeFaces(body, {band}, -2.0, &moved, 803,
+                                                   ExtrudeOp::Auto, &why),
+                  "the band pushes in: " + why);
+            const Real groove = kPi * (15.0 * 15.0 - 13.0 * 13.0) * 2.5;
+            check(near(body.health(false).volume, before - groove, 1e-3),
+                  "a groove of exactly the ring between 13 and 15: " +
+                      std::to_string(body.health(false).volume));
+            check(body.health().solid(), "and it is still a solid");
+        }
+        {
+            // Scale Face on a round face is a change of radius: 120 per cent
+            // of a 15 mm wall is an 18 mm one.
+            Body body;
+            Real before = 0;
+            const FaceId band = banded(body, before);
+            std::string why;
+            check(band != kInvalid && scaleFaces(body, {band}, 1.2, 804, &why),
+                  "the band scales: " + why);
+            const Real collar = kPi * (18.0 * 18.0 - 15.0 * 15.0) * 2.5;
+            check(near(body.health(false).volume, before + collar, 1e-3),
+                  "to 18 mm: " + std::to_string(body.health(false).volume));
+            check(body.health().solid(), "and it is a solid");
+        }
+        {
+            // A bore's wall is curved too, and pushing it moves the hole's
+            // surface along its own normal -- which points into the hole, so
+            // pushing it out makes the hole smaller.
+            Body plate40 = plate(40, 40, 10);
+            HoleCut cut;
+            cut.diameter = 10.0;
+            cut.through = true;
+            std::string why;
+            check(drillHole(plate40, {0, 0, 5}, {0, 0, -1}, cut, 810, &why), "a hole to widen");
+            const Real bored = plate40.health(false).volume;
+            FaceId wall = kInvalid;
+            std::vector<FaceId> fs;
+            plate40.allFaces(fs);
+            for (FaceId f : fs)
+                if (plate40.faceKind(f) == SurfaceKind::Cylinder) wall = f;
+            check(wall != kInvalid, "the bore is one cylindrical face");
+            std::vector<FaceId> moved;
+            why.clear();
+            check(wall != kInvalid &&
+                      extrudeFaces(plate40, {wall}, -1.0, &moved, 811, ExtrudeOp::Auto, &why),
+                  "the bore's wall pushes back: " + why);
+            // Pushed against its normal, the wall moves away from the axis:
+            // a 10 mm hole becomes a 12 mm one.
+            check(near(plate40.health(false).volume, bored - kPi * (36.0 - 25.0) * 10.0, 1e-3),
+                  "and the hole is 12 mm across: " + std::to_string(plate40.health(false).volume));
+        }
     }
 
     std::printf("--- a draft, so a wall leans the way it has to ---\n");

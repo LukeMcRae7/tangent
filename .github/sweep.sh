@@ -9,6 +9,7 @@ modes=(
   "--snap-demo 1" "--profile-demo 1"
   "--face-demo 5" "--face-demo 7" "--face-demo 8" "--face-demo 9"
   "--face-demo 10" "--face-demo 11" "--face-demo 12"
+  "--face-demo 15" "--face-demo 16" "--face-demo 17"
   "--preview-check 1" "--preview-check 2" "--preview-check 3"
   "--preview-check 4" "--preview-check 5" "--preview-check 6"
   "--preview-check 7"
@@ -84,6 +85,19 @@ for m in 1 2 3; do
     fail=1
   else
     printf '  ok    --draft-demo %s\n' "$m"
+  fi
+done
+
+# A curved face has no one direction to be swept along: pushing the band round
+# a cylinder has to make a collar of exactly the ring between the two radii.
+for m in 15 16 17; do
+  out=$(timeout 200 ./build/tangent --face-demo $m --smoke-test 30 2>&1)
+  if echo "$out" | grep "\[face-demo\]" | grep -q "agrees=0"; then
+    printf '  FAIL  face-demo %s\n' "$m"
+    echo "$out" | grep "\[face-demo\]" | sed 's/^/        /'
+    fail=1
+  else
+    printf '  ok    --face-demo %s\n' "$m"
   fi
 done
 
