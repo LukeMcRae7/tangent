@@ -683,6 +683,44 @@ int main() {
                     body.faceCount(), rm.triangles.size() / 3, rm.edgeLines.size() / 2);
     }
 
+    std::printf("--- the whole body grown and shrunk ---\n");
+    {
+        // A clearance copy: the part, 1 mm bigger all round. The corners have
+        // to stay corners, so a 20 mm cube becomes a 22 mm one exactly -- a
+        // rounded offset would come out at 10,605 and look close enough.
+        Body cube = plate(20, 20, 20);
+        std::string why;
+        check(offsetBody(cube, 1.0, 940, &why), "the cube grows: " + why);
+        check(near(cube.health(false).volume, 22.0 * 22.0 * 22.0, 1e-4),
+              "to exactly 22 mm cubed: " + std::to_string(cube.health(false).volume));
+        check(cube.faceCount() == 6, "still six faces");
+        check(cube.health().solid(), "and a solid");
+
+        Body small = plate(20, 20, 20);
+        why.clear();
+        check(offsetBody(small, -2.0, 941, &why), "and shrinks: " + why);
+        check(near(small.health(false).volume, 16.0 * 16.0 * 16.0, 1e-4),
+              "to 16 mm cubed: " + std::to_string(small.health(false).volume));
+
+        // Past nothing is refused rather than handed back as an empty body.
+        Body gone = plate(20, 20, 20);
+        why.clear();
+        check(!offsetBody(gone, -12.0, 942, &why), "shrinking past nothing is refused");
+        check(!why.empty(), "with a reason: " + why);
+
+        // A round body keeps its roundness: a cylinder grown by 2 is a
+        // cylinder 2 wider in the radius and 4 longer overall.
+        PrimitiveSpec spec;
+        spec.kind = PrimitiveKind::Cylinder;
+        spec.cylinder = {10.0, 20.0, 32};
+        Body cyl;
+        makePrimitive(spec, cyl, Backend::Brep);
+        why.clear();
+        check(offsetBody(cyl, 2.0, 943, &why), "the cylinder grows: " + why);
+        check(near(cyl.health(false).volume, kPi * 144.0 * 24.0, 1e-3),
+              "to r 12 and 24 tall: " + std::to_string(cyl.health(false).volume));
+    }
+
     std::printf("--- a part split for the bed, with pins to put it back ---\n");
     {
         // A plate too long for a bed, cut in half across its length. Two pins

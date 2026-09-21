@@ -121,6 +121,9 @@ public:
     void setAutoExtrude(float mm) { autoExtrude_ = true; autoExtrudeMm_ = mm; }
     void setShellDemo(float wallMm) { shellDemo_ = wallMm; }
     void setInsetDemo(float mm) { insetDemo_ = mm; }
+    // Grows the body by `mm`, then adjusts it in the panel to half that: what
+    // a clearance copy is made with.
+    void setOffsetDemo(float mm) { offsetDemo_ = mm; }
     // 1 cuts through the middle, 2 moves the plane, 3 cuts by another axis,
     // 4 puts two pins across that cut, 5 two sockets for a dowel instead.
     void setSplitDemo(int step) { splitDemo_ = step; }
@@ -1084,6 +1087,9 @@ private:
 
     AmountToolState insetTool_;
     AmountToolState shellTool_;
+    // The same shape of tool again: one number, applied at once, adjusted
+    // until Done. `amount` is signed here -- out is bigger, in is smaller.
+    AmountToolState offsetTool_;
     // Placing a hole, making it, and the panel that adjusts it.
     void beginDraft();
     void commitDraft();
@@ -1101,6 +1107,11 @@ private:
     // The cut the current choices come to: the table's numbers for the
     // fastener, or what was typed when there is none.
     HoleCut holeCutNow() const;
+
+    // Offset: the whole body grown or shrunk, adjusted in its panel until Done.
+    void beginOffset();
+    void commitOffset();
+    void drawOffsetPanel();
 
     void beginInset();
     void commitInset();
@@ -1174,7 +1185,7 @@ private:
     // viewport click in the first place. This is the first of those, because
     // this app does confirm on a click.
     enum class Settled { None, Fillet, Divide, Face, Pattern, Create, Sketch, Combine, Inset, Shell,
-                         Split, Hole, Draft };
+                         Split, Hole, Draft, Offset };
     Settled  settled_ = Settled::None;
     ObjectId settledObject_ = kNoObject;
 
@@ -1330,6 +1341,7 @@ private:
     bool        shellFilletDemo_ = false;
     int         splitDemo_ = 0;
     float       insetDemo_ = 0.0f;      // distance in mm; 0 means do not
+    float       offsetDemo_ = 0.0f;     // likewise, for the whole-body offset
     float       shellDemo_ = 0.0f;      // wall in mm; 0 means do not
     bool        holdTransform_ = false;
 

@@ -1034,6 +1034,65 @@ void Application::drawInsetPanel() {
     else if (footer < 0)             insetTool_.reset();
 }
 
+// The whole body, grown or shrunk. The one number is signed, because out and
+// in are the same operation and a panel with two buttons for it would be two
+// ways of saying the same thing.
+void Application::drawOffsetPanel() {
+    const bool settled = settledIs(Settled::Offset);
+    if (!settled && !offsetTool_.pending) return;
+    if (!scene_.find(offsetTool_.objectId)) { offsetTool_.reset(); return; }
+    const double was = offsetTool_.amount;
+
+    if (!ui::beginCommand("##offset", "Offset", Glyph::Offset,
+                          objectName(scene_, offsetTool_.objectId)))
+        return;
+
+    // How far it can go in: half the thinnest way through the body, which is
+    // where shrinking runs out of material.
+    double most = 20.0;
+    if (const SceneObject* o = scene_.find(offsetTool_.objectId)) {
+        const AABB b = o->localBounds;
+        if (b.valid()) most = std::max(0.1, std::min({b.size().x, b.size().y, b.size().z}) * 0.5);
+    }
+    const ui::NumberEdit v = ui::commandNumber("Distance", offsetTool_.amount, "mm",
+                                               !offsetTool_.typedValue.empty(),
+                                               !offsetTool_.typedValue.empty(),
+                                               offsetTool_.typedValue.c_str(),
+                                               -most, std::max(most, offsetTool_.amount),
+                                               /*signedRange=*/true);
+    applyBar(v, /*active=*/false, offsetTool_.typedValue,
+             [&](double x) { offsetTool_.amount = x; }, [] {});
+
+    // What it comes to on the part, which is the thing being judged: a
+    // clearance copy is read as a difference, not as a size.
+    if (const SceneObject* o = scene_.find(offsetTool_.objectId)) {
+        const AABB b = o->localBounds;
+        if (b.valid()) {
+            char size[80];
+            const Vec3 e = b.size();
+            std::snprintf(size, sizeof size, "%.2f x %.2f x %.2f mm", e.x, e.y, e.z);
+            ui::commandValue("Now", size);
+        }
+    }
+
+    if (settled) ui::commandApplied("Offset");
+    else         ui::commandRefused(offsetTool_.refusal.c_str());
+    ui::commandHint("Every face moves along its own normal and the corners stay corners, so a "
+                    "20 mm cube offset by 1 is a 22 mm cube. Out is bigger, in is smaller.");
+
+    const int footer = settled ? ui::commandFooter("Done", true, nullptr)
+                               : ui::commandFooter("Try again", true, "Cancel");
+    ui::endCommand();
+    if (offsetTool_.amount != was) {
+        if (settled) recommitSettled();
+        else         { offsetTool_.active = true; commitOffset(); }
+        return;
+    }
+    if (footer > 0 && settled)  dismissSettled();
+    else if (footer > 0)        { offsetTool_.active = true; commitOffset(); }
+    else if (footer < 0)        offsetTool_.reset();
+}
+
 void Application::drawShellPanel() {
     const bool settled = settledIs(Settled::Shell);
     if (!settled && !shellTool_.pending) return;

@@ -104,6 +104,8 @@ int main(int argc, char** argv) {
             app.setDraftDemo(std::atoi(argv[++i]));
         } else if (std::strcmp(argv[i], "--delete-face-demo") == 0 && i + 1 < argc) {
             app.setDeleteFaceDemo(std::atoi(argv[++i]));
+        } else if (std::strcmp(argv[i], "--offset-demo") == 0 && i + 1 < argc) {
+            app.setOffsetDemo(static_cast<float>(std::atof(argv[++i])));
         } else if (std::strcmp(argv[i], "--snap-demo") == 0 && i + 1 < argc) {
             app.setSnapDemo(std::atoi(argv[++i]));
         } else if (std::strcmp(argv[i], "--shell-fillet-demo") == 0) {

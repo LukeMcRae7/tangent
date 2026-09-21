@@ -1180,6 +1180,34 @@ bool Application::init() {
         if (!notice_.empty()) std::fprintf(stderr, "[app] %s\n", notice_.c_str());
     }
 
+    // The offset dialog: the body grown, then adjusted to half as much, which
+    // is what making a clearance copy looks like.
+    if (offsetDemo_ != 0.0f && !scene_.objects().empty()) {
+        const ObjectId id = scene_.objects().front()->id;
+        scene_.select(id);
+        const Real before = scene_.find(id)->body.health(false).volume;
+        const Vec3 was = scene_.find(id)->localBounds.size();
+        view_.offsetAmount = offsetDemo_;
+        beginOffset();
+        auto say = [&](const char* what, Real d) {
+            const SceneObject* o = scene_.find(id);
+            const Vec3 now = o->localBounds.size();
+            const Real want = (was.x + 2 * d) * (was.y + 2 * d) * (was.z + 2 * d);
+            std::fprintf(stderr,
+                         "[offset-demo] %s: %.2f x %.2f x %.2f mm, %.3f mm3, arithmetic says "
+                         "%.3f, agrees=%d, solid=%d\n",
+                         what, now.x, now.y, now.z, o->body.health(false).volume, want,
+                         std::fabs(o->body.health(false).volume - want) < want * 1e-6 ? 1 : 0,
+                         (int)o->body.health().solid());
+        };
+        say("grown", offsetDemo_);
+        offsetTool_.amount = offsetDemo_ * 0.5;
+        recommitSettled();
+        say("adjusted to half", offsetDemo_ * 0.5);
+        dismissSettled();
+        (void)before;
+    }
+
     // The inset dialog, driven the same way: made from the menu's action, then
     // adjusted to another distance.
     if (insetDemo_ > 0.0f && !scene_.objects().empty()) {
@@ -1337,7 +1365,8 @@ bool Application::editToolActive() const {
            reduceTool_.active || combineTool_.active || holeTool_.placing ||
            draftTool_.pending ||
            // Open with nothing applied, waiting for a number that works.
-           insetTool_.pending || shellTool_.pending || splitTool_.pending || holeTool_.pending;
+           insetTool_.pending || shellTool_.pending || splitTool_.pending ||
+           holeTool_.pending || offsetTool_.pending;
 }
 
 bool Application::refuseMeshEdit(const SceneObject& obj, const char* what) {
@@ -3097,6 +3126,63 @@ void Application::drawHoleOverlay() {
     renderer_.addFrontDashes(camera_, at, at + dir * depth, col, 1.6, 4.0, 3.0);
 }
 
+// The whole body, grown or shrunk. One number, and the same settled panel as
+// Inset and Shell: the size of a clearance is chosen by looking at the result.
+void Application::beginOffset() {
+    dismissSettled();
+    if (tool_.active() || createTool_.active() || sketchTool_.active() || editToolActive()) {
+        setNotice("Finish the current operation first");
+        return;
+    }
+    const ObjectId id = scene_.contextObject();
+    SceneObject* obj = scene_.find(id);
+    if (!obj) { setNotice("Select an object first"); return; }
+    if (refuseMeshEdit(*obj, "Offsetting a body")) return;
+    if (obj->body.empty()) { setNotice("That object has no body to offset"); return; }
+
+    offsetTool_.reset();
+    offsetTool_.objectId = id;
+    offsetTool_.amount = view_.offsetAmount != 0.0 ? view_.offsetAmount : 0.2;
+    offsetTool_.before = obj->body;
+    offsetTool_.chainBefore = obj->features;
+    offsetTool_.active = true;
+    preEditSolid_ = obj->healthVersion == obj->geometryVersion && obj->health.solid();
+    commitOffset();
+}
+
+void Application::commitOffset() {
+    if (!offsetTool_.active) return;
+    const ObjectId id = offsetTool_.objectId;
+    offsetTool_.active = false;
+    SceneObject* obj = scene_.find(id);
+    if (!obj) return;
+
+    std::vector<Feature> chainBefore = offsetTool_.chainBefore;
+    obj->features = offsetTool_.chainBefore;
+    obj->body = offsetTool_.before;
+
+    Feature f;
+    f.kind = FeatureKind::Offset;
+    f.distance = offsetTool_.amount;
+
+    std::string why;
+    if (scene_.addFeature(id, std::move(f), &why) && editKeepsSolid(id)) {
+        view_.offsetAmount = offsetTool_.amount;
+        undo_.push(std::make_unique<FeatureCommand>(id, std::move(chainBefore), obj->features,
+                                                    "Offset"),
+                   /*merge=*/recommitting_);
+        offsetTool_.pending = false;
+        offsetTool_.refusal.clear();
+        settleCommand(Settled::Offset, id);
+    } else {
+        obj->features = std::move(chainBefore);
+        obj->body = offsetTool_.before;
+        obj->refreshDerived();
+        offsetTool_.pending = true;
+        offsetTool_.refusal = why.empty() ? "the body will not take that offset" : why;
+    }
+}
+
 void Application::beginInset() {
     dismissSettled();
     if (tool_.active() || createTool_.active() || sketchTool_.active() || editToolActive()) {
@@ -4078,6 +4164,7 @@ void Application::recommitSettled() {
         case Settled::Pattern: patternTool_.active = true; commitPattern();  break;
         case Settled::Inset:   insetTool_.active = true;   commitInset();    break;
         case Settled::Shell:   shellTool_.active = true;   commitShell();    break;
+        case Settled::Offset:  offsetTool_.active = true;  commitOffset();   break;
         case Settled::Hole:    holeTool_.active = true;    commitHole();     break;
         case Settled::Draft:   draftTool_.active = true;   commitDraft();    break;
         default:               break;
@@ -7554,6 +7641,7 @@ void Application::applyActions() {
     if (a.addRequested || a.sketch || a.editSketchObject != kNoObject ||
         a.deleteSelected || a.duplicateSelected || a.mergeFaces || a.deleteFace ||
         a.booleanRequested || a.split || a.shell || a.inset || a.hole || a.draft ||
+        a.offset ||
         a.undo || a.redo ||
         a.importStep || a.importMesh || a.importSvg || a.convertToSolid || a.reduceMesh ||
         a.newProject || a.openProject || a.rebuildObject != kNoObject ||
@@ -7668,6 +7756,7 @@ void Application::applyActions() {
     if (a.inset)   beginInset();
     if (a.hole)    beginHole();
     if (a.draft)   beginDraft();
+    if (a.offset)  beginOffset();
     if (a.booleanRequested) beginCombine(a.booleanOp);
 
     if (a.rebuildObject != kNoObject) {
@@ -7835,6 +7924,7 @@ void Application::buildUi() {
     drawSplitPanel();
     drawHolePanel();
     drawDraftPanel();
+    drawOffsetPanel();
     drawPatternPanel();
     drawReducePanel();
 

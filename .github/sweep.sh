@@ -20,7 +20,7 @@ modes=(
   "--pattern-demo 1" "--pattern-demo 2" "--pattern-demo 3" "--pattern-demo 4"
   "--pattern-demo 5" "--pattern-demo 6" "--pattern-demo 7" "--pattern-demo 8"
   "--step-demo /tmp/tg_sweep.step"
-  "--inset-demo 2" "--shell-demo 2" "--split-demo 3"
+  "--inset-demo 2" "--shell-demo 2" "--split-demo 3" "--offset-demo 1"
   "--split-demo 4" "--split-demo 5"
 )
 
@@ -129,6 +129,17 @@ for m in 4 5; do
     printf '  ok    --split-demo %s\n' "$m"
   fi
 done
+
+# An offset has to be the size it says: a 20 mm cube grown by 1 is a 22 mm cube
+# and not a 22 mm cube with a round on every edge.
+out=$(timeout 200 ./build/tangent --offset-demo 1 --smoke-test 30 2>&1)
+if echo "$out" | grep "\[offset-demo\]" | grep -q "agrees=0"; then
+  printf '  FAIL  offset-demo\n'
+  echo "$out" | grep "\[offset-demo\]" | sed 's/^/        /'
+  fail=1
+else
+  printf '  ok    --offset-demo 1\n'
+fi
 
 # A large mesh has to get all the way to being useful: reduced to fit, turned
 # into a solid, bored, and split -- each step checked for what it made, not

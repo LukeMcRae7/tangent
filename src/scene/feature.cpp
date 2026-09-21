@@ -33,6 +33,7 @@ const char* featureKindName(FeatureKind k) {
         case FeatureKind::Hole:       return "Hole";
         case FeatureKind::Draft:      return "Draft";
         case FeatureKind::DeleteFace: return "Delete Face";
+        case FeatureKind::Offset:     return "Offset";
         case FeatureKind::Move:       return "Move";
         case FeatureKind::Rotate:     return "Rotate";
         case FeatureKind::Scale:      return "Scale";
@@ -261,6 +262,9 @@ std::string Feature::summary() const {
         }
         case FeatureKind::DeleteFace:
             std::snprintf(buf, sizeof(buf), "Delete Face  %s", faces.describe("face").c_str());
+            break;
+        case FeatureKind::Offset:
+            std::snprintf(buf, sizeof(buf), "Offset  %+.2f mm", static_cast<double>(distance));
             break;
         case FeatureKind::Draft: {
             const Vec3 d = axisDir;
@@ -690,6 +694,14 @@ bool evaluateFrom(std::vector<Feature>& features, size_t from,
                                  : why.c_str());
             else
                 body = std::move(combined);
+            break;
+        }
+
+        case FeatureKind::Offset: {
+            if (body.empty()) { fail("there is no body to offset"); break; }
+            std::string why;
+            if (!offsetBody(body, f.distance, f.uid, &why))
+                fail(why.empty() ? "the body could not be offset" : why.c_str());
             break;
         }
 

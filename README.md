@@ -114,6 +114,12 @@ drill leaves, which is also the shape a printer wants: a flat ceiling over a
 hole has nothing to print onto. The hole belongs to its face, so when that face
 moves the hole goes with it.
 
+**A body can be grown or shrunk whole.** Modify > Offset moves every face along
+its own normal, corners staying corners, so a 20 mm cube offset by 1 mm is a
+22 mm cube rather than one with a round on every edge. It is how a clearance
+copy of a part is made -- two tenths bigger all round to fit the pocket it sits
+in -- and how the void a part needs is made from the part.
+
 **A split can cut its own alignment pins.** A part too big for the bed is cut
 in two, and the Split panel will put two, three or four pins across the cut
 while it is there -- a pin on one half and a socket in the other, or a socket

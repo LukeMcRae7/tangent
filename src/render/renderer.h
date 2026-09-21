@@ -46,6 +46,9 @@ struct ViewOptions {
     // wall most printers make well.
     Real  shellThickness = 2.0;
     Real  insetAmount   = 2.0;
+    // Signed: out makes the body bigger, in smaller. Two tenths is a printed
+    // clearance, which is what an offset is usually for.
+    Real  offsetAmount  = 0.2;
 };
 
 // Sub-rectangle of the framebuffer to draw into, in physical pixels and in

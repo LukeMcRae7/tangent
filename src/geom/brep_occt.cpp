@@ -2687,6 +2687,47 @@ std::vector<ElementId> nameHoleTool(const TopoDS_Shape& shape, Vec3 at, Vec3 dir
 
 } // namespace
 
+BrepRef offsetBody(const BrepRef& s, Real distance, ElementId salt, std::string* reason) {
+    if (reason) reason->clear();
+    if (!s || s->shape.IsNull()) {
+        if (reason) *reason = "there is no body to offset";
+        return {};
+    }
+    if (std::fabs(distance) < 1e-9) {
+        if (reason) *reason = "the distance is zero";
+        return {};
+    }
+    const AABB box = bounds(*s);
+    if (distance < 0.0 && -distance >= std::min({box.size().x, box.size().y, box.size().z}) * 0.5) {
+        if (reason) *reason = "that would shrink the body past nothing";
+        return {};
+    }
+    try {
+        BRepOffsetAPI_MakeOffsetShape mk;
+        // Intersection rather than Arc: the faces are extended until they
+        // meet, so a cube stays a cube. Arc would put a round on every edge
+        // that nobody asked for and that a clearance copy must not have.
+        mk.PerformByJoin(s->shape, distance, 1e-4, BRepOffset_Skin, Standard_False,
+                         Standard_False, GeomAbs_Intersection);
+        mk.Build();
+        if (!mk.IsDone() || mk.Shape().IsNull()) {
+            if (reason)
+                *reason = distance > 0.0 ? "the body will not grow by that much"
+                                         : "the body will not shrink by that much";
+            return {};
+        }
+        const TopoDS_Shape out = mk.Shape();
+        if (!acceptable(out, reason)) {
+            if (reason && reason->empty()) *reason = "the offset produced no valid solid";
+            return {};
+        }
+        return makeBrep(out, propagateNames(mk, {{s.get()}}, out, salt));
+    } catch (const Standard_Failure& e) {
+        if (reason) *reason = kernelReason(e, "the body could not be offset");
+        return {};
+    }
+}
+
 BrepRef drillHole(const BrepRef& s, Vec3 at, Vec3 into, const HoleCut& cut, ElementId salt,
                   std::string* reason) {
     if (reason) reason->clear();

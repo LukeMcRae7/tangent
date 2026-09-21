@@ -131,6 +131,11 @@ struct FilletSpec {
 // Rounds edges. `reason` gets a short phrase on refusal; see the note above.
 bool filletEdges(Body& body, const FilletSpec& spec, std::string* reason = nullptr);
 
+// Grows or shrinks the whole body, every face moving along its own normal and
+// the corners staying corners: a clearance copy of a part, or the void it has
+// to fit into. Refused on a mesh.
+bool offsetBody(Body& body, Real distance, ElementId salt = 0, std::string* reason = nullptr);
+
 // Takes faces off the body and heals the gap: a boss, a hole, a fillet -- gone,
 // with the faces around it grown back over where it was. The one operation that
 // edits a shape nobody kept a history for. Refused on a mesh, and refused with

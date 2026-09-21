@@ -228,6 +228,14 @@ bool filletEdges(Body& body, const FilletSpec& spec, std::string* reason) {
     return refuseMesh(spec.chamfer ? "chamfering an edge" : "filleting an edge", reason);
 }
 
+bool offsetBody(Body& body, Real distance, ElementId salt, std::string* reason) {
+    if (body.isMesh()) return refuseMesh("offsetting a body", reason);
+    BrepRef out = brep::offsetBody(body.brepRef(), distance, salt, reason);
+    if (!out) return false;
+    body = Body(std::move(out));
+    return true;
+}
+
 bool removeFaces(Body& body, const std::vector<FaceId>& faces, ElementId salt,
                  std::string* reason) {
     if (body.isMesh()) return refuseMesh("removing a face", reason);

@@ -328,6 +328,16 @@ BrepRef insetFaces(const BrepRef& s, const std::vector<FaceId>& faces, Real amou
 BrepRef shell(const BrepRef& s, const std::vector<FaceId>& openFaces, Real thickness,
               ElementId salt, std::string* reason);
 
+// Grows or shrinks the whole body by moving every face along its own normal:
+// a part made 0.2 mm bigger all round to fit the pocket it has to sit in, or
+// a copy of a shape shrunk to be the void inside something else.
+//
+// The corners stay corners -- the faces are extended to meet, not rounded off
+// -- so a 20 mm cube offset by 1 is a 22 mm cube and not a cube with a 1 mm
+// round on every edge. Refused, with a reason, when shrinking takes the body
+// past nothing.
+BrepRef offsetBody(const BrepRef& s, Real distance, ElementId salt, std::string* reason);
+
 // Drills a hole into the solid: a cylinder from `at`, going `into` the
 // material, with a counterbore or a countersink at its mouth when the cut asks
 // for one. `at` and `into` are in the body's own space.

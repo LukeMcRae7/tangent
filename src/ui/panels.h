@@ -90,6 +90,7 @@ struct UiActions {
     bool hole = false;
     bool draft = false;
     bool deleteFace = false;
+    bool offset = false;
 
     // The modal transforms, from the bar or a menu.
     bool moveObject = false;

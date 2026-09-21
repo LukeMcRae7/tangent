@@ -153,6 +153,9 @@ void modifyMenu(UiContext& ctx) {
     menuNote("Drops every division that does not define the shape, leaving one face where there were several.");
 
     menuHeader("Whole body");
+    if (menuEntry(Glyph::Offset, "Offset...", nullptr, hasObject)) ctx.actions.offset = true;
+    menuNote("Grows or shrinks the whole body, every face moving along its own normal and the "
+             "corners staying corners: a clearance copy of a part, or the void it fits into.");
     if (menuEntry(Glyph::Shell, "Shell...", nullptr, hasObject)) ctx.actions.shell = true;
     menuNote(selFaces > 0 ? "Hollows the body out, leaving the selected faces open."
                           : "Hollows the body out and seals it. Select a face first to leave that side open.");

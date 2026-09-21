@@ -45,6 +45,7 @@ Glyph glyphFor(const Feature& f) {
         case FeatureKind::Hole:           return Glyph::Hole;
         case FeatureKind::Draft:          return Glyph::Draft;
         case FeatureKind::DeleteFace:     return Glyph::DeleteFace;
+        case FeatureKind::Offset:         return Glyph::Offset;
         case FeatureKind::Bevel:          return f.chamfer ? Glyph::Chamfer : Glyph::Fillet;
         case FeatureKind::Shell:          return Glyph::Shell;
         case FeatureKind::FaceRotate:     return Glyph::RotateFace;
@@ -355,6 +356,15 @@ void featureDetails(UiContext& ctx, SceneObject& obj, Feature& f, bool& changed)
         ImGui::TextColored(f.sketchFreedoms == 0 ? im(palette::kValid) : im(palette::kInfo), "%s",
                            f.sketchFreedoms == 0 ? "fully constrained"
                                                  : "not fully constrained: some of it can still move");
+        break;
+    }
+    case FeatureKind::Offset: {
+        double d = f.distance;
+        if (labelledNumber("Distance", d, 0.05f, -1000.0f, 1000.0f)) {
+            f.distance = d;
+            changed = true;
+        }
+        ImGui::TextColored(dim, "every face moved along its own normal");
         break;
     }
     case FeatureKind::DeleteFace:
