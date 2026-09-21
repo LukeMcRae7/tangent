@@ -859,12 +859,12 @@ void Application::drawHolePanel() {
     {
         ui::commandRow("Size");
         for (int i = 0; i < fastenerCount(); ++i) {
-            if (i) ImGui::SameLine(0.0f, 3.0f);
+            if (i) ui::commandNextPill(fastenerAt(i).name, 3.0f);
             if (ui::pillButton(fastenerAt(i).name, holeTool_.fastener == i) &&
                 holeTool_.fastener != i)
                 holeTool_.fastener = i;
         }
-        ImGui::SameLine(0.0f, 3.0f);
+        ui::commandNextPill("Custom", 3.0f);
         if (ui::pillButton("Custom", holeTool_.fastener < 0) && holeTool_.fastener >= 0) {
             holeTool_.cut = holeCutNow();      // start from where the table left it
             holeTool_.fastener = -1;
@@ -1058,7 +1058,7 @@ void Application::drawThreadPanel() {
     {
         ui::commandRow("Size");
         for (int i = 0; i < fastenerCount(); ++i) {
-            if (i) ImGui::SameLine(0.0f, 3.0f);
+            if (i) ui::commandNextPill(fastenerAt(i).name, 3.0f);
             if (ui::pillButton(fastenerAt(i).name, threadTool_.fastener == i) &&
                 threadTool_.fastener != i)
                 threadTool_.fastener = i;

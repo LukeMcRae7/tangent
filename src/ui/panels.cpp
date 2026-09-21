@@ -1013,6 +1013,8 @@ void drawViewportOverlays(UiContext& ctx, float x, float y, float w, float h) {
         ImGui::PopFont();
         nextY = hi.y + 8.0f;
     }
+    // An operation's panel goes under it, on the same left edge.
+    ui::setCommandTopInset(nextY - y0);
 
     // A notice: something refused, or something done that ought to be said.
     // It fades, because a message that stays is a message that stops being read.
@@ -1023,7 +1025,13 @@ void drawViewportOverlays(UiContext& ctx, float x, float y, float w, float h) {
             const float maxW = std::max(240.0f, w * 0.5f);
             const ImVec2 ts = ImGui::CalcTextSize(ctx.notice.c_str(), nullptr, false, maxW);
             const float bw = ts.x + 30.0f, bh = ts.y + 14.0f;
-            const ImVec2 lo(x0 + (w - bw) * 0.5f, nextY);
+            // Centred, unless that would put it under an operation's panel:
+            // then clear of it, on the right.
+            float left = x0 + (w - bw) * 0.5f;
+            const ImVec4 panel = ui::commandPanelRect();
+            if (panel.z > panel.x && nextY < panel.w && left < panel.z + 12.0f)
+                left = std::min(panel.z + 12.0f, x0 + w - bw - 14.0f);
+            const ImVec2 lo(left, nextY);
             const ImVec2 hi(lo.x + bw, lo.y + bh);
             dl->AddRectFilled(lo, hi, u32(palette::kCommand, 0.96f * alpha), 8.0f);
             dl->AddRect(lo, hi, u32(palette::kBrand, 0.6f * alpha), 8.0f);

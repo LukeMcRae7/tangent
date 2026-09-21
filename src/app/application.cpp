@@ -1497,9 +1497,16 @@ void Application::handleViewportMouse() {
         io.MousePos.x >= viewRect_.x && io.MousePos.x < viewRect_.x + viewRect_.w &&
         io.MousePos.y >= viewRect_.y && io.MousePos.y < viewRect_.y + viewRect_.h;
 
+    // An operation's panel is a layer behind the pointer, not in front of it:
+    // over its empty parts the view still hears the pointer move and the wheel
+    // turn, and -- once the panel has faded back -- a click. Only its controls
+    // keep the pointer to themselves. See ui/command_panel.h.
+    const bool uiPointer = io.WantCaptureMouse && !ui::commandPassesPointer();
+    const bool uiClicks  = io.WantCaptureMouse && !ui::commandPassesClicks();
+
     // Middle-drag navigation: capture continues even if the cursor leaves the
     // viewport, which is what makes a long orbit feel unbounded.
-    if (ImGui::IsMouseClicked(ImGuiMouseButton_Middle) && overViewport && !io.WantCaptureMouse)
+    if (ImGui::IsMouseClicked(ImGuiMouseButton_Middle) && overViewport && !uiPointer)
         navigating_ = true;
     if (!ImGui::IsMouseDown(ImGuiMouseButton_Middle))
         navigating_ = false;
@@ -1528,14 +1535,16 @@ void Application::handleViewportMouse() {
     // Sketching. The same arrangement as the create tool below: the wheel still
     // zooms, and the pointer on the dialog leaves the drawing alone.
     if (sketchTool_.active()) {
-        if (io.MouseWheel != 0.0f && overViewport && !io.WantCaptureMouse)
+        if (io.MouseWheel != 0.0f && overViewport && !uiPointer)
             camera_.dolly(io.MouseWheel);
-        if (!io.WantCaptureMouse) {
+        if (!uiPointer) {
             const auto t0 = std::chrono::steady_clock::now();
             sketchTool_.update(scene_, camera_, mouseInViewport(), !io.KeyCtrl);
             if (!svgDemo_.empty())
                 svgDemoUpdateMs_ = std::max(svgDemoUpdateMs_, std::chrono::duration<double, std::milli>(
                                                                   std::chrono::steady_clock::now() - t0).count());
+        }
+        if (!uiClicks) {
             if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && overViewport) {
                 sketchTool_.handleMouseDown(scene_, camera_, undo_);
                 if (!sketchTool_.active()) justFinishedModal_ = true;
@@ -1559,15 +1568,15 @@ void Application::handleViewportMouse() {
         // live above; the wheel was not, because it is handled below a return
         // this branch never reaches -- so zooming in to place a point on a
         // small feature meant cancelling the tool and starting again.
-        if (io.MouseWheel != 0.0f && overViewport && !io.WantCaptureMouse)
+        if (io.MouseWheel != 0.0f && overViewport && !uiPointer)
             camera_.dolly(io.MouseWheel);
 
-        // Held still while the pointer is on the dialog, for the same reason
-        // the fillet is: the way to a button is across the screen, and the
-        // profile must not follow the pointer there.
-        if (!io.WantCaptureMouse)
+        // Held still while the pointer is on one of the dialog's controls, for
+        // the same reason the fillet is: the profile must not be changed by
+        // reaching for a button. Over the dialog's empty parts it follows.
+        if (!uiPointer)
             createTool_.update(scene_, camera_, mouseInViewport(), !io.KeyCtrl);
-        if (!io.WantCaptureMouse) {
+        if (!uiClicks) {
             if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
                 createTool_.handleMouseDown(mouseInViewport(), scene_, camera_, undo_);
                 if (!createTool_.active()) justFinishedModal_ = true;
@@ -1584,7 +1593,7 @@ void Application::handleViewportMouse() {
     // Combining: clicking a body puts it in as a tool or takes it out.
     if (combineTool_.active) {
         updateCombine();
-        if (!io.WantCaptureMouse && overViewport) {
+        if (!uiClicks && overViewport) {
             if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
                 const Vec2 m = mouseInViewport();
                 const RayHit hit = scene_.raycast(camera_.rayThroughPixel(static_cast<float>(m.x),
@@ -1599,8 +1608,8 @@ void Application::handleViewportMouse() {
 
     // Modal face move, and the divide that makes a face to move.
     if (faceTool_.active) {
-        updateFaceMove(!io.KeyCtrl, /*follow=*/!io.WantCaptureMouse);
-        if (!io.WantCaptureMouse) {
+        updateFaceMove(!io.KeyCtrl, /*follow=*/!uiPointer);
+        if (!uiClicks) {
             if (ImGui::IsMouseClicked(ImGuiMouseButton_Left))       commitFaceMove();
             else if (ImGui::IsMouseClicked(ImGuiMouseButton_Right))  abortFaceMove();
         }
@@ -1610,7 +1619,7 @@ void Application::handleViewportMouse() {
     // drills it.
     if (holeTool_.placing) {
         updateHole(!io.KeyCtrl);
-        if (!io.WantCaptureMouse && overViewport) {
+        if (!uiClicks && overViewport) {
             if (ImGui::IsMouseClicked(ImGuiMouseButton_Left))       commitHole();
             else if (ImGui::IsMouseClicked(ImGuiMouseButton_Right))  abortHole();
         }
@@ -1620,20 +1629,20 @@ void Application::handleViewportMouse() {
         // Nothing follows the pointer, so a click in the viewport confirms
         // nothing; the right button cancels, as it does everywhere else.
         updateReduce();
-        if (!io.WantCaptureMouse && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) abortReduce();
+        if (!uiClicks && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) abortReduce();
         return;
     }
     if (patternTool_.active) {
-        updatePattern(!io.KeyCtrl, /*follow=*/!io.WantCaptureMouse);
-        if (!io.WantCaptureMouse) {
+        updatePattern(!io.KeyCtrl, /*follow=*/!uiPointer);
+        if (!uiClicks) {
             if (ImGui::IsMouseClicked(ImGuiMouseButton_Left))       commitPattern();
             else if (ImGui::IsMouseClicked(ImGuiMouseButton_Right))  abortPattern();
         }
         return;
     }
     if (divideTool_.active) {
-        updateDivide(!io.KeyCtrl, /*follow=*/!io.WantCaptureMouse);
-        if (!io.WantCaptureMouse) {
+        updateDivide(!io.KeyCtrl, /*follow=*/!uiPointer);
+        if (!uiClicks) {
             if (ImGui::IsMouseClicked(ImGuiMouseButton_Left))       commitDivide();
             else if (ImGui::IsMouseClicked(ImGuiMouseButton_Right))  abortDivide();
         }
@@ -1642,8 +1651,8 @@ void Application::handleViewportMouse() {
 
     // Modal Fillet tool:
     if (filletTool_.active) {
-        updateFillet(!io.KeyCtrl, /*follow=*/!io.WantCaptureMouse);
-        if (!io.WantCaptureMouse) {
+        updateFillet(!io.KeyCtrl, /*follow=*/!uiPointer);
+        if (!uiClicks) {
             if (ImGui::IsMouseClicked(ImGuiMouseButton_Left))      commitFillet();
             else if (ImGui::IsMouseClicked(ImGuiMouseButton_Right)) abortFillet();
         }
@@ -1657,16 +1666,16 @@ void Application::handleViewportMouse() {
         // round numbers; free positioning is the exception, so Ctrl releases
         // the snap rather than engaging it.
         tool_.update(scene_, camera_, mouseInViewport(), !io.KeyCtrl);
-        if (!io.WantCaptureMouse) {
+        if (!uiClicks) {
             if (ImGui::IsMouseClicked(ImGuiMouseButton_Left))       commitTransform();
             else if (ImGui::IsMouseClicked(ImGuiMouseButton_Right))  abortTransform();
         }
         return;
     }
 
-    if (io.WantCaptureMouse || !overViewport) return;
-
-    if (io.MouseWheel != 0.0f) camera_.dolly(io.MouseWheel);
+    if (!overViewport) return;
+    if (io.MouseWheel != 0.0f && !uiPointer) camera_.dolly(io.MouseWheel);
+    if (uiClicks) return;
 
     // A click that ends a drag is ignored, so an orbit or a future box-select
     // gesture does not also fire a pick. Finalizing a modal action does not deselect.
@@ -8124,6 +8133,21 @@ void Application::buildUi() {
                      vp->WorkSize.x, vp->WorkSize.y - ui_.frame.barHeight};
     }
     ui::setCommandAnchor(viewRect_.x, viewRect_.y, viewRect_.w, viewRect_.h);
+    {
+        // What the view is doing with the pointer, so an operation's panel
+        // knows when to stand back: an orbit or a drag that began in the view,
+        // or a tool that follows the pointer wherever it goes.
+        const ImGuiIO& io = ImGui::GetIO();
+        const bool gesture =
+            navigating_ ||
+            (ImGui::IsMouseDragging(ImGuiMouseButton_Left) && !io.MouseDownOwned[ImGuiMouseButton_Left]) ||
+            (ImGui::IsMouseDragging(ImGuiMouseButton_Right) && !io.MouseDownOwned[ImGuiMouseButton_Right]);
+        const bool tracking = createTool_.active() || sketchTool_.active() || tool_.active() ||
+                              holeTool_.placing || faceTool_.active || filletTool_.active ||
+                              patternTool_.active || divideTool_.active || combineTool_.active ||
+                              measure_.active();
+        ui::setCommandRecede(gesture, tracking);
+    }
 
     drawOutliner(ui_);
 

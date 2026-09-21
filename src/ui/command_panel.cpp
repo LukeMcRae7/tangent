@@ -2,7 +2,10 @@
 
 #include "core/palette.h"
 #include "ui/theme.h"
+#include "ui/view_cube.h"
 #include "ui/widgets.h"
+
+#include "imgui_internal.h"
 
 #include <algorithm>
 #include <cmath>
@@ -13,12 +16,31 @@
 namespace tg::ui {
 namespace {
 
-constexpr float kLabelColumn = 88.0f;
-constexpr float kPanelWidth  = 392.0f;
-constexpr float kBottomGap   = 22.0f;
+constexpr float kLabelColumn = 86.0f;
+constexpr float kPanelWidth  = 316.0f;
+constexpr float kMargin      = 14.0f;   // from the viewport's edges, as the status line
 
 struct Anchor { float x = 0, y = 0, w = 0, h = 0; bool set = false; };
 Anchor g_anchor;
+float  g_topInset = kMargin;
+
+// Stepping back. The panel fades once the pointer has rested on its empty
+// parts for a moment, or the view has been orbited or dragged for as long: a
+// pointer merely crossing the gap between two buttons, or a click, must not
+// make it flicker.
+constexpr float kRecedeAfter = 0.14f;   // seconds
+constexpr float kRecededAlpha = 0.5f;   // what is drawn on it
+constexpr float kRecededBg    = 0.28f;  // the panel itself, so the part shows
+bool  g_gesture = false, g_tracking = false;
+float g_recedeFor = 0.0f;               // how long it has been asked to
+float g_fade = 0.0f;                    // 0 in front, 1 all the way back
+
+// Whether the pointer is over the panel this frame, and over something in it
+// that can be used. Gathered as the panels are drawn -- which is before the
+// viewport reads them, in the same frame.
+bool   g_hovered = false, g_hot = false;
+bool   g_hoveredLast = false, g_hotLast = false;
+ImVec4 g_rect{0, 0, 0, 0}, g_rectNow{0, 0, 0, 0};
 
 // Which number bar is being pulled, and whether it has moved since the press,
 // so a press that never moved can count as a click instead. The range is
@@ -44,21 +66,73 @@ float commandLabelWidth() { return kLabelColumn; }
 
 void setCommandAnchor(float x, float y, float w, float h) {
     g_anchor = {x, y, w, h, true};
+    // A new frame of panels. Last frame's answers stand until this one's are
+    // in, for anyone who asks in between.
+    g_hoveredLast = g_hovered;
+    g_hotLast = g_hot;
+    g_hovered = g_hot = false;
+    g_rect = g_rectNow;
+    g_rectNow = ImVec4(0, 0, 0, 0);
 }
 
+void setCommandTopInset(float y) { g_topInset = std::max(y, kMargin); }
+
+void setCommandRecede(bool gesture, bool tracking) {
+    g_gesture = gesture;
+    g_tracking = tracking;
+}
+
+bool commandPassesPointer() { return g_hovered && !g_hot; }
+bool commandPassesClicks()  { return commandPassesPointer() && g_fade > 0.5f; }
+ImVec4 commandPanelRect()   { return g_rect; }
+
 bool beginCommand(const char* id, const char* title, Glyph glyph, const char* context) {
-    // Bottom-centre of the viewport, pinned by the panel's bottom edge so it
-    // grows upward as rows are added and never runs off the screen.
+    // Top-left of the viewport, under the status line, growing downward as
+    // rows are added -- and no further than the viewport's foot, past which
+    // it scrolls rather than running off the screen.
     ImGuiViewport* vp = ImGui::GetMainViewport();
-    float cx = vp->WorkPos.x + vp->WorkSize.x * 0.5f;
-    float by = vp->WorkPos.y + vp->WorkSize.y - kBottomGap;
+    float x = vp->WorkPos.x + kMargin, y = vp->WorkPos.y + kMargin;
+    float maxH = vp->WorkSize.y - kMargin * 2.0f;
     if (g_anchor.set) {
-        cx = vp->Pos.x + g_anchor.x + g_anchor.w * 0.5f;
-        by = vp->Pos.y + g_anchor.y + g_anchor.h - kBottomGap;
+        x = vp->Pos.x + g_anchor.x + kMargin;
+        y = vp->Pos.y + g_anchor.y + g_topInset;
+        maxH = g_anchor.h - g_topInset - kMargin;
     }
-    ImGui::SetNextWindowPos(ImVec2(cx, by), ImGuiCond_Always, ImVec2(0.5f, 1.0f));
-    ImGui::SetNextWindowSize(ImVec2(kPanelWidth, 0.0f), ImGuiCond_Always);
-    ImGui::SetNextWindowBgAlpha(0.97f);
+    // Narrower in a narrow view, down to what the rows can still be laid out in.
+    const float width = g_anchor.set
+        ? std::clamp(g_anchor.w - kMargin * 2.0f, 260.0f, kPanelWidth) : kPanelWidth;
+    // In a view too narrow for both corners to be used, under the view cube
+    // and the projection named beneath it rather than over them.
+    if (g_anchor.set) {
+        const ViewCubeStyle cube;
+        if (kMargin + width + 12.0f > g_anchor.w - cube.marginPx - cube.sizePx) {
+            const float below = cube.marginPx + cube.sizePx + 34.0f;
+            if (g_topInset < below) {
+                y += below - g_topInset;
+                maxH -= below - g_topInset;
+            }
+        }
+    }
+    ImGui::SetNextWindowPos(ImVec2(x, y), ImGuiCond_Always);
+    ImGui::SetNextWindowSizeConstraints(ImVec2(width, 0.0f),
+                                        ImVec2(width, std::max(maxH, 120.0f)));
+
+    // How far back it stands. Asked for by the viewport's gesture, or by the
+    // pointer resting on the panel's empty parts while a tool follows it --
+    // both only after a moment, so neither a click nor a pass across a gap
+    // shows. Coming forward again is at once in the asking and quick in the
+    // fading: a panel reached for must be there.
+    const float dt = ImGui::GetIO().DeltaTime;
+    const bool resting = g_hoveredLast && !g_hotLast && g_tracking;
+    if (g_gesture || resting) g_recedeFor += dt;
+    else                      g_recedeFor = 0.0f;
+    const float goal = g_recedeFor >= kRecedeAfter ? 1.0f : 0.0f;
+    const float rate = goal > g_fade ? 10.0f : 16.0f;
+    g_fade += (goal - g_fade) * std::min(1.0f, dt * rate);
+    if (std::fabs(goal - g_fade) < 0.002f) g_fade = goal;
+    const float alpha = 1.0f + (kRecededAlpha - 1.0f) * g_fade;
+    const float bg = 0.97f + (kRecededBg - 0.97f) * g_fade;
+    ImGui::SetNextWindowBgAlpha(bg / alpha);
 
     const ImGuiWindowFlags flags =
         ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
@@ -66,8 +140,9 @@ bool beginCommand(const char* id, const char* title, Glyph glyph, const char* co
         ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav |
         ImGuiWindowFlags_AlwaysAutoResize;
 
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(14.0f, 12.0f));
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8.0f, 8.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_Alpha, alpha);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12.0f, 10.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(6.0f, 6.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 10.0f);
     ImGui::PushStyleColor(ImGuiCol_WindowBg, im(palette::kCommand));
@@ -76,7 +151,7 @@ bool beginCommand(const char* id, const char* title, Glyph glyph, const char* co
     if (!ImGui::Begin(id, nullptr, flags)) {
         ImGui::End();
         ImGui::PopStyleColor(2);
-        ImGui::PopStyleVar(4);
+        ImGui::PopStyleVar(5);
         return false;
     }
 
@@ -84,7 +159,7 @@ bool beginCommand(const char* id, const char* title, Glyph glyph, const char* co
     const float line = ImGui::GetTextLineHeight();
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const ImVec2 at = ImGui::GetCursorScreenPos();
-    const float box = line + 6.0f;
+    const float box = line + 4.0f;
     // Where the ? goes, taken now while the row is still the full width of the
     // panel. What it says is collected as the rows are built and drawn at the
     // end, back up here.
@@ -111,7 +186,7 @@ bool beginCommand(const char* id, const char* title, Glyph glyph, const char* co
         ImGui::TextColored(im(palette::kText), "%s", title);
     }
     ImGui::PopFont();
-    ImGui::Dummy(ImVec2(0, 4));
+    ImGui::Dummy(ImVec2(0, 2));
     return true;
 }
 
@@ -143,9 +218,28 @@ void endCommand() {
         ImGui::Dummy(ImVec2(0, 0));
         g_help.clear();
     }
+
+    // Is the pointer here, and on something that does anything? Only items
+    // in the hovered window can be hovered, so an item hovered by now is one
+    // of this panel's. A press on its empty parts makes ImGui hold the window
+    // as if to drag it -- it cannot move, so that hold is not the panel's use
+    // of the pointer, and does not count.
+    const ImGuiContext& g = *GImGui;
+    ImGuiWindow* self = ImGui::GetCurrentWindow();
+    if (ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows |
+                               ImGuiHoveredFlags_AllowWhenBlockedByActiveItem)) {
+        g_hovered = true;
+        // A panel taller than the view scrolls, and the wheel is how.
+        if (g.HoveredId != 0 || ImGui::GetScrollMaxY() > 0.0f) g_hot = true;
+    }
+    if (g.ActiveId != 0 && g.ActiveIdWindow == self && g.ActiveId != self->MoveId) g_hot = true;
+    if (g_dragId != 0) g_hot = true;
+    const ImVec2 at = ImGui::GetWindowPos(), size = ImGui::GetWindowSize();
+    g_rectNow = ImVec4(at.x, at.y, at.x + size.x, at.y + size.y);
+
     ImGui::End();
     ImGui::PopStyleColor(2);
-    ImGui::PopStyleVar(4);
+    ImGui::PopStyleVar(5);
 }
 
 void commandRow(const char* label) {
@@ -177,7 +271,7 @@ NumberEdit commandNumber(const char* label, double value, const char* unit,
     // A bar the width of the rest of the row, so the numbers line up down the
     // panel however long their labels are.
     const float w = ImGui::GetContentRegionAvail().x;
-    const ImVec2 size(w, ImGui::GetFrameHeight() + 2.0f);
+    const ImVec2 size(w, ImGui::GetFrameHeight());
     const ImVec2 at = ImGui::GetCursorScreenPos();
 
     ImGui::InvisibleButton("##field", size);
@@ -263,7 +357,7 @@ int commandChoices(const char* label, const Choice* choices, int count, int acti
     if (compact) {
         commandRow(label);
         for (int i = 0; i < count; ++i) {
-            if (i) ImGui::SameLine(0.0f, 4.0f);
+            if (i) commandNextPill(choices[i].label);
             ImGui::PushID(i);
             if (pillButton(choices[i].label, i == active, ImVec2(0, 0), choices[i].enabled))
                 clicked = i;
@@ -281,11 +375,12 @@ int commandChoices(const char* label, const Choice* choices, int count, int acti
         ImGui::TextColored(im(palette::kTextDim), "%s", label);
         ImGui::PopFont();
     }
-    const ImGuiStyle& st = ImGui::GetStyle();
-    const float gap = 8.0f;
+    // The key goes in the tile's corner, small, as on a keycap: beside the
+    // word it made the word fight for the width, and the word is what is read.
+    const float gap = 6.0f;
     const float avail = ImGui::GetContentRegionAvail().x;
     const float each = (avail - gap * static_cast<float>(count - 1)) / static_cast<float>(count);
-    const float tileH = 60.0f;
+    const float tileH = 48.0f;
     ImDrawList* dl = ImGui::GetWindowDrawList();
     for (int i = 0; i < count; ++i) {
         if (i) ImGui::SameLine(0.0f, gap);
@@ -303,31 +398,37 @@ int commandChoices(const char* label, const Choice* choices, int count, int acti
         const ImU32 fg = on      ? IM_COL32(255, 255, 255, 255)
                        : live    ? u32(palette::kText)
                                  : u32(palette::kTextFaint);
-        drawGlyph(dl, choices[i].glyph, ImVec2(at.x + each * 0.5f, at.y + 22.0f), 24.0f, fg);
+        drawGlyph(dl, choices[i].glyph, ImVec2(at.x + each * 0.5f, at.y + 17.0f), 19.0f, fg);
 
-        pushFont(FontWeight::Medium, uiFonts().size * 0.92f);
+        pushFont(FontWeight::Medium, uiFonts().size * 0.86f);
         const ImVec2 ls = ImGui::CalcTextSize(choices[i].label);
-        float keyW = 0.0f;
-        ImVec2 ks(0, 0);
-        if (choices[i].key && *choices[i].key) {
-            ks = ImGui::CalcTextSize(choices[i].key);
-            keyW = ks.x + 7.0f;
-        }
-        const float x0 = at.x + (each - ls.x - keyW) * 0.5f;
-        const float y0 = at.y + tileH - ls.y - 8.0f;
-        dl->AddText(ImVec2(x0, y0), fg, choices[i].label);
-        if (keyW > 0.0f)
-            dl->AddText(ImVec2(x0 + ls.x + 7.0f, y0),
-                        on ? IM_COL32(255, 255, 255, 190)
-                           : live ? u32(palette::kTextDim) : u32(palette::kTextFaint),
-                        choices[i].key);
+        dl->AddText(ImVec2(at.x + std::max(4.0f, (each - ls.x) * 0.5f), hi.y - ls.y - 6.0f), fg,
+                    choices[i].label);
         ImGui::PopFont();
+        if (choices[i].key && *choices[i].key) {
+            pushFont(FontWeight::Medium, uiFonts().size * 0.72f);
+            const ImVec2 ks = ImGui::CalcTextSize(choices[i].key);
+            dl->AddText(ImVec2(hi.x - ks.x - 6.0f, at.y + 4.0f),
+                        on ? IM_COL32(255, 255, 255, 170)
+                           : live ? u32(palette::kTextFaint) : u32(palette::kTextFaint, 0.6f),
+                        choices[i].key);
+            ImGui::PopFont();
+        }
         hoverTip(choices[i].tip);
         ImGui::PopID();
     }
-    (void)st;
     ImGui::PopID();
     return clicked;
+}
+
+void commandNextPill(const char* label, float gap) {
+    ImGui::SameLine(0.0f, gap);
+    // What pillButton will make of it: the words and its padding either side.
+    const float w = ImGui::CalcTextSize(label).x + 22.0f;
+    if (ImGui::GetCursorPosX() + w > ImGui::GetWindowContentRegionMax().x) {
+        ImGui::NewLine();
+        ImGui::SetCursorPosX(kLabelColumn);
+    }
 }
 
 void commandHint(const char* text) {
@@ -363,7 +464,7 @@ void commandRefused(const char* why) {
 }
 
 int commandFooter(const char* commitLabel, bool commitEnabled, const char* cancelLabel) {
-    ImGui::Dummy(ImVec2(0, 4));
+    ImGui::Dummy(ImVec2(0, 2));
     int result = 0;
     const ImGuiStyle& st = ImGui::GetStyle();
     const float pad = 14.0f;
