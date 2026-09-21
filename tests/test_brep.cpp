@@ -683,6 +683,98 @@ int main() {
                     body.faceCount(), rm.triangles.size() / 3, rm.edgeLines.size() / 2);
     }
 
+    std::printf("--- a part split for the bed, with pins to put it back ---\n");
+    {
+        // A plate too long for a bed, cut in half across its length. Two pins
+        // on one half, two sockets in the other, and the halves have to add
+        // back up to the plate less the clearance around the pins.
+        Body body = plate(80, 40, 10);
+        const Real whole = body.health(false).volume;
+        Body a, b;
+        check(splitByPlane(body, {0, 0, 0}, {1, 0, 0}, a, b), "the plate cuts in two");
+        const Real halves = a.health(false).volume + b.health(false).volume;
+        check(near(halves, whole, 1e-6), "and the halves are the whole plate");
+
+        SplitPins pins;
+        pins.count = 2;
+        pins.diameter = 4.0;
+        pins.depth = 6.0;
+        pins.clearance = 0.2;
+        std::string why;
+        BrepRef up = a.brepRef(), down = b.brepRef();
+        check(brep::pinAcross(up, down, {0, 0, 0}, {1, 0, 0}, pins, 930, &why),
+              "pins go in: " + why);
+        Body pinned(std::move(up)), socketed(std::move(down));
+        check(pinned.health().solid() && socketed.health().solid(), "both halves are solids");
+
+        // The pin half gained two pins; the socket half lost two sockets, each
+        // a hair wider and deeper than the pin.
+        const Real pin = kPi * 4.0 * 6.0;                       // r 2, 6 deep
+        const Real socket = kPi * 2.1 * 2.1 * 6.2;              // r 2.1, 6.2 deep
+        check(near(pinned.health(false).volume, a.health(false).volume + 2.0 * pin, 1e-3),
+              "two pins stand out of the first half: " +
+                  std::to_string(pinned.health(false).volume));
+        check(near(socketed.health(false).volume, b.health(false).volume - 2.0 * socket, 1e-3),
+              "and two sockets go into the other: " +
+                  std::to_string(socketed.health(false).volume));
+
+        // A dowel instead: both halves take a socket, nothing sticks out.
+        pins.dowel = true;
+        BrepRef u2 = a.brepRef(), d2 = b.brepRef();
+        why.clear();
+        check(brep::pinAcross(u2, d2, {0, 0, 0}, {1, 0, 0}, pins, 931, &why),
+              "sockets both sides: " + why);
+        Body top(std::move(u2)), bottom(std::move(d2));
+        check(near(top.health(false).volume, a.health(false).volume - 2.0 * socket, 1e-3),
+              "the first half is hollowed for the dowel too");
+        check(top.health().solid() && bottom.health().solid(), "and both are still solids");
+
+        // Two pins on a face only five diameters across: they have to go near
+        // its ends, not four millimetres apart in the middle where they touch
+        // and leave nothing between them.
+        Body cube = plate(20, 20, 20);
+        Body ca, cb;
+        check(splitByPlane(cube, {0, 0, 0}, {1, 0, 0}, ca, cb), "the cube cuts in two");
+        BrepRef cu = ca.brepRef(), cd = cb.brepRef();
+        SplitPins tight;
+        tight.count = 2;
+        tight.diameter = 4.0;
+        tight.depth = 5.0;
+        why.clear();
+        check(brep::pinAcross(cu, cd, {0, 0, 0}, {1, 0, 0}, tight, 933, &why),
+              "two pins fit across a 20 mm cut: " + why);
+        Body cpin(std::move(cu)), csock(std::move(cd));
+        check(cpin.health().solid() && csock.health().solid(),
+              "and neither half is left with pins running into each other");
+        const Real p5 = kPi * 4.0 * 5.0, s5 = kPi * 2.1 * 2.1 * 5.2;
+        check(near(cpin.health(false).volume + csock.health(false).volume,
+                   4000.0 + 4000.0 + 2.0 * p5 - 2.0 * s5, 1e-3),
+              "with exactly two pins' worth added and two sockets' taken: " +
+                  std::to_string(cpin.health(false).volume + csock.health(false).volume));
+
+        // More than will fit: four of them on the same face.
+        BrepRef mu = ca.brepRef(), md = cb.brepRef();
+        SplitPins many = tight;
+        many.count = 4;
+        why.clear();
+        check(!brep::pinAcross(mu, md, {0, 0, 0}, {1, 0, 0}, many, 934, &why),
+              "four of that size on the same face is refused");
+        check(!why.empty(), "with a reason: " + why);
+
+        // Nowhere to put one: a wall thinner than the pin.
+        Body thin = plate(80, 3, 10);
+        Body ta, tb;
+        check(splitByPlane(thin, {0, 0, 0}, {1, 0, 0}, ta, tb), "the thin plate cuts too");
+        BrepRef u3 = ta.brepRef(), d3 = tb.brepRef();
+        SplitPins big;
+        big.count = 2;
+        big.diameter = 8.0;
+        why.clear();
+        check(!brep::pinAcross(u3, d3, {0, 0, 0}, {1, 0, 0}, big, 932, &why),
+              "a pin wider than the cut face is refused");
+        check(!why.empty(), "with a reason: " + why);
+    }
+
     std::printf("--- a face taken off, and the gap closed ---\n");
     {
         // The case a STEP file makes: a shape with no history, and a feature

@@ -1110,7 +1110,9 @@ void Application::drawSplitPanel() {
     const bool settled = settledIs(Settled::Split);
     if (!settled && !splitTool_.pending) return;
     if (!scene_.find(splitTool_.objectId)) { splitTool_.reset(); return; }
-    const auto was = std::make_pair(static_cast<int>(splitTool_.by), splitTool_.offset);
+    const auto was = std::make_tuple(static_cast<int>(splitTool_.by), splitTool_.offset,
+                                     splitTool_.pins.count, splitTool_.pins.diameter,
+                                     splitTool_.pins.depth, static_cast<int>(splitTool_.pins.dowel));
 
     if (!ui::beginCommand("##split", "Split Body", Glyph::Split,
                           objectName(scene_, splitTool_.objectId)))
@@ -1178,9 +1180,52 @@ void Application::drawSplitPanel() {
                  [&](double x) { splitTool_.offset = x; }, [] {});
     }
 
+    // What holds the halves together afterwards. A part cut to fit the bed is
+    // glued back by hand, and two printed faces have nothing to register
+    // against: a couple of pins are the difference between a joint that lines
+    // up and one that is a millimetre out along its whole length.
+    if (splitTool_.by != By::Pieces) {
+        static const ui::Choice kPins[4] = {
+            {Glyph::Count, "None", nullptr, "A bare cut"},
+            {Glyph::Count, "2",    nullptr, "Two pins across the cut"},
+            {Glyph::Count, "3",    nullptr, "Three pins across the cut"},
+            {Glyph::Count, "4",    nullptr, "Four pins across the cut"},
+        };
+        const int on = splitTool_.pins.count <= 0 ? 0 : splitTool_.pins.count - 1;
+        const int pick = ui::commandChoices("Pins", kPins, 4, on, /*compact=*/true);
+        if (pick >= 0 && pick != on) splitTool_.pins.count = pick == 0 ? 0 : pick + 1;
+
+        if (splitTool_.pins.count > 0) {
+            const ui::NumberEdit d = ui::commandNumber("Pin", splitTool_.pins.diameter, "mm",
+                                                       false, false, nullptr, 1.0, 20.0);
+            if (d.dragged) splitTool_.pins.diameter = std::clamp(d.value, 1.0, 40.0);
+            const ui::NumberEdit deep = ui::commandNumber("Into", splitTool_.pins.depth, "mm",
+                                                         false, false, nullptr, 1.0, 40.0);
+            if (deep.dragged) splitTool_.pins.depth = std::clamp(deep.value, 0.5, 100.0);
+
+            static const ui::Choice kStyle[2] = {
+                {Glyph::Count, "Pin and socket", nullptr,
+                 "A pin on one half and a socket in the other"},
+                {Glyph::Count, "Two sockets", nullptr,
+                 "A socket in each half, for a dowel printed or cut separately"},
+            };
+            const int on = splitTool_.pins.dowel ? 1 : 0;
+            const int style = ui::commandChoices("Joint", kStyle, 2, on, /*compact=*/true);
+            if (style >= 0 && style != on) splitTool_.pins.dowel = style == 1;
+
+            char fit[72];
+            std::snprintf(fit, sizeof fit, "socket %.2f mm for a %.2f mm pin",
+                          splitTool_.pins.diameter + splitTool_.pins.clearance,
+                          splitTool_.pins.diameter);
+            ui::commandValue("Fit", fit);
+        }
+    }
+
     char result[64];
     std::snprintf(result, sizeof result, "%d bodies", splitTool_.pieces);
     ui::commandValue("Result", splitTool_.pieces >= 2 ? result : "nothing cut");
+    if (!splitTool_.pinNote.empty())
+        ui::commandRefused(("no pins: " + splitTool_.pinNote).c_str());
 
     if (settled) ui::commandApplied("Split");
     else         ui::commandRefused(splitTool_.refusal.c_str());
@@ -1192,7 +1237,9 @@ void Application::drawSplitPanel() {
     const int footer = settled ? ui::commandFooter("Done", true, nullptr)
                                : ui::commandFooter("Try again", true, "Cancel");
     ui::endCommand();
-    if (was != std::make_pair(static_cast<int>(splitTool_.by), splitTool_.offset)) {
+    if (was != std::make_tuple(static_cast<int>(splitTool_.by), splitTool_.offset,
+                               splitTool_.pins.count, splitTool_.pins.diameter,
+                               splitTool_.pins.depth, static_cast<int>(splitTool_.pins.dowel))) {
         if (settled) recommitSettled();
         else         { splitTool_.active = true; commitSplit(); }
         return;

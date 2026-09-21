@@ -1147,6 +1147,36 @@ bool Application::init() {
             std::fprintf(stderr, "[split-demo] cut by x instead: %zu bodies, %s mm3\n",
                          scene_.objects().size(), volumes().c_str());
         }
+        if (splitDemo_ >= 4) {
+            // Pins across the cut: what a part cut to fit the bed needs to go
+            // back together straight. The halves gain a pin and lose a socket,
+            // so the two volumes move by exactly those cylinders.
+            const Real bare = [&] {
+                Real sum = 0;
+                for (const auto& o : scene_.objects()) sum += o->body.health(false).volume;
+                return sum;
+            }();
+            splitTool_.pins.count = 2;
+            splitTool_.pins.diameter = 4.0;
+            splitTool_.pins.depth = 5.0;
+            splitTool_.pins.dowel = splitDemo_ == 5;
+            recommitSettled();
+            Real sum = 0;
+            for (const auto& o : scene_.objects()) sum += o->body.health(false).volume;
+            const Real pin = kPi * 4.0 * 5.0;                   // r 2, 5 deep
+            const Real socket = kPi * 2.1 * 2.1 * 5.2;          // r 2.1, 5.2 deep
+            const Real want = splitDemo_ == 5 ? bare - 4.0 * socket
+                                              : bare + 2.0 * pin - 2.0 * socket;
+            bool solid = true;
+            for (const auto& o : scene_.objects()) solid = solid && o->body.health().solid();
+            std::fprintf(stderr,
+                         "[split-demo] %s: %zu bodies, %s mm3, together %.3f, arithmetic says "
+                         "%.3f, agrees=%d, solid=%d  %s\n",
+                         splitDemo_ == 5 ? "two sockets for a dowel" : "two pins across the cut",
+                         scene_.objects().size(), volumes().c_str(), sum, want,
+                         std::fabs(sum - want) < std::fabs(want) * 1e-6 ? 1 : 0, (int)solid,
+                         splitTool_.pinNote.c_str());
+        }
         if (!notice_.empty()) std::fprintf(stderr, "[app] %s\n", notice_.c_str());
     }
 
@@ -6835,12 +6865,26 @@ void Application::commitSplit() {
     scene_.reevaluate(id);
 
     std::vector<Body> pieces;
+    splitTool_.pinNote.clear();
     if (splitTool_.by == SplitToolState::By::Pieces) {
         splitBodies(splitTool_.before, pieces);
     } else {
         Vec3 point{}, normal{};
         Body a, b;
         if (splitPlane(point, normal) && splitByPlane(splitTool_.before, point, normal, a, b)) {
+            // Pins across the cut, if any were asked for. A cut that goes
+            // through but has nowhere to put a pin still cuts: the halves are
+            // what was asked for, and the panel says why they are bare.
+            if (splitTool_.pins.count > 0 && !a.isMesh() && !b.isMesh()) {
+                BrepRef up = a.brepRef(), down = b.brepRef();
+                std::string why;
+                if (brep::pinAcross(up, down, point, normal, splitTool_.pins, 0x5711D, &why)) {
+                    a = Body(std::move(up));
+                    b = Body(std::move(down));
+                } else {
+                    splitTool_.pinNote = why.empty() ? "the pins would not fit" : why;
+                }
+            }
             pieces.push_back(std::move(a));
             pieces.push_back(std::move(b));
         }

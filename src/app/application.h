@@ -121,7 +121,8 @@ public:
     void setAutoExtrude(float mm) { autoExtrude_ = true; autoExtrudeMm_ = mm; }
     void setShellDemo(float wallMm) { shellDemo_ = wallMm; }
     void setInsetDemo(float mm) { insetDemo_ = mm; }
-    // 1 cuts through the middle, 2 moves the plane, 3 cuts by another axis.
+    // 1 cuts through the middle, 2 moves the plane, 3 cuts by another axis,
+    // 4 puts two pins across that cut, 5 two sockets for a dowel instead.
     void setSplitDemo(int step) { splitDemo_ = step; }
 
     // Shell, then extrude what is left of the face that was opened -- the
@@ -1036,6 +1037,11 @@ private:
     // those applied -- with no way to see which it had chosen or to move it.
     struct SplitToolState {
         enum class By { Face, Tool, X, Y, Z, Pieces };
+        // What holds the halves together afterwards. A part cut to fit the bed
+        // goes back together by hand, and two printed faces have nothing to
+        // register against: see geom/op_types.h.
+        SplitPins pins;
+        std::string pinNote;      // why the pins did not go in, if they did not
         ObjectId objectId = kNoObject;
         ObjectId toolObject = kNoObject;   // a second selected body, whose plane can cut
         FaceId   face = kInvalid;          // a selected face, whose plane can cut

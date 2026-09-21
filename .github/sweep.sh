@@ -21,6 +21,7 @@ modes=(
   "--pattern-demo 5" "--pattern-demo 6" "--pattern-demo 7" "--pattern-demo 8"
   "--step-demo /tmp/tg_sweep.step"
   "--inset-demo 2" "--shell-demo 2" "--split-demo 3"
+  "--split-demo 4" "--split-demo 5"
 )
 
 fail=0
@@ -113,6 +114,19 @@ for m in 1 2 3; do
     fail=1
   else
     printf '  ok    --delete-face-demo %s\n' "$m"
+  fi
+done
+
+# Pins across a split have to be exactly the cylinders they say they are: the
+# halves gain a pin and lose a socket, or lose two sockets for a dowel.
+for m in 4 5; do
+  out=$(timeout 200 ./build/tangent --split-demo $m --smoke-test 30 2>&1)
+  if echo "$out" | grep "\[split-demo\]" | grep -q "agrees=0"; then
+    printf '  FAIL  split-demo %s\n' "$m"
+    echo "$out" | grep "\[split-demo\]" | sed 's/^/        /'
+    fail=1
+  else
+    printf '  ok    --split-demo %s\n' "$m"
   fi
 done
 

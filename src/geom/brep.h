@@ -446,6 +446,22 @@ size_t separateSolids(const BrepShape& s, std::vector<BrepRef>& out);
 bool splitByPlane(const BrepShape& s, Vec3 point, Vec3 normal, ElementId salt,
                   BrepRef& above, BrepRef& below, std::string* reason);
 
+// Cuts pins and sockets across the face two pieces were split on.
+//
+// `above` and `below` are what splitByPlane made, and the plane is the one it
+// cut on. The pins are spread along the longest way across the cut face, each
+// one somewhere the material is on both sides of the cut, so a shape whose
+// section is a ring or two islands does not get a pin in the air.
+//
+// The socket is cut `clearance` wider than the pin: a printed hole comes out
+// undersize and a printed pin oversize, and a pin that has to be forced is a
+// pin that splits the part it is going into.
+//
+// False, with a reason, when there is no room for one: a cut face thinner than
+// the pin, or nowhere on it that has material behind it on both sides.
+bool pinAcross(BrepRef& above, BrepRef& below, Vec3 point, Vec3 normal, const SplitPins& pins,
+               ElementId salt, std::string* reason);
+
 // ---------------------------------------------------------------------------
 // STEP.
 //

@@ -114,6 +114,14 @@ drill leaves, which is also the shape a printer wants: a flat ceiling over a
 hole has nothing to print onto. The hole belongs to its face, so when that face
 moves the hole goes with it.
 
+**A split can cut its own alignment pins.** A part too big for the bed is cut
+in two, and the Split panel will put two, three or four pins across the cut
+while it is there -- a pin on one half and a socket in the other, or a socket
+in each for a dowel. The socket is cut wider than the pin by the same allowance
+a printed hole gets, because a pin that has to be forced is a pin that splits
+the part it is going into, and the panel says what the fit comes to. A cut with
+nowhere to put a pin still cuts, and says why the halves came out bare.
+
 **A face can be taken off.** Modify > Delete Face removes the faces you picked
 and grows what is around them back over the gap: the hole fills in, the boss
 goes, the fillet becomes the corner it rounded. It is the operation for a shape

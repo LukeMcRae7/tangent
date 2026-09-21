@@ -4336,6 +4336,208 @@ bool splitByPlane(const BrepShape& s, Vec3 point, Vec3 normal, ElementId salt,
     }
 }
 
+namespace {
+
+// The faces of `s` that lie on the plane and face along it: the section a cut
+// left. There may be several -- a ring is cut into one annulus, a fork into
+// two islands -- and a pin has to stand on one of them.
+std::vector<TopoDS_Face> sectionFaces(const BrepShape& s, Vec3 point, Vec3 normal) {
+    std::vector<TopoDS_Face> out;
+    for (int i = 0; i < s.faces.Extent(); ++i) {
+        const TopoDS_Face face = TopoDS::Face(s.faces(i + 1));
+        BRepAdaptor_Surface surf(face);
+        if (surf.GetType() != GeomAbs_Plane) continue;
+        const Vec3 n = faceNormal(s, static_cast<FaceId>(i));
+        if (std::fabs(std::fabs(dot(n, normal)) - 1.0) > 1e-6) continue;
+        GProp_GProps props;
+        BRepGProp::SurfaceProperties(face, props);
+        if (std::fabs(dot(toVec3(props.CentreOfMass()) - point, normal)) > 1e-6) continue;
+        out.push_back(face);
+    }
+    return out;
+}
+
+// Is the point on this face -- inside its outline and outside its holes?
+bool onFace(const TopoDS_Face& face, Vec3 p, Real tol) {
+    try {
+        BRepExtrema_DistShapeShape d(BRepBuilderAPI_MakeVertex(gp_Pnt(p.x, p.y, p.z)).Vertex(),
+                                     face);
+        return d.IsDone() && d.NbSolution() > 0 && d.Value() <= tol;
+    } catch (const Standard_Failure&) {
+        return false;
+    }
+}
+
+} // namespace
+
+bool pinAcross(BrepRef& above, BrepRef& below, Vec3 point, Vec3 normal, const SplitPins& pins,
+               ElementId salt, std::string* reason) {
+    if (reason) reason->clear();
+    if (pins.count <= 0) return true;
+    if (!above || !below || above->shape.IsNull() || below->shape.IsNull()) {
+        if (reason) *reason = "there are not two pieces to pin";
+        return false;
+    }
+    if (!(pins.diameter > 1e-6) || !(pins.depth > 1e-6)) {
+        if (reason) *reason = "a pin needs a size";
+        return false;
+    }
+    const Real len = length(normal);
+    if (!(len > 1e-12)) {
+        if (reason) *reason = "the cut has no direction";
+        return false;
+    }
+    const Vec3 n = normal * (Real(1) / len);
+
+    const std::vector<TopoDS_Face> top = sectionFaces(*above, point, n);
+    const std::vector<TopoDS_Face> bottom = sectionFaces(*below, point, n);
+    if (top.empty() || bottom.empty()) {
+        if (reason) *reason = "the cut left no flat face to pin through";
+        return false;
+    }
+
+    // A frame on the cut, and the box the section fills in it.
+    const Vec3 helper = std::fabs(n.x) < 0.9 ? Vec3{1, 0, 0} : Vec3{0, 1, 0};
+    const Vec3 u = normalize(cross(helper, n));
+    const Vec3 v = cross(n, u);
+    Vec2 lo{1e300, 1e300}, hi{-1e300, -1e300};
+    for (const TopoDS_Face& f : top) {
+        TopTools_IndexedMapOfShape vs;
+        TopExp::MapShapes(f, TopAbs_VERTEX, vs);
+        for (int i = 1; i <= vs.Extent(); ++i) {
+            const Vec3 p = toVec3(BRep_Tool::Pnt(TopoDS::Vertex(vs(i)))) - point;
+            lo = {std::min(lo.x, dot(p, u)), std::min(lo.y, dot(p, v))};
+            hi = {std::max(hi.x, dot(p, u)), std::max(hi.y, dot(p, v))};
+        }
+    }
+    if (lo.x > hi.x) {
+        if (reason) *reason = "the cut face has no size to spread pins across";
+        return false;
+    }
+
+    // Along the longer way across the face, spread out, and inset far enough
+    // that a pin has material around it rather than half of one at the edge.
+    const bool alongU = (hi.x - lo.x) >= (hi.y - lo.y);
+    const Real span = alongU ? hi.x - lo.x : hi.y - lo.y;
+    const Real inset = pins.diameter;
+    if (span <= inset * 2.0) {
+        if (reason) *reason = "the cut face is too narrow for pins that size";
+        return false;
+    }
+    const Real from = (alongU ? lo.x : lo.y) + inset;
+    const Real to = (alongU ? hi.x : hi.y) - inset;
+    const Real acrossMid = alongU ? (lo.y + hi.y) * 0.5 : (lo.x + hi.x) * 0.5;
+
+    // Where a pin can actually stand: on the face, on both sides of the cut,
+    // with room for its own radius around it. Tried at the spread positions
+    // first and then off to either side of the middle, because the middle of a
+    // bounding box is in the hole of a ring.
+    const Real r = pins.diameter * 0.5;
+    auto standable = [&](Vec3 at) {
+        for (Real du : {Real(0), r, -r})
+            for (Real dv : {Real(0), r, -r}) {
+                const Vec3 q = at + u * (alongU ? du : dv) + v * (alongU ? dv : du);
+                bool ok = false;
+                for (const TopoDS_Face& f : top) ok = ok || onFace(f, q, 1e-6);
+                if (!ok) return false;
+                ok = false;
+                for (const TopoDS_Face& f : bottom) ok = ok || onFace(f, q, 1e-6);
+                if (!ok) return false;
+            }
+        return true;
+    };
+
+    // Spread across the whole of what is usable, ends included: two pins on a
+    // twenty millimetre face belong near its ends, not four millimetres apart
+    // in the middle of it, where they touch and leave no web between them.
+    if (pins.count > 1) {
+        const Real gap = (to - from) / static_cast<Real>(pins.count - 1);
+        if (gap < pins.diameter * 1.5) {
+            if (reason) *reason = "there is no room for that many pins that size";
+            return false;
+        }
+    }
+    std::vector<Vec3> places;
+    for (int i = 0; i < pins.count; ++i) {
+        const Real t = pins.count == 1
+                           ? (from + to) * 0.5
+                           : from + (to - from) * static_cast<Real>(i) /
+                                        static_cast<Real>(pins.count - 1);
+        bool placed = false;
+        // Straight along the middle first; then off to the sides, which is
+        // where a ring's material is.
+        const Real reach = (alongU ? hi.y - lo.y : hi.x - lo.x) * 0.5 - inset;
+        for (Real off : {Real(0), reach * Real(0.6), -reach * Real(0.6), reach, -reach}) {
+            if (placed || (off != 0.0 && reach <= 0.0)) continue;
+            const Vec3 at = point + (alongU ? u * t + v * (acrossMid + off)
+                                            : v * t + u * (acrossMid + off));
+            if (!standable(at)) continue;
+            places.push_back(at);
+            placed = true;
+        }
+    }
+    if (places.empty()) {
+        if (reason) *reason = "there is nowhere on the cut with material on both sides";
+        return false;
+    }
+
+    try {
+        const gp_Dir axis(n.x, n.y, n.z);
+        BrepRef upper = above, lower = below;
+        for (size_t i = 0; i < places.size(); ++i) {
+            const Vec3 at = places[i];
+            const ElementId mark = nameId(salt, IdRole::Side, static_cast<ElementId>(i));
+
+            // The socket, in the piece below: a hair wider than the pin, and a
+            // hair deeper, so the two halves meet on their faces and not on
+            // the bottom of a hole.
+            const Vec3 socketAt = at - n * (pins.depth + 0.2);
+            TopoDS_Shape socket =
+                BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(socketAt.x, socketAt.y, socketAt.z), axis),
+                                         r + pins.clearance * 0.5, pins.depth + 0.2)
+                    .Shape();
+            BrepRef socketShape = makeBrep(socket, {});
+            if (!socketShape) { if (reason) *reason = "the socket could not be made"; return false; }
+            BrepRef cut = booleanOp(*lower, *socketShape, BooleanOp::Difference, mark, reason);
+            if (!cut) return false;
+            lower = cut;
+
+            if (pins.dowel) {
+                // The other half takes a socket too, and the dowel is printed
+                // or cut separately.
+                const Vec3 twinAt = at;
+                TopoDS_Shape twin =
+                    BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(twinAt.x, twinAt.y, twinAt.z), axis),
+                                             r + pins.clearance * 0.5, pins.depth + 0.2)
+                        .Shape();
+                BrepRef twinShape = makeBrep(twin, {});
+                if (!twinShape) { if (reason) *reason = "the socket could not be made"; return false; }
+                BrepRef cutTop = booleanOp(*upper, *twinShape, BooleanOp::Difference, mark, reason);
+                if (!cutTop) return false;
+                upper = cutTop;
+            } else {
+                // The pin itself, standing out of the upper piece's cut face.
+                const Vec3 pinAt = at - n * pins.depth;
+                TopoDS_Shape pin =
+                    BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(pinAt.x, pinAt.y, pinAt.z), axis), r,
+                                             pins.depth)
+                        .Shape();
+                BrepRef pinShape = makeBrep(pin, {});
+                if (!pinShape) { if (reason) *reason = "the pin could not be made"; return false; }
+                BrepRef joined = booleanOp(*upper, *pinShape, BooleanOp::Union, mark, reason);
+                if (!joined) return false;
+                upper = joined;
+            }
+        }
+        above = upper;
+        below = lower;
+        return true;
+    } catch (const Standard_Failure& e) {
+        if (reason) *reason = kernelReason(e, "the pins could not be cut");
+        return false;
+    }
+}
+
 BrepRef mirrored(const BrepShape& s, Vec3 point, Vec3 normal) {
     const Vec3 n = normalize(normal);
     if (!(length(n) > 0.5)) return {};

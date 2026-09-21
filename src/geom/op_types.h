@@ -55,4 +55,19 @@ struct HoleCut {
     double sinkAngle = 90.0 * 3.14159265358979323846 / 180.0;
 };
 
+// Pins across a cut, so two halves of a printed part go back together the same
+// way every time -- and stay together while the glue sets.
+//
+// `count` of them, spread across the cut face. A pin on one side and a socket
+// in the other is the usual answer; two sockets and a separate dowel is the
+// other, and is what a part wants when neither half should have something
+// sticking out of it while it prints.
+struct SplitPins {
+    int    count = 0;            // 0: none, which is what a split does by default
+    double diameter = 4.0;
+    double depth = 6.0;          // into each side of the cut
+    double clearance = 0.2;      // on the socket's diameter, for a printed fit
+    bool   dowel = false;        // two sockets rather than a pin and a socket
+};
+
 } // namespace tg
