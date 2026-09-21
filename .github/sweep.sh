@@ -16,6 +16,7 @@ modes=(
   "--revolve-demo 1" "--revolve-demo 2" "--revolve-demo 3"
   "--hole-demo 1" "--hole-demo 2" "--hole-demo 3"
   "--draft-demo 1" "--draft-demo 2" "--draft-demo 3"
+  "--delete-face-demo 1" "--delete-face-demo 2" "--delete-face-demo 3"
   "--pattern-demo 1" "--pattern-demo 2" "--pattern-demo 3" "--pattern-demo 4"
   "--pattern-demo 5" "--pattern-demo 6" "--pattern-demo 7" "--pattern-demo 8"
   "--step-demo /tmp/tg_sweep.step"
@@ -98,6 +99,20 @@ for m in 15 16 17; do
     fail=1
   else
     printf '  ok    --face-demo %s\n' "$m"
+  fi
+done
+
+# Taking a face off has to put the body back exactly as it was before the
+# feature was on it -- and refuse, rather than quietly do nothing, when the
+# gap cannot be closed.
+for m in 1 2 3; do
+  out=$(timeout 200 ./build/tangent --delete-face-demo $m --smoke-test 30 2>&1)
+  if echo "$out" | grep "\[delete-face-demo\]" | grep -q "agrees=0"; then
+    printf '  FAIL  delete-face-demo %s\n' "$m"
+    echo "$out" | grep "\[delete-face-demo\]" | sed 's/^/        /'
+    fail=1
+  else
+    printf '  ok    --delete-face-demo %s\n' "$m"
   fi
 done
 

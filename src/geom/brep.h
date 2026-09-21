@@ -304,6 +304,16 @@ BrepRef scaleFaces(const BrepRef& s, const std::vector<FaceId>& faces, Real fact
 BrepRef divideBody(const BrepRef& s, Vec3 planePoint, Vec3 planeNormal,
                    ElementId salt, std::string* reason);
 
+// Takes faces off the body and closes the gap: the boss goes and the face it
+// stood on grows back over it, the hole fills in, the fillet becomes the corner
+// it rounded. This is what makes a STEP file somebody else made editable --
+// there is no history to delete a step from, only the shape.
+//
+// Refused, with a reason, when the faces around the gap cannot be grown to
+// meet: not everything that can be pointed at can be taken away.
+BrepRef removeFaces(const BrepRef& s, const std::vector<FaceId>& faces, ElementId salt,
+                    std::string* reason);
+
 BrepRef insetFaces(const BrepRef& s, const std::vector<FaceId>& faces, Real amount,
                    ElementId salt, std::vector<ElementId>* newFaces, std::string* reason);
 

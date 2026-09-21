@@ -44,6 +44,7 @@ Glyph glyphFor(const Feature& f) {
         case FeatureKind::RevolveProfile: return Glyph::Revolve;
         case FeatureKind::Hole:           return Glyph::Hole;
         case FeatureKind::Draft:          return Glyph::Draft;
+        case FeatureKind::DeleteFace:     return Glyph::DeleteFace;
         case FeatureKind::Bevel:          return f.chamfer ? Glyph::Chamfer : Glyph::Fillet;
         case FeatureKind::Shell:          return Glyph::Shell;
         case FeatureKind::FaceRotate:     return Glyph::RotateFace;
@@ -356,6 +357,12 @@ void featureDetails(UiContext& ctx, SceneObject& obj, Feature& f, bool& changed)
                                                  : "not fully constrained: some of it can still move");
         break;
     }
+    case FeatureKind::DeleteFace:
+        // Nothing to set: what it took off is what it took off. The step says
+        // which faces, and turning it off puts them back.
+        ImGui::TextColored(dim, "%s taken off, the gap closed",
+                           f.faces.describe("face").c_str());
+        break;
     case FeatureKind::Draft: {
         double deg = f.angle * kRad2Deg;
         if (labelledNumber("Angle", deg, 0.1f, -80.0f, 80.0f)) {

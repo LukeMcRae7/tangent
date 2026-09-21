@@ -715,6 +715,89 @@ bool Application::init() {
         }
     }
 
+    if (deleteFaceDemo_ > 0) {
+        // A body with a feature on it and no history that made it: what an
+        // imported STEP file is. The face is picked and taken off, and what
+        // has to come back is exactly the plate that was there before.
+        scene_.clear();
+        camera_.yaw = 0.7f;
+        camera_.pitch = 0.6f;
+        camera_.distance = 150.0f;
+        camera_.target = {0, 0, 0};
+        camera_.snapToGoal();
+
+        PrimitiveSpec spec;
+        spec.kind = PrimitiveKind::Box;
+        spec.box = {40.0, 40.0, 10.0};
+        const ObjectId id = scene_.addPrimitive(PrimitiveKind::Box, spec, {0, 0, 0});
+        SceneObject* o = scene_.find(id);
+        const Real bare = o->body.health(false).volume;
+
+        // Put the feature on, then forget how: the body is baked into a chain
+        // of its own, with nothing in it but the geometry.
+        Body worked = o->body;
+        std::string why;
+        if (deleteFaceDemo_ == 2) {
+            std::vector<EdgeId> es;
+            worked.allEdges(es);
+            FilletSpec fs;
+            for (EdgeId e : es) {
+                Vec3 a, b;
+                worked.edgePositions(e, a, b);
+                if (std::fabs(a.z - 5.0) < 1e-6 && std::fabs(b.z - 5.0) < 1e-6)
+                    fs.edges.push_back({e, 3.0});
+            }
+            fs.salt = 61;
+            if (!filletEdges(worked, fs, &why))
+                std::fprintf(stderr, "[delete-face-demo] fillet refused: %s\n", why.c_str());
+        } else if (deleteFaceDemo_ == 1) {
+            HoleCut cut;
+            cut.diameter = 8.0;
+            cut.depth = 4.0;
+            cut.through = false;
+            cut.drillPoint = false;
+            if (!drillHole(worked, {8, 0, 5}, {0, 0, -1}, cut, 62, &why))
+                std::fprintf(stderr, "[delete-face-demo] hole refused: %s\n", why.c_str());
+        }
+        // 3 leaves the plate plain: the face picked there is its top, which
+        // nothing around it can close over, and the answer has to be a refusal
+        // rather than a body that quietly did not change.
+        const Real featured = worked.health(false).volume;
+        // As an import arrives: geometry, with no steps behind it.
+        scene_.removeObject(id);
+        const ObjectId part = scene_.addImportedBody(std::move(worked), "Plate");
+        o = scene_.find(part);
+
+        // Pick what has to go: the hole's faces, the four rounds, or -- for 3
+        // -- the top of the plate, which nothing can close.
+        std::vector<FaceId> pick;
+        std::vector<FaceId> fs;
+        o->body.allFaces(fs);
+        for (FaceId f : fs) {
+            const Vec3 c = o->body.faceCentroid(f);
+            if (deleteFaceDemo_ == 1 && std::hypot(c.x - 8.0, c.y) < 4.5 && c.z < 4.99)
+                pick.push_back(f);
+            if (deleteFaceDemo_ == 2 && o->body.faceKind(f) == SurfaceKind::Cylinder)
+                pick.push_back(f);
+            if (deleteFaceDemo_ == 3 && o->body.faceNormal(f).z > 0.99 && c.z > 4.99)
+                pick.push_back(f);
+        }
+        scene_.select(part);
+        scene_.clearElementSelection();
+        for (FaceId f : pick) scene_.selectElement({part, ElementKind::Face, f}, true);
+
+        deleteSelectedFaces();
+        const SceneObject* after = scene_.find(part);
+        const Real got = after->body.health(false).volume;
+        std::fprintf(stderr,
+                     "[delete-face-demo] %zu faces picked off a plate of %.1f mm3 (%.1f with the "
+                     "feature): %d faces, %.3f mm3, arithmetic says %.3f, agrees=%d, solid=%d  %s\n",
+                     pick.size(), bare, featured, after->body.faceCount(), got,
+                     deleteFaceDemo_ == 3 ? featured : bare,
+                     std::fabs(got - (deleteFaceDemo_ == 3 ? featured : bare)) < 1e-6 ? 1 : 0,
+                     (int)after->body.health().solid(), notice_.c_str());
+    }
+
     if (draftDemo_ > 0) {
         // A 20 cube with its four walls leant off the bed. What that should
         // come to is an integral: the section at height z is a square of side
@@ -3780,6 +3863,50 @@ void Application::abortFaceMove() {
 // Not a gesture: there is nothing to drag and nothing to choose, so it happens
 // and says how much it removed. One step on the chain like any other, so it can
 // be undone and so a later edit rebuilds through it.
+// Take the selected faces off and let the body close over them.
+//
+// No dialog: there is nothing to set. What it does is decided entirely by what
+// was picked, so it is applied at once and says what it did -- and what it
+// could not do, which is the interesting half: not everything that can be
+// pointed at can be taken away.
+void Application::deleteSelectedFaces() {
+    dismissSettled();
+    const ObjectId id = scene_.contextObject();
+    SceneObject* obj = scene_.find(id);
+    if (!obj) { setNotice("Select an object first"); return; }
+    if (refuseMeshEdit(*obj, "Removing a face")) return;
+
+    const std::vector<FaceId> faces = scene_.selectedFaces(id);
+    if (faces.empty()) { setNotice("Select the faces to take off"); return; }
+
+    const int before = obj->body.faceCount();
+    std::vector<Feature> chainBefore = obj->features;
+    preEditSolid_ = obj->healthVersion == obj->geometryVersion && obj->health.solid();
+
+    Feature f;
+    f.kind = FeatureKind::DeleteFace;
+    f.faces = nameFaces(obj->body, faces);
+
+    std::string why;
+    if (!scene_.addFeature(id, std::move(f), &why) || !editKeepsSolid(id)) {
+        obj->features = std::move(chainBefore);
+        scene_.reevaluate(id);
+        setNotice(why.empty() ? "Those faces could not be taken off"
+                              : "Not taken off: " + why);
+        return;
+    }
+
+    scene_.clearElementSelection();
+    undo_.push(std::make_unique<FeatureCommand>(id, std::move(chainBefore), obj->features,
+                                                "Delete Face"));
+    char msg[110];
+    std::snprintf(msg, sizeof msg, "%zu face%s off; the body closed over %s, %d faces now",
+                  faces.size(), faces.size() == 1 ? "" : "s",
+                  faces.size() == 1 ? "it" : "them", scene_.find(id)->body.faceCount());
+    (void)before;
+    setNotice(msg);
+}
+
 void Application::mergeSelected() {
     const ObjectId id = scene_.contextObject();
     SceneObject* obj = scene_.find(id);
@@ -7381,7 +7508,7 @@ void Application::applyActions() {
     // the next thing. The gestures put their own panel away in begin*; this
     // catches the commands that are not gestures.
     if (a.addRequested || a.sketch || a.editSketchObject != kNoObject ||
-        a.deleteSelected || a.duplicateSelected || a.mergeFaces ||
+        a.deleteSelected || a.duplicateSelected || a.mergeFaces || a.deleteFace ||
         a.booleanRequested || a.split || a.shell || a.inset || a.hole || a.draft ||
         a.undo || a.redo ||
         a.importStep || a.importMesh || a.importSvg || a.convertToSolid || a.reduceMesh ||
@@ -7489,6 +7616,7 @@ void Application::applyActions() {
     if (a.pattern) beginPattern(PatternMode::Linear);
     if (a.mirror) beginPattern(PatternMode::Mirror);
     if (a.mergeFaces) mergeSelected();
+    if (a.deleteFace) deleteSelectedFaces();
     if (a.bevel)   roundAllEdges();
     if (a.split)   beginSplit();
     if (a.fillet)  beginFillet();

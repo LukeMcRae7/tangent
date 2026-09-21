@@ -134,6 +134,10 @@ void modifyMenu(UiContext& ctx) {
     if (menuEntry(Glyph::Hole, "Hole...", "H", hasObject)) ctx.actions.hole = true;
     menuNote("Point at the face it goes into and click. Chosen by the screw it takes, not typed in millimetres.");
     if (menuEntry(Glyph::Draft, "Draft...", nullptr, selFaces > 0)) ctx.actions.draft = true;
+    if (menuEntry(Glyph::DeleteFace, "Delete Face", nullptr, selFaces > 0))
+        ctx.actions.deleteFace = true;
+    menuNote("Takes the selected faces off and closes the gap behind them: how a boss, a hole or "
+             "a fillet goes from a shape that has no history to edit.");
     menuNote("Leans the selected walls away from the way the part comes off the bed, so nothing prints out over nothing.");
 
     menuHeader("Edges");

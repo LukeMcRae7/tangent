@@ -32,6 +32,7 @@ const char* featureKindName(FeatureKind k) {
         case FeatureKind::RevolveProfile: return "Revolve";
         case FeatureKind::Hole:       return "Hole";
         case FeatureKind::Draft:      return "Draft";
+        case FeatureKind::DeleteFace: return "Delete Face";
         case FeatureKind::Move:       return "Move";
         case FeatureKind::Rotate:     return "Rotate";
         case FeatureKind::Scale:      return "Scale";
@@ -258,6 +259,9 @@ std::string Feature::summary() const {
                               extrudeOpName(shown));
             break;
         }
+        case FeatureKind::DeleteFace:
+            std::snprintf(buf, sizeof(buf), "Delete Face  %s", faces.describe("face").c_str());
+            break;
         case FeatureKind::Draft: {
             const Vec3 d = axisDir;
             const char* way = std::fabs(d.x) > 0.9 ? "X" : std::fabs(d.y) > 0.9 ? "Y" : "Z";
@@ -686,6 +690,19 @@ bool evaluateFrom(std::vector<Feature>& features, size_t from,
                                  : why.c_str());
             else
                 body = std::move(combined);
+            break;
+        }
+
+        case FeatureKind::DeleteFace: {
+            if (body.empty()) { fail("there is no body to take a face off"); break; }
+            std::vector<FaceId> fs;
+            if (!f.faces.resolveFaces(body, fs) || fs.empty()) {
+                fail("the faces it takes off are gone");
+                break;
+            }
+            std::string why;
+            if (!removeFaces(body, fs, f.uid, &why))
+                fail(why.empty() ? "the gap could not be closed" : why.c_str());
             break;
         }
 

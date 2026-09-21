@@ -155,6 +155,9 @@ public:
     // Leans the walls of a box: 1 three degrees off the bed, 2 the same
     // adjusted to six in the panel, 3 widest in the middle.
     void setDraftDemo(int step) { draftDemo_ = step; }
+    // Takes a face off a body that has no history for it: 1 a drilled hole
+    // removed, 2 a fillet removed, 3 one that cannot be closed and says so.
+    void setDeleteFaceDemo(int step) { deleteFaceDemo_ = step; }
     // An SVG onto the top plane: 1 placed in the sketch, 2 its filled regions
     // picked, 3 extruded 3 mm, 4 cut 3 mm into a plate under it, 5 with the
     // busiest face of the result selected -- what the highlight costs to draw.
@@ -234,6 +237,7 @@ private:
     int  revolveDemo_ = 0;
     int  holeDemo_ = 0;
     int  draftDemo_ = 0;
+    int  deleteFaceDemo_ = 0;
     std::string svgDemo_;
     int  svgDemoStep_ = 1;
     int  svgDemoFrames_ = 0;
@@ -929,6 +933,7 @@ private:
     void drawPatternPanel();
 
     void mergeSelected();
+    void deleteSelectedFaces();
     // Inset and Shell. Neither is a gesture: the faces say where, and the one
     // number is the operation. They are made as soon as they are asked for and
     // stay adjustable in their panel until Done, so the number is chosen by

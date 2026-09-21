@@ -114,6 +114,14 @@ drill leaves, which is also the shape a printer wants: a flat ceiling over a
 hole has nothing to print onto. The hole belongs to its face, so when that face
 moves the hole goes with it.
 
+**A face can be taken off.** Modify > Delete Face removes the faces you picked
+and grows what is around them back over the gap: the hole fills in, the boss
+goes, the fillet becomes the corner it rounded. It is the operation for a shape
+nobody kept a history for -- a STEP file somebody else made -- and it is the
+one place the tool edits geometry rather than a step. A gap that cannot be
+closed is refused with the reason, rather than handing back the body unchanged
+and calling it done.
+
 **A curved face is pushed along itself.** Divide a cylinder twice and the band
 of wall between the cuts is a face like any other: Push/Pull (G) moves it out
 into a collar or in into a groove, Extrude (E) raises it keeping its outline,

@@ -53,6 +53,7 @@ enum class FeatureKind {
     RevolveProfile, // a region of a sketch turned about an axis in its plane
     Hole,        // a bore into a named face, sized for a fastener
     Draft,       // named faces leant away from a pull direction
+    DeleteFace,  // named faces taken off, the gap closed behind them
 
     // New kinds go on the end and nowhere else. The value is what is written
     // to a file, so inserting one in the middle renumbers every kind after it
@@ -63,7 +64,7 @@ enum class FeatureKind {
 // here rather than in the loader so that adding a kind above is one edit and
 // not two: a kind the loader does not know about is refused as a corrupt file,
 // and that refusal is silent about why.
-inline constexpr FeatureKind kLastFeatureKind = FeatureKind::Draft;
+inline constexpr FeatureKind kLastFeatureKind = FeatureKind::DeleteFace;
 
 const char* featureKindName(FeatureKind k);
 

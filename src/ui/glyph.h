@@ -25,7 +25,7 @@ enum class Glyph {
     Move, Rotate, Scale, Boolean, Union, Difference, Intersect, Overlap, NewBody,
     // Modelling
     Extrude, PushPull, Revolve, Fillet, Chamfer, Shell, Inset, Divide, Merge,
-    Hole, Counterbore, Countersink, Draft,
+    Hole, Counterbore, Countersink, Draft, DeleteFace,
     Pattern, PatternRow, PatternRing, Mirror, Split, Convert, Reduce, RotateFace, ScaleFace,
     // Inspecting
     Measure, Alert, Check, Eye, EyeOff, Grid, Wire, Backface, Bounds,

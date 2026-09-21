@@ -36,6 +36,7 @@
 #include <BRepBndLib.hxx>
 #include <BRepAlgoAPI_BooleanOperation.hxx>
 #include <BRepAlgoAPI_Common.hxx>
+#include <BRepAlgoAPI_Defeaturing.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
@@ -2301,6 +2302,69 @@ BrepRef divideBody(const BrepRef& s, Vec3 planePoint, Vec3 planeNormal,
         return makeBrep(result, names);
     } catch (const Standard_Failure& e) {
         if (reason) *reason = kernelReason(e, "the body could not be divided there");
+        return {};
+    }
+}
+
+BrepRef removeFaces(const BrepRef& s, const std::vector<FaceId>& faces, ElementId salt,
+                    std::string* reason) {
+    if (reason) reason->clear();
+    if (!s || s->shape.IsNull() || faces.empty()) {
+        if (reason) *reason = "no faces to remove";
+        return {};
+    }
+    try {
+        TopTools_ListOfShape drop;
+        for (FaceId f : faces) {
+            if (!validFace(*s, f)) {
+                if (reason) *reason = "a face to remove no longer exists";
+                return {};
+            }
+            drop.Append(s->faces(static_cast<int>(f) + 1));
+        }
+
+        BRepAlgoAPI_Defeaturing algo;
+        algo.SetShape(s->shape);
+        algo.AddFacesToRemove(drop);
+        algo.SetRunParallel(!inIsolatedChild());
+        algo.SetToFillHistory(Standard_True);
+        algo.Build();
+        if (!algo.IsDone() || algo.HasErrors() || algo.Shape().IsNull()) {
+            if (reason) {
+                std::ostringstream os;
+                algo.DumpErrors(os);
+                // What the kernel says here is not for reading: the useful
+                // half is that the faces around the hole could not be grown
+                // back over it, which is what this means every time.
+                *reason = "the faces around it will not close the gap";
+                if (!os.str().empty()) std::fprintf(stderr, "[kernel] defeaturing: %s", os.str().c_str());
+            }
+            return {};
+        }
+        const TopoDS_Shape out = algo.Shape();
+        if (!acceptable(out, reason)) {
+            if (reason && reason->empty()) *reason = "removing it produced no valid solid";
+            return {};
+        }
+
+        // A face it could not take off comes back as the body it was given,
+        // reported as a success. That is the quiet no-op this codebase will
+        // not ship: the user asked for a face to go and would be looking at
+        // it still there, with nothing said.
+        TopTools_IndexedMapOfShape left;
+        TopExp::MapShapes(out, TopAbs_FACE, left);
+        if (left.Extent() == s->faces.Extent()) {
+            GProp_GProps was, now;
+            BRepGProp::VolumeProperties(s->shape, was);
+            BRepGProp::VolumeProperties(out, now);
+            if (std::fabs(now.Mass() - was.Mass()) < std::fabs(was.Mass()) * 1e-9) {
+                if (reason) *reason = "there is nothing around it to close the gap";
+                return {};
+            }
+        }
+        return makeBrep(out, propagateNames(algo, {{s.get()}}, out, salt));
+    } catch (const Standard_Failure& e) {
+        if (reason) *reason = kernelReason(e, "those faces could not be removed");
         return {};
     }
 }

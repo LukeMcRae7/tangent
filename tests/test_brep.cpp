@@ -683,6 +683,56 @@ int main() {
                     body.faceCount(), rm.triangles.size() / 3, rm.edgeLines.size() / 2);
     }
 
+    std::printf("--- a face taken off, and the gap closed ---\n");
+    {
+        // The case a STEP file makes: a shape with no history, and a feature
+        // on it that has to go. A boss raised on a plate, then removed -- and
+        // the plate has to come back to exactly what it was.
+        Body body = plate(40, 40, 10);
+        const Real bare = body.health(false).volume;
+        FaceId top = kInvalid;
+        std::vector<FaceId> fs;
+        body.allFaces(fs);
+        for (FaceId f : fs)
+            if (body.faceNormal(f).z > 0.99) top = f;
+
+        std::string why;
+        Body boss = body;
+        HoleCut cut;   // a hole is quicker to make than a boss and no different here
+        cut.diameter = 8.0;
+        cut.depth = 4.0;
+        cut.through = false;
+        cut.drillPoint = false;
+        check(drillHole(boss, {8, 0, 5}, {0, 0, -1}, cut, 920, &why), "a blind hole to remove");
+        const Real drilled = boss.health(false).volume;
+        check(drilled < bare - 100.0, "which took material away");
+
+        // The hole is a wall and a floor; both go, and the top grows back.
+        std::vector<FaceId> hole;
+        std::vector<FaceId> after;
+        boss.allFaces(after);
+        for (FaceId f : after) {
+            const Vec3 c = boss.faceCentroid(f);
+            const bool inside = std::hypot(c.x - 8.0, c.y) < 4.5;
+            if (inside && c.z < 4.99) hole.push_back(f);
+        }
+        check(hole.size() == 2, "the hole is two faces: a wall and a floor");
+        why.clear();
+        check(removeFaces(boss, hole, 921, &why), "they come off: " + why);
+        check(near(boss.health(false).volume, bare, 1e-6),
+              "and the plate is exactly what it was: " + std::to_string(boss.health(false).volume));
+        check(boss.faceCount() == 6, "six faces again");
+        check(boss.health().solid(), "and a solid");
+
+        // Not everything that can be pointed at can be taken away: remove the
+        // top of a plain plate and there is nothing to close the gap with.
+        Body flat = plate(40, 40, 10);
+        why.clear();
+        check(!removeFaces(flat, {top}, 922, &why),
+              "a face with nothing to close the gap is refused");
+        check(!why.empty(), "with a reason: " + why);
+    }
+
     std::printf("--- a band round a cylinder, pushed out and in ---\n");
     {
         // What a person actually does: divide a cylinder twice and push the

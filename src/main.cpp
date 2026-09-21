@@ -102,6 +102,8 @@ int main(int argc, char** argv) {
             app.setHoleDemo(std::atoi(argv[++i]));
         } else if (std::strcmp(argv[i], "--draft-demo") == 0 && i + 1 < argc) {
             app.setDraftDemo(std::atoi(argv[++i]));
+        } else if (std::strcmp(argv[i], "--delete-face-demo") == 0 && i + 1 < argc) {
+            app.setDeleteFaceDemo(std::atoi(argv[++i]));
         } else if (std::strcmp(argv[i], "--snap-demo") == 0 && i + 1 < argc) {
             app.setSnapDemo(std::atoi(argv[++i]));
         } else if (std::strcmp(argv[i], "--shell-fillet-demo") == 0) {

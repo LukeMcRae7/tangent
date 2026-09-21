@@ -131,6 +131,13 @@ struct FilletSpec {
 // Rounds edges. `reason` gets a short phrase on refusal; see the note above.
 bool filletEdges(Body& body, const FilletSpec& spec, std::string* reason = nullptr);
 
+// Takes faces off the body and heals the gap: a boss, a hole, a fillet -- gone,
+// with the faces around it grown back over where it was. The one operation that
+// edits a shape nobody kept a history for. Refused on a mesh, and refused with
+// a reason when the gap will not close.
+bool removeFaces(Body& body, const std::vector<FaceId>& faces, ElementId salt,
+                 std::string* reason = nullptr);
+
 // Tips faces away from a pull direction, about the line where each meets the
 // plane through `neutralPoint` square to `pull`: the draft that gets a part out
 // of a mould, and the lean that keeps a printed wall from hanging over nothing.
