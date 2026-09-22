@@ -4,21 +4,26 @@
 // followed by an ordered list of operations. Editing any parameter re-runs the
 // chain, which is what makes the model parametric rather than a frozen result.
 //
-// Known limitation, stated plainly because it will bite: operations name the
-// faces they act on by index. Face numbering is stable while the features
-// before them are unchanged, so editing a primitive's dimensions re-applies
-// later operations correctly. But inserting, removing or reordering a feature
-// renumbers everything downstream, and an index-based reference cannot follow
-// that. This is the topological naming problem, and solving it properly needs
-// persistent identifiers that survive a remesh -- not attempted here. What is
-// implemented instead is honest failure: a feature whose references no longer
-// resolve is marked errored and skipped, the chain continues, and the timeline
-// shows which step gave up rather than silently producing wrong geometry.
+// Operations name what they act on by ElementId rather than by index -- see
+// element_id.h and ElementRefs below. A name is derived from what made the
+// element and carries across an edit: the kernel is asked what each face became
+// and the names follow, so editing a dimension near the root re-applies
+// everything after it against the right geometry.
+//
+// What that does not yet buy is inserting or reordering a step. The names
+// would survive it; nothing offers to do it. When that arrives it is the real
+// test of this machinery, because a feature inserted at step four hands every
+// later step geometry it has never seen.
+//
+// Where a name does not resolve, the answer is honest failure: the feature is
+// marked errored and skipped, the chain continues, and the timeline says which
+// step gave up rather than silently producing wrong geometry.
 #pragma once
 
-#include "mesh/boolean.h"
-#include "mesh/primitives.h"
-#include "mesh/operations.h"
+#include "geom/body.h"
+#include "geom/fasteners.h"
+#include "geom/operations.h"
+#include "sketch/sketch.h"
 
 #include <string>
 #include <vector>
@@ -33,7 +38,35 @@ enum class FeatureKind {
     Bevel,
     VertexEdit,
     Boolean,     // combine with a baked copy of another body
+    Shell,       // hollow it out, opening the faces named
+    FaceRotate,  // tip a face about one of its own edges
+    Divide,      // cut a line across the body without cutting it in two
+    Merge,       // drop every division that does not define the shape
+    FaceScale,   // grow or shrink a face in its own plane
+    Pattern,     // repeat a tool, or the body, in a row, around an axis, or mirrored
+    Reduce,      // fewer triangles for a mesh, within a tolerance
+    Sketch,      // constrained 2D geometry on a plane; changes no body itself
+    ExtrudeProfile, // a region of a sketch swept into a solid
+    Move,        // puts the object somewhere else; its shape is untouched
+    Rotate,      // turns the object about a point; its shape is untouched
+    Scale,       // stretches the body along its own axes: a change of shape
+    RevolveProfile, // a region of a sketch turned about an axis in its plane
+    Hole,        // a bore into a named face, sized for a fastener
+    Draft,       // named faces leant away from a pull direction
+    DeleteFace,  // named faces taken off, the gap closed behind them
+    Offset,      // every face moved along its own normal: the whole body grows
+    Thread,      // a helical groove cut on a named round face
+
+    // New kinds go on the end and nowhere else. The value is what is written
+    // to a file, so inserting one in the middle renumbers every kind after it
+    // and quietly turns a divide in an old project into something else.
 };
+
+// The last of them, which the loader checks a file's number against. It lives
+// here rather than in the loader so that adding a kind above is one edit and
+// not two: a kind the loader does not know about is refused as a corrupt file,
+// and that refusal is silent about why.
+inline constexpr FeatureKind kLastFeatureKind = FeatureKind::Thread;
 
 const char* featureKindName(FeatureKind k);
 
@@ -70,26 +103,33 @@ struct ElementRefs {
              : false;
     }
 
-    // Resolves to half-edge indices in `mesh`. Returns false if anything named
+    // Resolves to handles into `body`. Returns false if anything named
     // here has gone; a feature that cannot find what it acts on is errored, not
     // quietly re-pointed at whatever now sits at those numbers.
-    bool resolveEdges(const Mesh& mesh, std::vector<Index>& out) const;
+    bool resolveEdges(const Body& body, std::vector<EdgeId>& out) const;
 
     // Resolves to face indices.
-    bool resolveFaces(const Mesh& mesh, std::vector<Index>& out) const;
+    bool resolveFaces(const Body& body, std::vector<FaceId>& out) const;
 };
 
-// Records a selection made on `mesh` as something that will still mean the
+// Records a selection made on `body` as something that will still mean the
 // same thing later.
-ElementRefs nameFaces(const Mesh& mesh, const std::vector<Index>& faces);
+ElementRefs nameFaces(const Body& body, const std::vector<FaceId>& faces);
 
 // As above, and additionally: if the chosen edges are exactly the boundary of
 // one face, that is recorded instead of the list. It is what the user meant --
 // they picked a rim, not sixteen edges that happen to be there today -- and it
 // is the only form that survives the face being retessellated under them.
-ElementRefs nameEdges(const Mesh& mesh, const std::vector<Index>& edges);
+// `allowBoundary` lets a set of edges that happens to be exactly some face's
+// rim be stored as that rim instead, which survives an edit that renumbers or
+// re-splits the face. It costs the order: a rim resolves in whatever order the
+// body lists it, and a caller pairing a parallel array -- a radius per edge --
+// then has its radii on other edges. Such a caller passes false, or passes
+// true only when every entry is the same and the pairing cannot matter.
+ElementRefs nameEdges(const Body& body, const std::vector<EdgeId>& edges,
+                      bool allowBoundary = true);
 
-std::vector<ElementId> nameVertices(const Mesh& mesh, const std::vector<Index>& verts);
+std::vector<ElementId> nameVertices(const Body& body, const std::vector<VertexId>& verts);
 
 struct Feature {
     FeatureKind kind = FeatureKind::Primitive;
@@ -101,14 +141,54 @@ struct Feature {
     // same kind do not collide. Assigned when the feature is created.
     ElementId uid = 0;
 
-    // Primitive: the base shape the chain starts from.
+    // Primitive: the base shape the chain starts from, and which kernel builds
+    // it. The backend belongs to the feature that creates the body rather than
+    // to the object, because it is a property of the geometry: a chain that
+    // starts exact stays exact, and one that starts from an imported mesh
+    // cannot become exact by wishing.
     PrimitiveSpec primitive;
+    Backend       backend = Backend::Mesh;
 
     // Extrude / Inset: which faces, by name as of this point in the chain.
     ElementRefs faces;
     Real distance = 5.0;    // Extrude, signed
     ExtrudeOp extrudeOp = ExtrudeOp::Auto;
+
+    // Whether the walls the sweep left flush with the walls it slid along are
+    // merged into them. True is push and pull -- the face moves and the body
+    // absorbs it. False is extrude -- the boss keeps its own outline, which is
+    // what makes it something you can point at afterwards.
+    bool mergeFlush = true;
     Real amount   = 2.0;    // Inset
+
+    // FaceRotate: how far to tip, and the edge to tip about. Divide: a point on
+    // the cutting plane, and its normal. Draft: a point on the neutral plane,
+    // and the direction the part is pulled -- which for a printed one is the
+    // way it comes off the bed. Hole: where its mouth is, and the way it goes
+    // in. All of them a point and a direction, so all of them these.
+    //
+    // Held in the body's own space as plain geometry rather than as a named
+    // edge, which means an edit further up the chain that moves that edge does
+    // not carry the hinge with it. Names would be better and are what the rest
+    // of the chain uses; this is the honest version of what is built, not a
+    // claim that it follows.
+    Real angle = 0.0;                    // radians
+    Real scale = 1.0;                    // FaceScale: a multiple, 1 is unchanged
+    Vec3 axisPoint{0, 0, 0};
+    Vec3 axisDir{0, 0, 1};
+
+    // Extrude and Push / Pull: whether `axisDir` is the way it goes, in the
+    // body's own space, rather than the face's own normal. A face pulled along
+    // a world axis is a thing people ask for -- a boss that stands up straight
+    // off a slanted face -- and the panel offers it. Off by default, and in a
+    // file written before version 16 it is off, so an extrusion made then goes
+    // the way it always went.
+    bool alongAxis = false;
+
+    // Shell: the wall left behind, measured inward. `faces` holds the faces to
+    // open, and may be empty -- that is a sealed cavity, which is a thing
+    // someone may want and a thing a printer will want a drain hole in.
+    Real thickness = 2.0;
 
     // Bevel / fillet. `edges` empty means every edge of the body; otherwise
     // just those, named by half-edge as numbered at this point in the chain.
@@ -126,6 +206,14 @@ struct Feature {
     ElementRefs edges;
     std::vector<Real>  radii;
     Real width    = 1.0;
+
+    // A flat cut rather than a round, at the same distance.
+    bool chamfer = false;
+
+    // Where the radius ends up at the far end of each edge, for a round that
+    // tapers. Negative means it does not.
+    Real endWidth = -1.0;
+
     int  segments = 1;
 
     // Radius for the i'th resolved edge, falling back to the feature-wide
@@ -141,8 +229,105 @@ struct Feature {
     // graph rather than a list, which is a bigger change than this milestone.
     BooleanOp booleanOp = BooleanOp::Difference;
 
-    // Boolean's tool body, or BaseMesh's geometry.
-    Mesh bakedMesh;
+    // Boolean's tool body, BaseMesh's geometry, or Pattern's tool.
+    Body bakedBody;
+
+    // Pattern: how the copies are laid out and how many there are. The rest of
+    // the layout reuses fields that already mean the same thing -- `axisPoint`
+    // and `axisDir` for the axis or the mirror plane, `distance` for the gap
+    // between copies, `angle` for the turn between them, and `booleanOp` for
+    // whether each copy adds or takes away.
+    //
+    // With `bakedBody` set the pattern repeats that tool, which is how a hole
+    // becomes a bolt circle. Empty, it repeats the body itself, which is how
+    // half a symmetric part becomes the whole of it.
+    PatternMode patternMode = PatternMode::Linear;
+    int         patternCount = 2;
+
+    // Reduce: how far the surface may move, and optionally how few triangles
+    // to stop at (0: as few as the tolerance allows). The reduction is
+    // deterministic, so re-evaluating the chain names the same faces again and
+    // anything after it still finds what it refers to.
+    Real reduceTolerance = 0.05;
+    int  reduceTarget = 0;
+    bool reduceLoosen = false;       // loosen past the tolerance to reach the target
+
+    // The pattern this feature describes, assembled from the fields above.
+    PatternSpec pattern() const;
+
+    // Sketch: the geometry, what has been said about it, and its plane. Solved
+    // each time the chain is evaluated, with the solved positions written back
+    // here -- so what follows, and anyone looking at it, sees the shape its
+    // constraints describe rather than the one it happened to be drawn as.
+    Sketch sketch;
+
+    // ExtrudeProfile: which sketch, and which regions of it. The sketch is
+    // named by its feature's uid and each region by its key, neither of which
+    // changes when a step is added before it or a line is added elsewhere in
+    // the sketch. `distance` and `extrudeOp` say how far, and what to do with
+    // them. Several regions are one step, swept together and combined with the
+    // body once: an imported drawing is hundreds of regions, and a step each
+    // was hundreds of booleans.
+    ElementId sketchUid = 0;
+    std::vector<SketchId> profileKeys;
+
+    // RevolveProfile: the axis those regions turn about, as a point and a
+    // direction in the sketch's own coordinates, and how far round in radians.
+    // Kept in the sketch's frame rather than the world's because that is where
+    // it was picked -- usually a line of the drawing -- and it has to keep
+    // meaning the same thing when the sketch's plane is a face that moves.
+    Vec2 revolveAxisAt{0, 0};
+    Vec2 revolveAxisDir{0, 1};
+    Real revolveAngle = 2.0 * kPi;
+
+    // Hole: what is cut, and what it was chosen for. The face it goes into is
+    // in `faces` and where it goes in is `axisPoint` and `axisDir`, so that a
+    // hole stays on its face and square to it when the face moves. The
+    // fastener and the fit are kept beside the numbers they produced: they are
+    // what the panel shows and what the step says, and a hole typed by hand is
+    // one with no fastener (-1).
+    HoleCut hole;
+    int     holeFastener = -1;
+    HoleFit holeFit = HoleFit::Normal;
+
+    // Thread: the groove cut on the face in `faces`. How far a turn advances
+    // and how deep it goes are kept rather than derived, so a thread stays the
+    // thread it was cut even if the table it came from changes; the fastener
+    // is remembered for the panel to show and for the step to say.
+    Real threadPitch = 1.0;
+    Real threadHeight = 0.5413;
+    bool threadExternal = false;
+    int  threadFastener = -1;
+
+    // Sketch: whether its geometry is drawn in the viewport. A sketch stays in
+    // the outliner once something has been built from it, but showing every
+    // sketch of a finished part would bury the part in its own scaffolding, so
+    // extruding one turns its drawing off. Display only: it changes nothing
+    // about what the chain builds.
+    bool sketchShown = true;
+
+    // Move and Rotate: where the object went, in the world. They are history
+    // like everything else -- they can be edited, turned off and removed -- but
+    // what they change is where the object stands rather than what it is, so
+    // the chain leaves the body alone and the scene composes them onto the
+    // placement the object was created at (see SceneObject::base). Turning a
+    // move off puts the object back; the faces and edges after it keep their
+    // names, since nothing about them changed.
+    Vec3 moveBy{0, 0, 0};
+    Quat turnBy{};
+    Vec3 turnAbout{0, 0, 0};
+
+    // Scale: how much along each of the body's own axes, and the point in its
+    // own space that stays where it is. A real change of shape, made by the
+    // kernel -- not a display transform -- so that everything which bakes
+    // this body into something else, a boolean above all, gets the shape that
+    // is on the screen.
+    Vec3 scaleBy{1, 1, 1};
+    Vec3 scaleAbout{0, 0, 0};
+
+    // Boolean: what the tool body was called when it was combined, so the
+    // history can say "Cut  Cylinder" rather than counting its faces.
+    std::string toolName;
 
     // VertexEdit: a free-form drag, recorded as explicit offsets. Not
     // parametric in any meaningful sense, but it has to live in the chain so
@@ -153,18 +338,28 @@ struct Feature {
     // Set by evaluation; not part of the definition.
     bool        errored = false;
     std::string error;
+    int         sketchFreedoms = 0;   // Sketch: what the last solve left free
 
     // Short description for the timeline, e.g. "Extrude  12.0 mm".
     std::string summary() const;
+
+    // What to call this step in a sentence. Not always featureKindName: a
+    // bevel is a chamfer when it cuts flat and a fillet when it rounds, and a
+    // message that calls it neither leaves the user hunting the timeline for a
+    // word that is not there.
+    const char* displayKind() const;
 };
 
 // Runs the chain, leaving the result in `out`. Marks failing features and keeps
 // going, so one bad step does not destroy the rest of the model. Returns false
 // only if nothing at all could be produced.
-bool evaluateFeatures(std::vector<Feature>& features, Mesh& out);
+bool evaluateFeatures(std::vector<Feature>& features, Body& out);
+
+// Whether a step places the object rather than shaping it.
+inline bool isPlacement(FeatureKind k) { return k == FeatureKind::Move || k == FeatureKind::Rotate; }
 
 // Re-runs the chain from `from` onward, reusing `cache[from - 1]` as the
-// starting point. `cache[i]` holds the mesh as it stood after feature i.
+// starting point. `cache[i]` holds the body as it stood after feature i.
 //
 // This is what keeps editing responsive on a heavy model: adding a bevel to a
 // 100k-triangle part, or dragging the distance slider on the last feature,
@@ -172,6 +367,6 @@ bool evaluateFeatures(std::vector<Feature>& features, Mesh& out);
 // every step since. Falls back to a full evaluation if the cache cannot
 // supply the requested starting point.
 bool evaluateFrom(std::vector<Feature>& features, size_t from,
-                  std::vector<Mesh>& cache, Mesh& out);
+                  std::vector<Body>& cache, Body& out);
 
 } // namespace tg

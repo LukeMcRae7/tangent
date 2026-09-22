@@ -1,5 +1,7 @@
 #include "scene/serialize.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <fstream>
 #include <vector>
@@ -126,6 +128,12 @@ void writeMesh(Writer& w, const Mesh& m) {
     }
 }
 
+// A body is written with a tag for which representation it is, so a file
+// written before a second backend exists still reads afterwards, and one
+// written with a B-rep body fails loudly on a build that has no backend for it
+// rather than being misread as a mesh.
+enum : uint32_t { kBodyMesh = 1, kBodyBrep = 2 };
+
 bool readMesh(Reader& r, Mesh& out) {
     const uint32_t vertCount = r.u32();
     if (r.bad || !r.need(static_cast<size_t>(vertCount) * 24)) return false;
@@ -180,6 +188,91 @@ bool readSpec(Reader& r, PrimitiveSpec& s) {
     return !r.bad;
 }
 
+// A sketch is written whole -- plane, points, entities, constraints -- with
+// every reference kept as the id it had. Ids are never reused within a sketch,
+// so reading it back gives the same sketch rather than one renumbered.
+void writeSketch(Writer& w, const Sketch& s) {
+    w.vec3(s.plane.origin);
+    w.vec3(s.plane.xAxis);
+    w.vec3(s.plane.yAxis);
+    w.u32(s.nextId);
+    w.u32(static_cast<uint32_t>(s.points.size()));
+    for (const SketchPoint& p : s.points) {
+        w.u32(p.id);
+        w.f64(p.at.x);
+        w.f64(p.at.y);
+    }
+    w.u32(static_cast<uint32_t>(s.entities.size()));
+    for (const SketchEntity& e : s.entities) {
+        w.u32(e.id);
+        w.u8(static_cast<uint8_t>(e.curve));
+        w.u8(e.construction ? 1 : 0);
+        w.u32(e.a);
+        w.u32(e.b);
+        w.u32(e.c);
+        w.u32(e.d);
+        w.f64(e.radius);
+    }
+    w.u32(static_cast<uint32_t>(s.constraints.size()));
+    for (const SketchConstraint& k : s.constraints) {
+        w.u32(k.id);
+        w.u8(static_cast<uint8_t>(k.rule));
+        w.u32(k.first);
+        w.u32(k.second);
+        w.f64(k.value);
+        w.f64(k.value2);
+    }
+}
+
+bool readSketch(Reader& r, Sketch& s) {
+    s.plane.origin = r.vec3();
+    s.plane.xAxis = r.vec3();
+    s.plane.yAxis = r.vec3();
+    s.nextId = r.u32();
+
+    // Each count is checked against what is left of the file before anything is
+    // allocated for it: a corrupt count must not become a four-gigabyte vector.
+    const uint32_t points = r.u32();
+    if (r.bad || !r.need(static_cast<size_t>(points) * 20)) return false;
+    s.points.resize(points);
+    for (SketchPoint& p : s.points) {
+        p.id = r.u32();
+        p.at.x = r.f64();
+        p.at.y = r.f64();
+    }
+
+    const uint32_t entities = r.u32();
+    if (r.bad || !r.need(static_cast<size_t>(entities) * 30)) return false;
+    s.entities.resize(entities);
+    for (SketchEntity& e : s.entities) {
+        e.id = r.u32();
+        const uint8_t curve = r.u8();
+        if (curve > static_cast<uint8_t>(SketchCurve::Bezier)) return false;
+        e.curve = static_cast<SketchCurve>(curve);
+        e.construction = r.u8() != 0;
+        e.a = r.u32();
+        e.b = r.u32();
+        e.c = r.u32();
+        e.d = r.u32();
+        e.radius = r.f64();
+    }
+
+    const uint32_t constraints = r.u32();
+    if (r.bad || !r.need(static_cast<size_t>(constraints) * 29)) return false;
+    s.constraints.resize(constraints);
+    for (SketchConstraint& k : s.constraints) {
+        k.id = r.u32();
+        const uint8_t rule = r.u8();
+        if (rule > static_cast<uint8_t>(SketchRule::Angle)) return false;
+        k.rule = static_cast<SketchRule>(rule);
+        k.first = r.u32();
+        k.second = r.u32();
+        k.value = r.f64();
+        k.value2 = r.f64();
+    }
+    return !r.bad;
+}
+
 void writeFeature(Writer& w, const Feature& f) {
     w.u32(static_cast<uint32_t>(f.kind));
     w.u8(f.enabled ? 1 : 0);
@@ -197,12 +290,98 @@ void writeFeature(Writer& w, const Feature& f) {
     w.ids(f.verts);
     w.u32(static_cast<uint32_t>(f.offsets.size()));
     for (const Vec3& o : f.offsets) w.vec3(o);
-    writeMesh(w, f.bakedMesh);
+    if (f.bakedBody.isMesh()) {
+        w.u32(kBodyMesh);
+        writeMesh(w, f.bakedBody.mesh());
+    } else {
+        // The shape in OCCT's own text, and the names beside it. Writing an
+        // empty mesh here instead -- which is what a tag-blind writer would do
+        // -- would save a file that loads as a model with a hole where the cut
+        // used to be, and say nothing about it.
+        std::string shape;
+        std::vector<ElementId> names;
+        if (brep::encode(f.bakedBody.brep(), shape, names)) {
+            w.u32(kBodyBrep);
+            w.text(shape);
+            w.ids(names);
+        } else {
+            w.u32(kBodyMesh);
+            writeMesh(w, Mesh{});
+        }
+    }
+    w.u32(static_cast<uint32_t>(f.backend));
+    w.f64(f.thickness);
+
+    // Version 7: the angle a face was tipped through, and the line it was
+    // tipped about -- which is also the plane a divide cuts on.
+    w.f64(f.angle);
+    w.f64(f.axisPoint.x); w.f64(f.axisPoint.y); w.f64(f.axisPoint.z);
+    w.f64(f.axisDir.x);   w.f64(f.axisDir.y);   w.f64(f.axisDir.z);
+    w.u32(f.mergeFlush ? 1u : 0u);
+
+    // Version 8: how much a face was grown or shrunk.
+    w.f64(f.scale);
+
+    // Version 9: whether a bevel cuts flat, and where its radius ends up.
+    w.u32(f.chamfer ? 1u : 0u);
+    w.f64(f.endWidth);
+    // v10.
+    w.u32(static_cast<uint32_t>(f.patternMode));
+    w.i32(f.patternCount);
+    // v11.
+    w.f64(f.reduceTolerance);
+    w.i32(f.reduceTarget);
+    w.u32(f.reduceLoosen ? 1u : 0u);
+    // v12: a sketch, and which region of which sketch an extrusion sweeps.
+    writeSketch(w, f.sketch);
+    w.u64(f.sketchUid);
+    w.u32(f.profileKeys.empty() ? kNoSketchId : f.profileKeys.front());
+    w.u8(f.sketchShown ? 1 : 0);
+    // v14: where a Move or Rotate took the object, and a Scale's stretch.
+    w.vec3(f.moveBy);
+    w.f64(f.turnBy.x); w.f64(f.turnBy.y); w.f64(f.turnBy.z); w.f64(f.turnBy.w);
+    w.vec3(f.turnAbout);
+    w.vec3(f.scaleBy);
+    w.vec3(f.scaleAbout);
+    w.text(f.toolName);
+    // v15: the regions after the first, for an extrusion of several.
+    w.u32(static_cast<uint32_t>(f.profileKeys.size() > 1 ? f.profileKeys.size() - 1 : 0));
+    for (size_t i = 1; i < f.profileKeys.size(); ++i) w.u32(f.profileKeys[i]);
+    // v16: whether a face was pulled along an axis rather than its own normal.
+    w.u8(f.alongAxis ? 1 : 0);
+    // v17: the axis a revolve turns about, in its sketch's own coordinates,
+    // and how far round.
+    w.f64(f.revolveAxisAt.x);  w.f64(f.revolveAxisAt.y);
+    w.f64(f.revolveAxisDir.x); w.f64(f.revolveAxisDir.y);
+    w.f64(f.revolveAngle);
+    // v18: a hole, and the fastener it was chosen for.
+    w.u32(static_cast<uint32_t>(f.hole.kind));
+    w.f64(f.hole.diameter);
+    w.f64(f.hole.depth);
+    w.u8(f.hole.through ? 1 : 0);
+    w.u8(f.hole.drillPoint ? 1 : 0);
+    w.f64(f.hole.pointAngle);
+    w.f64(f.hole.headDiameter);
+    w.f64(f.hole.headDepth);
+    w.f64(f.hole.sinkAngle);
+    w.i32(f.holeFastener);
+    w.u32(static_cast<uint32_t>(f.holeFit));
+    // v19: a thread, and the screw it was cut for.
+    w.f64(f.threadPitch);
+    w.f64(f.threadHeight);
+    w.u8(f.threadExternal ? 1 : 0);
+    w.i32(f.threadFastener);
 }
 
-bool readFeature(Reader& r, Feature& f) {
+// `version` is the file's, not this build's: a project written before bodies
+// could be exact has no representation tag to read and no backend field after
+// it, and refusing to open it would be losing someone's work over a field that
+// has one possible value.
+bool readFeature(Reader& r, Feature& f, uint32_t version) {
     const uint32_t kind = r.u32();
-    if (kind > static_cast<uint32_t>(FeatureKind::Boolean)) return false;
+    // The last of the enum, kept beside it: a kind added later and not added
+    // here would be read as a corrupt file by the build that has it.
+    if (kind > static_cast<uint32_t>(kLastFeatureKind)) return false;
     f.kind = static_cast<FeatureKind>(kind);
     f.enabled = r.u8() != 0;
     if (!readSpec(r, f.primitive)) return false;
@@ -228,7 +407,131 @@ bool readFeature(Reader& r, Feature& f) {
     f.offsets.clear();
     f.offsets.reserve(offsetCount);
     for (uint32_t i = 0; i < offsetCount; ++i) f.offsets.push_back(r.vec3());
-    if (!readMesh(r, f.bakedMesh)) return false;
+    const uint32_t bodyTag = r.u32();
+    if (version < 5 && bodyTag != kBodyMesh) return false;   // v4 had only meshes
+    if (bodyTag == kBodyMesh) {
+        Mesh m;
+        if (!readMesh(r, m)) return false;
+        f.bakedBody = Body(std::move(m));
+    } else if (bodyTag == kBodyBrep) {
+        const std::string shape = r.text();
+        const std::vector<ElementId> names = r.ids();
+        if (r.bad) return false;
+        BrepRef s = brep::decode(shape, names);
+        if (!s) return false;      // a build without the backend says so loudly
+        f.bakedBody = Body(std::move(s));
+    } else {
+        return false;
+    }
+    if (version >= 5) {
+        const uint32_t backend = r.u32();
+        if (backend > static_cast<uint32_t>(Backend::Brep)) return false;
+        f.backend = static_cast<Backend>(backend);
+    } else {
+        f.backend = Backend::Mesh;   // everything in a v4 file was a mesh
+    }
+    // Version 6 added the shell. A file older than that has no shell features
+    // in it, so the default wall stands and nothing reads it.
+    if (version >= 6) f.thickness = r.f64();
+
+    // Version 7 added rotating a face and dividing one, and the geometry both
+    // of those hang on. At the end of the record, not in the middle of it: a
+    // field written among the others is seven doubles an older file does not
+    // have, and everything after it would be read from the wrong place.
+    if (version >= 7) {
+        f.angle = r.f64();
+        f.axisPoint = {r.f64(), r.f64(), r.f64()};
+        f.axisDir   = {r.f64(), r.f64(), r.f64()};
+        // A file written before this was an extrude, which kept its outline.
+        f.mergeFlush = r.u32() != 0;
+    } else {
+        f.mergeFlush = false;
+    }
+    // A file older than this has no scaled faces in it, so the multiple that
+    // changes nothing is the right one to leave standing.
+    if (version >= 8) f.scale = r.f64();
+    // Older files have no chamfers and no tapers: every bevel in them is a
+    // round of one radius, which is what these defaults say.
+    if (version >= 9) {
+        f.chamfer = r.u32() != 0;
+        f.endWidth = r.f64();
+    }
+    if (version >= 10) {
+        const uint32_t mode = r.u32();
+        if (mode > static_cast<uint32_t>(PatternMode::Mirror)) return false;
+        f.patternMode = static_cast<PatternMode>(mode);
+        f.patternCount = r.i32();
+        if (f.patternCount < 1 || f.patternCount > 4096) return false;
+    }
+    // Older files have no reductions in them.
+    if (version >= 11) {
+        f.reduceTolerance = r.f64();
+        f.reduceTarget = r.i32();
+        f.reduceLoosen = r.u32() != 0;
+        if (!(f.reduceTolerance > 0) || f.reduceTarget < 0) return false;
+    }
+    // Older files have no sketches in them.
+    if (version >= 12) {
+        if (!readSketch(r, f.sketch)) return false;
+        f.sketchUid = r.u64();
+        const SketchId first = r.u32();
+        f.profileKeys.clear();
+        if (first != kNoSketchId) f.profileKeys.push_back(first);
+    }
+    // A sketch in a version 12 file was drawn but never stood on its own, so
+    // there was nothing to hide it from: shown is what it was.
+    if (version >= 13) f.sketchShown = r.u8() != 0;
+    // Older files have no moves, turns or scales in their history: those lived
+    // on the object, and the loader turns them into steps.
+    if (version >= 14) {
+        f.moveBy = r.vec3();
+        f.turnBy.x = r.f64(); f.turnBy.y = r.f64(); f.turnBy.z = r.f64(); f.turnBy.w = r.f64();
+        f.turnAbout = r.vec3();
+        f.scaleBy = r.vec3();
+        f.scaleAbout = r.vec3();
+        f.toolName = r.text();
+    }
+    if (version >= 15) {
+        const uint32_t more = r.u32();
+        if (more > 1000000u) return false;
+        for (uint32_t i = 0; i < more && !r.bad; ++i) f.profileKeys.push_back(r.u32());
+    }
+    // Before this, an extrusion always went along the face's own normal.
+    if (version >= 16) f.alongAxis = r.u8() != 0;
+    // Before this there were no revolves to read one for.
+    if (version >= 17) {
+        f.revolveAxisAt.x  = r.f64(); f.revolveAxisAt.y  = r.f64();
+        f.revolveAxisDir.x = r.f64(); f.revolveAxisDir.y = r.f64();
+        f.revolveAngle = r.f64();
+        if (!(f.revolveAngle > 0.0) || length(f.revolveAxisDir) < 1e-9) return false;
+    }
+    // Before this there were no holes to read one for.
+    if (version >= 18) {
+        const uint32_t kind = r.u32();
+        if (kind > static_cast<uint32_t>(HoleKind::Countersink)) return false;
+        f.hole.kind = static_cast<HoleKind>(kind);
+        f.hole.diameter = r.f64();
+        f.hole.depth = r.f64();
+        f.hole.through = r.u8() != 0;
+        f.hole.drillPoint = r.u8() != 0;
+        f.hole.pointAngle = r.f64();
+        f.hole.headDiameter = r.f64();
+        f.hole.headDepth = r.f64();
+        f.hole.sinkAngle = r.f64();
+        f.holeFastener = r.i32();
+        const uint32_t fit = r.u32();
+        if (fit > static_cast<uint32_t>(HoleFit::Tapped)) return false;
+        f.holeFit = static_cast<HoleFit>(fit);
+        if (!(f.hole.diameter > 0.0)) return false;
+    }
+    // Before this there were no threads to read one for.
+    if (version >= 19) {
+        f.threadPitch = r.f64();
+        f.threadHeight = r.f64();
+        f.threadExternal = r.u8() != 0;
+        f.threadFastener = r.i32();
+        if (!(f.threadPitch > 0.0) || !(f.threadHeight > 0.0)) return false;
+    }
     return !r.bad;
 }
 
@@ -247,10 +550,12 @@ ProjectResult saveProject(const Scene& scene, const std::string& path) {
     for (const auto& obj : scene.objects()) {
         w.u32(obj->id);
         w.text(obj->name);
-        w.vec3(obj->transform.position);
-        w.f64(obj->transform.rotation.x); w.f64(obj->transform.rotation.y);
-        w.f64(obj->transform.rotation.z); w.f64(obj->transform.rotation.w);
-        w.vec3(obj->transform.scale);
+        // Where it was made. Where it is now is that and the moves in its
+        // history, which are written with the rest of the chain.
+        w.vec3(obj->base.position);
+        w.f64(obj->base.rotation.x); w.f64(obj->base.rotation.y);
+        w.f64(obj->base.rotation.z); w.f64(obj->base.rotation.w);
+        w.vec3(Vec3{1, 1, 1});
         w.u8(obj->visible ? 1 : 0);
         writeSpec(w, obj->spec);
 
@@ -292,9 +597,12 @@ ProjectResult loadProject(Scene& scene, const std::string& path) {
     r.p += sizeof(kMagic);
 
     const uint32_t version = r.u32();
-    if (version != kProjectVersion) {
+    // Older files are read; newer ones are not, because there is no way to know
+    // what a field this build has never heard of means.
+    if (version > kProjectVersion || version < kMinReadableVersion) {
         res.error = "project version " + std::to_string(version) +
-                    " (this build reads " + std::to_string(kProjectVersion) + ")";
+                    " (this build reads " + std::to_string(kMinReadableVersion) +
+                    " to " + std::to_string(kProjectVersion) + ")";
         return res;
     }
 
@@ -329,19 +637,66 @@ ProjectResult loadProject(Scene& scene, const std::string& path) {
         chain.reserve(featureCount);
         for (uint32_t k = 0; k < featureCount; ++k) {
             Feature f;
-            if (!readFeature(r, f)) { res.error = "bad feature"; return res; }
+            if (!readFeature(r, f, version)) { res.error = "bad feature"; return res; }
             chain.push_back(std::move(f));
         }
         if (r.bad) { res.error = "truncated file"; return res; }
 
-        const ObjectId newId = loaded.addPrimitive(spec.kind, spec, t.position);
+        // Before version 13 a sketch could not be shown or hidden, because a
+        // sketch could not stand on its own: every one of them was drawn in
+        // order to sweep something. So one that was swept is scaffolding and
+        // starts hidden, and one that nothing was built from starts shown --
+        // which is what saving those same files from here would now record.
+        if (version < 13) {
+            for (Feature& f : chain) {
+                if (f.kind != FeatureKind::Sketch) continue;
+                f.sketchShown = std::none_of(chain.begin(), chain.end(), [&](const Feature& g) {
+                    return g.kind == FeatureKind::ExtrudeProfile && g.sketchUid == f.uid;
+                });
+            }
+        }
+
+        // An object that came from a file -- a STEP import, a mesh, a piece of a
+        // split -- has no primitive to start from: its chain begins with the
+        // geometry itself. Starting every object from a primitive refused
+        // these outright, so a project holding one saved and then would not
+        // open.
+        const bool fromGeometry = !chain.empty() && chain.front().kind == FeatureKind::BaseMesh;
+        // A part that starts from a sketch has no primitive to fall back on:
+        // the chain itself is the object, so it is built from the chain.
+        const bool fromSketch = !chain.empty() && chain.front().kind == FeatureKind::Sketch;
+        ObjectId newId = kNoObject;
+        if (fromSketch)        newId = loaded.addChainAsIs(chain, name);
+        else if (fromGeometry) newId = loaded.addImportedBody(chain.front().bakedBody, name);
+        else                   newId = loaded.addPrimitive(spec.kind, spec, t.position);
         if (newId == kNoObject) { res.error = "object '" + name + "' failed to build"; return res; }
+
+        // Before version 14 the transform was where the object was, scale and
+        // all, and nothing in the history moved it. Where it was is where it
+        // was made, then; and a scale -- which the exact kernel never saw, so
+        // that anything baking this body into another got it unscaled --
+        // becomes the step it always should have been, at the end of the
+        // chain where it acted.
+        const bool scaled = std::fabs(t.scale.x - 1.0) > 1e-9 || std::fabs(t.scale.y - 1.0) > 1e-9 ||
+                            std::fabs(t.scale.z - 1.0) > 1e-9;
+        if (scaled && t.scale.x > 0.0 && t.scale.y > 0.0 && t.scale.z > 0.0) {
+            const bool hasBody = std::any_of(chain.begin(), chain.end(), [](const Feature& f) {
+                return f.kind != FeatureKind::Sketch && !isPlacement(f.kind);
+            });
+            if (hasBody) {
+                Feature sc;
+                sc.kind = FeatureKind::Scale;
+                sc.uid = loaded.takeFeatureUid();
+                sc.scaleBy = t.scale;
+                chain.push_back(std::move(sc));
+            }
+        }
 
         SceneObject* o = loaded.find(newId);
         o->name = name;
-        o->transform = t;
         o->visible = visible;
         o->features = std::move(chain);
+        loaded.setBasePlacement(newId, t);
         // Re-runs the recipe. A chain that no longer evaluates leaves the
         // object as its base primitive rather than failing the whole load.
         loaded.reevaluate(newId);
@@ -351,6 +706,31 @@ ProjectResult loadProject(Scene& scene, const std::string& path) {
     scene = std::move(loaded);
     res.ok = true;
     return res;
+}
+
+// ---------------------------------------------------------------------------
+std::string encodeFeatures(const std::vector<Feature>& features) {
+    Writer w;
+    w.u32(kProjectVersion);
+    w.u32(static_cast<uint32_t>(features.size()));
+    for (const Feature& f : features) writeFeature(w, f);
+    return std::string(reinterpret_cast<const char*>(w.buf.data()), w.buf.size());
+}
+
+bool decodeFeatures(const std::string& bytes, std::vector<Feature>& out) {
+    out.clear();
+    Reader r{reinterpret_cast<const unsigned char*>(bytes.data()),
+             reinterpret_cast<const unsigned char*>(bytes.data()) + bytes.size(), false};
+    const uint32_t version = r.u32();
+    if (r.bad || version != kProjectVersion) return false;
+    const uint32_t n = r.u32();
+    // Every feature is far more than a byte, so a count past that is corrupt.
+    if (r.bad || n > bytes.size()) return false;
+    out.resize(n);
+    for (Feature& f : out)
+        if (!readFeature(r, f, version)) { out.clear(); return false; }
+    if (r.bad || r.p != r.end) { out.clear(); return false; }
+    return true;
 }
 
 } // namespace tg

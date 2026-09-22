@@ -16,7 +16,12 @@ bool segmentHitsTriangle(Vec3 p0, Vec3 p1, Vec3 a, Vec3 b, Vec3 c) {
     const Vec3 e1 = b - a, e2 = c - a;
     const Vec3 pv = cross(dir, e2);
     const Real det = dot(e1, pv);
-    if (std::fabs(det) < 1e-12f) return false;      // parallel
+    // Parallel, tested scale-free. An absolute cutoff is a different test on a
+    // 2 mm part than on a 2 m one: det carries the cube of a length, so at
+    // 1e-12 a 20 mm model's coplanar pairs sit right on the threshold, and
+    // whichever side of it rounding puts them on decides the answer. Comparing
+    // against the magnitudes it was built from is the same test at any size.
+    if (std::fabs(det) <= 1e-10 * length(e1) * length(pv)) return false;
 
     const Real inv = 1.0f / det;
     const Vec3 tv = p0 - a;
@@ -37,19 +42,38 @@ struct Tri {
     uint32_t a, b, c;
     Vec3 pa, pb, pc;
     AABB box;
+    Index face = kInvalid;   // the polygon it was triangulated from
 };
 
 bool trianglesCross(const Tri& x, const Tri& y) {
-    // Triangles that meet at a shared corner touch legitimately and must be
+    // Two triangles of the same polygon are that polygon's triangulation, not
+    // two pieces of surface. Ear clipping cannot make them overlap, and being
+    // coplanar is the case the crossing test is least stable on. A face that
+    // genuinely folds through itself is a degenerate face, counted as one.
+    if (x.face != kInvalid && x.face == y.face) return false;
+
+    // Triangles sharing an edge meet along it legitimately and must be
     // excluded. Comparing indices is not enough: the render mesh gives every
     // face its own copy of each corner (that is what lets adjacent faces
     // disagree about the normal), so neighbouring triangles never share an
-    // index even though they share a position.
+    // index even though they share a position -- hence the comparison by
+    // position.
+    //
+    // Two coincident corners, not one. Excluding any pair that shared a single
+    // corner let through the one shape this check exists to catch: a fan that
+    // folds back through itself pivots on its apex, so every pair in it shares
+    // that corner and every pair was waved past. The fillet's acceptance gate
+    // is checkHealth().solid(), which left it blind to its own characteristic
+    // failure. Touching *at* a shared corner is already excluded by the strict
+    // parameter bounds in segmentHitsTriangle -- an edge leaving that corner
+    // meets the other triangle's plane at t = 0.
     const Vec3 xs[3] = {x.pa, x.pb, x.pc};
     const Vec3 ys[3] = {y.pa, y.pb, y.pc};
+    int shared = 0;
     for (const Vec3& p : xs)
         for (const Vec3& q : ys)
-            if (lengthSq(p - q) < 1e-12) return false;
+            if (lengthSq(p - q) < 1e-12) ++shared;
+    if (shared >= 2) return false;
 
     return segmentHitsTriangle(x.pa, x.pb, y.pa, y.pb, y.pc) ||
            segmentHitsTriangle(x.pb, x.pc, y.pa, y.pb, y.pc) ||
@@ -116,6 +140,7 @@ MeshHealth checkHealth(const Mesh& mesh, bool checkIntersections) {
         Tri t;
         t.a = rm.triangles[i]; t.b = rm.triangles[i + 1]; t.c = rm.triangles[i + 2];
         t.pa = rm.positions[t.a]; t.pb = rm.positions[t.b]; t.pc = rm.positions[t.c];
+        if (i / 3 < rm.triangleFace.size()) t.face = rm.triangleFace[i / 3];
         t.box.expand(t.pa); t.box.expand(t.pb); t.box.expand(t.pc);
         edgeSum += length(t.box.size());
         tris.push_back(t);
@@ -134,6 +159,13 @@ MeshHealth checkHealth(const Mesh& mesh, bool checkIntersections) {
 
     std::unordered_map<uint64_t, std::vector<uint32_t>> grid;
     grid.reserve(tris.size() * 2);
+    // A triangle spanning a huge number of cells would defeat the point of
+    // having a grid, so it is held out of it and scanned separately below.
+    // Holding it out and then never scanning it -- which is what "left to the
+    // pair scan" meant, there being no pair scan -- exempted exactly the
+    // triangles most likely to be crossed: the big flat wall a part is built
+    // from, next to the small facets an operation covers it in.
+    std::vector<uint32_t> oversized;
     for (uint32_t i = 0; i < tris.size(); ++i) {
         const Tri& t = tris[i];
         const int x0 = static_cast<int>(std::floor(t.box.min.x / cell));
@@ -142,13 +174,29 @@ MeshHealth checkHealth(const Mesh& mesh, bool checkIntersections) {
         const int y1 = static_cast<int>(std::floor(t.box.max.y / cell));
         const int z0 = static_cast<int>(std::floor(t.box.min.z / cell));
         const int z1 = static_cast<int>(std::floor(t.box.max.z / cell));
-        // A triangle spanning a huge number of cells would defeat the point;
-        // such a triangle is rare and is simply left to the pair scan.
-        if (static_cast<int64_t>(x1 - x0 + 1) * (y1 - y0 + 1) * (z1 - z0 + 1) > 512) continue;
+        if (static_cast<int64_t>(x1 - x0 + 1) * (y1 - y0 + 1) * (z1 - z0 + 1) > 512) {
+            oversized.push_back(i);
+            continue;
+        }
         for (int x = x0; x <= x1; ++x)
             for (int y = y0; y <= y1; ++y)
                 for (int z = z0; z <= z1; ++z)
                     grid[key(x, y, z)].push_back(i);
+    }
+
+    // Each held-out triangle against every other, and against each other once.
+    // There are few of them by construction -- one has to span 512 cells to
+    // qualify -- so this stays far below the grid's own cost.
+    for (size_t a = 0; a < oversized.size(); ++a) {
+        const uint32_t i = oversized[a];
+        for (uint32_t j = 0; j < tris.size(); ++j) {
+            if (j == i) continue;
+            // Pairs of held-out triangles are tested once, from the lower one.
+            if (j < i && std::binary_search(oversized.begin(), oversized.end(), j))
+                continue;
+            if (!tris[i].box.overlaps(tris[j].box)) continue;
+            if (trianglesCross(tris[i], tris[j])) ++h.selfIntersections;
+        }
     }
 
     // A pair of triangles can share several cells, so each pair must be tested

@@ -19,6 +19,11 @@ struct ViewOptions {
     bool  showGrid       = true;
     bool  showWireframe  = true;
     bool  showSelectionBox = false;
+
+    // Faces a printer will struggle with, tinted on the model. On by default:
+    // this is what the tool is for, and a check nobody turns on is a check
+    // nobody runs.
+    bool  showPrintIssues = true;
     bool  backfaceCulling = true;
     Real  creaseAngleDeg = 35.0;
 
@@ -34,9 +39,16 @@ struct ViewOptions {
     Real  gridSpacing    = 1.0;
     Real  gridSubdivide  = 10.0;
 
-    // Bevel parameters, driven from the Modify menu.
-    Real  bevelWidth    = 1.0;
-    int   bevelSegments = 1;
+    // Where the Shell dialog's wall starts, and where the Inset dialog's
+    // distance starts: each is the last one used, so the next part of the same
+    // job begins where the last left off. Both are chosen in their dialog.
+    // 2mm is a few perimeters at a common nozzle width, which is the thinnest
+    // wall most printers make well.
+    Real  shellThickness = 2.0;
+    Real  insetAmount   = 2.0;
+    // Signed: out makes the body bigger, in smaller. Two tenths is a printed
+    // clearance, which is what an offset is usually for.
+    Real  offsetAmount  = 0.2;
 };
 
 // Sub-rectangle of the framebuffer to draw into, in physical pixels and in
@@ -73,6 +85,29 @@ public:
     // it sits on without occluding anything.
     void addTriangle(Vec3 a, Vec3 b, Vec3 c, Vec4 color);
 
+    // A filled shape that goes over everything else in the overlay, including
+    // the overlay's own lines, and ignores the depth buffer.
+    //
+    // For the one thing that has to be read rather than seen: the arrow a drag
+    // is measured along. Behind the tick marks it is striped; behind the model
+    // it is gone; and it is the only part of the guide the eye follows.
+    void addFrontTriangle(Vec3 a, Vec3 b, Vec3 c, Vec4 color);
+
+    // A line of a fixed width in pixels, in the front layer.
+    //
+    // Not glLineWidth: a core profile is only required to support a width of
+    // one, and several drivers give exactly that. A quad turned to face the eye
+    // holds its width at any angle and any zoom, which is what an overlay
+    // measured in pixels has to do.
+    void addFrontLine(const Camera& camera, Vec3 a, Vec3 b, Vec4 color,
+                      Real widthPx = 2.0);
+
+    // The same, broken into dashes of `dashPx` on and `gapPx` off, measured on
+    // screen so the pattern stays legible however long the line is in world
+    // terms. For lines that report a relationship rather than draw a thing.
+    void addFrontDashes(const Camera& camera, Vec3 a, Vec3 b, Vec4 color,
+                        Real widthPx = 1.6, Real dashPx = 6.0, Real gapPx = 5.0);
+
 private:
     struct CacheEntry {
         GpuMesh  gpu;
@@ -108,6 +143,7 @@ private:
     std::vector<LineVert> lineVerts_;
     uint32_t triVao_ = 0, triVbo_ = 0;
     std::vector<LineVert> triVerts_;
+    std::vector<LineVert> frontVerts_;
     std::unordered_map<ObjectId, CacheEntry> cache_;
 
     // Objects can leave the scene without passing through forget(): undo lifts

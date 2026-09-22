@@ -33,6 +33,163 @@ AABB SceneObject::worldBounds() const {
 }
 
 // ---------------------------------------------------------------------------
+Transform placementOf(const Transform& base, const std::vector<Feature>& features) {
+    Transform t = base;
+    t.scale = {1, 1, 1};
+    for (const Feature& f : features) {
+        if (!f.enabled) continue;
+        if (f.kind == FeatureKind::Move) {
+            t.position += f.moveBy;
+        } else if (f.kind == FeatureKind::Rotate) {
+            t.rotation = normalize(f.turnBy * t.rotation);
+            t.position = f.turnAbout + rotate(f.turnBy, t.position - f.turnAbout);
+        }
+    }
+    return t;
+}
+
+Vec3 scaleOf(const std::vector<Feature>& features) {
+    Vec3 s{1, 1, 1};
+    for (const Feature& f : features)
+        if (f.enabled && f.kind == FeatureKind::Scale)
+            s = {s.x * f.scaleBy.x, s.y * f.scaleBy.y, s.z * f.scaleBy.z};
+    return s;
+}
+
+namespace {
+
+// The last step, if it is an enabled one of this kind -- the one a new step of
+// the same kind folds into.
+Feature* trailing(SceneObject& obj, FeatureKind kind) {
+    if (obj.features.size() < 2) return nullptr;      // never the root
+    Feature& f = obj.features.back();
+    return f.enabled && f.kind == kind ? &f : nullptr;
+}
+
+// A placement step appended without evaluating anything: the body after it is
+// the body before it, so the cache only needs that body repeated.
+void appendUnchanged(SceneObject& obj, Feature f) {
+    const bool whole = obj.featureCache.size() == obj.features.size();
+    obj.features.push_back(std::move(f));
+    if (whole) obj.featureCache.push_back(obj.body);
+}
+
+void dropLast(SceneObject& obj) {
+    obj.features.pop_back();
+    if (obj.featureCache.size() > obj.features.size()) obj.featureCache.resize(obj.features.size());
+}
+
+} // namespace
+
+bool Scene::recordMove(ObjectId id, Vec3 by) {
+    SceneObject* obj = find(id);
+    if (!obj) return false;
+    if (length(by) < 1e-9) return true;
+    if (Feature* f = trailing(*obj, FeatureKind::Move)) {
+        f->moveBy += by;
+        if (length(f->moveBy) < 1e-9) dropLast(*obj);
+    } else {
+        Feature m;
+        m.kind = FeatureKind::Move;
+        m.uid = nextFeatureUid_++;
+        m.moveBy = by;
+        appendUnchanged(*obj, std::move(m));
+    }
+    place(*obj);
+    return true;
+}
+
+bool Scene::recordRotate(ObjectId id, Quat turn, Vec3 aboutWorld) {
+    SceneObject* obj = find(id);
+    if (!obj) return false;
+    turn = normalize(turn);
+    if (std::fabs(turn.w) > 1.0 - 1e-12) return true;
+    Feature* f = trailing(*obj, FeatureKind::Rotate);
+    if (f && length(f->turnAbout - aboutWorld) < 1e-6) {
+        f->turnBy = normalize(turn * f->turnBy);
+        if (std::fabs(f->turnBy.w) > 1.0 - 1e-12) dropLast(*obj);
+    } else {
+        Feature r;
+        r.kind = FeatureKind::Rotate;
+        r.uid = nextFeatureUid_++;
+        r.turnBy = turn;
+        r.turnAbout = aboutWorld;
+        appendUnchanged(*obj, std::move(r));
+    }
+    place(*obj);
+    return true;
+}
+
+bool Scene::recordScale(ObjectId id, Vec3 factors, Vec3 aboutLocal, std::string* error) {
+    if (error) error->clear();
+    SceneObject* obj = find(id);
+    if (!obj) return false;
+    if (!(factors.x > 0.0) || !(factors.y > 0.0) || !(factors.z > 0.0)) {
+        if (error) *error = "a scale has to be above zero every way: a negative one is a mirror";
+        return false;
+    }
+    if (std::fabs(factors.x - 1.0) < 1e-12 && std::fabs(factors.y - 1.0) < 1e-12 &&
+        std::fabs(factors.z - 1.0) < 1e-12)
+        return true;
+    if (obj->body.empty()) {
+        if (error) *error = "a sketch has no body to scale: change its dimensions instead";
+        return false;
+    }
+
+    const std::vector<Feature> before = obj->features;
+    size_t from = obj->features.size();
+    Feature* f = trailing(*obj, FeatureKind::Scale);
+    if (f && length(f->scaleAbout - aboutLocal) < 1e-9) {
+        f->scaleBy = {f->scaleBy.x * factors.x, f->scaleBy.y * factors.y, f->scaleBy.z * factors.z};
+        from = obj->features.size() - 1;
+        if (std::fabs(f->scaleBy.x - 1.0) < 1e-12 && std::fabs(f->scaleBy.y - 1.0) < 1e-12 &&
+            std::fabs(f->scaleBy.z - 1.0) < 1e-12) {
+            dropLast(*obj);
+            from = obj->features.size();
+        }
+    } else {
+        Feature sc;
+        sc.kind = FeatureKind::Scale;
+        sc.uid = nextFeatureUid_++;
+        sc.scaleBy = factors;
+        sc.scaleAbout = aboutLocal;
+        obj->features.push_back(std::move(sc));
+    }
+
+    // Only the step that changed needs building; the rest is cached.
+    if (from < obj->features.size()) {
+        Body next;
+        const bool ok = evaluateFrom(obj->features, from, obj->featureCache, next);
+        if (!ok || obj->features[from].errored) {
+            if (error) *error = obj->features[from].error.empty() ? "the body could not be scaled"
+                                                                  : obj->features[from].error;
+            obj->features = before;
+            obj->featureCache.resize(std::min(obj->featureCache.size(), obj->features.size()));
+            reevaluate(id);
+            return false;
+        }
+        obj->body = std::move(next);
+    } else {
+        // Folded back to nothing: the body is what it was before the step.
+        Body back;
+        if (!evaluateFrom(obj->features, obj->features.size(), obj->featureCache, back))
+            evaluateFeatures(obj->features, back);
+        obj->body = std::move(back);
+    }
+    obj->refreshDerived();
+    place(*obj);
+    pruneElementSelection();
+    return true;
+}
+
+void Scene::setBasePlacement(ObjectId id, const Transform& base) {
+    SceneObject* obj = find(id);
+    if (!obj) return;
+    obj->base = base;
+    obj->base.scale = {1, 1, 1};
+    place(*obj);
+}
+
 std::string Scene::uniqueName(const std::string& base) const {
     bool taken = false;
     for (const auto& o : objects_) if (o->name == base) { taken = true; break; }
@@ -50,6 +207,36 @@ std::string Scene::uniqueName(const std::string& base) const {
     return base;
 }
 
+ObjectId Scene::addImportedBody(Body body, const std::string& name) {
+    if (body.empty()) return kNoObject;
+
+    auto obj = std::make_unique<SceneObject>();
+    obj->spec.kind = PrimitiveKind::Custom;
+
+    // BaseMesh is the chain root for geometry that has no parameters behind it.
+    // The name is historical -- it predates the exact kernel -- but the meaning
+    // is right for an import either way: this is where the chain starts, and
+    // nothing upstream of it can be edited because there is no upstream.
+    Feature base;
+    base.kind = FeatureKind::BaseMesh;
+    base.backend = body.isMesh() ? Backend::Mesh : Backend::Brep;
+    base.uid = nextFeatureUid_++;
+    base.bakedBody = std::move(body);
+    obj->features.push_back(std::move(base));
+
+    if (!evaluateFeatures(obj->features, obj->body)) return kNoObject;
+
+    obj->id = nextId_++;
+    obj->name = uniqueName(name.empty() ? "Imported" : name);
+    place(*obj);
+    obj->body.tessellate(obj->render);
+    obj->localBounds = obj->body.bounds();
+
+    const ObjectId id = obj->id;
+    objects_.push_back(std::move(obj));
+    return id;
+}
+
 ObjectId Scene::addPrimitive(PrimitiveKind kind, const PrimitiveSpec& spec, Vec3 position) {
     auto obj = std::make_unique<SceneObject>();
     obj->spec = spec;
@@ -58,39 +245,108 @@ ObjectId Scene::addPrimitive(PrimitiveKind kind, const PrimitiveSpec& spec, Vec3
     Feature base;
     base.kind = FeatureKind::Primitive;
     base.primitive = obj->spec;
+    base.backend = defaultBackend_;
     base.uid = nextFeatureUid_++;
     obj->features.push_back(base);
 
-    if (!evaluateFeatures(obj->features, obj->mesh)) return kNoObject;
+    // A plane is a surface, not a solid, and the exact kernel builds solids.
+    // Falling back keeps the construction plane working rather than refusing
+    // to make one at all.
+    if (base.backend == Backend::Brep && kind == PrimitiveKind::Plane)
+        obj->features.back().backend = Backend::Mesh;
+
+    if (!evaluateFeatures(obj->features, obj->body)) return kNoObject;
 
     obj->id = nextId_++;
     obj->name = uniqueName(primitiveName(kind));
-    obj->transform.position = position;
-    obj->mesh.buildRenderMesh(obj->render);
-    obj->localBounds = obj->mesh.bounds();
+    obj->base.position = position;
+    place(*obj);
+    obj->body.tessellate(obj->render);
+    obj->localBounds = obj->body.bounds();
 
     const ObjectId id = obj->id;
     objects_.push_back(std::move(obj));
     return id;
 }
 
-ObjectId Scene::addMesh(Mesh mesh, Vec3 position, const std::string& name) {
-    if (mesh.empty()) return kNoObject;
+ObjectId Scene::addBody(Body body, Vec3 position, const std::string& name) {
+    if (body.empty()) return kNoObject;
     auto obj = std::make_unique<SceneObject>();
     obj->spec.kind = PrimitiveKind::Custom;
-    obj->mesh = std::move(mesh);
+    obj->body = std::move(body);
 
     Feature base;
     base.kind = FeatureKind::BaseMesh;
-    base.bakedMesh = obj->mesh;
+    base.bakedBody = obj->body;
     base.uid = nextFeatureUid_++;
     obj->features.push_back(base);
 
     obj->id = nextId_++;
     obj->name = uniqueName(name.empty() ? "Object" : name);
-    obj->transform.position = position;
-    obj->mesh.buildRenderMesh(obj->render);
-    obj->localBounds = obj->mesh.bounds();
+    obj->base.position = position;
+    place(*obj);
+    obj->body.tessellate(obj->render);
+    obj->localBounds = obj->body.bounds();
+
+    const ObjectId id = obj->id;
+    objects_.push_back(std::move(obj));
+    return id;
+}
+
+namespace {
+
+// The object a chain describes, evaluated. Not in the scene yet: whether a
+// chain that failed is kept is the caller's decision.
+std::unique_ptr<SceneObject> buildFromChain(std::vector<Feature> features, bool& built) {
+    auto obj = std::make_unique<SceneObject>();
+    obj->spec.kind = PrimitiveKind::Custom;
+    obj->features = std::move(features);
+    built = evaluateFrom(obj->features, 0, obj->featureCache, obj->body);
+    return obj;
+}
+
+} // namespace
+
+ObjectId Scene::addFeatureChain(std::vector<Feature> features, const std::string& name,
+                                std::string* error) {
+    if (error) error->clear();
+    for (Feature& f : features)
+        if (f.uid == 0) f.uid = nextFeatureUid_++;
+
+    bool built = false;
+    std::unique_ptr<SceneObject> obj = buildFromChain(std::move(features), built);
+    for (const Feature& f : obj->features) {
+        if (!f.errored) continue;
+        if (error) *error = f.error;
+        return kNoObject;
+    }
+    if (!built) {
+        if (error) *error = "the history produced nothing";
+        return kNoObject;
+    }
+
+    obj->id = nextId_++;
+    obj->name = uniqueName(name.empty() ? "Part" : name);
+    place(*obj);
+    obj->body.tessellate(obj->render);
+    obj->localBounds = obj->body.bounds();
+
+    const ObjectId id = obj->id;
+    objects_.push_back(std::move(obj));
+    return id;
+}
+
+ObjectId Scene::addChainAsIs(std::vector<Feature> features, const std::string& name) {
+    for (Feature& f : features)
+        if (f.uid == 0) f.uid = nextFeatureUid_++;
+
+    bool built = false;
+    std::unique_ptr<SceneObject> obj = buildFromChain(std::move(features), built);
+    obj->id = nextId_++;
+    obj->name = uniqueName(name.empty() ? "Part" : name);
+    place(*obj);
+    obj->body.tessellate(obj->render);
+    obj->localBounds = obj->body.bounds();
 
     const ObjectId id = obj->id;
     objects_.push_back(std::move(obj));
@@ -118,7 +374,8 @@ ObjectId Scene::duplicateObject(ObjectId id) {
                                         // intermediate mesh would cost more
                                         // than re-running the chain once
     obj->transform   = src->transform;
-    obj->mesh        = src->mesh;
+    obj->base        = src->base;
+    obj->body        = src->body;
     obj->render      = src->render;
     obj->localBounds = src->localBounds;
     obj->visible     = src->visible;
@@ -186,16 +443,48 @@ bool Scene::rebuild(ObjectId id) {
     return reevaluate(id);
 }
 
+void Scene::noteNewFailures(const SceneObject& obj,
+                            const std::vector<ElementId>& wasBroken) {
+    const Feature* first = nullptr;
+    int count = 0;
+    for (const Feature& f : obj.features) {
+        if (!f.errored) continue;
+        if (std::find(wasBroken.begin(), wasBroken.end(), f.uid) != wasBroken.end()) continue;
+        if (!first) first = &f;
+        ++count;
+    }
+    if (!first) return;
+
+    chainNotice_ = std::string(first->displayKind()) + " failed";
+    if (!first->error.empty()) chainNotice_ += ": " + first->error;
+    if (count > 1) chainNotice_ += " (and " + std::to_string(count - 1) + " more)";
+}
+
 bool Scene::reevaluateFrom(ObjectId id, size_t fromFeature) {
     SceneObject* obj = find(id);
     if (!obj) return false;
 
-    // Evaluate into a scratch mesh: a chain that produces nothing must not
-    // destroy the geometry the user can still see.
-    Mesh next;
-    if (!evaluateFrom(obj->features, fromFeature, obj->featureCache, next)) return false;
+    // What was already broken before this run, so that only a step that has
+    // newly failed is reported. Held by uid rather than by position: a chain
+    // can be reordered between runs.
+    std::vector<ElementId> wasBroken;
+    for (const Feature& f : obj->features)
+        if (f.errored) wasBroken.push_back(f.uid);
 
-    obj->mesh = std::move(next);
+    // Evaluate into a scratch body: a chain that produces nothing must not
+    // destroy the geometry the user can still see.
+    Body next;
+    const bool ok = evaluateFrom(obj->features, fromFeature, obj->featureCache, next);
+
+    // Either way: evaluateFrom has marked each step it ran, and a chain that
+    // produced nothing at all is exactly the case worth saying something about.
+    noteNewFailures(*obj, wasBroken);
+    // Where it stands follows the chain whatever the body did: a Move turned
+    // off in the history takes the object back even if some later step fails.
+    place(*obj);
+    if (!ok) return false;
+
+    obj->body = std::move(next);
     obj->refreshDerived();
     // Face numbering does not survive a re-evaluation.
     pruneElementSelection();
@@ -211,7 +500,7 @@ bool Scene::addFeature(ObjectId id, Feature feature, std::string* error) {
     obj->features.push_back(std::move(feature));
 
     // Only the new feature needs running; everything before it is cached.
-    Mesh next;
+    Body next;
     if (!evaluateFrom(obj->features, obj->features.size() - 1,
                       obj->featureCache, next)) {
         if (error) *error = obj->features.back().error;
@@ -227,8 +516,65 @@ bool Scene::addFeature(ObjectId id, Feature feature, std::string* error) {
         return false;
     }
 
-    obj->mesh = std::move(next);
+    obj->body = std::move(next);
     obj->refreshDerived();
+    place(*obj);
+    pruneElementSelection();
+    return true;
+}
+
+void Scene::addFeatureWithResult(ObjectId id, Feature feature, Body result) {
+    SceneObject* obj = find(id);
+    if (!obj) return;
+    // The cache is trusted by its length alone, so it has to be whole before a
+    // result is placed at its end: an incremental evaluation later starts from
+    // the entry before the step it is re-running, and a gap there would hand it
+    // an empty body. An imported mesh's chain is its root, which is cheap to
+    // evaluate; anything longer costs what an ordinary append would have.
+    if (obj->featureCache.size() != obj->features.size()) {
+        Body current;
+        evaluateFrom(obj->features, 0, obj->featureCache, current);
+    }
+    if (feature.uid == 0) feature.uid = nextFeatureUid_++;
+    obj->features.push_back(std::move(feature));
+    obj->featureCache.push_back(result);
+    obj->body = std::move(result);
+    obj->refreshDerived();
+    place(*obj);
+    pruneElementSelection();
+}
+
+bool Scene::setFeatures(ObjectId id, std::vector<Feature> features, std::string* error) {
+    if (error) error->clear();
+    SceneObject* obj = find(id);
+    if (!obj) return false;
+
+    for (Feature& f : features)
+        if (f.uid == 0) f.uid = nextFeatureUid_++;
+
+    std::vector<Feature> previous = std::move(obj->features);
+    std::vector<Body>    cache = std::move(obj->featureCache);
+    obj->features = std::move(features);
+    obj->featureCache.clear();
+
+    Body next;
+    const bool built = evaluateFeatures(obj->features, next);
+    size_t bad = obj->features.size();
+    for (size_t i = 0; i < obj->features.size(); ++i)
+        if (obj->features[i].errored) { bad = i; break; }
+
+    if (!built || bad < obj->features.size()) {
+        if (error)
+            *error = bad < obj->features.size() ? obj->features[bad].error
+                                                : "the chain produced nothing";
+        obj->features = std::move(previous);
+        obj->featureCache = std::move(cache);
+        return false;
+    }
+
+    obj->body = std::move(next);
+    obj->refreshDerived();
+    place(*obj);
     pruneElementSelection();
     return true;
 }
@@ -305,15 +651,58 @@ float distToSegment(Vec2 p, Vec2 a, Vec2 b) {
     return length(p - (a + ab * t));
 }
 
+// Pixel distance from the cursor to an edge *as it is drawn*: along the curve,
+// rather than across the chord between its two ends. Negative when nothing
+// projected in front of the camera.
+//
+// This is where measuring the chord failed worst. A closed rim's two ends are
+// the same point, so the chord collapsed to that point and the only part of a
+// whole circle that could be clicked was the handful of pixels around its
+// seam. Sampled fine enough to stay inside a pixel at any zoom worth clicking
+// at; picking runs on a click and not per frame, so this is not a frame cost.
+float distToEdgePx(const Body& body, const Mat4& model, EdgeId e,
+                   const Mat4& viewProj, int w, int h, Vec2 cursorPx,
+                   std::vector<Vec3>& scratch) {
+    body.edgePolyline(e, body.edgeLength(e) * 0.0005, scratch);
+
+    float best = -1.0f;
+    Vec2 prev{};
+    bool havePrev = false;
+    for (const Vec3& local : scratch) {
+        Vec2 px;
+        if (!projectPx(viewProj, w, h, transformPoint(model, local), px)) {
+            havePrev = false;
+            continue;
+        }
+        if (havePrev) {
+            const float d = distToSegment(cursorPx, prev, px);
+            if (best < 0.0f || d < best) best = d;
+        }
+        prev = px;
+        havePrev = true;
+    }
+    // One lone point still has a distance: a degenerate edge should not become
+    // unpickable just because it has no length to measure along.
+    if (best < 0.0f && havePrev) best = length(cursorPx - prev);
+    return best;
+}
+
 } // namespace
 
 ElementHit Scene::pickElement(const Ray& ray, const Mat4& viewProj,
                               int viewportW, int viewportH, Vec2 cursorPx,
                               float vertexTolPx, float edgeTolPx) const {
-    ElementHit out;
+    const std::vector<ElementHit> all =
+        pickElements(ray, viewProj, viewportW, viewportH, cursorPx, vertexTolPx, edgeTolPx);
+    return all.empty() ? ElementHit{} : all.front();
+}
 
-    const RayHit surface = raycast(ray);
-    if (surface.hit()) {
+std::vector<ElementHit> Scene::pickElements(const Ray& ray, const Mat4& viewProj,
+                                            int viewportW, int viewportH, Vec2 cursorPx,
+                                            float vertexTolPx, float edgeTolPx) const {
+    std::vector<ElementHit> found;
+    for (const RayHit& surface : raycastCoincident(ray)) {
+        ElementHit out;
         const SceneObject* obj = find(surface.object);
         if (obj && surface.face != kInvalid) {
             out.ref = {surface.object, ElementKind::Face, surface.face};
@@ -321,94 +710,97 @@ ElementHit Scene::pickElement(const Ray& ray, const Mat4& viewProj,
             out.point = surface.point;
 
             const Mat4 model = obj->modelMatrix();
-            const Mesh& mesh = obj->mesh;
+            const Body& body = obj->body;
 
             float bestVert = vertexTolPx, bestEdge = edgeTolPx;
-            Index vertPick = kInvalid, edgePick = kInvalid;
+            VertexId vertPick = kInvalid;
+            EdgeId   edgePick = kInvalid;
 
-            const Index start = mesh.faces[surface.face].halfedge;
-            Index h = start;
-            do {
-                const Index v0 = mesh.fromVertex(h);
-                const Index v1 = mesh.halfedges[h].vertex;
+            auto atPixel = [&](Vec3 local, Vec2& px) {
+                return projectPx(viewProj, viewportW, viewportH,
+                                 transformPoint(model, local), px);
+            };
 
-                Vec2 p0, p1;
-                const bool ok0 = projectPx(viewProj, viewportW, viewportH,
-                                           transformPoint(model, mesh.verts[v0].position), p0);
-                const bool ok1 = projectPx(viewProj, viewportW, viewportH,
-                                           transformPoint(model, mesh.verts[v1].position), p1);
+            std::vector<VertexId> fv;
+            body.faceVertices(surface.face, fv);
+            for (VertexId v : fv) {
+                Vec2 p;
+                if (!atPixel(body.vertexPosition(v), p)) continue;
+                const float d = length(cursorPx - p);
+                if (d < bestVert) { bestVert = d; vertPick = v; }
+            }
 
-                if (ok0) {
-                    const float d = length(cursorPx - p0);
-                    if (d < bestVert) { bestVert = d; vertPick = v0; }
-                }
-                if (ok0 && ok1) {
-                    const float d = distToSegment(cursorPx, p0, p1);
-                    if (d < bestEdge) {
-                        bestEdge = d;
-                        edgePick = std::min(h, mesh.halfedges[h].twin);
-                    }
-                }
-                h = mesh.halfedges[h].next;
-            } while (h != start);
+            std::vector<EdgeId> fe;
+            std::vector<Vec3> edgePts;
+            body.faceEdges(surface.face, fe);
+            for (EdgeId e : fe) {
+                // A cut that only exists because a face cannot hold a hole is
+                // not drawn, so it must not be pickable either -- clicking one
+                // would select a line the user cannot see.
+                if (body.isBridgeEdge(e)) continue;
+                const float d = distToEdgePx(body, model, e, viewProj, viewportW,
+                                             viewportH, cursorPx, edgePts);
+                if (d >= 0.0f && d < bestEdge) { bestEdge = d; edgePick = e; }
+            }
 
             if (vertPick != kInvalid)      out.ref = {surface.object, ElementKind::Vertex, vertPick};
             else if (edgePick != kInvalid) out.ref = {surface.object, ElementKind::Edge, edgePick};
-            return out;
+            const bool seen = std::any_of(found.begin(), found.end(),
+                                          [&](const ElementHit& h) { return h.ref == out.ref; });
+            if (!seen) found.push_back(out);
         }
     }
+    if (!found.empty()) return found;
+    ElementHit out;
 
     // If raycast missed or didn't hit a surface, check nearby vertices and edges
     // of visible objects on screen (off-silhouette generous picking).
+    // A vertex hit and an edge hit are tracked with their own owning object.
+    // Sharing one `bestObj` between them meant a vertex winning on one object
+    // and an edge later winning on another returned that second object with the
+    // first one's vertex handle.
     float bestVert = vertexTolPx, bestEdge = edgeTolPx;
-    ObjectId bestObj = kNoObject;
-    Index vertPick = kInvalid, edgePick = kInvalid;
+    ObjectId vertObj = kNoObject, edgeObj = kNoObject;
+    VertexId vertPick = kInvalid;
+    EdgeId   edgePick = kInvalid;
 
+    std::vector<VertexId> verts;
+    std::vector<EdgeId> edges;
+    std::vector<Vec3> edgePts;
     for (const auto& obj : objects_) {
-        if (!obj->visible || obj->mesh.empty()) continue;
+        if (!obj->visible || obj->body.empty()) continue;
         const Mat4 model = obj->modelMatrix();
-        const Mesh& mesh = obj->mesh;
+        const Body& body = obj->body;
 
-        for (Index v = 0; v < mesh.vertexCount(); ++v) {
+        auto atPixel = [&](Vec3 local, Vec2& px) {
+            return projectPx(viewProj, viewportW, viewportH,
+                             transformPoint(model, local), px);
+        };
+
+        body.allVertices(verts);
+        for (VertexId v : verts) {
             Vec2 p;
-            if (projectPx(viewProj, viewportW, viewportH,
-                          transformPoint(model, mesh.verts[v].position), p)) {
-                const float d = length(cursorPx - p);
-                if (d < bestVert) {
-                    bestVert = d;
-                    vertPick = v;
-                    bestObj = obj->id;
-                }
-            }
+            if (!atPixel(body.vertexPosition(v), p)) continue;
+            const float d = length(cursorPx - p);
+            if (d < bestVert) { bestVert = d; vertPick = v; vertObj = obj->id; }
         }
 
-        for (Index h = 0; h < mesh.halfedgeCount(); ++h) {
-            if (h > mesh.halfedges[h].twin) continue;
-            const Index v0 = mesh.fromVertex(h);
-            const Index v1 = mesh.halfedges[h].vertex;
-            Vec2 p0, p1;
-            const bool ok0 = projectPx(viewProj, viewportW, viewportH,
-                                       transformPoint(model, mesh.verts[v0].position), p0);
-            const bool ok1 = projectPx(viewProj, viewportW, viewportH,
-                                       transformPoint(model, mesh.verts[v1].position), p1);
-            if (ok0 && ok1) {
-                const float d = distToSegment(cursorPx, p0, p1);
-                if (d < bestEdge) {
-                    bestEdge = d;
-                    edgePick = h;
-                    bestObj = obj->id;
-                }
-            }
+        body.allEdges(edges);
+        for (EdgeId e : edges) {
+            if (body.isBridgeEdge(e)) continue;
+            const float d = distToEdgePx(body, model, e, viewProj, viewportW,
+                                         viewportH, cursorPx, edgePts);
+            if (d >= 0.0f && d < bestEdge) { bestEdge = d; edgePick = e; edgeObj = obj->id; }
         }
     }
 
-    if (vertPick != kInvalid && bestObj != kNoObject) {
-        out.ref = {bestObj, ElementKind::Vertex, vertPick};
-    } else if (edgePick != kInvalid && bestObj != kNoObject) {
-        out.ref = {bestObj, ElementKind::Edge, edgePick};
+    if (vertPick != kInvalid && vertObj != kNoObject) {
+        out.ref = {vertObj, ElementKind::Vertex, vertPick};
+    } else if (edgePick != kInvalid && edgeObj != kNoObject) {
+        out.ref = {edgeObj, ElementKind::Edge, edgePick};
     }
-
-    return out;
+    if (out.hit()) found.push_back(out);
+    return found;
 }
 
 // ---------------------------------------------------------------------------
@@ -416,17 +808,49 @@ bool Scene::isElementSelected(const ElementRef& e) const {
     return std::find(elements_.begin(), elements_.end(), e) != elements_.end();
 }
 
+// Picking one piece of a face that was split because a face cannot have a hole
+// selects the whole of it. The pieces are joined by cuts that are not drawn and
+// cannot be clicked, so anything else would have the user selecting two thirds
+// of a surface with no way to see why.
+//
+// Only those cuts are crossed. A face the user divided -- the section line an
+// extrude leaves down a wall -- stays two faces, picked and acted on
+// separately, which is what it is for.
+std::vector<ElementRef> Scene::faceGroup(const ElementRef& e) const {
+    if (e.kind != ElementKind::Face) return {e};
+    const SceneObject* o = find(e.object);
+    if (!o || e.index < 0 || e.index >= o->body.faceCount()) return {e};
+
+    std::vector<Index> group;
+    o->body.coplanarFaceGroup(e.index, group);
+    std::vector<ElementRef> out;
+    out.reserve(group.size());
+    for (Index f : group) out.push_back({e.object, ElementKind::Face, f});
+    return out;
+}
+
 void Scene::selectElement(const ElementRef& e, bool additive) {
     if (!additive) elements_.clear();
     if (!e.valid()) return;
-    if (!isElementSelected(e)) elements_.push_back(e);
+    for (const ElementRef& r : faceGroup(e))
+        if (!isElementSelected(r)) elements_.push_back(r);
 }
 
 void Scene::toggleElement(const ElementRef& e) {
     if (!e.valid()) return;
-    auto it = std::find(elements_.begin(), elements_.end(), e);
-    if (it != elements_.end()) elements_.erase(it);
-    else elements_.push_back(e);
+    // The group goes in and out together, or a shift-click would peel one
+    // invisible piece off a face and leave the rest selected.
+    const std::vector<ElementRef> group = faceGroup(e);
+    if (isElementSelected(e)) {
+        elements_.erase(std::remove_if(elements_.begin(), elements_.end(),
+                            [&](const ElementRef& x) {
+                                return std::find(group.begin(), group.end(), x) != group.end();
+                            }),
+                        elements_.end());
+        return;
+    }
+    for (const ElementRef& r : group)
+        if (!isElementSelected(r)) elements_.push_back(r);
 }
 
 std::vector<Index> Scene::selectedFaces(ObjectId id) const {
@@ -436,16 +860,17 @@ std::vector<Index> Scene::selectedFaces(ObjectId id) const {
     return out;
 }
 
-std::vector<Index> Scene::selectedEdges(ObjectId id) const {
-    std::vector<Index> out;
+std::vector<EdgeId> Scene::selectedEdges(ObjectId id) const {
+    std::vector<EdgeId> out;
     const SceneObject* o = find(id);
     if (!o) return out;
     for (const ElementRef& e : elements_) {
         if (e.object != id || e.kind != ElementKind::Edge) continue;
-        if (e.index < 0 || e.index >= o->mesh.halfedgeCount()) continue;
-        const Index canonical = std::min(e.index, o->mesh.halfedges[e.index].twin);
-        if (std::find(out.begin(), out.end(), canonical) == out.end())
-            out.push_back(canonical);
+        // Handles are already canonical wherever they came from, so this is a
+        // validity check and a de-duplication, not a normalisation.
+        if (!o->body.hasEdge(e.index)) continue;
+        if (std::find(out.begin(), out.end(), e.index) == out.end())
+            out.push_back(e.index);
     }
     return out;
 }
@@ -456,9 +881,9 @@ void Scene::pruneElementSelection() {
             const SceneObject* o = find(e.object);
             if (!o) return true;
             switch (e.kind) {
-                case ElementKind::Face:   return e.index >= o->mesh.faceCount();
-                case ElementKind::Edge:   return e.index >= o->mesh.halfedgeCount();
-                case ElementKind::Vertex: return e.index >= o->mesh.vertexCount();
+                case ElementKind::Face:   return !o->body.hasFace(e.index);
+                case ElementKind::Edge:   return !o->body.hasEdge(e.index);
+                case ElementKind::Vertex: return !o->body.hasVertex(e.index);
                 case ElementKind::None:   return true;
             }
             return true;
@@ -503,10 +928,54 @@ RayHit Scene::raycast(const Ray& ray) const {
             best.t      = worldT;
             best.point  = ray.origin + ray.dir * worldT;
             best.normal = normalize(transformVector(normalMatrix(model),
-                                                    o->mesh.faceNormal(best.face)));
+                                                    o->body.faceNormal(best.face)));
         }
     }
     return best;
+}
+
+std::vector<RayHit> Scene::raycastCoincident(const Ray& ray) const {
+    std::vector<RayHit> out;
+    const RayHit nearest = raycast(ray);
+    if (!nearest.hit()) return out;
+
+    // As close as a depth buffer can tell apart at that distance, with room
+    // for the float arithmetic that finds the hits: faces nearer together
+    // than this fight over the same pixels.
+    const float tol = 1e-3f + 2e-5f * nearest.t;
+    for (const auto& o : objects_) {
+        if (!o->visible || o->render.triangles.empty()) continue;
+        const Mat4 model = o->modelMatrix();
+        const Mat4 inv = inverse(model);
+        Ray local{transformPoint(inv, ray.origin), transformVector(inv, ray.dir)};
+        const float dirScale = length(local.dir);
+        if (dirScale < 1e-9f) continue;
+        local.dir = local.dir / dirScale;
+        Real boxT = 0.0;
+        if (!rayAABB(local, o->localBounds, boxT)) continue;
+        if (boxT / dirScale > nearest.t + tol) continue;
+
+        // The nearest face of this body, if it is as near as the nearest of all.
+        RayHit mine;
+        float mineT = nearest.t + tol;
+        const RenderMesh& rm = o->render;
+        for (size_t i = 0; i + 2 < rm.triangles.size(); i += 3) {
+            Real t = 0.0;
+            if (!rayTriangle(local, rm.positions[rm.triangles[i + 0]],
+                                    rm.positions[rm.triangles[i + 1]],
+                                    rm.positions[rm.triangles[i + 2]], t)) continue;
+            const float worldT = t / dirScale;
+            if (worldT > mineT) continue;
+            mineT = worldT;
+            mine.object = o->id;
+            mine.face   = rm.triangleFace[i / 3];
+            mine.t      = worldT;
+            mine.point  = ray.origin + ray.dir * worldT;
+            mine.normal = normalize(transformVector(normalMatrix(model), o->body.faceNormal(mine.face)));
+        }
+        if (mine.hit() && std::fabs(mine.t - nearest.t) <= tol) out.push_back(mine);
+    }
+    return out;
 }
 
 } // namespace tg

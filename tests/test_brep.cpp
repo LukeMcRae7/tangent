@@ -1,0 +1,1297 @@
+// The exact backend: the operations, and the names that have to survive them.
+//
+// Everything here goes through Body and src/geom/operations.h -- the same calls
+// the feature history makes -- rather than reaching for OpenCASCADE directly.
+// The parts are the ones the mesh kernel refuses, because that is the whole
+// argument for the backend existing.
+#include "geom/body.h"
+#include "geom/brep.h"
+#include "geom/fasteners.h"
+#include "geom/operations.h"
+
+#include <cmath>
+#include <cstdio>
+#include <map>
+#include <set>
+#include <string>
+#include <vector>
+
+using namespace tg;
+
+static int failures = 0;
+static void check(bool ok, const std::string& what) {
+    if (!ok) { std::printf("  FAIL: %s\n", what.c_str()); ++failures; }
+}
+static bool near(Real a, Real b, Real eps = 1e-6) { return std::fabs(a - b) < eps; }
+
+static Body plate(Real w = 100, Real d = 100, Real h = 10) {
+    PrimitiveSpec spec;
+    spec.kind = PrimitiveKind::Box;
+    spec.box.width = w; spec.box.depth = d; spec.box.height = h;
+    Body b;
+    makePrimitive(spec, b, Backend::Brep);
+    return b;
+}
+
+static Body bore(Real x, Real y, Real dia, Real h = 40) {
+    PrimitiveSpec spec;
+    spec.kind = PrimitiveKind::Cylinder;
+    spec.cylinder.radius = dia / 2;
+    spec.cylinder.height = h;
+    Body b;
+    makePrimitive(spec, b, Backend::Brep);
+    b.transform(translate({x, y, 0}));
+    return b;
+}
+
+// The face a body's own name says is the top of it, without looking at any
+// geometry to find it.
+static FaceId topFace(const Body& b) {
+    std::vector<FaceId> faces;
+    b.allFaces(faces);
+    for (FaceId f : faces)
+        if (dot(b.faceNormal(f), Vec3{0, 0, 1}) > 0.99) return f;
+    return kNoFace;
+}
+
+int main() {
+    if (!brep::available()) {
+        std::printf("B-rep backend not built (TANGENT_BREP=OFF); nothing to test\n");
+        return 0;
+    }
+
+    std::printf("--- a rim is drawn along its curve, not across it ---\n");
+    {
+        // The bug this covers: anything drawing an edge from its two ends put a
+        // chord across a bore rather than a line around it, so a hole's rim and
+        // a fillet read as polygons however finely the body was tessellated.
+        Body body = plate();
+        Body out;
+        std::string why;
+        check(booleanOp(body, bore(0, 0, 20.0), BooleanOp::Difference, out, 1, false, &why),
+              "bored a 20mm hole");
+        body = std::move(out);
+
+        const FaceId top = topFace(body);
+        check(top != kNoFace, "found the top face");
+
+        std::vector<EdgeId> edges;
+        body.faceEdges(top, edges);
+
+        const Real asked = 0.01;
+        int lines = 0, curved = 0;
+        Real worstPoint = 0.0, worstChord = 0.0;
+        std::vector<Vec3> pts;
+        for (EdgeId e : edges) {
+            body.edgePolyline(e, asked, pts);
+            if (body.edgeKind(e) == CurveKind::Line) {
+                ++lines;
+                check(pts.size() == 2, "a straight edge is its two ends and nothing more");
+                continue;
+            }
+            ++curved;
+            check(pts.size() > 2, "a curved edge is more than one chord");
+
+            // Every sampled point sits on the bore, and the chords between them
+            // stay inside the tolerance that was asked for.
+            for (const Vec3& p : pts)
+                worstPoint = std::max(worstPoint, std::fabs(std::hypot(p.x, p.y) - 10.0));
+            for (size_t k = 1; k < pts.size(); ++k) {
+                const Vec3 mid{(pts[k - 1].x + pts[k].x) * 0.5,
+                               (pts[k - 1].y + pts[k].y) * 0.5, pts[k].z};
+                worstChord = std::max(worstChord, 10.0 - std::hypot(mid.x, mid.y));
+            }
+        }
+        check(curved > 0, "the bored top face has a curved edge");
+        check(lines == 4, "and the plate's four straight ones");
+        check(worstPoint < 1e-6, "every sampled point is on the bore");
+        check(worstChord <= asked + 1e-9, "and no chord strays past the tolerance asked for");
+        std::printf("[rim] %d curved, %d straight; worst point %.2e mm, worst chord %.5f mm\n",
+                    curved, lines, worstPoint, worstChord);
+    }
+
+    std::printf("--- shell: the operation a printed part is hollowed with ---\n");
+    {
+        // A 60 x 60 x 20 box, shelled to a 2mm wall with its top left open, is
+        // a tray. The volume is the arithmetic anyone would do by hand, which
+        // is the point of checking it that way.
+        const Real w = 60, d = 60, h = 20, t = 2;
+        Body body = plate(w, d, h);
+        const Real solidVolume = body.health(false).volume;
+        check(near(solidVolume, w * d * h, 1e-6), "the solid block measures up");
+
+        const FaceId top = topFace(body);
+        check(top != kNoFace, "found the top face to open");
+
+        std::string why;
+        check(shellBody(body, {top}, t, 11, &why), std::string("shelled it: ") + why);
+        check(body.health().solid(), "and the result is a closed solid");
+
+        // Walls on four sides and a floor; the cavity is open at the top.
+        const Real cavity = (w - 2 * t) * (d - 2 * t) * (h - t);
+        check(near(body.health(false).volume, solidVolume - cavity, 1e-6),
+              "the wall left behind is exactly the wall that was asked for");
+        std::printf("  tray: %.1f mm3 of %.1f mm3 left at a %.0fmm wall, %d faces\n",
+                    body.health(false).volume, solidVolume, t, body.faceCount());
+
+        // The name of the face that was open survives: a feature that referred
+        // to the top of the box still refers to it after the hollowing.
+        Body fresh = plate(w, d, h);
+        const ElementId topName = fresh.faceName(topFace(fresh));
+        Body shelled = fresh;
+        check(shellBody(shelled, {topFace(shelled)}, t, 11, &why), "shelled again");
+        std::vector<FaceId> still;
+        shelled.findFaces(topName, still);
+        check(!still.empty(), "and the opened face keeps its name");
+
+        // Refusals carry a reason rather than a self-intersecting solid.
+        Body tooThick = plate(w, d, h);
+        check(!shellBody(tooThick, {topFace(tooThick)}, 40.0, 12, &why),
+              "a wall thicker than the part is refused");
+        check(!why.empty(), "and says why: " + why);
+
+        Body zero = plate(w, d, h);
+        check(!shellBody(zero, {topFace(zero)}, 0.0, 13, &why),
+              "so is a wall of no thickness");
+
+        // A sealed cavity: no face opened. This is a different construction and
+        // not the same one with an empty list -- offsetting inward with nothing
+        // to open hands back a *smaller solid*, which is watertight, valid, and
+        // smaller than it was, so nothing downstream can tell it is wrong.
+        //
+        // The three numbers together are what pin it. Volume alone passes on a
+        // shrunken solid (it went down); bounds alone passes on a body that was
+        // never hollowed; the face count alone passes on plenty of things. A
+        // hollow box is twelve faces, the size it always was, with the wall's
+        // volume and nothing else.
+        {
+            const Real sw = 20, st = 2;
+            Body sealed = plate(sw, sw, sw);
+            check(shellBody(sealed, {}, st, 15, &why), std::string("sealed shell: ") + why);
+
+            check(near(sealed.health(false).volume,
+                       sw * sw * sw - (sw - 2 * st) * (sw - 2 * st) * (sw - 2 * st), 1e-6),
+                  "the wall is the wall, not the cavity");
+            const AABB bb = sealed.bounds();
+            check(near(bb.max.x - bb.min.x, sw, 1e-6) &&
+                  near(bb.max.z - bb.min.z, sw, 1e-6),
+                  "the part is still the size it was, not shrunk to the cavity");
+            check(sealed.faceCount() == 12, "six faces outside and six in");
+            check(sealed.validate(), "and it is a valid solid");
+            check(sealed.health(false).shells == 1,
+                  "one body with a void in it, not two bodies");
+            std::printf("  sealed: %.1f mm3 of wall, %d faces, %.0f mm across\n",
+                        sealed.health(false).volume, sealed.faceCount(), bb.max.x - bb.min.x);
+        }
+
+        // A mesh body says plainly that this is not its operation.
+        PrimitiveSpec boxSpec;
+        boxSpec.kind = PrimitiveKind::Box;
+        boxSpec.box.width = boxSpec.box.depth = boxSpec.box.height = 20;
+        Body meshBox;
+        check(makePrimitive(boxSpec, meshBox, Backend::Mesh), "a mesh box");
+        check(!shellBody(meshBox, {}, t, 14, &why), "a mesh body refuses to shell");
+        check(why.find("mesh") != std::string::npos, "and names the reason: " + why);
+    }
+
+    std::printf("--- a drawn circle is one cylinder, not four quarters ---\n");
+    {
+        // The create tool draws a circle as four quarter-arcs, because a
+        // sagitta per span is all the profile format carries. Swept naively
+        // that gives four wall faces: seams drawn down a bore, and a click
+        // that selects a quarter of it.
+        const Real r = 10.0, h = 12.0;
+        std::vector<Vec3> pts;
+        std::vector<Real> arcs;
+        for (int i = 0; i < 4; ++i) {
+            const Real a = kHalfPi * i;
+            pts.push_back({r * std::cos(a), r * std::sin(a), 0});
+            // Negative: the profile winds counter-clockwise, and the arc has
+            // to stand off the chord away from the centre to stay on the circle.
+            arcs.push_back(-r * (1.0 - std::sqrt(2.0) * 0.5));
+        }
+
+        Body solid;
+        std::string why;
+        check(makeProfileSolid(pts, arcs, {0, 0, 1}, 0, h, solid, 9, &why),
+              std::string("swept the drawn circle: ") + why);
+
+        std::vector<FaceId> faces;
+        solid.allFaces(faces);
+        int cyls = 0, planes = 0;
+        FaceId wall = kNoFace;
+        for (FaceId f : faces) {
+            if (solid.faceKind(f) == SurfaceKind::Cylinder) { ++cyls; wall = f; }
+            else if (solid.faceKind(f) == SurfaceKind::Plane) ++planes;
+        }
+        std::printf("  %zu faces: %d cylinder, %d plane\n", faces.size(), cyls, planes);
+        check(cyls == 1, "the wall is one cylindrical face, not four quarters");
+        check(planes == 2, "with a cap at each end");
+        if (wall != kNoFace) {
+            Vec3 p, ax;
+            Real got = 0;
+            check(solid.faceCylinder(wall, p, ax, got), "and it knows it is a cylinder");
+            check(near(got, r, 1e-6), "of the radius that was drawn");
+            check(near(solid.faceArea(wall), 2.0 * kPi * r * h, 1e-4),
+                  "carrying the whole wall, not a quarter of it");
+        }
+        check(solid.health().solid(), "and the result is still a solid");
+    }
+
+    std::printf("--- what a bore is made of ---\n");
+    {
+        Body body = plate(60, 60, 10);
+        Body drill = bore(0, 0, 20.0, 40);
+        drill.transform(translate({0, 0, -10}));     // clear through, no tangency
+        Body out;
+        std::string why;
+        check(booleanOp(body, drill, BooleanOp::Difference, out, 2, false, &why),
+              std::string("bored through: ") + why);
+        body = std::move(out);
+
+        std::vector<FaceId> faces;
+        body.allFaces(faces);
+        int planes = 0, cyls = 0;
+        for (FaceId f : faces) {
+            if (body.faceKind(f) == SurfaceKind::Plane) ++planes;
+            if (body.faceKind(f) == SurfaceKind::Cylinder) ++cyls;
+        }
+        std::printf("  faces: %zu total, %d plane, %d cylinder\n", faces.size(), planes, cyls);
+
+        std::vector<EdgeId> edges;
+        body.allEdges(edges);
+        int lines = 0, circles = 0, other = 0;
+        for (EdgeId e : edges) {
+            if (body.edgeKind(e) == CurveKind::Line) ++lines;
+            else if (body.edgeKind(e) == CurveKind::Circle) ++circles;
+            else ++other;
+        }
+        std::printf("  edges: %zu total, %d line, %d circle, %d other\n",
+                    edges.size(), lines, circles, other);
+
+        for (FaceId f : faces) {
+            if (body.faceKind(f) != SurfaceKind::Cylinder) continue;
+            std::vector<EdgeId> fe;
+            body.faceEdges(f, fe);
+            Vec3 p, ax;
+            Real r = 0;
+            body.faceCylinder(f, p, ax, r);
+            std::printf("  a cylinder face: r=%.3f, %zu edges, area %.3f (whole wall = %.3f)\n",
+                        r, fe.size(), body.faceArea(f), 2.0 * kPi * 10.0 * 10.0);
+        }
+        check(cyls >= 1, "the bore is a cylinder, not a prism");
+
+        // One wall, not four. A bore cut by a boolean stays a single
+        // cylindrical face carrying the whole 2*pi*r*h of it, which is what
+        // lets clicking the bore select the bore. A profile swept from four
+        // quarter-arcs gives four faces instead, and reads as a cylinder with
+        // seams drawn down it.
+        FaceId wall = kNoFace;
+        for (FaceId f : faces) if (body.faceKind(f) == SurfaceKind::Cylinder) wall = f;
+        check(cyls == 1, "the bore is one face");
+        check(near(body.faceArea(wall), 2.0 * kPi * 10.0 * 10.0, 1e-6),
+              "holding the whole wall, not a quarter of it");
+
+        // And it is *drawn* round: the deviation lives at the middle of a
+        // chord, since the triangle vertices sit on the surface and measuring
+        // those measures nothing.
+        RenderMesh rm;
+        body.tessellate(rm);
+        Real worst = 0.0;
+        for (size_t t = 0; t < rm.triangleFace.size(); ++t) {
+            if (rm.triangleFace[t] != wall) continue;
+            for (int k = 0; k < 3; ++k) {
+                const Vec3 a = rm.positions[rm.triangles[t * 3 + k]];
+                const Vec3 b = rm.positions[rm.triangles[t * 3 + (k + 1) % 3]];
+                if (std::fabs(a.z - b.z) > 1e-9) continue;      // not a chord around
+                const Vec3 mid{(a.x + b.x) * 0.5, (a.y + b.y) * 0.5, a.z};
+                worst = std::max(worst, 10.0 - std::hypot(mid.x, mid.y));
+            }
+        }
+        check(worst < 0.05, "and no facet stands more than 0.05mm inside it");
+        std::printf("  wall is one face of %.3f mm2, drawn %.4f mm inside a 10mm bore\n",
+                    body.faceArea(wall), worst);
+    }
+
+    std::printf("--- a bolt circle, cut and rounded in one go ---\n");
+    {
+        // The part the mesh kernel refuses outright: eight holes on a pitch
+        // circle and one in the middle. Stage 0 measured it as the case where
+        // the mesh boolean gave up at hole six.
+        Body body = plate();
+        const Real startVolume = body.health(false).volume;
+        check(near(startVolume, 100.0 * 100.0 * 10.0, 1e-6), "plate is 100 x 100 x 10");
+
+        std::vector<Vec2> holes;
+        for (int i = 0; i < 8; ++i) {
+            const Real a = 2.0 * kPi * i / 8.0;
+            holes.push_back({35.0 * std::cos(a), 35.0 * std::sin(a)});
+        }
+        holes.push_back({0, 0});
+
+        int cut = 0;
+        for (size_t i = 0; i < holes.size(); ++i) {
+            const Real dia = (i + 1 == holes.size()) ? 20.0 : 6.6;
+            Body out;
+            std::string why;
+            if (!booleanOp(body, bore(holes[i].x, holes[i].y, dia), BooleanOp::Difference,
+                           out, static_cast<ElementId>(100 + i), false, &why)) {
+                std::printf("  refused at hole %zu: %s\n", i + 1, why.c_str());
+                break;
+            }
+            body = std::move(out);
+            ++cut;
+        }
+        check(cut == 9, "all nine holes went through");
+        // Six sides and one wall per hole. The mesh kernel's answer to the same
+        // part, before the coplanar rebuild was repaired, was in the thousands;
+        // at 32 segments and working, it is 278.
+        check(body.faceCount() == 15, "the plate is fifteen faces: six sides and nine walls");
+
+        const Real expected = 100.0 * 100.0 * 10.0
+                            - 8.0 * kPi * 3.3 * 3.3 * 10.0
+                            - kPi * 10.0 * 10.0 * 10.0;
+        check(near(body.health(false).volume, expected, 1e-6),
+              "the volume is exact, not a polygon's approximation of it");
+
+        // Every rim, rounded in one operation. This is the Stage 0 criterion
+        // and the thing the mesh kernel could not do at any segment count.
+        std::vector<EdgeId> rims;
+        std::vector<EdgeId> edges;
+        body.allEdges(edges);
+        for (EdgeId e : edges) {
+            Vec3 a, b;
+            body.edgePositions(e, a, b);
+            if (near(a.z, 5.0, 1e-6) && near(b.z, 5.0, 1e-6) &&
+                std::hypot(a.x, a.y) < 49.0)
+                rims.push_back(e);
+        }
+        check(!rims.empty(), "found the rims");
+
+        FilletSpec spec;
+        spec.salt = 999;
+        for (EdgeId e : rims) spec.edges.push_back({e, 1.5});
+        std::string why;
+        Body rounded = body;
+        check(filletEdges(rounded, spec, &why),
+              "every rim rounds at once: " + why);
+        check(rounded.health(false).volume < body.health(false).volume,
+              "and rounding took material off");
+        std::printf("  9 holes, %zu rims filleted, %d faces, %.1f mm3\n",
+                    rims.size(), rounded.faceCount(), rounded.health(false).volume);
+    }
+
+    std::printf("--- names survive the operations that make them ---\n");
+    {
+        Body body = plate(60, 60, 10);
+        const ElementId topName = body.faceName(topFace(body));
+        check(topName != kNoId, "the plate's top face has a name");
+
+        Body tool = bore(0, 0, 12);
+        const ElementId wallName = [&] {
+            std::vector<FaceId> fs;
+            tool.allFaces(fs);
+            for (FaceId f : fs)
+                if (std::fabs(tool.faceNormal(f).z) < 0.5) return tool.faceName(f);
+            return kNoId;
+        }();
+        check(wallName != kNoId, "the tool's wall has a name");
+
+        Body bored;
+        std::string why;
+        check(booleanOp(body, tool, BooleanOp::Difference, bored, 7, false, &why),
+              "the bore goes through: " + why);
+
+        check(bored.findFace(topName) != kInvalid, "the top face keeps its name through the cut");
+        check(bored.findFace(wallName) != kInvalid, "and the hole's wall is named from the tool");
+
+        // The rim, found by asking which edge lies between two named faces --
+        // no geometry, no searching for circles.
+        const FaceId top = bored.findFace(topName);
+        const FaceId wall = bored.findFace(wallName);
+        EdgeId rim = kInvalid;
+        std::vector<EdgeId> edges;
+        bored.allEdges(edges);
+        for (EdgeId e : edges) {
+            FaceId a = kNoFace, b = kNoFace;
+            bored.edgeFaces(e, a, b);
+            if ((a == top && b == wall) || (a == wall && b == top)) { rim = e; break; }
+        }
+        check(rim != kInvalid, "the rim is the edge between the two named faces");
+
+        FilletSpec spec;
+        spec.salt = 11;
+        spec.edges.push_back({rim, 2.0});
+        Body rounded = bored;
+        check(filletEdges(rounded, spec, &why), "the rim rounds: " + why);
+        check(rounded.findFace(topName) != kInvalid, "the top face survives the fillet");
+        check(rounded.findFace(wallName) != kInvalid, "so does the wall");
+        check(rounded.faceCount() == bored.faceCount() + 1,
+              "and exactly one face was added -- the fillet itself");
+
+        // Every face in the result has a name from provenance. A count of
+        // unnamed faces is the number that says whether the mechanism leaks.
+        std::vector<FaceId> fs;
+        rounded.allFaces(fs);
+        int unnamed = 0;
+        std::set<ElementId> names;
+        for (FaceId f : fs) {
+            if (rounded.faceName(f) == kNoId) ++unnamed;
+            names.insert(rounded.faceName(f));
+        }
+        check(unnamed == 0, "no face came out unnamed");
+        check(names.size() == fs.size(), "and no two faces share a name here");
+        std::printf("  plate, bore, fillet: %d faces, %zu names, %d unnamed\n",
+                    rounded.faceCount(), names.size(), unnamed);
+    }
+
+    std::printf("--- the same chain twice, and after a parameter change ---\n");
+    {
+        auto run = [](Real thickness, Real dia) {
+            Body body = plate(60, 60, thickness);
+            Body out;
+            booleanOp(body, bore(0, 0, dia), BooleanOp::Difference, out, 7, false, nullptr);
+            std::set<ElementId> names;
+            std::vector<FaceId> fs;
+            out.allFaces(fs);
+            for (FaceId f : fs) names.insert(out.faceName(f));
+            return names;
+        };
+        const std::set<ElementId> a = run(10, 12);
+        const std::set<ElementId> b = run(10, 12);
+        const std::set<ElementId> c = run(14, 12);
+        const std::set<ElementId> d = run(10, 16);
+        check(a == b, "the same chain twice gives the same names");
+        check(a == c, "a thicker plate changes no name");
+        check(a == d, "a wider bore changes no name");
+        std::printf("  %zu names, stable across a re-run and two parameter changes\n", a.size());
+    }
+
+    std::printf("--- extrude, the operation the workflow is built on ---\n");
+    {
+        Body body = plate(40, 40, 10);
+        const ElementId topName = body.faceName(topFace(body));
+
+        // A boss pushed out of the top face.
+        std::vector<FaceId> newFaces;
+        std::string why;
+        check(extrudeFaces(body, {topFace(body)}, 12.0, &newFaces, 21,
+                           ExtrudeOp::Auto, &why), "extrude out: " + why);
+        check(near(body.health(false).volume, 40.0 * 40.0 * 22.0, 1e-6),
+              "the body grew by exactly the swept volume");
+        check(!newFaces.empty(), "and it reports where the face went");
+        check(body.findFace(topName) != kInvalid,
+              "the extruded face keeps the name it was selected by");
+
+        // A pocket pushed into it, from the face the last step left on top.
+        const FaceId nowTop = topFace(body);
+        check(nowTop != kNoFace, "there is a top face to push into");
+        Body pocketed = body;
+        check(extrudeFaces(pocketed, {nowTop}, -4.0, nullptr, 22, ExtrudeOp::Auto, &why),
+              "extrude in: " + why);
+        check(pocketed.health(false).volume < body.health(false).volume,
+              "pushing into the body takes material away");
+        std::printf("  boss then pocket: %d faces, %.1f mm3\n",
+                    pocketed.faceCount(), pocketed.health(false).volume);
+    }
+
+    std::printf("--- inset, and what a pocket is drawn from ---\n");
+    {
+        Body body = plate(40, 40, 10);
+        const FaceId top = topFace(body);
+        const ElementId topName = body.faceName(top);
+        const int facesBefore = body.faceCount();
+        const Real volumeBefore = body.health(false).volume;
+
+        std::vector<FaceId> inner;
+        std::string why;
+        check(insetFaces(body, {top}, 5.0, &inner, 41, &why), "the top face insets: " + why);
+        check(body.faceCount() == facesBefore + 1, "the face is now two: an inner and a ring");
+        check(near(body.health(false).volume, volumeBefore, 1e-6),
+              "and no material moved -- an inset is a split, not a cut");
+        check(!inner.empty(), "it reports the inner face");
+
+        // The inner face keeps the name: it is the one a person would point at
+        // next, and the ring around it takes a derived name.
+        check(body.findFace(topName) != kInvalid, "the inner face answers to the original name");
+        const FaceId keptName = body.findFace(topName);
+        check(near(body.faceArea(keptName), 30.0 * 30.0, 1e-6),
+              "and it is the inner one: 30 x 30 inside a 40 x 40 face");
+
+        // A pocket: inset, then push the inner face in.
+        check(extrudeFaces(body, {keptName}, -3.0, nullptr, 42, ExtrudeOp::Auto, &why),
+              "the inner face pushes in: " + why);
+        check(near(body.health(false).volume, volumeBefore - 30.0 * 30.0 * 3.0, 1e-6),
+              "which takes exactly the pocket out");
+        std::printf("  40mm plate, 5mm inset, 3mm pocket: %d faces, %.1f mm3\n",
+                    body.faceCount(), body.health(false).volume);
+    }
+
+    std::printf("--- a curved face is refused rather than approximated ---\n");
+    {
+        PrimitiveSpec cs;
+        cs.kind = PrimitiveKind::Cylinder;
+        cs.cylinder.radius = 10;
+        cs.cylinder.height = 20;
+        Body cyl;
+        check(makePrimitive(cs, cyl, Backend::Brep), "cylinder built");
+
+        FaceId wall = kNoFace;
+        std::vector<FaceId> faces;
+        cyl.allFaces(faces);
+        for (FaceId f : faces)
+            if (std::fabs(cyl.faceNormal(f).z) < 0.5) wall = f;
+        check(wall != kNoFace, "found the wall");
+
+        std::string why;
+        check(!insetFaces(cyl, {wall}, 2.0, nullptr, 43, &why), "insetting a curved face is refused");
+        check(why.find("flat") != std::string::npos, "and says why: " + why);
+    }
+
+    std::printf("--- a profile with real arcs in it ---\n");
+    {
+        // A 40 x 20 rectangle with 5mm rounded corners, as the create tool
+        // draws it -- but with the corners as actual arcs rather than the
+        // polyline the mesh backend has to settle for.
+        const Real w = 40, d = 20, r = 5;
+        std::vector<Vec3> pts;
+        std::vector<Real> arcs;
+        auto add = [&](Real x, Real y, Real bulge) {
+            pts.push_back({x, y, 0});
+            arcs.push_back(bulge);
+        };
+        // Corner arcs bulge inward by the sagitta of a quarter circle.
+        const Real sag = r * (1.0 - std::sqrt(2.0) / 2.0);
+        add(-w / 2 + r, -d / 2, 0);           add(w / 2 - r, -d / 2, -sag);
+        add(w / 2, -d / 2 + r, 0);            add(w / 2, d / 2 - r, -sag);
+        add(w / 2 - r, d / 2, 0);             add(-w / 2 + r, d / 2, -sag);
+        add(-w / 2, d / 2 - r, 0);            add(-w / 2, -d / 2 + r, -sag);
+
+        Body solid;
+        std::string why;
+        check(makeProfileSolid(pts, arcs, {0, 0, 1}, 0, 10, solid, 31, &why),
+              "the rounded profile sweeps into a solid: " + why);
+        check(!solid.empty() && solid.validate(), "and it is valid");
+
+        // Area of a rounded rectangle: the rectangle less the corners the
+        // rounding cut off. If the corners were polylines this would be short.
+        const Real area = w * d - (4.0 - kPi) * r * r;
+        check(near(solid.health(false).volume, area * 10.0, 1e-6),
+              "with the volume of a rounded rectangle, not a chamfered one");
+        std::printf("  rounded rectangle: %d faces, %.3f mm3 (exact %.3f)\n",
+                    solid.faceCount(), solid.health(false).volume, area * 10.0);
+    }
+
+    std::printf("--- what gets drawn is what the part looks like ---\n");
+    {
+        // A rounded cube with a bore: every kind of surface at once, and the
+        // shape the first exact bodies were rendered as.
+        PrimitiveSpec bs;
+        bs.kind = PrimitiveKind::Box;
+        bs.box = {20, 20, 20};
+        Body body;
+        check(makePrimitive(bs, body, Backend::Brep), "cube built");
+
+        std::vector<EdgeId> edges;
+        body.allEdges(edges);
+        FilletSpec fs;
+        fs.salt = 51;
+        for (EdgeId e : edges) fs.edges.push_back({e, 4.0});
+        std::string why;
+        check(filletEdges(body, fs, &why), "every edge rounded: " + why);
+
+        PrimitiveSpec cs;
+        cs.kind = PrimitiveKind::Cylinder;
+        cs.cylinder.radius = 3;
+        cs.cylinder.height = 60;
+        Body tool;
+        check(makePrimitive(cs, tool, Backend::Brep), "bore tool built");
+        tool.transform(toMat4(Quat::fromAxisAngle({0, 1, 0}, static_cast<Real>(kHalfPi))));
+        Body out;
+        check(booleanOp(body, tool, BooleanOp::Difference, out, 52, false, &why),
+              "bored through: " + why);
+        body = std::move(out);
+
+        RenderMesh rm;
+        body.tessellate(rm);
+
+        // Every face has to reach the screen. A face with no triangles is a
+        // hole in the model as far as the user is concerned.
+        std::vector<FaceId> faces;
+        body.allFaces(faces);
+        std::set<Index> drawn(rm.triangleFace.begin(), rm.triangleFace.end());
+        check(static_cast<int>(drawn.size()) == body.faceCount(),
+              "every face contributes triangles");
+
+        // No triangles of zero area: they draw as a speck at best, and a ray
+        // that hit one would resolve to a face nobody can see.
+        int degenerate = 0;
+        for (size_t i = 0; i + 2 < rm.triangles.size(); i += 3) {
+            const Vec3 a2 = rm.positions[rm.triangles[i]];
+            const Vec3 b2 = rm.positions[rm.triangles[i + 1]];
+            const Vec3 c2 = rm.positions[rm.triangles[i + 2]];
+            if (length(cross(b2 - a2, c2 - a2)) < 1e-12) ++degenerate;
+        }
+        check(degenerate == 0, "no triangles of zero area");
+
+        // And no cracks: welded by position, every triangle edge is shared by
+        // exactly two triangles, or the silhouette shows a notch.
+        std::map<std::string, int> ids;
+        std::vector<int> welded(rm.positions.size(), 0);
+        for (size_t i = 0; i < rm.positions.size(); ++i) {
+            const Vec3 p = rm.positions[i];
+            char buf[96];
+            std::snprintf(buf, sizeof buf, "%lld,%lld,%lld",
+                          static_cast<long long>(std::llround(p.x * 1e4)),
+                          static_cast<long long>(std::llround(p.y * 1e4)),
+                          static_cast<long long>(std::llround(p.z * 1e4)));
+            const auto [it, fresh] = ids.emplace(buf, static_cast<int>(ids.size()));
+            welded[i] = it->second;
+        }
+        std::map<std::pair<int, int>, int> used;
+        for (size_t i = 0; i + 2 < rm.triangles.size(); i += 3) {
+            const int t[3] = {welded[rm.triangles[i]], welded[rm.triangles[i + 1]],
+                              welded[rm.triangles[i + 2]]};
+            for (int k = 0; k < 3; ++k) {
+                const int x = t[k], y = t[(k + 1) % 3];
+                if (x != y) ++used[{std::min(x, y), std::max(x, y)}];
+            }
+        }
+        int cracks = 0, overshared = 0;
+        for (const auto& [e, n] : used) {
+            if (n == 1) ++cracks;
+            else if (n > 2) ++overshared;
+        }
+        check(cracks == 0, "the tessellated surface is closed: no cracks between faces");
+        check(overshared == 0, "and no edge is shared by more than two triangles");
+
+        // The wireframe draws the part's edges and not the parameterisation's.
+        // A hole has a seam running across it where its surface is cut open to
+        // be parameterised, and drawing that puts a line across the opening.
+        int acrossTheBore = 0;
+        for (size_t i = 0; i + 1 < rm.edgeLines.size(); i += 2) {
+            const Vec3 a2 = rm.positions[rm.edgeLines[i]];
+            const Vec3 b2 = rm.positions[rm.edgeLines[i + 1]];
+            // A seam of this bore runs along X, inside the hole's radius.
+            if (std::fabs(a2.y) < 3.01 && std::fabs(a2.z) < 3.01 &&
+                std::fabs(b2.y) < 3.01 && std::fabs(b2.z) < 3.01 &&
+                std::fabs(b2.x - a2.x) > 1.0)
+                ++acrossTheBore;
+        }
+        check(acrossTheBore == 0, "no seam line is drawn across the bore");
+        std::printf("  rounded cube with a bore: %d faces, %zu triangles, %zu lines\n",
+                    body.faceCount(), rm.triangles.size() / 3, rm.edgeLines.size() / 2);
+    }
+
+    std::printf("--- a thread that is actually there ---\n");
+    {
+        // Not a cosmetic thread: the helix is cut, because on a printed part
+        // there is nothing to cut it with afterwards. An M6 hole is drilled at
+        // the minor diameter and the groove taken out to the major one.
+        //
+        // What comes away is arithmetic. The groove is a triangle carried
+        // round a helix, so Pappus gives its volume -- the part of it that is
+        // in the material, times the circle its centre of area travels -- and
+        // to that is added the hundredth of a millimetre of skin the cut takes
+        // off the bore, which is how the helix is kept away from the round
+        // face it spirals on (see threadFace).
+        const Real pitch = 1.0;                 // M6 coarse
+        const Real height = 0.5413 * pitch;     // ISO thread engagement
+        const Real minor = 4.917;               // M6 minor diameter
+        const Real skin = 0.01;
+        const Real base = 0.94 * pitch;         // the groove's width at its foot
+        const Real bite = 0.05;                 // how far under the face it starts
+        Body body = plate(30, 30, 10);
+        const Real bare = body.health(false).volume;
+        HoleCut cut;
+        cut.diameter = minor;
+        cut.through = true;
+        std::string why;
+        check(drillHole(body, {0, 0, 5}, {0, 0, -1}, cut, 950, &why), "the hole is drilled: " + why);
+        const Real bored = body.health(false).volume;
+        check(near(bored, bare - kPi * minor * minor * 0.25 * 10.0, 1e-3),
+              "at the minor diameter");
+
+        FaceId wall = kInvalid;
+        std::vector<FaceId> fs;
+        body.allFaces(fs);
+        for (FaceId f : fs)
+            if (body.faceKind(f) == SurfaceKind::Cylinder) wall = f;
+        check(wall != kInvalid, "the bore is one face");
+
+        why.clear();
+        BrepRef threaded = wall == kInvalid
+                               ? BrepRef{}
+                               : brep::threadFace(body.brepRef(), wall, pitch, height,
+                                                  /*external=*/false, 951, &why);
+        check(threaded != nullptr, "and it threads: " + why);
+        if (threaded) {
+            Body out(std::move(threaded));
+            check(out.health().solid(), "the threaded plate is a solid");
+
+            const Real r = minor * 0.5;
+            const Real sleeve = kPi * ((r + skin) * (r + skin) - r * r) * 10.0;
+            const Real reach = height - skin;                    // the groove, past the skin
+            const Real wide = base * reach / (height + bite);    // its width there
+            const Real area = 0.5 * wide * reach;
+            const Real centre = r + skin + reach / 3.0;
+            const Real turns = 10.0;                             // the plate, in pitches
+            const Real expect = sleeve + area * kTwoPi * centre * turns;
+            const Real gone = bored - out.health(false).volume;
+            std::printf("  M6 x 1 inside: %.3f mm3 came away, arithmetic says %.3f\n", gone,
+                        expect);
+            check(std::fabs(gone - expect) < expect * 0.01,
+                  "and what came away is the helix, within a hundredth");
+
+            // The shape of it, not just the size: the bore now runs from the
+            // root out to the major diameter.
+            RenderMesh rm;
+            out.tessellate(rm);
+            Real rmin = 1e9, rmax = 0;
+            for (const Vec3& p : rm.positions) {
+                if (std::fabs(p.z) > 3.0) continue;
+                const Real at = std::hypot(p.x, p.y);
+                if (at < 8.0) { rmin = std::min(rmin, at); rmax = std::max(rmax, at); }
+            }
+            check(near(rmin, r + skin, 1e-3), "the root is the hole it was drilled at");
+            check(near(rmax, r + height, 1e-3),
+                  "and the crest is the major diameter: " + std::to_string(rmax * 2.0));
+        }
+
+        // The other kind, on the outside of a shaft: an M6 bolt.
+        PrimitiveSpec spec;
+        spec.kind = PrimitiveKind::Cylinder;
+        spec.cylinder = {3.0, 12.0, 32};
+        Body shaft;
+        makePrimitive(spec, shaft, Backend::Brep);
+        const Real solidShaft = shaft.health(false).volume;
+        FaceId side = kInvalid;
+        std::vector<FaceId> sf;
+        shaft.allFaces(sf);
+        for (FaceId f : sf)
+            if (shaft.faceKind(f) == SurfaceKind::Cylinder) side = f;
+        why.clear();
+        BrepRef bolt = side == kInvalid
+                           ? BrepRef{}
+                           : brep::threadFace(shaft.brepRef(), side, pitch, height,
+                                              /*external=*/true, 952, &why);
+        check(bolt != nullptr, "a shaft takes an outside thread: " + why);
+        if (bolt) {
+            Body out(std::move(bolt));
+            check(out.health().solid(), "and stays a solid");
+
+            const Real r = 3.0;
+            const Real skinOut = 0.02;      // an outside thread is fused to a sleeve
+            const Real sleeve = kPi * (r * r - (r - skinOut) * (r - skinOut)) * 12.0;
+            const Real reach = height - skinOut;
+            const Real wide = base * reach / height;
+            const Real area = 0.5 * wide * reach;
+            const Real centre = r - skinOut - reach / 3.0;
+            const Real expect = sleeve + area * kTwoPi * centre * 12.0;
+            const Real gone = solidShaft - out.health(false).volume;
+            std::printf("  M6 x 1 outside: %.3f mm3 came away, arithmetic says %.3f\n", gone,
+                        expect);
+            check(std::fabs(gone - expect) < expect * 0.01,
+                  "the groove round a bolt is the helix too, within a hundredth");
+
+            RenderMesh rm;
+            out.tessellate(rm);
+            Real rmin = 1e9, rmax = 0;
+            for (const Vec3& p : rm.positions) {
+                if (std::fabs(p.z) > 3.0) continue;
+                const Real at = std::hypot(p.x, p.y);
+                rmin = std::min(rmin, at);
+                rmax = std::max(rmax, at);
+            }
+            check(near(rmax, r - skinOut, 1e-3), "its crest is the shaft it was cut on");
+            check(near(rmin, r - height, 1e-3),
+                  "and its root is a thread's depth in: " + std::to_string(rmin * 2.0));
+        }
+
+        // Asking for the wrong kind is refused rather than threaded inside out.
+        why.clear();
+        check(!brep::threadFace(body.brepRef(), wall, pitch, height, /*external=*/true, 953, &why),
+              "an outside thread on a bore is refused");
+        check(why.find("hole") != std::string::npos, "and says which it is: " + why);
+
+        // And a face that is not round at all.
+        FaceId flat = kInvalid;
+        for (FaceId f : fs)
+            if (body.faceKind(f) == SurfaceKind::Plane) flat = f;
+        why.clear();
+        check(!brep::threadFace(body.brepRef(), flat, pitch, height, false, 954, &why),
+              "a flat face cannot be threaded");
+        check(!why.empty(), "with a reason: " + why);
+    }
+
+    std::printf("--- the whole body grown and shrunk ---\n");
+    {
+        // A clearance copy: the part, 1 mm bigger all round. The corners have
+        // to stay corners, so a 20 mm cube becomes a 22 mm one exactly -- a
+        // rounded offset would come out at 10,605 and look close enough.
+        Body cube = plate(20, 20, 20);
+        std::string why;
+        check(offsetBody(cube, 1.0, 940, &why), "the cube grows: " + why);
+        check(near(cube.health(false).volume, 22.0 * 22.0 * 22.0, 1e-4),
+              "to exactly 22 mm cubed: " + std::to_string(cube.health(false).volume));
+        check(cube.faceCount() == 6, "still six faces");
+        check(cube.health().solid(), "and a solid");
+
+        Body small = plate(20, 20, 20);
+        why.clear();
+        check(offsetBody(small, -2.0, 941, &why), "and shrinks: " + why);
+        check(near(small.health(false).volume, 16.0 * 16.0 * 16.0, 1e-4),
+              "to 16 mm cubed: " + std::to_string(small.health(false).volume));
+
+        // Past nothing is refused rather than handed back as an empty body.
+        Body gone = plate(20, 20, 20);
+        why.clear();
+        check(!offsetBody(gone, -12.0, 942, &why), "shrinking past nothing is refused");
+        check(!why.empty(), "with a reason: " + why);
+
+        // A round body keeps its roundness: a cylinder grown by 2 is a
+        // cylinder 2 wider in the radius and 4 longer overall.
+        PrimitiveSpec spec;
+        spec.kind = PrimitiveKind::Cylinder;
+        spec.cylinder = {10.0, 20.0, 32};
+        Body cyl;
+        makePrimitive(spec, cyl, Backend::Brep);
+        why.clear();
+        check(offsetBody(cyl, 2.0, 943, &why), "the cylinder grows: " + why);
+        check(near(cyl.health(false).volume, kPi * 144.0 * 24.0, 1e-3),
+              "to r 12 and 24 tall: " + std::to_string(cyl.health(false).volume));
+    }
+
+    std::printf("--- a part split for the bed, with pins to put it back ---\n");
+    {
+        // A plate too long for a bed, cut in half across its length. Two pins
+        // on one half, two sockets in the other, and the halves have to add
+        // back up to the plate less the clearance around the pins.
+        Body body = plate(80, 40, 10);
+        const Real whole = body.health(false).volume;
+        Body a, b;
+        check(splitByPlane(body, {0, 0, 0}, {1, 0, 0}, a, b), "the plate cuts in two");
+        const Real halves = a.health(false).volume + b.health(false).volume;
+        check(near(halves, whole, 1e-6), "and the halves are the whole plate");
+
+        SplitPins pins;
+        pins.count = 2;
+        pins.diameter = 4.0;
+        pins.depth = 6.0;
+        pins.clearance = 0.2;
+        std::string why;
+        BrepRef up = a.brepRef(), down = b.brepRef();
+        check(brep::pinAcross(up, down, {0, 0, 0}, {1, 0, 0}, pins, 930, &why),
+              "pins go in: " + why);
+        Body pinned(std::move(up)), socketed(std::move(down));
+        check(pinned.health().solid() && socketed.health().solid(), "both halves are solids");
+
+        // The pin half gained two pins; the socket half lost two sockets, each
+        // a hair wider and deeper than the pin.
+        const Real pin = kPi * 4.0 * 6.0;                       // r 2, 6 deep
+        const Real socket = kPi * 2.1 * 2.1 * 6.2;              // r 2.1, 6.2 deep
+        check(near(pinned.health(false).volume, a.health(false).volume + 2.0 * pin, 1e-3),
+              "two pins stand out of the first half: " +
+                  std::to_string(pinned.health(false).volume));
+        check(near(socketed.health(false).volume, b.health(false).volume - 2.0 * socket, 1e-3),
+              "and two sockets go into the other: " +
+                  std::to_string(socketed.health(false).volume));
+
+        // A dowel instead: both halves take a socket, nothing sticks out.
+        pins.dowel = true;
+        BrepRef u2 = a.brepRef(), d2 = b.brepRef();
+        why.clear();
+        check(brep::pinAcross(u2, d2, {0, 0, 0}, {1, 0, 0}, pins, 931, &why),
+              "sockets both sides: " + why);
+        Body top(std::move(u2)), bottom(std::move(d2));
+        check(near(top.health(false).volume, a.health(false).volume - 2.0 * socket, 1e-3),
+              "the first half is hollowed for the dowel too");
+        check(top.health().solid() && bottom.health().solid(), "and both are still solids");
+
+        // Two pins on a face only five diameters across: they have to go near
+        // its ends, not four millimetres apart in the middle where they touch
+        // and leave nothing between them.
+        Body cube = plate(20, 20, 20);
+        Body ca, cb;
+        check(splitByPlane(cube, {0, 0, 0}, {1, 0, 0}, ca, cb), "the cube cuts in two");
+        BrepRef cu = ca.brepRef(), cd = cb.brepRef();
+        SplitPins tight;
+        tight.count = 2;
+        tight.diameter = 4.0;
+        tight.depth = 5.0;
+        why.clear();
+        check(brep::pinAcross(cu, cd, {0, 0, 0}, {1, 0, 0}, tight, 933, &why),
+              "two pins fit across a 20 mm cut: " + why);
+        Body cpin(std::move(cu)), csock(std::move(cd));
+        check(cpin.health().solid() && csock.health().solid(),
+              "and neither half is left with pins running into each other");
+        const Real p5 = kPi * 4.0 * 5.0, s5 = kPi * 2.1 * 2.1 * 5.2;
+        check(near(cpin.health(false).volume + csock.health(false).volume,
+                   4000.0 + 4000.0 + 2.0 * p5 - 2.0 * s5, 1e-3),
+              "with exactly two pins' worth added and two sockets' taken: " +
+                  std::to_string(cpin.health(false).volume + csock.health(false).volume));
+
+        // More than will fit: four of them on the same face.
+        BrepRef mu = ca.brepRef(), md = cb.brepRef();
+        SplitPins many = tight;
+        many.count = 4;
+        why.clear();
+        check(!brep::pinAcross(mu, md, {0, 0, 0}, {1, 0, 0}, many, 934, &why),
+              "four of that size on the same face is refused");
+        check(!why.empty(), "with a reason: " + why);
+
+        // Nowhere to put one: a wall thinner than the pin.
+        Body thin = plate(80, 3, 10);
+        Body ta, tb;
+        check(splitByPlane(thin, {0, 0, 0}, {1, 0, 0}, ta, tb), "the thin plate cuts too");
+        BrepRef u3 = ta.brepRef(), d3 = tb.brepRef();
+        SplitPins big;
+        big.count = 2;
+        big.diameter = 8.0;
+        why.clear();
+        check(!brep::pinAcross(u3, d3, {0, 0, 0}, {1, 0, 0}, big, 932, &why),
+              "a pin wider than the cut face is refused");
+        check(!why.empty(), "with a reason: " + why);
+    }
+
+    std::printf("--- a face taken off, and the gap closed ---\n");
+    {
+        // The case a STEP file makes: a shape with no history, and a feature
+        // on it that has to go. A boss raised on a plate, then removed -- and
+        // the plate has to come back to exactly what it was.
+        Body body = plate(40, 40, 10);
+        const Real bare = body.health(false).volume;
+        FaceId top = kInvalid;
+        std::vector<FaceId> fs;
+        body.allFaces(fs);
+        for (FaceId f : fs)
+            if (body.faceNormal(f).z > 0.99) top = f;
+
+        std::string why;
+        Body boss = body;
+        HoleCut cut;   // a hole is quicker to make than a boss and no different here
+        cut.diameter = 8.0;
+        cut.depth = 4.0;
+        cut.through = false;
+        cut.drillPoint = false;
+        check(drillHole(boss, {8, 0, 5}, {0, 0, -1}, cut, 920, &why), "a blind hole to remove");
+        const Real drilled = boss.health(false).volume;
+        check(drilled < bare - 100.0, "which took material away");
+
+        // The hole is a wall and a floor; both go, and the top grows back.
+        std::vector<FaceId> hole;
+        std::vector<FaceId> after;
+        boss.allFaces(after);
+        for (FaceId f : after) {
+            const Vec3 c = boss.faceCentroid(f);
+            const bool inside = std::hypot(c.x - 8.0, c.y) < 4.5;
+            if (inside && c.z < 4.99) hole.push_back(f);
+        }
+        check(hole.size() == 2, "the hole is two faces: a wall and a floor");
+        why.clear();
+        check(removeFaces(boss, hole, 921, &why), "they come off: " + why);
+        check(near(boss.health(false).volume, bare, 1e-6),
+              "and the plate is exactly what it was: " + std::to_string(boss.health(false).volume));
+        check(boss.faceCount() == 6, "six faces again");
+        check(boss.health().solid(), "and a solid");
+
+        // Not everything that can be pointed at can be taken away: remove the
+        // top of a plain plate and there is nothing to close the gap with.
+        Body flat = plate(40, 40, 10);
+        why.clear();
+        check(!removeFaces(flat, {top}, 922, &why),
+              "a face with nothing to close the gap is refused");
+        check(!why.empty(), "with a reason: " + why);
+    }
+
+    std::printf("--- a band round a cylinder, pushed out and in ---\n");
+    {
+        // What a person actually does: divide a cylinder twice and push the
+        // band of wall between the cuts. There is no one direction to push a
+        // curved face in, so what has to come out is a collar -- the same
+        // cylinder, two millimetres wider, over the band's own height.
+        auto banded = [](Body& body, Real& before) {
+            PrimitiveSpec spec;
+            spec.kind = PrimitiveKind::Cylinder;
+            spec.cylinder = {15.0, 27.5, 32};
+            makePrimitive(spec, body, Backend::Brep);
+            before = body.health(false).volume;
+            std::string why;
+            if (!divideBody(body, {0, 0, -4.25}, {0, 0, 1}, 800, &why)) return kInvalid;
+            if (!divideBody(body, {0, 0, -1.75}, {0, 0, 1}, 801, &why)) return kInvalid;
+            std::vector<FaceId> fs;
+            body.allFaces(fs);
+            for (FaceId f : fs) {
+                const Vec3 c = body.faceCentroid(f);
+                if (body.faceKind(f) == SurfaceKind::Cylinder && c.z > -4.25 && c.z < -1.75)
+                    return f;
+            }
+            return kInvalid;
+        };
+
+        {
+            Body body;
+            Real before = 0;
+            const FaceId band = banded(body, before);
+            check(band != kInvalid, "the band is a cylindrical face of its own");
+            check(near(body.health(false).volume, before, 1e-6), "the divides took nothing away");
+            check(near(body.faceArea(band), 2.0 * kPi * 15.0 * 2.5, 1e-6),
+                  "and it is 2.5 mm of the wall");
+
+            std::vector<FaceId> moved;
+            std::string why;
+            check(extrudeFaces(body, {band}, 2.0, &moved, 802, ExtrudeOp::Auto, &why),
+                  "the band pushes out: " + why);
+            check(body.health().solid(), "leaving a solid");
+            const Real collar = kPi * (17.0 * 17.0 - 15.0 * 15.0) * 2.5;
+            check(near(body.health(false).volume, before + collar, 1e-3),
+                  "a collar of exactly the ring between 15 and 17: " +
+                      std::to_string(body.health(false).volume));
+            check(!moved.empty(), "and the face that moved is reported");
+            std::printf("  collar: %d faces, %.3f mm3\n", body.faceCount(),
+                        body.health(false).volume);
+        }
+        {
+            // The other way: a groove, not a collar.
+            Body body;
+            Real before = 0;
+            const FaceId band = banded(body, before);
+            std::vector<FaceId> moved;
+            std::string why;
+            check(band != kInvalid && extrudeFaces(body, {band}, -2.0, &moved, 803,
+                                                   ExtrudeOp::Auto, &why),
+                  "the band pushes in: " + why);
+            const Real groove = kPi * (15.0 * 15.0 - 13.0 * 13.0) * 2.5;
+            check(near(body.health(false).volume, before - groove, 1e-3),
+                  "a groove of exactly the ring between 13 and 15: " +
+                      std::to_string(body.health(false).volume));
+            check(body.health().solid(), "and it is still a solid");
+        }
+        {
+            // Scale Face on a round face is a change of radius: 120 per cent
+            // of a 15 mm wall is an 18 mm one.
+            Body body;
+            Real before = 0;
+            const FaceId band = banded(body, before);
+            std::string why;
+            check(band != kInvalid && scaleFaces(body, {band}, 1.2, 804, &why),
+                  "the band scales: " + why);
+            const Real collar = kPi * (18.0 * 18.0 - 15.0 * 15.0) * 2.5;
+            check(near(body.health(false).volume, before + collar, 1e-3),
+                  "to 18 mm: " + std::to_string(body.health(false).volume));
+            check(body.health().solid(), "and it is a solid");
+        }
+        {
+            // A bore's wall is curved too, and pushing it moves the hole's
+            // surface along its own normal -- which points into the hole, so
+            // pushing it out makes the hole smaller.
+            Body plate40 = plate(40, 40, 10);
+            HoleCut cut;
+            cut.diameter = 10.0;
+            cut.through = true;
+            std::string why;
+            check(drillHole(plate40, {0, 0, 5}, {0, 0, -1}, cut, 810, &why), "a hole to widen");
+            const Real bored = plate40.health(false).volume;
+            FaceId wall = kInvalid;
+            std::vector<FaceId> fs;
+            plate40.allFaces(fs);
+            for (FaceId f : fs)
+                if (plate40.faceKind(f) == SurfaceKind::Cylinder) wall = f;
+            check(wall != kInvalid, "the bore is one cylindrical face");
+            std::vector<FaceId> moved;
+            why.clear();
+            check(wall != kInvalid &&
+                      extrudeFaces(plate40, {wall}, -1.0, &moved, 811, ExtrudeOp::Auto, &why),
+                  "the bore's wall pushes back: " + why);
+            // Pushed against its normal, the wall moves away from the axis:
+            // a 10 mm hole becomes a 12 mm one.
+            check(near(plate40.health(false).volume, bored - kPi * (36.0 - 25.0) * 10.0, 1e-3),
+                  "and the hole is 12 mm across: " + std::to_string(plate40.health(false).volume));
+        }
+    }
+
+    std::printf("--- a draft, so a wall leans the way it has to ---\n");
+    {
+        // A 20 cube, drafted 5 degrees on all four walls with the neutral
+        // plane at the bottom. The section at height z is a square of side
+        // 20 - 2 z tan(5), so the volume integrates exactly.
+        const Real angle = 5.0 * kDeg2Rad;
+        const Real k = 2.0 * std::tan(angle);
+        const Real exact = (20.0 * 20.0 * 20.0 - std::pow(20.0 - 20.0 * k, 3.0)) / (3.0 * k);
+
+        Body body = plate(20, 20, 20);
+        std::vector<FaceId> walls;
+        std::vector<FaceId> all;
+        body.allFaces(all);
+        for (FaceId f : all)
+            if (std::fabs(body.faceNormal(f).z) < 0.01) walls.push_back(f);
+        check(walls.size() == 4, "a cube has four walls");
+
+        std::string why;
+        check(draftFaces(body, walls, angle, {0, 0, -10}, {0, 0, 1}, 950, &why),
+              "the walls take a 5 degree draft: " + why);
+        check(body.health().solid(), "and it is still a solid");
+        check(near(body.health(false).volume, exact, 1e-4),
+              "narrowing exactly as the arithmetic says: " +
+                  std::to_string(body.health(false).volume) + " against " +
+                  std::to_string(exact));
+        const AABB b = body.bounds();
+        check(near(b.size().z, 20.0, 1e-6), "the height is untouched");
+
+        // The bottom stays where the neutral plane is; the top comes in.
+        Real top = 0.0, bottom = 0.0;
+        std::vector<VertexId> vs;
+        body.allVertices(vs);
+        for (VertexId v : vs) {
+            const Vec3 p = body.vertexPosition(v);
+            if (p.z > 9.99) top = std::max(top, p.x);
+            if (p.z < -9.99) bottom = std::max(bottom, p.x);
+        }
+        check(near(bottom, 10.0, 1e-6), "the neutral plane keeps its size");
+        check(near(top, 10.0 - 20.0 * std::tan(angle), 1e-6),
+              "and the far end is in by the angle: " + std::to_string(top));
+
+        // A face square to the pull is the top, not a wall, and drafting it
+        // means nothing.
+        Body again = plate(20, 20, 20);
+        FaceId lid = kInvalid;
+        std::vector<FaceId> fs;
+        again.allFaces(fs);
+        for (FaceId f : fs)
+            if (again.faceNormal(f).z > 0.99) lid = f;
+        why.clear();
+        check(!draftFaces(again, {lid}, angle, {0, 0, -10}, {0, 0, 1}, 951, &why),
+              "the top of the part cannot be drafted");
+        check(why.find("square to the pull") != std::string::npos, "and says why: " + why);
+    }
+
+    std::printf("--- a hole, and what it is chosen from ---\n");
+    {
+        // A plate 40 x 40 x 10, standing from z = -5 to 5, drilled from the top.
+        const Real volume = 40.0 * 40.0 * 10.0;
+        {
+            Body body = plate(40, 40, 10);
+            HoleCut cut;
+            cut.diameter = 5.0;
+            cut.through = true;
+            std::string why;
+            check(drillHole(body, {10, 0, 5}, {0, 0, -1}, cut, 900, &why),
+                  "a hole goes through the plate: " + why);
+            check(body.health().solid(), "and leaves a solid");
+            check(near(body.health(false).volume, volume - kPi * 6.25 * 10.0, 1e-6),
+                  "with a 5 mm bore's worth gone: " +
+                      std::to_string(body.health(false).volume));
+            check(body.findFace(nameId(900, IdRole::Wall, 0)) != kNoFace,
+                  "the bore's wall is named for the hole, so a chamfer can find it");
+        }
+        {
+            // Blind, and ending in the drill's cone: the straight part is
+            // 6 deep, the point adds a cone of the bore's radius over its own
+            // length.
+            Body body = plate(40, 40, 10);
+            HoleCut cut;
+            cut.diameter = 6.0;
+            cut.depth = 6.0;
+            cut.through = false;
+            cut.drillPoint = true;
+            const Real tip = 3.0 / std::tan(cut.pointAngle * 0.5);
+            std::string why;
+            check(drillHole(body, {0, 0, 5}, {0, 0, -1}, cut, 901, &why),
+                  "a blind hole is drilled: " + why);
+            const Real gone = kPi * 9.0 * 6.0 + kPi * 9.0 * tip / 3.0;
+            check(near(body.health(false).volume, volume - gone, 1e-6),
+                  "the straight part and the cone under it: " +
+                      std::to_string(body.health(false).volume));
+        }
+        {
+            // A counterbore for an M4 cap screw, which is where the table
+            // earns its keep: 4.5 clearance plus the printed allowance, and a
+            // 7 mm head with the same allowance, 4.2 deep.
+            const int m4 = fastenerNamed("M4");
+            check(m4 >= 0, "the table has an M4");
+            const HoleCut cut = holeFor(m4, HoleFit::Normal, HoleKind::Counterbore, 0, true);
+            check(near(cut.diameter, 4.7, 1e-9), "its clearance hole is cut 4.7 wide");
+            check(near(cut.headDiameter, 7.2, 1e-9), "and its pocket 7.2");
+            check(near(holeFor(m4, HoleFit::Tapped, HoleKind::Simple, 5, false).diameter, 3.3, 1e-9),
+                  "a tapped hole gets no allowance at all: the thread needs the material");
+
+            Body body = plate(40, 40, 10);
+            std::string why;
+            check(drillHole(body, {0, 0, 5}, {0, 0, -1}, cut, 902, &why),
+                  "the counterbored hole is drilled: " + why);
+            const Real gone = kPi * (cut.headDiameter * 0.5) * (cut.headDiameter * 0.5) * cut.headDepth +
+                              kPi * (cut.diameter * 0.5) * (cut.diameter * 0.5) * (10.0 - cut.headDepth);
+            check(near(body.health(false).volume, volume - gone, 1e-6),
+                  "a pocket over a bore: " + std::to_string(body.health(false).volume));
+            check(body.findFace(nameId(902, IdRole::Top, 0)) != kNoFace,
+                  "the pocket's floor has a name of its own: the head sits on it");
+        }
+        {
+            // A countersink: the cone runs from the head's diameter at the
+            // surface to the bore's, so what it takes away is a frustum.
+            Body body = plate(40, 40, 10);
+            HoleCut cut;
+            cut.kind = HoleKind::Countersink;
+            cut.diameter = 4.0;
+            cut.headDiameter = 8.0;
+            cut.sinkAngle = 90.0 * kDeg2Rad;
+            cut.through = true;
+            std::string why;
+            check(drillHole(body, {0, 0, 5}, {0, 0, -1}, cut, 903, &why),
+                  "the countersunk hole is drilled: " + why);
+            const Real drop = (4.0 - 2.0) / std::tan(cut.sinkAngle * 0.5);
+            const Real cone = kPi * drop / 3.0 * (16.0 + 8.0 + 4.0);   // r1^2 + r1 r2 + r2^2
+            const Real gone = cone + kPi * 4.0 * (10.0 - drop);
+            check(near(body.health(false).volume, volume - gone, 1e-6),
+                  "a cone over a bore: " + std::to_string(body.health(false).volume));
+        }
+        {
+            // Beside the plate rather than in it. OCCT calls that a success
+            // and hands the body back unchanged; the operation does not.
+            Body body = plate(40, 40, 10);
+            HoleCut cut;
+            cut.diameter = 5.0;
+            std::string why;
+            check(!drillHole(body, {100, 0, 5}, {0, 0, -1}, cut, 904, &why),
+                  "a hole that misses the material is refused");
+            check(why.find("misses") != std::string::npos, "and says so: " + why);
+
+            why.clear();
+            HoleCut narrow;
+            narrow.kind = HoleKind::Counterbore;
+            narrow.diameter = 6.0;
+            narrow.headDiameter = 5.0;
+            check(!drillHole(body, {0, 0, 5}, {0, 0, -1}, narrow, 905, &why),
+                  "and a counterbore narrower than its hole is refused");
+            check(!why.empty(), "with a reason: " + why);
+        }
+    }
+
+    std::printf("--- refusals say why ---\n");
+    {
+        Body body = plate(20, 20, 20);
+        std::vector<EdgeId> edges;
+        body.allEdges(edges);
+
+        FilletSpec spec;
+        spec.edges.push_back({edges.front(), 50.0});   // wider than the body
+        std::string why;
+        check(!filletEdges(body, spec, &why), "an impossible radius is refused");
+        check(!why.empty(), "and it says why: " + why);
+
+        // A mesh body and an exact one cannot be combined, and saying so is
+        // better than quietly giving back a mesh.
+        Body meshBody;
+        PrimitiveSpec cube;
+        cube.kind = PrimitiveKind::Box;
+        check(makePrimitive(cube, meshBody, Backend::Mesh), "a mesh body for comparison");
+        Body out;
+        std::string mixWhy;
+        check(!booleanOp(body, meshBody, BooleanOp::Union, out, 1, false, &mixWhy),
+              "mixing backends is refused");
+        check(!mixWhy.empty(), "with a reason: " + mixWhy);
+    }
+
+    std::printf("\n%s (%d failures)\n", failures ? "FAILED" : "ALL PASS", failures);
+    return failures ? 1 : 0;
+}

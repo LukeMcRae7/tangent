@@ -1,5 +1,7 @@
 #include "render/renderer.h"
 
+#include <algorithm>
+
 #include <epoxy/gl.h>
 
 #include <cstdio>
@@ -111,6 +113,56 @@ void Renderer::addTriangle(Vec3 a, Vec3 b, Vec3 c, Vec4 color) {
     triVerts_.push_back(makeVert(a, color));
     triVerts_.push_back(makeVert(b, color));
     triVerts_.push_back(makeVert(c, color));
+}
+
+void Renderer::addFrontTriangle(Vec3 a, Vec3 b, Vec3 c, Vec4 color) {
+    frontVerts_.push_back(makeVert(a, color));
+    frontVerts_.push_back(makeVert(b, color));
+    frontVerts_.push_back(makeVert(c, color));
+}
+
+void Renderer::addFrontLine(const Camera& camera, Vec3 a, Vec3 b, Vec4 color,
+                            Real widthPx) {
+    Vec3 along = b - a;
+    const Real len = length(along);
+    if (len < 1e-12) return;
+    along = along / len;
+
+    // Across the line and facing the eye, so the quad keeps its width whichever
+    // way the line runs. Taken at the midpoint: a line long enough for the two
+    // ends to disagree is already far enough away that either answer reads the
+    // same.
+    const Vec3 mid = (a + b) * 0.5;
+    Vec3 across = cross(along, normalize(camera.eye() - mid));
+    if (lengthSq(across) < 1e-12) return;      // end-on: nothing to draw
+    across = normalize(across) * (static_cast<Real>(camera.pixelWorldSize(mid)) * widthPx * 0.5);
+
+    addFrontTriangle(a - across, b - across, b + across, color);
+    addFrontTriangle(a - across, b + across, a + across, color);
+}
+
+void Renderer::addFrontDashes(const Camera& camera, Vec3 a, Vec3 b, Vec4 color,
+                              Real widthPx, Real dashPx, Real gapPx) {
+    const Vec3 span = b - a;
+    const Real len = length(span);
+    if (len < 1e-12) return;
+
+    const Real px = static_cast<Real>(camera.pixelWorldSize((a + b) * 0.5));
+    const Real dash = std::max(dashPx * px, Real(1e-9));
+    const Real gap = std::max(gapPx * px, Real(0));
+    const Real period = dash + gap;
+    if (period <= 0.0) return;
+
+    // Bounded: a reference line can run the length of the model, and at a tight
+    // zoom that is thousands of dashes nobody can tell apart.
+    const int count = std::min(static_cast<int>(len / period) + 1, 256);
+    const Vec3 dir = span / len;
+    for (int i = 0; i < count; ++i) {
+        const Real s0 = static_cast<Real>(i) * period;
+        const Real s1 = std::min(s0 + dash, len);
+        if (s1 <= s0) break;
+        addFrontLine(camera, a + dir * s0, a + dir * s1, color, widthPx);
+    }
 }
 
 void Renderer::addBox(const AABB& box, Vec4 color) {
@@ -236,15 +288,28 @@ void Renderer::render(const Scene& scene, const Camera& camera, const ViewOption
     surfaceShader_.set("uBaseColor", opts.objectColor);
     surfaceShader_.set("uAccent", opts.accentColor);
 
+    // Where two bodies have faces in one plane, the depth buffer cannot tell
+    // them apart and draws a speckle of both. The body holding the selection
+    // is pushed back less than the rest, so it wins: select a face there --
+    // clicking again steps to the next -- and that face is the one shown.
+    std::vector<ObjectId> holding;
+    for (const ElementRef& e : scene.elementSelection())
+        if (std::find(holding.begin(), holding.end(), e.object) == holding.end())
+            holding.push_back(e.object);
+
     for (const auto& obj : scene.objects()) {
         if (!obj->visible) continue;
         const GpuMesh& gpu = syncObject(*obj);
         const Mat4 model = obj->modelMatrix();
+        const bool selected = scene.isSelected(obj->id);
+        const bool inFront = selected ||
+                             std::find(holding.begin(), holding.end(), obj->id) != holding.end();
+        glPolygonOffset(inFront ? 1.0f : 2.0f, inFront ? 1.0f : 3.0f);
 
         surfaceShader_.bind();
         surfaceShader_.set("uModel", model);
         surfaceShader_.set("uNormalMat", normalMatrix(model));
-        surfaceShader_.set("uSelected", scene.isSelected(obj->id) ? 1.0f : 0.0f);
+        surfaceShader_.set("uSelected", selected ? 1.0f : 0.0f);
         gpu.drawTriangles();
     }
 
@@ -293,6 +358,26 @@ void Renderer::render(const Scene& scene, const Camera& camera, const ViewOption
     glDisable(GL_CULL_FACE);
     flushTriangles(camera);
     flushLines(camera);
+
+    // Last, and with the depth buffer ignored: whatever is in this layer is
+    // there to be read, so nothing -- not the model, not the overlay's own
+    // ticks -- may be drawn over it.
+    if (!frontVerts_.empty()) {
+        overlayShader_.bind();
+        overlayShader_.set("uViewProj", camera.viewProjection());
+        glDisable(GL_DEPTH_TEST);
+        glDepthMask(GL_FALSE);
+        glBindVertexArray(triVao_);
+        glBindBuffer(GL_ARRAY_BUFFER, triVbo_);
+        glBufferData(GL_ARRAY_BUFFER,
+                     static_cast<GLsizeiptr>(frontVerts_.size() * sizeof(LineVert)),
+                     frontVerts_.data(), GL_STREAM_DRAW);
+        glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(frontVerts_.size()));
+        glBindVertexArray(0);
+        glEnable(GL_DEPTH_TEST);
+        glDepthMask(GL_TRUE);
+        frontVerts_.clear();
+    }
 
     glDisable(GL_BLEND);
     glDisable(GL_LINE_SMOOTH);

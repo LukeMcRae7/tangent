@@ -4,13 +4,15 @@
 // element a user picked is still findable after the steps before it change.
 // Everything else here supports that -- names have to exist on every element,
 // be unique, survive an operation that does not destroy the element, and come
-// out the same every time the same chain is run.
+// out the same every time the same primitive is built.
+//
+// These are the names a mesh primitive carries. Operations on meshes went when
+// modelling moved to the exact kernel, and the names an operation hands out are
+// tested with that kernel (test_brep, test_chain).
 //
 // The failure this guards against is not a crash. Raise a cylinder's segment
 // count under a rim fillet and index-based references still resolve, to
 // different edges, and the model comes back valid and wrong.
-#include "mesh/health.h"
-#include "mesh/operations.h"
 #include "mesh/primitives.h"
 
 #include <cstdio>
@@ -23,16 +25,6 @@ using namespace tg;
 static int failures = 0;
 static void check(bool ok, const std::string& what) {
     if (!ok) { std::printf("  FAIL: %s\n", what.c_str()); ++failures; }
-}
-
-static Index faceFacing(const Mesh& m, Vec3 dir) {
-    Index best = kInvalid;
-    Real bestDot = -2.0;
-    for (Index f = 0; f < m.faceCount(); ++f) {
-        const Real d = dot(m.faceNormal(f), dir);
-        if (d > bestDot) { bestDot = d; best = f; }
-    }
-    return best;
 }
 
 // Every element named, no name used twice.
@@ -101,87 +93,6 @@ int main() {
         makeCylinder(d, p2);
         check(namesOf(c) == namesOf(d), "a cylinder keeps its names when resized");
         std::printf("[names] resizing renames nothing\n");
-    }
-
-    // ---- Re-running a chain reproduces the names ---------------------------
-    // Names are derived, never allocated from a counter, so evaluating the same
-    // chain twice has to give the same answer. Without this a stored reference
-    // would go stale every time the model was rebuilt.
-    {
-        auto buildChain = [] {
-            Mesh m;
-            makeBox(m);
-            const Index top = faceFacing(m, {0, 0, 1});
-            extrudeFaces(m, {top}, 8.0, nullptr, 111);
-            const Index lifted = faceFacing(m, {0, 0, 1});
-            insetFaces(m, {lifted}, 3.0, nullptr, 222);
-            std::vector<Index> edges;
-            for (Index h = 0; h < m.halfedgeCount(); ++h)
-                if (h < m.halfedges[h].twin) edges.push_back(h);
-            FilletSpec spec;
-            spec.segments = 4;
-            spec.salt = 333;
-            for (Index e : edges) spec.edges.push_back({e, 0.8});
-            filletEdges(m, spec);
-            return m;
-        };
-        const Mesh first = buildChain();
-        const Mesh again = buildChain();
-        expectNamed(first, "extrude + inset + fillet");
-        check(namesOf(first) == namesOf(again), "re-running a chain reproduces every name");
-        check(checkHealth(first).solid(), "the chain still produces a solid");
-        std::printf("[names] chain of %d faces reproduces exactly\n", first.faceCount());
-    }
-
-    // ---- An operation leaves alone what it did not touch --------------------
-    {
-        Mesh m;
-        makeBox(m);
-        const Index top = faceFacing(m, {0, 0, 1});
-        const Index bottom = faceFacing(m, {0, 0, -1});
-        const ElementId topName = m.faces[top].id;
-        const ElementId bottomName = m.faces[bottom].id;
-
-        check(extrudeFaces(m, {top}, 8.0, nullptr, 111), "extrude");
-        expectNamed(m, "after extrude");
-
-        // The lifted face is the same face and keeps its name; so does every
-        // face the operation never looked at.
-        check(m.findFace(topName) != kInvalid, "the extruded face keeps its name");
-        check(m.findFace(bottomName) != kInvalid, "an untouched face keeps its name");
-        const Index lifted = m.findFace(topName);
-        check(std::fabs(m.faceCentroid(lifted).z - 18.0) < 1e-9,
-              "and that name now finds it in its new position");
-        std::printf("[names] extrude keeps the names of what it moved and what it did not\n");
-    }
-
-    // ---- An edge is named by its endpoints ---------------------------------
-    // Which is why an edge a fillet does not touch keeps its name through the
-    // fillet: both its endpoints survive, so the derived name is the same.
-    {
-        Mesh m;
-        makeBox(m);
-        const Vec3 tFL{-10, -10, 10}, tFR{10, -10, 10};
-        Index target = kInvalid, far = kInvalid;
-        for (Index h = 0; h < m.halfedgeCount(); ++h) {
-            const Vec3 a = m.verts[m.fromVertex(h)].position;
-            const Vec3 b = m.verts[m.halfedges[h].vertex].position;
-            if (lengthSq(a - tFL) < 1e-9 && lengthSq(b - tFR) < 1e-9) target = h;
-            // The bottom edge diagonally opposite, which the fillet cannot reach.
-            if (a.z < -9 && b.z < -9 && a.y > 9 && b.y > 9) far = h;
-        }
-        check(target != kInvalid && far != kInvalid, "found both edges");
-        const ElementId farName = m.edgeId(far);
-
-        FilletSpec spec;
-        spec.segments = 5;
-        spec.salt = 42;
-        spec.edges.push_back({target, 3.0});
-        check(filletEdges(m, spec), "fillet one edge");
-        expectNamed(m, "after fillet");
-        check(m.findEdge(farName) != kInvalid,
-              "an edge the fillet never reached keeps its name");
-        std::printf("[names] a fillet leaves distant edges named as they were\n");
     }
 
     // ---- The failure this exists to prevent --------------------------------

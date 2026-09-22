@@ -13,7 +13,7 @@ static void check(bool ok, const std::string& what) {
 }
 static bool near(Real a, Real b, Real eps = 1e-9) { return std::fabs(a - b) < eps; }
 
-static Index faceFacing(const Mesh& m, Vec3 dir) {
+static FaceId faceFacing(const Body& m, Vec3 dir) {
     Index best = kInvalid; Real bestDot = -2.0;
     for (Index f = 0; f < m.faceCount(); ++f) {
         const Real d = dot(m.faceNormal(f), dir);
@@ -21,9 +21,11 @@ static Index faceFacing(const Mesh& m, Vec3 dir) {
     }
     return best;
 }
-static Index vertexAt(const Mesh& m, Vec3 p) {
-    for (Index v = 0; v < m.vertexCount(); ++v)
-        if (lengthSq(m.verts[v].position - p) < 1e-12) return v;
+static VertexId vertexAt(const Body& m, Vec3 p) {
+    std::vector<VertexId> verts;
+    m.allVertices(verts);
+    for (VertexId v : verts)
+        if (lengthSq(m.vertexPosition(v) - p) < 1e-12) return v;
     return kInvalid;
 }
 
@@ -46,7 +48,7 @@ int main() {
 
     Scene s;
     const ObjectId id = s.addPrimitive(PrimitiveKind::Box);   // 20mm, centred
-    const Mesh& m = s.find(id)->mesh;
+    const Body& m = s.find(id)->body;
 
     const Index top    = faceFacing(m, {0, 0, 1});
     const Index bottom = faceFacing(m, {0, 0, -1});
@@ -136,7 +138,7 @@ int main() {
     // ---- Two objects --------------------------------------------------------
     {
         const ObjectId b = s.addPrimitive(PrimitiveKind::Box, {}, Vec3{50, 0, 0});
-        const Mesh& mb = s.find(b)->mesh;
+        const Body& mb = s.find(b)->body;
         // Gap between the facing walls: 50 - 10 - 10 = 30mm.
         t.pick({id, ElementKind::Face, faceFacing(m, {1, 0, 0})});
         t.pick({b,  ElementKind::Face, faceFacing(mb, {-1, 0, 0})});
@@ -173,6 +175,51 @@ int main() {
         check(t.picks().size() == 1, "a third pick starts a new measurement");
         check(t.picks()[0].index == right, "from the entity just clicked");
         std::printf("[measure] pick bookkeeping ok\n");
+    }
+
+    // Round things measure as round things. On a mesh a hole is a polygon and
+    // the honest answer is the polygon's; on an exact body the answer is the
+    // diameter the part was drilled at.
+    if (brep::available()) {
+        Scene s;
+        PrimitiveSpec spec;
+        spec.kind = PrimitiveKind::Cylinder;
+        spec.cylinder.radius = 6;
+        spec.cylinder.height = 20;
+        spec.cylinder.segments = 32;
+        const ObjectId id = s.addPrimitive(PrimitiveKind::Cylinder, spec);
+        const Body& b = s.find(id)->body;
+
+        MeasureTool t;
+        t.begin();
+
+        EdgeId rim = kInvalid;
+        std::vector<EdgeId> edges;
+        b.allEdges(edges);
+        for (EdgeId e : edges) if (b.edgeKind(e) == CurveKind::Circle) rim = e;
+        check(rim != kInvalid, "the cylinder has a circular rim");
+
+        t.pick({id, ElementKind::Edge, rim});
+        const MeasureResult re = t.compute(s);
+        check(re.valid && re.hasDiameter, "a circular edge reports a diameter");
+        check(near(re.diameter, 12.0, 1e-6), "12mm, not the chord across a facet");
+        check(near(re.length, 2.0 * static_cast<Real>(kPi) * 6.0, 1e-6),
+              "and 37.70mm around, not the zero a full circle's chord gives");
+        check(length(re.to - re.from) > 1.0, "with a line to draw across it");
+        std::printf("[measure] rim: %s\n", re.summary.c_str());
+        t.clearPicks();
+
+        FaceId wall = kNoFace;
+        std::vector<FaceId> faces;
+        b.allFaces(faces);
+        for (FaceId f : faces) if (b.faceKind(f) == SurfaceKind::Cylinder) wall = f;
+        check(wall != kNoFace, "and a cylindrical wall");
+        t.pick({id, ElementKind::Face, wall});
+        const MeasureResult rf = t.compute(s);
+        check(rf.valid && rf.hasDiameter, "a cylindrical face reports a diameter too");
+        check(near(rf.diameter, 12.0, 1e-6), "the same 12mm");
+        std::printf("[measure] wall: %s\n", rf.summary.c_str());
+        t.end();
     }
 
     std::printf("\n%s (%d failures)\n", failures ? "FAILED" : "ALL PASS", failures);

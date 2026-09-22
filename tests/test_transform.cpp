@@ -29,7 +29,40 @@ static Camera makeCamera() {
     return c;
 }
 
+// Quat::fromFrame: the rotation that takes the world axes onto a given frame.
+// Used when an object is built on a plane that is not the ground, which is the
+// difference between a primitive that stays parametric and one that gets baked.
+static void testFromFrame() {
+    struct Case { const char* what; Vec3 u, v, n; };
+    const Case cases[] = {
+        {"identity",        {1, 0, 0}, {0, 1, 0}, {0, 0, 1}},
+        {"front plane XZ",  {1, 0, 0}, {0, 0, 1}, {0, -1, 0}},
+        {"right plane YZ",  {0, 1, 0}, {0, 0, 1}, {1, 0, 0}},
+        {"upside down",     {1, 0, 0}, {0, -1, 0}, {0, 0, -1}},
+        {"half turn about z", {-1, 0, 0}, {0, -1, 0}, {0, 0, 1}},
+        {"quarter turn",    {0, 1, 0}, {-1, 0, 0}, {0, 0, 1}},
+    };
+    for (const Case& c : cases) {
+        const Quat q = Quat::fromFrame(c.u, c.v, c.n);
+        check(nearV(rotate(q, {1, 0, 0}), c.u), std::string("x lands on u: ") + c.what);
+        check(nearV(rotate(q, {0, 1, 0}), c.v), std::string("y lands on v: ") + c.what);
+        check(nearV(rotate(q, {0, 0, 1}), c.n), std::string("z lands on n: ") + c.what);
+    }
+
+    // An arbitrary frame, built the way the create tool builds one.
+    const Vec3 n = normalize(Vec3{0.3f, -0.7f, 0.65f});
+    const Vec3 u = normalize(cross(std::fabs(n.z) < 0.9f ? Vec3{0, 0, 1} : Vec3{1, 0, 0}, n));
+    const Vec3 v = cross(n, u);
+    const Quat q = Quat::fromFrame(u, v, n);
+    check(nearV(rotate(q, {0, 0, 1}), n), "an arbitrary plane normal is matched");
+    check(nearV(cross(rotate(q, {1, 0, 0}), rotate(q, {0, 1, 0})), n),
+          "and the frame stays right-handed");
+    std::printf("[math] fromFrame maps the world axes onto 7 frames\n");
+}
+
 int main() {
+    testFromFrame();
+
     // ---- Undo stack basics -------------------------------------------------
     {
         Scene s;
@@ -77,7 +110,7 @@ int main() {
 
         // Deleting and undoing must bring back the same object, mesh included:
         // selections and later feature references are held by id.
-        const int facesBefore = s.find(a)->mesh.faceCount();
+        const int facesBefore = s.find(a)->body.faceCount();
         s.find(a)->transform.position = {7, 8, 9};
         u.push(ExistenceCommand::forDelete(s, {a}));
         check(s.objectCount() == 0, "delete removes");
@@ -87,7 +120,7 @@ int main() {
         check(s.objectCount() == 1, "undo restores the deleted object");
         const SceneObject* back = s.find(a);
         check(back != nullptr, "restored with the original id");
-        check(back && back->mesh.faceCount() == facesBefore, "mesh survived the round trip");
+        check(back && back->body.faceCount() == facesBefore, "mesh survived the round trip");
         check(back && nearV(back->transform.position, {7, 8, 9}), "transform survived");
 
         // A restored id must not collide with a later creation.
@@ -230,11 +263,18 @@ int main() {
         auto cmd = tool.confirm(s);
         check(cmd != nullptr, "confirm yields an undo command");
         check(!tool.active(), "tool ends after confirm");
+        // The move is a step in the history, and where the object stands
+        // follows from it -- a re-evaluation must not put it back.
+        check(s.find(id)->features.back().kind == FeatureKind::Move, "the move is a step in the history");
+        s.reevaluate(id);
+        check(nearV(s.find(id)->transform.position, start + Vec3{0, 0, 12.5f}),
+              "and re-evaluating keeps it where it was put");
 
         UndoStack u;
         u.push(std::move(cmd));
         u.undo(s);
         check(nearV(s.find(id)->transform.position, start), "undo reverts the move");
+        check(s.find(id)->features.size() == 1, "and takes the step away");
         std::printf("[tool] numeric translate ok\n");
     }
 
@@ -312,7 +352,16 @@ int main() {
         check(nearV(s.find(a)->transform.scale, {1, 1, 2}), "axis scale affects only Z");
         check(nearV(s.find(a)->transform.position, {40, 0, 0}),
               "position is unchanged along unscaled axes");
-        tool.cancel(s);
+
+        // Confirmed, the stretch is the body's own shape: the transform goes
+        // back to unscaled and the body is twice as tall.
+        const Real tallBefore = s.find(a)->localBounds.size().z;
+        auto cmd = tool.confirm(s);
+        check(cmd != nullptr, "the scale yields an undo command");
+        check(nearV(s.find(a)->transform.scale, {1, 1, 1}), "the transform carries no scale");
+        check(std::fabs(s.find(a)->localBounds.size().z - tallBefore * 2) < 1e-4,
+              "the body itself is twice as tall");
+        check(s.find(a)->features.back().kind == FeatureKind::Scale, "as a Scale step");
         std::printf("[tool] scale ok\n");
     }
 
@@ -349,14 +398,17 @@ int main() {
     // ---- Element transforms: move a face, not the object -------------------
     {
         Scene s;
+        // Dragging vertices is a mesh operation: on an exact body a vertex is
+        // where surfaces meet, not a free point, and the feature refuses.
+        s.setDefaultBackend(Backend::Mesh);
         Camera cam = makeCamera();
         TransformTool tool;
         const ObjectId id = s.addPrimitive(PrimitiveKind::Box);   // 20mm cube
 
         // Top face, found by normal.
         Index top = kInvalid;
-        for (Index f = 0; f < s.find(id)->mesh.faceCount(); ++f)
-            if (dot(s.find(id)->mesh.faceNormal(f), Vec3{0, 0, 1}) > 0.99f) top = f;
+        for (Index f = 0; f < s.find(id)->body.faceCount(); ++f)
+            if (dot(s.find(id)->body.faceNormal(f), Vec3{0, 0, 1}) > 0.99f) top = f;
         check(top != kInvalid, "found the top face");
 
         s.selectElement({id, ElementKind::Face, top});
@@ -390,6 +442,9 @@ int main() {
     // Cancelling an element move must restore the vertices exactly.
     {
         Scene s;
+        // Dragging vertices is a mesh operation: on an exact body a vertex is
+        // where surfaces meet, not a free point, and the feature refuses.
+        s.setDefaultBackend(Backend::Mesh);
         Camera cam = makeCamera();
         TransformTool tool;
         const ObjectId id = s.addPrimitive(PrimitiveKind::Box);
@@ -409,6 +464,9 @@ int main() {
     // object carries a rotation and a non-uniform scale.
     {
         Scene s;
+        // Dragging vertices is a mesh operation: on an exact body a vertex is
+        // where surfaces meet, not a free point, and the feature refuses.
+        s.setDefaultBackend(Backend::Mesh);
         Camera cam = makeCamera();
         TransformTool tool;
         const ObjectId id = s.addPrimitive(PrimitiveKind::Box);
@@ -417,8 +475,8 @@ int main() {
         o->transform.scale = {2.0f, 1.0f, 1.0f};
 
         Index top = kInvalid;
-        for (Index f = 0; f < o->mesh.faceCount(); ++f)
-            if (dot(o->mesh.faceNormal(f), Vec3{0, 0, 1}) > 0.99f) top = f;
+        for (Index f = 0; f < o->body.faceCount(); ++f)
+            if (dot(o->body.faceNormal(f), Vec3{0, 0, 1}) > 0.99f) top = f;
         s.selectElement({id, ElementKind::Face, top});
 
         tool.begin(TransformMode::Translate, s, cam, {500, 400});
@@ -437,17 +495,20 @@ int main() {
     // An edge drag moves only its two vertices.
     {
         Scene s;
+        // Dragging vertices is a mesh operation: on an exact body a vertex is
+        // where surfaces meet, not a free point, and the feature refuses.
+        s.setDefaultBackend(Backend::Mesh);
         Camera cam = makeCamera();
         TransformTool tool;
         const ObjectId id = s.addPrimitive(PrimitiveKind::Box);
-        const int vertsBefore = s.find(id)->mesh.vertexCount();
+        const int vertsBefore = s.find(id)->body.vertexCount();
 
         // Snapshot every position rather than testing a coordinate threshold:
         // which end of the box half-edge 0 happens to lie on is an internal
         // detail of the generator, not something the test should assume.
         std::vector<Vec3> original;
         for (Index v = 0; v < vertsBefore; ++v)
-            original.push_back(s.find(id)->mesh.verts[v].position);
+            original.push_back(s.find(id)->body.vertexPosition(v));
 
         s.selectElement({id, ElementKind::Edge, 0});
         tool.begin(TransformMode::Translate, s, cam, {500, 400});
@@ -455,10 +516,10 @@ int main() {
         for (char ch : std::string("5")) tool.typeCharacter(ch);
         tool.update(s, cam, {500, 400}, false);
 
-        check(s.find(id)->mesh.vertexCount() == vertsBefore, "no vertices added");
+        check(s.find(id)->body.vertexCount() == vertsBefore, "no vertices added");
         int moved = 0;
         for (Index v = 0; v < vertsBefore; ++v) {
-            const Vec3 now = s.find(id)->mesh.verts[v].position;
+            const Vec3 now = s.find(id)->body.vertexPosition(v);
             if (now != original[v]) {
                 ++moved;
                 check(near(now.z - original[v].z, 5.0f), "moved exactly 5mm along Z");

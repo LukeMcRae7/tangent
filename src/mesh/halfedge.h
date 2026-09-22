@@ -37,6 +37,16 @@ struct MeshVertex {
     ElementId id   = kNoId;     // stable across re-evaluation; see element_id.h
 };
 
+// One boundary loop per face, and no inner ones.
+//
+// A drilled face genuinely has an inner boundary, so this is a real
+// restriction: a plate with a hole through it cannot be one face here, and has
+// to arrive as pieces joined along cuts from the hole to the rim.
+//
+// It stays because meshes are no longer modelled on. They come from files and
+// primitives, the exact kernel is where a face with a hole is made, and inner
+// loops would touch build's twin pairing, triangulation and picking to buy
+// nothing an imported triangle mesh needs.
 struct MeshFace {
     Index halfedge = kInvalid;  // one half-edge bounding this face
     ElementId id   = kNoId;
@@ -86,9 +96,9 @@ public:
     Index findEdge(ElementId id) const;   // returns a half-edge
 
     // Ear-clips one face into triangles, as corner indices local to the face.
-    // Public because a boolean has to feed the BSP convex pieces: the classic
-    // split routine assumes a plane cuts a polygon in two, which is only true
-    // if it is convex, and this mesh's faces need not be.
+    // Public because a boolean works on triangles: the split routine it uses
+    // assumes a plane cuts a polygon in two, which is only true if the polygon
+    // is convex, and this mesh's faces need not be.
     void triangulateFacePublic(Index f, std::vector<Index>& out) const {
         triangulateFace(f, out);
     }
@@ -140,6 +150,32 @@ public:
         return halfedges[he].face == kInvalid ||
                halfedges[halfedges[he].twin].face == kInvalid;
     }
+
+    // Is this edge only there because a face cannot have a hole?
+    //
+    // A region with a hole in it has to be cut into pieces here (see MeshFace),
+    // and the cuts are edges the surface does not turn at -- the two lines a
+    // drilled face comes back with, running from the bore to the rim. Nothing
+    // on the model corresponds to them, and they should be neither drawn nor
+    // offered to a click.
+    //
+    // Two coplanar faces sharing *more than one* edge is what says so. One
+    // shared edge can be a line the file drew on purpose; a bridged hole always
+    // leaves its two halves joined along both of its cuts.
+    bool isBridgeEdge(Index he, Real toleranceDegrees = 0.5) const;
+
+    // The faces `f` was split into because a face cannot have a hole -- itself,
+    // plus everything reachable from it across bridge edges only. One face for
+    // anything that was not split that way.
+    //
+    // Crossing *only* bridge edges is the whole point. A split the user made is
+    // a face they meant to have, and it stays its own face: raise part of a wall
+    // and the section line divides it into two pieces that are picked, moved and
+    // extruded separately. A split this representation forced is not a face at
+    // all, and picking any of its pieces should reach the surface the user sees.
+    // The two are told apart by how many edges the pieces share -- see above.
+    void coplanarFaceGroup(Index f, std::vector<Index>& out,
+                           Real toleranceDegrees = 0.5) const;
     // Vertex the half-edge starts from.
     Index fromVertex(Index he) const { return halfedges[halfedges[he].prev].vertex; }
 
@@ -167,5 +203,10 @@ private:
     // are local to the face (0 .. degree-1) rather than mesh vertex ids.
     void triangulateFace(Index f, std::vector<Index>& out) const;
 };
+
+// Splits a mesh into its connected pieces, largest first, every name kept.
+// Returns the number produced; a mesh that is already one piece yields itself,
+// so a caller can always use the result. An STL often holds several parts.
+size_t splitShells(const Mesh& mesh, std::vector<Mesh>& out);
 
 } // namespace tg

@@ -1,0 +1,118 @@
+// Tangent - the direction a drag is measured along, and the line that says so.
+//
+// A value dragged with the mouse has to answer two questions before it feels
+// like a tool rather than a guess: which way do I move to make it bigger, and
+// how much does a given movement change it. Distance from a point answers
+// neither. It grows in every direction at once, so the user finds the
+// direction by experiment, and moving *along* an edge changes the radius as
+// much as moving away from it does.
+//
+// So every drag names an axis: an anchor in the world and a direction that
+// increases the value. The value is the cursor projected onto that axis, which
+// means movement across it changes nothing and movement along it changes
+// exactly what the line shows. And because the axis is a real thing in the
+// world, it can be drawn -- which is the whole point. The user should not have
+// to discover the direction.
+#pragma once
+
+#include "app/camera.h"
+#include "geom/body.h"
+
+#include <vector>
+
+namespace tg {
+
+struct DragAxis {
+    Vec3 origin;         // where the value is zero
+    Vec3 direction;      // unit; the way that increases it
+
+    // The value at the origin, which is where the gesture starts and the
+    // smallest it can go. The origin sits under the cursor at the moment the
+    // operation began, so the guide appears in the hand rather than out on the
+    // edge -- and the value is how far the pointer has been pulled from there.
+    //
+    // Nothing goes behind it. Projecting a ray onto a line gives a signed
+    // answer, and near the edge of the screen -- where a perspective ray is
+    // most oblique -- that sign flips and the arrow turns to point the other
+    // way. There is nothing behind the start to point at.
+    Real baseValue = 0.0;
+
+    // The value at the far end of the track. Zero means the drag is unbounded
+    // and one millimetre of world is one millimetre of value.
+    //
+    // With a limit, the whole usable range is mapped onto a track of a fixed
+    // length on screen instead. That is the difference between a gesture that
+    // feels the same every time and one whose sensitivity depends on how big
+    // the part is and how far away the camera happens to be: rounding a 2mm
+    // wall and rounding a 200mm plate are then the same movement of the hand,
+    // and the ticks along the way are spaced the same in both.
+    Real spanValue = 0.0;
+
+    // How long that track is, in pixels. One number, so every bounded drag in
+    // the program is the same size and the same sensitivity.
+    static constexpr Real kTrackPx = 200.0;
+
+    bool valid = false;
+
+    // A drag that runs both ways from where it started.
+    //
+    // A fillet has a floor and a ceiling and nothing behind the origin: the
+    // track carries the whole range and the value cannot be negative. Moving a
+    // face is the opposite on every count. It starts at nothing, it can go
+    // either way -- out adds material, in takes it -- and there is no distance
+    // at which it stops being a sensible thing to ask for. So the value is
+    // measured from the origin in both directions and is not clamped at either
+    // end; `spanValue` is then a scale, how many millimetres a track's length
+    // of travel is worth, rather than a limit.
+    bool signedRange = false;
+
+    // Where the cursor sits along the axis, in millimetres from the origin.
+    // Signed, so a drag the other way gives a negative value and a caller that
+    // only wants positive ones can clamp and say why.
+    //
+    // Computed as the point on the axis nearest the cursor's ray, which is the
+    // right answer from any camera angle. When the axis points nearly at the
+    // eye that point is ill-conditioned -- a pixel of movement swings it
+    // wildly -- so there is a screen-space fallback below.
+    Real valueAt(const Camera& camera, Vec2 mousePx) const;
+
+    // How far along the axis the cursor is, in pixels on screen, signed. This
+    // is what the value is built from: measuring on screen is what makes the
+    // track a fixed size, and it degrades gracefully when the axis points near
+    // the eye, where a world-space projection does not.
+    Real offsetPx(const Camera& camera, Vec2 mousePx) const;
+
+    // True when the axis is square enough to the view to measure along. Near
+    // false the caller should say so rather than let the number jump about.
+    bool facingCamera(const Camera& camera) const;
+
+    // The guide itself -- the track, the ticks and the arrow -- is drawn on the
+    // screen rather than in the world, by ui::drawDragGuide. It does not move:
+    // the anchor and the direction are fixed when the gesture starts, and only
+    // the marker inside travels. A line that slid about under the cursor would
+    // be a second thing to track rather than a thing to aim along.
+
+    // The increment for a gesture that can travel `reach` millimetres, at this
+    // zoom. Tied to both: a step fine enough to be worth having on screen, and
+    // coarse enough that the travel is not a hundred indistinguishable ticks.
+    // Always a number a person would choose -- 0.25, 0.5, 1, 2.5.
+    static Real stepFor(const Camera& camera, Vec3 at, Real reach);
+};
+
+// The axis a fillet grows along: away from the edge, along the bisector of the
+// two faces that meet there. Pulling the cursor off the edge into open space
+// increases the radius; sliding along the edge does nothing, which is what
+// distance-from-the-edge got wrong.
+// The axis a fillet grows along, for a whole selection rather than one edge.
+//
+// The direction is the sum of the outward normals of every face that meets the
+// selected edges, which gives the right answer in each case without any of
+// them being special: one edge of a cube sums its two faces and comes out at 45
+// degrees; the four edges around a face sum that face four times and its four
+// sides, which cancel in pairs, leaving the face's own normal; two
+// perpendicular faces meeting at an edge come out at 45 again. It is a
+// statement about the boundary, and the boundary is what a fillet eats into.
+DragAxis filletAxis(const Body& body, const Mat4& model,
+                    const std::vector<EdgeId>& edges, Vec3 nearPoint);
+
+} // namespace tg

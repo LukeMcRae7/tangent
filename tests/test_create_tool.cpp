@@ -18,35 +18,17 @@
 //    - Micro-extrusion (0.1 mm), thin-wall (1 mm), fractional (7.35 mm), standard (25 mm), deep column (500 mm)
 //    - Positive depths (+D, outwards along normal)
 //    - Negative depths (-D, inwards against normal)
-//  Section 5: Positive Extrusions Out Of Existing Objects (Boss / Auto-Join)
-//    - Out of Cube flat faces (+Z, -Z, +X, -X, +Y, -Y)
-//    - Out of Cylinder flat caps and lateral curved walls
-//    - Out of Sphere surface (polar and equatorial posts)
-//    - Out of Angled / Chamfered 45-degree faces
-//    - Boss spanning across coplanar planar seams
-//  Section 6: Negative Extrusions Into Existing Objects (Boolean Difference Cuts)
-//    - Shallow and deep blind pockets in Cube
-//    - Full through-hole cuts in Cube
-//    - Corner notch and side edge-step cutaways
-//    - Rounded-corner pockets and circular blind/through holes
-//    - Cuts into Cylinder cap, axis bore (tube), and transverse slot through curved wall
-//    - Cuts into Sphere surface (dimple cavity and through bore)
-//    - Cuts into Angled / Chamfered 45-degree face
-//  Section 7: Complex Multi-Operation Sequences
-//    - Cut-then-Boss (boss extruded out of pocket floor)
-//    - Boss-then-Cut (through-hole drilled through boss and base)
-//    - Orthogonal multi-face cuts on all sides of a body
-//    - Precision volume and topological invariant verifications
+//  (Sections 5-7 tested the mesh boolean directly, and went with it. Cuts and
+//   joins are booleans on the exact kernel now, and are tested through the tool
+//   in section 9.)
 //  Section 9: Cuts and joins belong to the feature history
-//    - The tool's cut/join land in the chain, not over obj->mesh
+//    - The tool's cut/join land in the chain, not over obj->body
 //    - Re-evaluating for any reason preserves them
 //    - A fillet committed afterwards is neither refused nor loses the cut
 //    - A cut with nothing to cut into refuses instead of adding a body
 #include "app/create_tool.h"
 #include "app/undo.h"
-#include "mesh/boolean.h"
 #include "mesh/health.h"
-#include "mesh/operations.h"
 #include "mesh/primitives.h"
 #include "scene/feature.h"
 #include "scene/scene.h"
@@ -54,6 +36,7 @@
 #include <cmath>
 #include <cstdio>
 #include <string>
+#include <algorithm>
 #include <vector>
 
 using namespace tg;
@@ -90,8 +73,18 @@ double polygonArea2D(const std::vector<Vec2>& poly) {
     return 0.5 * area;
 }
 
+// The suite works at two levels: raw meshes from makePrismMesh, and Bodies
+// once they are in a scene. Both spellings forward to the same checks.
+void expectSolid(const Body& m, const std::string& what);
+double volumeOf(const Body& m);
+
 void expectSolid(const Mesh& m, const std::string& what) {
-    const MeshHealth h = checkHealth(m);
+    expectSolid(Body(m), what);
+}
+double volumeOf(const Mesh& m) { return volumeOf(Body(m)); }
+
+void expectSolid(const Body& m, const std::string& what) {
+    const MeshHealth h = m.health();
     check(h.watertight, what + ": watertight");
     check(h.volume > 0.0, what + ": positive volume");
     check(h.boundaryEdges == 0, what + ": no boundary edges");
@@ -102,61 +95,8 @@ void expectSolid(const Mesh& m, const std::string& what) {
     check(m.validate(&err), what + ": topological validation (" + err + ")");
 }
 
-double volumeOf(const Mesh& m) {
-    return checkHealth(m, false).volume;
-}
-
-Mesh makeBoxMesh(Vec3 size, Vec3 center = {0, 0, 0}) {
-    Mesh m;
-    BoxParams p;
-    p.width = size.x;
-    p.depth = size.y;
-    p.height = size.z;
-    makeBox(m, p);
-    for (auto& v : m.verts) v.position += center;
-    return m;
-}
-
-Mesh makeCylinderMesh(Real radius, Real height, int segments = 24, Vec3 center = {0, 0, 0}) {
-    Mesh m;
-    CylinderParams p;
-    p.radius = radius;
-    p.height = height;
-    p.segments = segments;
-    makeCylinder(m, p);
-    for (auto& v : m.verts) v.position += center;
-    return m;
-}
-
-Mesh makeSphereMesh(Real radius, int segments = 24, int rings = 16, Vec3 center = {0, 0, 0}) {
-    Mesh m;
-    SphereParams p;
-    p.radius = radius;
-    p.segments = segments;
-    p.rings = rings;
-    makeSphere(m, p);
-    for (auto& v : m.verts) v.position += center;
-    return m;
-}
-
-// Builds a 45-degree wedge / chamfered block
-Mesh makeWedgeMesh(Real width, Real depth, Real height) {
-    const Real hx = width * 0.5f, hy = depth * 0.5f, hz = height * 0.5f;
-    std::vector<Vec3> pos = {
-        {-hx, -hy, -hz}, { hx, -hy, -hz}, {-hx, -hy,  hz}, // 0, 1, 2 (front triangle y=-hy)
-        {-hx,  hy, -hz}, { hx,  hy, -hz}, {-hx,  hy,  hz}  // 3, 4, 5 (back triangle y=+hy)
-    };
-    std::vector<uint32_t> sizes = {3, 3, 4, 4, 4};
-    std::vector<uint32_t> indices = {
-        0, 1, 2,          // front triangle (-Y)
-        3, 5, 4,          // back triangle (+Y)
-        0, 3, 4, 1,       // bottom face (-Z)
-        0, 2, 5, 3,       // back face (-X)
-        1, 4, 5, 2        // slanted face (+hypotenuse)
-    };
-    Mesh m;
-    m.build(pos, sizes, indices, nullptr);
-    return m;
+double volumeOf(const Body& m) {
+    return m.health(false).volume;
 }
 
 } // namespace
@@ -525,302 +465,6 @@ void testSection4_ExtrusionDistancesAndDirections() {
 }
 
 // ===========================================================================
-// SECTION 5: Positive Extrusions Out Of Existing Objects (Boss / Auto-Join)
-// ===========================================================================
-void testSection5_PositiveExtrudeAutoJoin() {
-    std::printf("\n--- Section 5: Positive Extrusions (Boss / Auto-Join) ---\n");
-
-    // 5.1 Boss atop Cube Top Face (+Z)
-    {
-        Mesh base = makeBoxMesh({50, 50, 30}, {0, 0, 15}); // z in [0, 30]
-        std::vector<Vec2> bossPoly = CreateTool::makeRectPolygon({-10, -10}, {10, 10}, 0.0);
-        Mesh boss;
-        CreateTool::makePrismMesh(bossPoly, {0, 0, 30}, {1, 0, 0}, {0, 1, 0}, {0, 0, 1}, 0.0, 15.0, boss);
-
-        Mesh result;
-        bool ok = meshBoolean(base, boss, BooleanOp::Union, result);
-        check(ok, "union boss with base box succeeds");
-        mergeCoplanarFaces(result);
-        expectSolid(result, "boss on box top");
-        const double expectedVol = (50.0 * 50.0 * 30.0) + (20.0 * 20.0 * 15.0); // 75000 + 6000 = 81000
-        check(near(volumeOf(result), expectedVol), "boss atop box volume = 81000 mm3");
-    }
-
-    // 5.2 Boss out of Cube Side Face (+X)
-    {
-        Mesh base = makeBoxMesh({40, 40, 40}); // x in [-20, 20]
-        std::vector<Vec2> bossPoly = CreateTool::makeRectPolygon({-8, -8}, {8, 8}, 0.0);
-        Mesh sideBoss;
-        CreateTool::makePrismMesh(bossPoly, {20, 0, 0}, {0, 1, 0}, {0, 0, 1}, {1, 0, 0}, 0.0, 12.0, sideBoss);
-
-        Mesh result;
-        bool ok = meshBoolean(base, sideBoss, BooleanOp::Union, result);
-        check(ok, "union side boss with box succeeds");
-        mergeCoplanarFaces(result);
-        expectSolid(result, "side boss on box");
-        const double expectedVol = 64000.0 + (16.0 * 16.0 * 12.0); // 67072
-        check(near(volumeOf(result), expectedVol), "side boss volume = 67072 mm3");
-    }
-
-    // 5.3 Concentric Cylindrical Boss atop Cylinder Cap
-    {
-        Mesh baseCyl = makeCylinderMesh(20.0, 30.0, 24, {0, 0, 15}); // z in [0, 30]
-        Mesh bossCyl = makeCylinderMesh(8.0, 15.0, 24, {0, 0, 37.5}); // z in [30, 45]
-
-        Mesh result;
-        bool ok = meshBoolean(baseCyl, bossCyl, BooleanOp::Union, result);
-        check(ok, "union concentric cylinder boss succeeds");
-        mergeCoplanarFaces(result);
-        expectSolid(result, "cylinder boss on cylinder cap");
-        const double n = 24.0;
-        const double aBase = 0.5 * n * 400.0 * std::sin(kTwoPi / n);
-        const double aBoss = 0.5 * n * 64.0 * std::sin(kTwoPi / n);
-        const double expectedVol = (aBase * 30.0) + (aBoss * 15.0);
-        check(nearRel(volumeOf(result), expectedVol, 0.01), "stepped cylinder volume exact");
-    }
-
-    // 5.4 Boss Extruded Out of Sphere Surface
-    {
-        Mesh baseSphere = makeSphereMesh(20.0, 24, 16);
-        Mesh post = makeBoxMesh({10, 10, 20}, {0, 0, 25}); // z in [15, 35]
-
-        Mesh result;
-        bool ok = meshBoolean(baseSphere, post, BooleanOp::Union, result);
-        check(ok, "union post with sphere succeeds");
-        mergeCoplanarFaces(result);
-        expectSolid(result, "post on sphere");
-        check(volumeOf(result) > volumeOf(baseSphere), "post on sphere increases total volume");
-        const AABB b = result.bounds();
-        check(near(b.max.z, 35.0), "sphere with post reaches z=35");
-    }
-
-    // 5.5 Boss Extruded Out of Angled / Chamfered 45-Degree Face
-    {
-        Mesh wedge = makeWedgeMesh(30.0, 30.0, 30.0);
-        expectSolid(wedge, "base 45-degree wedge");
-
-        // Boss extending perpendicular to slanted face
-        const Vec3 normal = normalize(Vec3{1, 0, 1});
-        const Vec3 u{0, 1, 0};
-        const Vec3 v = cross(normal, u);
-        std::vector<Vec2> bossPoly = CreateTool::makeRectPolygon({-6, -6}, {6, 6}, 0.0);
-        Mesh boss;
-        CreateTool::makePrismMesh(bossPoly, {0, 0, 0}, u, v, normal, 0.0, 10.0, boss);
-
-        Mesh result;
-        bool ok = meshBoolean(wedge, boss, BooleanOp::Union, result);
-        check(ok, "union boss on angled wedge face succeeds");
-        mergeCoplanarFaces(result);
-        expectSolid(result, "boss on angled wedge");
-        check(volumeOf(result) > volumeOf(wedge), "angled boss increases wedge volume");
-    }
-}
-
-// ===========================================================================
-// SECTION 6: Negative Extrusions Into Existing Objects (Boolean Difference Cuts)
-// ===========================================================================
-void testSection6_NegativeExtrudeCuts() {
-    std::printf("\n--- Section 6: Negative Extrusions (Boolean Difference Cuts) ---\n");
-
-    // 6.1 Shallow Blind Pocket Cut into Cube Top Face
-    {
-        Mesh base = makeBoxMesh({40, 40, 30}, {0, 0, -15}); // z in [-30, 0]
-        std::vector<Vec2> pocketPoly = CreateTool::makeRectPolygon({-10, -10}, {10, 10}, 0.0);
-        Mesh cutter;
-        CreateTool::makePrismMesh(pocketPoly, {0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {0, 0, 1}, -8.0, 1.0, cutter);
-
-        Mesh result;
-        bool ok = meshBoolean(base, cutter, BooleanOp::Difference, result);
-        check(ok, "shallow pocket cut succeeds");
-        mergeCoplanarFaces(result);
-        expectSolid(result, "shallow pocket in box");
-        const double expectedVol = (40.0 * 40.0 * 30.0) - (20.0 * 20.0 * 8.0); // 44800
-        check(near(volumeOf(result), expectedVol), "shallow pocket volume = 44800 mm3");
-    }
-
-    // 6.2 Through-Hole Square Cut Through Entire Cube
-    {
-        Mesh base = makeBoxMesh({40, 40, 30}, {0, 0, -15}); // z in [-30, 0]
-        std::vector<Vec2> holePoly = CreateTool::makeRectPolygon({-8, -8}, {8, 8}, 0.0);
-        Mesh cutter;
-        CreateTool::makePrismMesh(holePoly, {0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {0, 0, 1}, -35.0, 1.0, cutter);
-
-        Mesh result;
-        bool ok = meshBoolean(base, cutter, BooleanOp::Difference, result);
-        check(ok, "through-hole square cut succeeds");
-        mergeCoplanarFaces(result);
-        expectSolid(result, "square through-hole in box");
-        const double expectedVol = (40.0 * 40.0 * 30.0) - (16.0 * 16.0 * 30.0); // 40320
-        check(near(volumeOf(result), expectedVol), "square through-hole volume = 40320 mm3");
-    }
-
-    // 6.3 Corner Notch Cutaway (Overlapping Outer Perimeter)
-    {
-        Mesh base = makeBoxMesh({40, 40, 20}, {20, 20, 10}); // [0, 40] x [0, 40] x [0, 20]
-        std::vector<Vec2> notchPoly = CreateTool::makeRectPolygon({-1, -1}, {15, 15}, 0.0);
-        Mesh cutter;
-        CreateTool::makePrismMesh(notchPoly, {0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {0, 0, 1}, -1.0, 21.0, cutter);
-
-        Mesh result;
-        bool ok = meshBoolean(base, cutter, BooleanOp::Difference, result);
-        check(ok, "corner notch cut succeeds");
-        mergeCoplanarFaces(result);
-        expectSolid(result, "corner notch cutaway");
-        const double expectedVol = (40.0 * 40.0 * 20.0) - (15.0 * 15.0 * 20.0); // 27500
-        check(near(volumeOf(result), expectedVol), "corner notch volume = 27500 mm3");
-    }
-
-    // 6.4 Edge-Straddling Slot Cut on Box Side Wall
-    {
-        Mesh base = makeBoxMesh({40, 40, 40}); // in [-20, 20]^3
-        std::vector<Vec2> slotPoly = CreateTool::makeRectPolygon({-5, -7.5}, {5, 7.5}, 0.0);
-        Mesh slotCutter;
-        CreateTool::makePrismMesh(slotPoly, {20, 0, 0}, {0, 1, 0}, {0, 0, 1}, {1, 0, 0}, -10.0, 1.0, slotCutter);
-
-        Mesh result;
-        bool ok = meshBoolean(base, slotCutter, BooleanOp::Difference, result);
-        check(ok, "side wall slot cut succeeds");
-        mergeCoplanarFaces(result);
-        expectSolid(result, "slot on box side");
-        const double expectedVol = 64000.0 - (10.0 * 15.0 * 10.0); // 62500
-        check(near(volumeOf(result), expectedVol), "side wall slot volume = 62500 mm3");
-    }
-
-    // 6.5 Cylindrical Bore Through Sphere Pole-to-Pole
-    {
-        Mesh sphere = makeSphereMesh(20.0, 24, 16);
-        Mesh drill = makeCylinderMesh(6.0, 50.0, 24);
-
-        Mesh result;
-        bool ok = meshBoolean(sphere, drill, BooleanOp::Difference, result);
-        check(ok, "drill through sphere pole-to-pole succeeds");
-        mergeCoplanarFaces(result);
-        expectSolid(result, "drilled sphere");
-        check(volumeOf(result) < volumeOf(sphere), "drilled sphere volume reduced");
-    }
-
-    // 6.6 Cylindrical Cut Through Cylinder Axis (Coaxial Tube)
-    {
-        Mesh outer = makeCylinderMesh(20.0, 40.0, 24);
-        Mesh inner = makeCylinderMesh(10.0, 50.0, 24);
-
-        Mesh tube;
-        bool ok = meshBoolean(outer, inner, BooleanOp::Difference, tube);
-        check(ok, "hollow cylinder tube cut succeeds");
-        mergeCoplanarFaces(tube);
-        expectSolid(tube, "hollow tube");
-        const double n = 24.0;
-        const double aOuter = 0.5 * n * 400.0 * std::sin(kTwoPi / n);
-        const double aInner = 0.5 * n * 100.0 * std::sin(kTwoPi / n);
-        const double expectedVol = (aOuter - aInner) * 40.0;
-        check(nearRel(volumeOf(tube), expectedVol, 0.01), "tube volume exact");
-    }
-
-    // 6.7 Pocket Cut into Angled / Chamfered 45-Degree Face
-    {
-        Mesh wedge = makeWedgeMesh(40.0, 40.0, 40.0);
-        const Vec3 normal = normalize(Vec3{1, 0, 1});
-        const Vec3 u{0, 1, 0};
-        const Vec3 v = cross(normal, u);
-        std::vector<Vec2> pocketPoly = CreateTool::makeRectPolygon({-6, -6}, {6, 6}, 0.0);
-        Mesh cutter;
-        CreateTool::makePrismMesh(pocketPoly, {0, 0, 0}, u, v, normal, -8.0, 1.0, cutter);
-
-        Mesh result;
-        bool ok = meshBoolean(wedge, cutter, BooleanOp::Difference, result);
-        check(ok, "pocket cut into angled wedge face succeeds");
-        mergeCoplanarFaces(result);
-        expectSolid(result, "pocket in angled wedge");
-        check(volumeOf(result) < volumeOf(wedge), "wedge volume decreased after pocket cut");
-    }
-}
-
-// ===========================================================================
-// SECTION 7: Multi-Operation Sequences & Interaction Chaining
-// ===========================================================================
-void testSection7_MultiOperationSequences() {
-    std::printf("\n--- Section 7: Multi-Operation Chaining ---\n");
-
-    // 7.1 Cut Then Boss: Pocket into box, then a post out of the pocket floor
-    {
-        // 1. Base Box: 60 x 60 x 30 sitting in z in [0, 30]
-        Mesh m = makeBoxMesh({60, 60, 30}, {0, 0, 15});
-
-        // 2. Cut pocket at top face (z=30): 40 x 40 mm, depth 10 mm (pocket floor at z=20)
-        std::vector<Vec2> p1 = CreateTool::makeRectPolygon({-20, -20}, {20, 20}, 0.0);
-        Mesh cutter;
-        CreateTool::makePrismMesh(p1, {0, 0, 30}, {1, 0, 0}, {0, 1, 0}, {0, 0, 1}, -10.0, 1.0, cutter);
-        Mesh withPocket;
-        check(meshBoolean(m, cutter, BooleanOp::Difference, withPocket), "step 1: cut pocket");
-        mergeCoplanarFaces(withPocket);
-
-        // 3. Extrude boss out of pocket floor (z=20): 16 x 16 mm, height +15 mm (reaches z=35)
-        std::vector<Vec2> p2 = CreateTool::makeRectPolygon({-8, -8}, {8, 8}, 0.0);
-        Mesh boss;
-        CreateTool::makePrismMesh(p2, {0, 0, 20}, {1, 0, 0}, {0, 1, 0}, {0, 0, 1}, 0.0, 15.0, boss);
-        Mesh withBoss;
-        check(meshBoolean(withPocket, boss, BooleanOp::Union, withBoss), "step 2: extrude boss in pocket");
-        mergeCoplanarFaces(withBoss);
-        expectSolid(withBoss, "pocket with boss in floor");
-
-        const double expectedVol = (60.0 * 60.0 * 30.0) - (40.0 * 40.0 * 10.0) + (16.0 * 16.0 * 15.0);
-        check(near(volumeOf(withBoss), expectedVol), "cut-then-boss volume = 95840 mm3");
-    }
-
-    // 7.2 Boss Then Cut: Boss atop box, then a through-hole drilled through boss and base
-    {
-        // 1. Base Box: 40 x 40 x 20 (z in [0, 20])
-        Mesh base = makeBoxMesh({40, 40, 20}, {0, 0, 10});
-
-        // 2. Boss: 20 x 20 x 10 atop base (z in [20, 30])
-        Mesh boss = makeBoxMesh({20, 20, 10}, {0, 0, 25});
-        Mesh combined;
-        check(meshBoolean(base, boss, BooleanOp::Union, combined), "boss atop box");
-        mergeCoplanarFaces(combined);
-
-        // 3. Drill through-hole: 8 x 8 square from z=35 to z=-5
-        Mesh drill = makeBoxMesh({8, 8, 40}, {0, 0, 15});
-        Mesh drilled;
-        check(meshBoolean(combined, drill, BooleanOp::Difference, drilled), "drill through boss and base");
-        mergeCoplanarFaces(drilled);
-        expectSolid(drilled, "boss and base with through-hole");
-
-        const double baseVol = 40.0 * 40.0 * 20.0; // 32000
-        const double bossVol = 20.0 * 20.0 * 10.0; // 4000
-        const double holeVol = 8.0 * 8.0 * 30.0;   // 1920 (through total height 30)
-        const double expectedVol = baseVol + bossVol - holeVol; // 34080
-        check(near(volumeOf(drilled), expectedVol), "boss-then-cut volume = 34080 mm3");
-    }
-
-    // 7.3 Multi-Face Orthogonal Cuts (Pockets on 4 sides of a cube)
-    {
-        Mesh cube = makeBoxMesh({40, 40, 40}); // in [-20, 20]^3, vol = 64000
-
-        // Pocket on +Z face: 10 x 10 x 5 deep
-        Mesh cutZ = makeBoxMesh({10, 10, 6}, {0, 0, 18});
-        Mesh r1;
-        check(meshBoolean(cube, cutZ, BooleanOp::Difference, r1), "cut +Z");
-        mergeCoplanarFaces(r1);
-
-        // Pocket on +X face: 10 x 10 x 5 deep
-        Mesh cutX = makeBoxMesh({6, 10, 10}, {18, 0, 0});
-        Mesh r2;
-        check(meshBoolean(r1, cutX, BooleanOp::Difference, r2), "cut +X");
-        mergeCoplanarFaces(r2);
-
-        // Pocket on +Y face: 10 x 10 x 5 deep
-        Mesh cutY = makeBoxMesh({10, 6, 10}, {0, 18, 0});
-        Mesh r3;
-        check(meshBoolean(r2, cutY, BooleanOp::Difference, r3), "cut +Y");
-        mergeCoplanarFaces(r3);
-
-        expectSolid(r3, "cube with 3 orthogonal face pockets");
-        const double expectedVol = 64000.0 - 3.0 * (10.0 * 10.0 * 5.0); // 64000 - 1500 = 62500
-        check(near(volumeOf(r3), expectedVol), "orthogonal pockets volume = 62500 mm3");
-    }
-}
-
-// ===========================================================================
 // SECTION 8: Interactive Scene Lifecycle & Transformed Object Integration
 // ===========================================================================
 void testSection8_SceneLifecycleAndTransforms() {
@@ -845,20 +489,21 @@ void testSection8_SceneLifecycleAndTransforms() {
         bool finished = tool.finishCreation(scene, camera, undo);
         check(finished, "finishCreation on filleted box succeeds");
         check(scene.objectCount() == 1, "scene has 1 object after creating filleted box");
+        if (scene.objectCount() != 1) return;   // nothing below is meaningful
 
         ObjectId id = scene.objects().front()->id;
         SceneObject* obj = scene.find(id);
         check(obj != nullptr, "filleted object is present in scene (does not vanish)");
         if (obj) {
-            check(!obj->mesh.empty(), "filleted object mesh is non-empty");
-            expectSolid(obj->mesh, "scene filleted box solid");
+            check(!obj->body.empty(), "filleted object mesh is non-empty");
+            expectSolid(obj->body, "scene filleted box solid");
             const double expectedVol = (30.0 * 20.0 - (4.0 - kPi) * 16.0) * 15.0;
-            check(nearRel(volumeOf(obj->mesh), expectedVol, 0.01), "scene filleted box volume matches expected");
+            check(nearRel(volumeOf(obj->body), expectedVol, 0.01), "scene filleted box volume matches expected");
 
             // Re-evaluating scene feature timeline must preserve the geometry
             bool reb = scene.rebuild(id);
             check(reb, "scene.rebuild succeeds on filleted object");
-            check(!obj->mesh.empty() && nearRel(volumeOf(obj->mesh), expectedVol, 0.01),
+            check(!obj->body.empty() && nearRel(volumeOf(obj->body), expectedVol, 0.01),
                   "filleted object survives scene.rebuild without vanishing");
         }
 
@@ -868,13 +513,15 @@ void testSection8_SceneLifecycleAndTransforms() {
         undo.redo(scene);
         check(scene.objectCount() == 1, "redo restores filleted object");
         if (scene.objectCount() == 1) {
+            if (scene.objectCount() != 1) { check(false, "redo restored the object"); return; }
             SceneObject* restored = scene.objects().front().get();
-            expectSolid(restored->mesh, "restored filleted object is solid");
+            expectSolid(restored->body, "restored filleted object is solid");
         }
     }
 
     // 8.2 Positive Extrude / Boss on Transformed Object (Moved in World Space)
-    {
+    // A join and a cut are booleans, which are the exact kernel's.
+    if (brep::available()) {
         Scene scene;
         Camera camera;
         UndoStack undo;
@@ -909,11 +556,11 @@ void testSection8_SceneLifecycleAndTransforms() {
         check(near(wb.min.x, 80.0) && near(wb.max.x, 120.0), "boss world X bounds correct [80, 120]");
         check(near(wb.min.y, 30.0) && near(wb.max.y, 70.0), "boss world Y bounds correct [30, 70]");
         check(near(wb.min.z, -40.0) && near(wb.max.z, 15.0), "boss world Z bounds reach z=15 at top");
-        expectSolid(baseObj->mesh, "joined boss on transformed box");
+        expectSolid(baseObj->body, "joined boss on transformed box");
     }
 
     // 8.3 Negative Extrude / Cut into Transformed Object (Moved in World Space)
-    {
+    if (brep::available()) {
         Scene scene;
         Camera camera;
         UndoStack undo;
@@ -943,14 +590,14 @@ void testSection8_SceneLifecycleAndTransforms() {
 
         // Target volume should be exactly 64000 - 4000 = 60000 mm3
         const double expVol = 64000.0 - (20.0 * 20.0 * 10.0);
-        check(near(volumeOf(baseObj->mesh), expVol), "pocket cut into transformed box has exact volume 60000 mm3");
-        expectSolid(baseObj->mesh, "transformed box with pocket");
+        check(near(volumeOf(baseObj->body), expVol), "pocket cut into transformed box has exact volume 60000 mm3");
+        expectSolid(baseObj->body, "transformed box with pocket");
 
         // Test Undo & Redo of cut
         undo.undo(scene);
-        check(near(volumeOf(baseObj->mesh), 64000.0), "undo restores uncut transformed box volume");
+        check(near(volumeOf(baseObj->body), 64000.0), "undo restores uncut transformed box volume");
         undo.redo(scene);
-        check(near(volumeOf(baseObj->mesh), expVol), "redo restores pocket cut volume");
+        check(near(volumeOf(baseObj->body), expVol), "redo restores pocket cut volume");
     }
 
     // 8.4 Standalone Solid with Single Corner Fillet in Scene
@@ -972,14 +619,15 @@ void testSection8_SceneLifecycleAndTransforms() {
         bool finished = tool.finishCreation(scene, camera, undo);
         check(finished, "finishCreation on single-corner filleted box succeeds");
         check(scene.objectCount() == 1, "scene contains single-corner filleted box");
+        if (scene.objectCount() != 1) return;
 
         ObjectId id = scene.objects().front()->id;
         SceneObject* obj = scene.find(id);
         check(obj != nullptr, "single-corner filleted object found");
         if (obj) {
-            expectSolid(obj->mesh, "single-corner filleted object solid");
+            expectSolid(obj->body, "single-corner filleted object solid");
             const double expVol = (40.0 * 30.0 - (1.0 - kPi * 0.25) * 36.0) * 20.0;
-            check(nearRel(volumeOf(obj->mesh), expVol, 0.01), "single-corner filleted object volume exact");
+            check(nearRel(volumeOf(obj->body), expVol, 0.01), "single-corner filleted object volume exact");
         }
     }
 
@@ -1012,7 +660,7 @@ void testSection8_SceneLifecycleAndTransforms() {
 
         // Key 'E' in ExtrudeDepth finishes creation
         tool.handleKey('E', false, false, camera, scene, undo);
-        check(tool.stage() == CreateStage::None, "'E' finishes creation");
+        check(!tool.active() && tool.applied(), "'E' finishes creation, and the panel stays to adjust it");
         check(scene.objectCount() == 1, "object created via E shortcuts");
     }
 }
@@ -1020,7 +668,7 @@ void testSection8_SceneLifecycleAndTransforms() {
 // ===========================================================================
 // SECTION 9: Cuts and Joins Belong to the Feature History
 //
-// The tool used to assign target->mesh and leave features/featureCache
+// The tool used to assign target->body and leave features/featureCache
 // describing the body as it was before the operation. Everything downstream
 // trusted the stale chain: re-evaluating deleted the cut, and committing a
 // fillet either failed to resolve edges it had just previewed or applied them
@@ -1052,6 +700,29 @@ void testSection9_EditsLandInTheHistory() {
     const double kBox    = 36.0 * 20.0 * 20.0;              // 14400
     const double kPocket = kBox - 10.0 * 10.0 * 8.0;        // 13600
 
+    // Without the exact kernel there is no boolean to cut with, and the tool
+    // has to say so rather than leave the cutter lying in the scene.
+    if (!brep::available()) {
+        Scene scene; Camera camera; UndoStack undo;
+        PrimitiveSpec ps;
+        ps.kind = PrimitiveKind::Box;
+        ps.box.width = 36.0; ps.box.depth = 20.0; ps.box.height = 20.0;
+        const ObjectId id = scene.addPrimitive(PrimitiveKind::Box, ps, {0, 0, 10});
+        CreateTool tool;
+        tool.start(PrimitiveKind::Box);
+        tool.setHoveredPlane(PlaneChoice::Face, {0, 0, 20}, {0, 0, 1}, id, 1);
+        tool.commitPlaneSelection(camera);
+        tool.setProfileRect({-5, -5}, {5, 5}, 0.0);
+        tool.setExtrudeDepth(-8.0);
+        tool.setStage(CreateStage::ExtrudeDepth);
+        check(!tool.finishCreation(scene, camera, undo), "a cut without the kernel is refused");
+        check(scene.objectCount() == 1, "and nothing is added");
+        check(tool.takeError().find("exact kernel") != std::string::npos,
+              "and it says what is missing");
+        std::printf("  (the rest needs the exact kernel)\n");
+        return;
+    }
+
     // 9.1 The cut is a feature, and the cache agrees with what is on screen
     {
         Scene scene; Camera camera; UndoStack undo;
@@ -1061,8 +732,8 @@ void testSection9_EditsLandInTheHistory() {
         check(obj != nullptr, "cut object present");
         if (!obj) return;
 
-        check(near(volumeOf(obj->mesh), kPocket), "pocket volume is 13600 mm3");
-        expectSolid(obj->mesh, "pocketed box");
+        check(near(volumeOf(obj->body), kPocket), "pocket volume is 13600 mm3");
+        expectSolid(obj->body, "pocketed box");
         check(obj->features.size() == 2, "the chain has two features");
         check(obj->features.size() == 2 &&
               obj->features[1].kind == FeatureKind::Boolean &&
@@ -1081,21 +752,21 @@ void testSection9_EditsLandInTheHistory() {
         SceneObject* obj = scene.find(id);
         if (!obj) { check(false, "cut object present for re-evaluation"); return; }
 
-        check(scene.reevaluate(id) && near(volumeOf(obj->mesh), kPocket),
+        check(scene.reevaluate(id) && near(volumeOf(obj->body), kPocket),
               "reevaluate keeps the pocket");
-        check(scene.rebuild(id) && near(volumeOf(obj->mesh), kPocket),
+        check(scene.rebuild(id) && near(volumeOf(obj->body), kPocket),
               "rebuild keeps the pocket");
 
         // The base is still a parametric box, so changing its width re-cuts.
         obj->spec.box.width = 50.0;
         check(scene.rebuild(id) &&
-              near(volumeOf(obj->mesh), 50.0 * 20.0 * 20.0 - 10.0 * 10.0 * 8.0),
+              near(volumeOf(obj->body), 50.0 * 20.0 * 20.0 - 10.0 * 10.0 * 8.0),
               "widening the box re-cuts the pocket");
 
         undo.undo(scene);
-        check(near(volumeOf(obj->mesh), kBox), "undo restores the uncut box");
+        check(near(volumeOf(obj->body), kBox), "undo restores the uncut box");
         undo.redo(scene);
-        check(near(volumeOf(obj->mesh), kPocket), "redo restores the pocket");
+        check(near(volumeOf(obj->body), kPocket), "redo restores the pocket");
     }
 
     // 9.3 A fillet committed on the cut body is neither refused nor destructive
@@ -1105,29 +776,29 @@ void testSection9_EditsLandInTheHistory() {
         SceneObject* obj = scene.find(id);
         if (!obj) { check(false, "cut object present for filleting"); return; }
 
-        const Mesh before = obj->mesh;
+        const Body before = obj->body;
         int previewed = 0, refused = 0, lostTheCut = 0;
 
-        for (Index he = 0; he < before.halfedgeCount(); ++he) {
-            if (he > before.halfedges[he].twin) continue;
-            const Index fa = before.halfedges[he].face;
-            const Index fb = before.halfedges[before.halfedges[he].twin].face;
-            if (fa == kInvalid || fb == kInvalid) continue;
+        std::vector<EdgeId> allEdges;
+        before.allEdges(allEdges);
+        for (EdgeId he : allEdges) {
+            FaceId fa = kNoFace, fb = kNoFace;
+            before.edgeFaces(he, fa, fb);
+            if (fa == kNoFace || fb == kNoFace) continue;
             if (dot(before.faceNormal(fa), before.faceNormal(fb)) > 0.999) continue;
 
-            const std::vector<Index> edges = extendTangentChain(before, {he});
+            const std::vector<EdgeId> edges{he};
 
             // What the interactive preview computes.
-            Mesh scratch = before;
+            Body scratch = before;
             FilletSpec spec;
-            spec.segments = 4;
-            for (Index e : edges) spec.edges.push_back({e, 1.0});
+            for (EdgeId e : edges) spec.edges.push_back({e, 1.0});
             if (!filletEdges(scratch, spec)) continue;
             ++previewed;
 
             // What committing it computes: named edges, replayed chain.
             const std::vector<Feature> chainBefore = obj->features;
-            const std::vector<Mesh> cacheBefore = obj->featureCache;
+            const std::vector<Body> cacheBefore = obj->featureCache;
 
             Feature f;
             f.kind = FeatureKind::Bevel;
@@ -1140,12 +811,12 @@ void testSection9_EditsLandInTheHistory() {
             if (!scene.addFeature(id, std::move(f), &why)) {
                 ++refused;
                 std::printf("      chain at he %d refused on commit: %s\n", he, why.c_str());
-            } else if (volumeOf(obj->mesh) > kPocket + 400.0) {
+            } else if (volumeOf(obj->body) > kPocket + 400.0) {
                 // A fillet moves the volume by a few mm3 either way; the pocket
                 // vanishing is an 800 mm3 jump, so halfway is a safe line.
                 ++lostTheCut;
                 std::printf("      chain at he %d committed onto the uncut body (vol %.1f)\n",
-                            he, volumeOf(obj->mesh));
+                            he, volumeOf(obj->body));
             }
 
             obj->features = chainBefore;
@@ -1196,19 +867,802 @@ void testSection9_EditsLandInTheHistory() {
         SceneObject* obj = scene.find(id);
         if (!obj) { check(false, "joined object present"); return; }
         const double expected = 20.0 * 20.0 * 20.0 + 10.0 * 10.0 * 10.0;
-        check(near(volumeOf(obj->mesh), expected), "boss volume is 9000 mm3");
+        check(near(volumeOf(obj->body), expected), "boss volume is 9000 mm3");
         check(obj->features.size() == 2 &&
               obj->features[1].kind == FeatureKind::Boolean &&
               obj->features[1].booleanOp == BooleanOp::Union,
               "the join is recorded as a Boolean union");
-        check(scene.reevaluate(id) && near(volumeOf(obj->mesh), expected),
+        check(scene.reevaluate(id) && near(volumeOf(obj->body), expected),
               "reevaluate keeps the boss");
+    }
+}
+
+// ===========================================================================
+// SECTION 10: Choosing What the New Solid Does to the Body Under It
+//
+// Drawing on an object's face, the user says whether the result joins, cuts, or
+// stands apart. Auto keeps what the tool did before: push out of a face and it
+// joins, push into anything and it cuts.
+// ===========================================================================
+void testSection10_CreateOperation() {
+    std::printf("\n--- Section 10: Join / Cut / New Body ---\n");
+    if (!brep::available()) { std::printf("  (needs the exact kernel)\n"); return; }
+
+    const double kBox = 40.0 * 40.0 * 40.0;
+    const double kStub = 10.0 * 10.0 * 10.0;
+
+    // Builds a 40mm box and puts the tool on its top face with a 10x10 profile.
+    auto onTopFace = [](Scene& scene, Camera& camera, CreateTool& tool, ObjectId& id) {
+        PrimitiveSpec ps;
+        ps.kind = PrimitiveKind::Box;
+        ps.box.width = ps.box.depth = ps.box.height = 40.0;
+        id = scene.addPrimitive(PrimitiveKind::Box, ps, {0, 0, 20});
+        tool.start(PrimitiveKind::Box);
+        tool.setHoveredPlane(PlaneChoice::Face, {0, 0, 40}, {0, 0, 1}, id, 1);
+        tool.commitPlaneSelection(camera);
+        tool.setProfileRect({-5, -5}, {5, 5}, 0.0);
+        tool.setStage(CreateStage::ExtrudeDepth);
+    };
+
+    // 10.1 Until one is picked, the drag decides; picking one ends that
+    {
+        Scene scene; Camera camera; UndoStack undo; CreateTool tool; ObjectId id;
+        onTopFace(scene, camera, tool, id);
+        tool.setExtrudeDepth(10.0);
+        check(tool.opFollowsDrag(), "the operation follows the drag until one is picked");
+        check(tool.op() == ExtrudeOp::Join, "outward joins");
+        tool.setExtrudeDepth(-10.0);
+        check(tool.op() == ExtrudeOp::Cut, "inward cuts");
+        tool.setOp(ExtrudeOp::Join);
+        check(!tool.opFollowsDrag(), "picking one stops the drag deciding");
+        check(tool.op() == ExtrudeOp::Join, "and it stays what was picked");
+    }
+
+    // 10.2 Join, forced, on an inward depth
+    {
+        Scene scene; Camera camera; UndoStack undo; CreateTool tool; ObjectId id;
+        onTopFace(scene, camera, tool, id);
+        tool.setExtrudeDepth(10.0);
+        tool.setOp(ExtrudeOp::Join);
+        check(tool.finishCreation(scene, camera, undo), "forced join succeeds");
+        check(scene.objectCount() == 1, "join does not add a body");
+        check(near(volumeOf(scene.find(id)->body), kBox + kStub), "join adds the stub's volume");
+    }
+
+    // 10.3 Cut, forced, on an outward depth -- trimming a boss back
+    {
+        Scene scene; Camera camera; UndoStack undo; CreateTool tool; ObjectId id;
+        onTopFace(scene, camera, tool, id);
+        tool.setExtrudeDepth(-10.0);
+        tool.setOp(ExtrudeOp::Cut);
+        check(tool.finishCreation(scene, camera, undo), "forced cut succeeds");
+        check(scene.objectCount() == 1, "cut does not add a body");
+        check(near(volumeOf(scene.find(id)->body), kBox - kStub), "cut removes the stub's volume");
+    }
+
+    // 10.4 New Body leaves the target alone, on either sign
+    for (double depth : {10.0, -10.0}) {
+        Scene scene; Camera camera; UndoStack undo; CreateTool tool; ObjectId id;
+        onTopFace(scene, camera, tool, id);
+        tool.setExtrudeDepth(depth);
+        tool.setOp(ExtrudeOp::NewBody);
+        const std::string what = depth > 0 ? "outward" : "inward";
+        check(tool.finishCreation(scene, camera, undo), "new body (" + what + ") succeeds");
+        check(scene.objectCount() == 2, "new body adds a second object (" + what + ")");
+        check(near(volumeOf(scene.find(id)->body), kBox),
+              "and leaves the original untouched (" + what + ")");
+    }
+
+    // 10.5 The choice only arises where there is a body to act on
+    {
+        Scene scene; Camera camera; UndoStack undo; CreateTool tool;
+        tool.start(PrimitiveKind::Box);
+        tool.setHoveredPlane(PlaneChoice::XY, {0, 0, 0}, {0, 0, 1});
+        tool.commitPlaneSelection(camera);
+        check(!tool.hasTargetBody(), "an origin plane has no body to act on");
+        tool.setProfileRect({-5, -5}, {5, 5}, 0.0);
+        tool.setExtrudeDepth(10.0);
+        tool.setStage(CreateStage::ExtrudeDepth);
+        check(tool.op() == ExtrudeOp::NewBody, "outward from an origin plane is a new body");
+
+        // ...but pushing into an origin plane still cuts whatever is under it,
+        // which is how a hole gets drilled from a construction plane.
+        tool.setExtrudeDepth(-10.0);
+        check(tool.op() == ExtrudeOp::Cut, "inward from an origin plane still cuts");
+    }
+}
+
+
+// ===========================================================================
+// SECTION 10b: Intersect, several bodies, and adjusting once applied
+// ===========================================================================
+void testSection10b_Reach() {
+    std::printf("\n--- Section 10b: Intersect, the bodies reached, applied ---\n");
+    if (!brep::available()) { std::printf("  (needs the exact kernel)\n"); return; }
+
+    // Two 20mm boxes side by side along X with a gap between, and a 30 x 10
+    // slot drawn on the ground plane under both, pushed up through them.
+    auto twoBoxes = [](Scene& scene, ObjectId& a, ObjectId& b) {
+        a = scene.addPrimitive(PrimitiveKind::Box, {}, {-15, 0, 10});
+        b = scene.addPrimitive(PrimitiveKind::Box, {}, {15, 0, 10});
+    };
+    auto slot = [](Scene& scene, Camera& camera, CreateTool& tool) {
+        tool.start(PrimitiveKind::Box);
+        tool.setHoveredPlane(PlaneChoice::XY, {0, 0, 0}, {0, 0, 1});
+        tool.commitPlaneSelection(camera);
+        tool.setProfileRect({-20, -5}, {20, 5}, 0.0);
+        tool.setStage(CreateStage::ExtrudeDepth);
+        tool.setExtrudeDepth(30.0);
+        tool.refreshReach(scene);
+    };
+    const double kBox = 20.0 * 20.0 * 20.0;
+
+    // 10b.1 A cut reaches both bodies and cuts both
+    {
+        Scene scene; Camera camera; UndoStack undo; CreateTool tool; ObjectId a, b;
+        twoBoxes(scene, a, b);
+        slot(scene, camera, tool);
+        tool.setOp(ExtrudeOp::Cut);
+        tool.refreshReach(scene);
+        check(tool.reach().bodies().size() == 2, "the slot reaches both boxes");
+        check(tool.finishCreation(scene, camera, undo), "the cut is made");
+        // Each box loses 15 x 10 x 20 where the slot passes through it.
+        check(near(volumeOf(scene.find(a)->body), kBox - 3000.0), "the first box is cut");
+        check(near(volumeOf(scene.find(b)->body), kBox - 3000.0), "and so is the second");
+        check(tool.applied() && !tool.active(), "and the panel stays, applied, to adjust it");
+        check(undo.depth() == 1, "as one undo step");
+        undo.undo(scene);
+        check(near(volumeOf(scene.find(a)->body), kBox) && near(volumeOf(scene.find(b)->body), kBox),
+              "undo takes both cuts back");
+    }
+
+    // 10b.2 Leaving a body out leaves it alone
+    {
+        Scene scene; Camera camera; UndoStack undo; CreateTool tool; ObjectId a, b;
+        twoBoxes(scene, a, b);
+        slot(scene, camera, tool);
+        tool.setOp(ExtrudeOp::Cut);
+        tool.refreshReach(scene);
+        tool.toggleBody(b);
+        check(tool.finishCreation(scene, camera, undo), "the cut is made");
+        check(near(volumeOf(scene.find(a)->body), kBox - 3000.0), "the included box is cut");
+        check(near(volumeOf(scene.find(b)->body), kBox), "the excluded one is not");
+    }
+
+    // 10b.3 Intersect keeps what each body shares with the slot
+    {
+        Scene scene; Camera camera; UndoStack undo; CreateTool tool; ObjectId a, b;
+        twoBoxes(scene, a, b);
+        slot(scene, camera, tool);
+        tool.setOp(ExtrudeOp::Intersect);
+        check(tool.finishCreation(scene, camera, undo), "the intersect is made");
+        check(near(volumeOf(scene.find(a)->body), 3000.0), "the first box is what it shares");
+        check(near(volumeOf(scene.find(b)->body), 3000.0), "and the second");
+    }
+
+    // 10b.4 A join that reaches two bodies makes them one
+    {
+        Scene scene; Camera camera; UndoStack undo; CreateTool tool; ObjectId a, b;
+        twoBoxes(scene, a, b);
+        slot(scene, camera, tool);
+        tool.setOp(ExtrudeOp::Join);
+        check(tool.finishCreation(scene, camera, undo), "the join is made");
+        check(scene.objectCount() == 1, "the two boxes and the slot are one body");
+        const double joined = volumeOf(scene.objects().front()->body);
+        check(near(joined, 2 * kBox + 40.0 * 10.0 * 30.0 - 2 * 3000.0), "with the volume of all three");
+        undo.undo(scene);
+        check(scene.objectCount() == 2, "undo brings the second box back");
+    }
+
+    // 10b.5 Applied, a change is made again over the top: the recommit takes
+    // the last step's undo entry back first, as the application does.
+    {
+        Scene scene; Camera camera; UndoStack undo; CreateTool tool; ObjectId a, b;
+        twoBoxes(scene, a, b);
+        slot(scene, camera, tool);
+        tool.setOp(ExtrudeOp::Cut);
+        check(tool.finishCreation(scene, camera, undo), "the cut is made");
+        tool.setExtrudeDepth(10.0);
+        check(undo.undo(scene), "the application takes the cut back");
+        check(tool.recommit(scene, camera, undo), "and makes it again, shallower");
+        check(near(volumeOf(scene.find(a)->body), kBox - 15.0 * 10.0 * 10.0), "cut to the new depth");
+        check(undo.depth() == 1, "still one undo step");
+        tool.dismissApplied();
+        check(!tool.applied(), "Done puts the panel away");
+    }
+}
+
+// ===========================================================================
+// SECTION 11: Numeric Entry
+//
+// The README has promised this since the beginning -- "type a number -> exact
+// value" -- and the buffer existed, was cleared, and was never read. A printed
+// part is designed in round numbers; getting 24.97 because the mouse was a
+// pixel out is the whole reason this matters.
+// ===========================================================================
+static void testSection11_NumericEntry() {
+    std::printf("\n--- Section 11: Numeric Entry ---\n");
+
+    auto typeInto = [](CreateTool& t, const char* digits, Camera& c, Scene& s, UndoStack& u) {
+        for (const char* p = digits; *p; ++p) t.handleKey(*p, false, false, c, s, u);
+    };
+
+    // 11.1 A typed width and depth, committed with Tab and Enter
+    {
+        Scene scene; Camera camera; UndoStack undo; CreateTool tool;
+        tool.start(PrimitiveKind::Box);
+        tool.handleKey('7', false, false, camera, scene, undo);   // top plane
+        tool.handleKey('E', false, false, camera, scene, undo);   // -> Pt2
+        tool.setProfileRect({0, 0}, {3, 3}, 0.0);                 // a rough drag
+
+        typeInto(tool, "25", camera, scene, undo);
+        check(tool.typing(), "digits are being collected");
+        tool.handleKey(9, false, false, camera, scene, undo);     // Tab: commit, next field
+        check(!tool.typing(), "Tab commits what was typed");
+        check(tool.typedField() == 1, "and moves to the second dimension");
+
+        typeInto(tool, "12.5", camera, scene, undo);
+        tool.handleKey(13, false, false, camera, scene, undo);    // Enter: commit and advance
+        check(tool.stage() == CreateStage::AdjustProfile, "Enter advances the stage");
+
+        tool.setStage(CreateStage::ExtrudeDepth);
+        tool.setExtrudeDepth(10.0);
+        check(tool.finishCreation(scene, camera, undo), "created");
+        const SceneObject* obj = scene.objects().front().get();
+        const AABB b = obj->body.bounds();
+        check(near(b.max.x - b.min.x, 25.0), "the typed width is exact");
+        check(near(b.max.y - b.min.y, 12.5), "the typed depth is exact");
+        std::printf("  typed 25 x 12.5: got %.4f x %.4f mm\n",
+                    b.max.x - b.min.x, b.max.y - b.min.y);
+    }
+
+    // 11.2 A negative depth is a cut, and only a depth may be negative
+    {
+        Scene scene; Camera camera; UndoStack undo; CreateTool tool;
+        tool.start(PrimitiveKind::Box);
+        tool.setHoveredPlane(PlaneChoice::XY, {0, 0, 0}, {0, 0, 1});
+        tool.commitPlaneSelection(camera);
+        tool.setProfileRect({-5, -5}, {5, 5}, 0.0);
+        tool.setStage(CreateStage::ExtrudeDepth);
+
+        typeInto(tool, "-7.5", camera, scene, undo);
+        check(tool.typing(), "a minus starts a depth");
+        tool.handleKey(13, false, false, camera, scene, undo);
+
+        // Back in a profile stage a minus is not part of a size.
+        CreateTool t2;
+        t2.start(PrimitiveKind::Box);
+        t2.handleKey('7', false, false, camera, scene, undo);
+        t2.handleKey('E', false, false, camera, scene, undo);
+        check(!t2.handleKey('-', false, false, camera, scene, undo),
+              "a width cannot start with a minus");
+    }
+
+    // 11.3 Backspace, Escape, and a half-typed number that means nothing
+    {
+        Scene scene; Camera camera; UndoStack undo; CreateTool tool;
+        tool.start(PrimitiveKind::Cylinder);
+        tool.handleKey('7', false, false, camera, scene, undo);
+        tool.handleKey('E', false, false, camera, scene, undo);
+        tool.setProfileCircle({0, 0}, 4.0);
+
+        typeInto(tool, "18", camera, scene, undo);
+        tool.handleKey(8, false, false, camera, scene, undo);     // backspace
+        check(tool.typedValue() == "1", "backspace removes a digit");
+
+        tool.handleKey(27, false, false, camera, scene, undo);    // Esc
+        check(!tool.typing(), "Escape drops what was typed");
+        check(tool.stage() == CreateStage::DrawProfile_Pt2, "and does not cancel the tool");
+
+        tool.handleKey(27, false, false, camera, scene, undo);    // Esc again
+        check(tool.stage() == CreateStage::None, "a second Escape cancels the tool");
+
+        // "." alone is not a number: it must not become zero.
+        CreateTool t2;
+        t2.start(PrimitiveKind::Box);
+        t2.handleKey('7', false, false, camera, scene, undo);
+        t2.handleKey('E', false, false, camera, scene, undo);
+        t2.setProfileRect({0, 0}, {30, 20}, 0.0);
+        t2.handleKey('.', false, false, camera, scene, undo);
+        t2.handleKey(13, false, false, camera, scene, undo);
+        t2.setStage(CreateStage::ExtrudeDepth);
+        t2.setExtrudeDepth(5.0);
+        check(t2.finishCreation(scene, camera, undo), "created after a discarded entry");
+        const AABB b = scene.objects().back()->body.bounds();
+        check(near(b.max.x - b.min.x, 30.0), "the dimension was left alone");
+    }
+
+    // 11.4 Typing locks the mouse out of the dimension being typed
+    {
+        Scene scene; Camera camera; UndoStack undo; CreateTool tool;
+        tool.start(PrimitiveKind::Box);
+        tool.handleKey('7', false, false, camera, scene, undo);
+        tool.handleKey('E', false, false, camera, scene, undo);
+        tool.setProfileRect({0, 0}, {30, 20}, 0.0);
+        typeInto(tool, "45", camera, scene, undo);
+
+        // A mouse move mid-entry would otherwise overwrite the number before it
+        // could be committed, which is the one way this feature gets worse than
+        // not having it.
+        tool.update(scene, camera, {400.0f, 300.0f}, false);
+        check(tool.typedValue() == "45", "the mouse did not touch what was typed");
+        tool.handleKey(13, false, false, camera, scene, undo);
+        tool.setStage(CreateStage::ExtrudeDepth);
+        tool.setExtrudeDepth(5.0);
+        check(tool.finishCreation(scene, camera, undo), "created");
+        const AABB b = scene.objects().back()->body.bounds();
+        check(near(b.max.x - b.min.x, 45.0), "and the typed width survived");
+    }
+}
+
+
+// ===========================================================================
+// SECTION 12: A Primitive Stays A Primitive, Whatever Plane It Was Drawn On
+//
+// A box drawn on the front plane used to be baked into a mesh and lose its
+// dimensions from the Inspector, purely because nothing recorded which way it
+// faced. The plane's own axes are a rotation; that is all it needed.
+// ===========================================================================
+static void testSection12_ParametricOnAnyPlane() {
+    std::printf("\n--- Section 12: Parametric On Any Plane ---\n");
+
+    // World size along each axis, sorted, so an assertion does not depend on
+    // which way round the plane's basis came out.
+    auto sortedSize = [](const AABB& b) {
+        std::vector<double> d{b.max.x - b.min.x, b.max.y - b.min.y, b.max.z - b.min.z};
+        std::sort(d.begin(), d.end());
+        return d;
+    };
+    auto sameSize = [&](const std::vector<double>& got, std::vector<double> want,
+                        const std::string& what) {
+        std::sort(want.begin(), want.end());
+        for (size_t i = 0; i < 3; ++i) check(near(got[i], want[i]), what);
+    };
+
+    struct Case { const char* what; int key; };
+    const Case planes[] = {{"top (XY)", '7'}, {"front (XZ)", '1'}, {"right (YZ)", '3'}};
+
+    for (const Case& c : planes) {
+        Scene scene; Camera camera; UndoStack undo; CreateTool tool;
+        tool.start(PrimitiveKind::Box);
+        tool.handleKey(c.key, false, false, camera, scene, undo);
+        tool.setProfileRect({-15, -10}, {15, 10}, 0.0);   // 30 x 20
+        tool.setStage(CreateStage::ExtrudeDepth);
+        tool.setExtrudeDepth(12.0);
+        check(tool.finishCreation(scene, camera, undo), std::string("created on ") + c.what);
+
+        SceneObject* o = scene.objects().back().get();
+        check(o->features.size() == 1 && o->features[0].kind == FeatureKind::Primitive,
+              std::string("stays parametric on ") + c.what);
+        sameSize(sortedSize(o->worldBounds()), {30.0, 20.0, 12.0},
+                 std::string("world size is right on ") + c.what);
+
+        // The point of staying parametric: the dimension is still editable.
+        o->spec.box.width = 45.0;
+        check(scene.rebuild(o->id), std::string("rebuilt after a width change on ") + c.what);
+        sameSize(sortedSize(o->worldBounds()), {45.0, 20.0, 12.0},
+                 std::string("and the edit lands on the right axis on ") + c.what);
+        std::printf("  %-12s parametric, %.0f x %.0f x %.0f -> width 45\n",
+                    c.what, 30.0, 20.0, 12.0);
+    }
+
+    // The same on an object's face, which is the case the create tool was built
+    // for: a boss drawn on the side of a cube and kept as its own body.
+    {
+        Scene scene; Camera camera; UndoStack undo; CreateTool tool;
+        PrimitiveSpec cube;
+        cube.kind = PrimitiveKind::Box;
+        cube.box = {20.0f, 20.0f, 20.0f};
+        scene.addPrimitive(PrimitiveKind::Box, cube);
+
+        tool.start(PrimitiveKind::Cylinder);
+        tool.setHoveredPlane(PlaneChoice::Face, {10, 0, 0}, {1, 0, 0},
+                             scene.objects().front()->id, 0);
+        tool.commitPlaneSelection(camera);
+        tool.setProfileCircle({0, 0}, 4.0);
+        tool.setStage(CreateStage::ExtrudeDepth);
+        tool.setExtrudeDepth(6.0);
+        tool.setOp(ExtrudeOp::NewBody);
+        check(tool.finishCreation(scene, camera, undo), "boss created as its own body");
+
+        SceneObject* o = scene.objects().back().get();
+        check(o->features.size() == 1 && o->features[0].kind == FeatureKind::Primitive,
+              "a cylinder on a face stays parametric too");
+        check(near(o->spec.cylinder.radius, 4.0), "with the radius it was drawn at");
+        const AABB b = o->worldBounds();
+        check(near(b.min.x, 10.0) && near(b.max.x, 16.0),
+              "and sits on the face it was drawn on");
+        std::printf("  on a +X face: parametric cylinder r=4, x 10.0..16.0\n");
+    }
+}
+
+
+// ===========================================================================
+// SECTION 13: Snapping To The Geometry
+//
+// The point of exact curves, from where a user stands: a boss goes on the
+// centre of a hole because the centre is a thing that exists, not because the
+// cursor landed within a millimetre of where a facet happened to start.
+// ===========================================================================
+static void testSection13_SnapToGeometry() {
+    std::printf("\n--- Section 13: Snapping To Geometry ---\n");
+    if (!brep::available()) {
+        std::printf("  exact kernel not built; nothing to snap to\n");
+        return;
+    }
+
+    Scene scene; Camera camera; UndoStack undo;
+
+    // A plate with a hole 20mm off centre.
+    PrimitiveSpec plate;
+    plate.kind = PrimitiveKind::Box;
+    plate.box = {80, 80, 10};
+    const ObjectId id = scene.addPrimitive(PrimitiveKind::Box, plate);
+
+    PrimitiveSpec bore;
+    bore.kind = PrimitiveKind::Cylinder;
+    bore.cylinder.radius = 7;
+    bore.cylinder.height = 40;
+    Body tool;
+    check(makePrimitive(bore, tool, Backend::Brep), "bore tool built");
+    tool.transform(translate({20, 0, 0}));
+    Feature cut;
+    cut.kind = FeatureKind::Boolean;
+    cut.booleanOp = BooleanOp::Difference;
+    cut.bakedBody = std::move(tool);
+    check(scene.addFeature(id, cut), "hole cut in the plate");
+
+    camera.viewportW = 1600;
+    camera.viewportH = 900;
+    camera.distance = 200.0f;
+    camera.target = {0, 0, 0};
+    camera.yaw = 0.0f;
+    camera.pitch = 1.5707f;          // looking straight down at the plate
+    camera.snapToGoal();
+
+    // Draw on the top face, then aim near the hole's centre but not on it.
+    CreateTool tool2;
+    tool2.start(PrimitiveKind::Cylinder);
+    tool2.setHoveredPlane(PlaneChoice::Face, {0, 0, 5}, {0, 0, 1}, id, 0);
+    tool2.commitPlaneSelection(camera);
+
+    // Project *after* committing the plane: choosing a plane moves the camera
+    // to look at it head-on, so a pixel worked out before that points somewhere
+    // else afterwards.
+    camera.snapToGoal();
+    Vec2 centrePx{};
+    check(camera.projectToPixel(Vec3{20, 0, 5}, centrePx), "the hole's centre is on screen");
+    tool2.update(scene, camera, centrePx + Vec2{5.0f, 4.0f}, true);
+
+    const PlaneSnap& hit = tool2.activeSnap();
+    check(hit.valid(), "the cursor snapped to something");
+    check(hit.kind == SnapKind::CircleCentre,
+          std::string("and it is the hole's centre, not ") + snapKindName(hit.kind));
+    check(near(hit.point.x, 20.0) && near(hit.point.y, 0.0),
+          "at exactly the centre, from five pixels away");
+    check(near(hit.radius, 7.0), "and it carries the radius it came from");
+    std::printf("  aimed 6px off, landed on the centre at %.4f, %.4f (r %.3f)\n",
+                hit.point.x, hit.point.y, hit.radius);
+
+    // Holding Ctrl -- snapping off -- leaves the cursor where it actually is.
+    tool2.update(scene, camera, centrePx + Vec2{5.0f, 4.0f}, false);
+    check(!tool2.activeSnap().valid(), "with snapping off, nothing is snapped to");
+
+    // ---- and the click has to keep it -------------------------------------
+    //
+    // It used to throw it away: update() placed the snapped point, and then the
+    // mouse-down unprojected the cursor again and committed that instead. The
+    // indicator said "centre", the dotted line said which centre, and the point
+    // landed a third of a millimetre off -- the one failure that makes a user
+    // stop trusting snapping altogether.
+    std::printf("--- the click commits the snapped point, not the cursor ---\n");
+    {
+        CreateTool t3;
+        t3.start(PrimitiveKind::Cylinder);
+        t3.setHoveredPlane(PlaneChoice::Face, {0, 0, 5}, {0, 0, 1}, id, 0);
+        t3.commitPlaneSelection(camera);
+        camera.snapToGoal();
+
+        const Vec2 aim = centrePx + Vec2{5.0f, 4.0f};
+        t3.update(scene, camera, aim, true);
+        check(t3.activeSnap().kind == SnapKind::CircleCentre, "aimed near the centre");
+
+        t3.handleMouseDown(aim, scene, camera, undo);
+        check(t3.stage() == CreateStage::DrawProfile_Pt2, "moved on to the second point");
+
+        // Build the cylinder and measure it. A circle is drawn about pt1, so a
+        // first point that drifted shows up as a body centred somewhere else --
+        // which is the only evidence that actually matters.
+        Vec2 rimPx{};
+        check(camera.projectToPixel(Vec3{28, 0, 5}, rimPx), "a point out on the plate");
+        t3.update(scene, camera, rimPx, true);
+        t3.handleMouseDown(rimPx, scene, camera, undo);
+        check(t3.stage() == CreateStage::AdjustProfile, "and on to adjusting");
+
+        t3.setOp(ExtrudeOp::NewBody);
+        t3.setStage(CreateStage::ExtrudeDepth);
+        t3.setExtrudeDepth(6.0);
+        const size_t before = scene.objects().size();
+        check(t3.finishCreation(scene, camera, undo), "the cylinder was made");
+        check(scene.objects().size() == before + 1, "as a body of its own");
+
+        const SceneObject* made = scene.objects().back().get();
+        const AABB b = made->worldBounds();
+        const Real cx = (b.min.x + b.max.x) * 0.5;
+        const Real cy = (b.min.y + b.max.y) * 0.5;
+        check(near(cx, 20.0, 1e-6) && near(cy, 0.0, 1e-6),
+              "centred exactly on the hole it snapped to");
+        std::printf("  built about %.6f, %.6f -- the hole is at 20, 0\n", cx, cy);
+    }
+
+    // ---- the view squares up to the plane, and is given back --------------
+    std::printf("--- the view squares up to the plane and is handed back ---\n");
+    {
+        Camera c;
+        c.viewportW = 1600;
+        c.viewportH = 900;
+        c.distance = 200.0f;
+        c.target = {5, 5, 5};
+        c.yaw = 0.7f;
+        c.pitch = 0.4f;
+        c.setOrthographic(false);          // deliberately in perspective
+        c.snapToGoal();
+
+        const Vec3 wasTarget = c.target;
+        const float wasYaw = c.yaw, wasPitch = c.pitch;
+
+        CreateTool t5;
+        t5.start(PrimitiveKind::Box);
+        t5.setHoveredPlane(PlaneChoice::Face, {0, 0, 5}, {0, 0, 1}, id, 0);
+        t5.commitPlaneSelection(c);
+
+        // It animates rather than jumping, so nothing has moved yet.
+        check(c.animating(), "the turn is animated, not a teleport");
+        check(near(c.yaw, wasYaw) && near(c.pitch, wasPitch), "and has not happened yet");
+        c.snapToGoal();
+
+        check(c.orthographic, "a sketch is drawn square-on");
+        check(!c.preferOrtho, "without changing what the user asked for");
+        check(near(std::fabs(c.pitch), kHalfPi, 1e-3),
+              "looking straight down at a plane whose normal is +Z");
+        check(near(c.target.z, 5.0) && near(c.target.x, 0.0),
+              "pivoting on the plane rather than wherever it was");
+
+        // Place both points; the boundary is defined at the second click, and
+        // that is where the view is supposed to come back.
+        Vec2 px{};
+        check(c.projectToPixel(Vec3{-10, -10, 5}, px), "first corner on screen");
+        t5.update(scene, c, px, true);
+        t5.handleMouseDown(px, scene, c, undo);
+        check(c.orthographic, "still square-on while the profile is drawn");
+
+        check(c.projectToPixel(Vec3{10, 10, 5}, px), "second corner on screen");
+        t5.update(scene, c, px, true);
+        t5.handleMouseDown(px, scene, c, undo);
+        check(t5.stage() == CreateStage::AdjustProfile, "the boundary is defined");
+
+        c.snapToGoal();
+        check(!c.orthographic, "and the perspective the user had is given back");
+        check(near(c.yaw, wasYaw) && near(c.pitch, wasPitch), "pointing where it was");
+        check(lengthSq(c.target - wasTarget) < 1e-6, "pivoting where it was");
+        t5.cancel(c);
+    }
+
+    // ---- lined up with the hole from across the plate ----------------------
+    std::printf("--- in line with the hole, from 30mm away ---\n");
+    {
+        CreateTool t4;
+        t4.start(PrimitiveKind::Box);
+        t4.setHoveredPlane(PlaneChoice::Face, {0, 0, 5}, {0, 0, 1}, id, 0);
+        t4.commitPlaneSelection(camera);
+        camera.snapToGoal();
+
+        Vec2 px{};
+        check(camera.projectToPixel(Vec3{20.4, -30.0, 5}, px), "a point level with the hole");
+        t4.update(scene, camera, px, true);
+
+        const PlaneSnap& a4 = t4.activeSnap();
+        check(a4.kind == SnapKind::Alignment || a4.kind == SnapKind::Intersection,
+              std::string("lined up rather than left alone: ") + snapKindName(a4.kind));
+        check(near(a4.point.x, 20.0, 0.05), "and pulled onto the hole's line");
+        check(a4.refCount >= 1, "with a reference to draw a line back to");
+        std::printf("  %s -> x = %.4f\n", describeSnap(a4).c_str(), a4.point.x);
     }
 }
 
 // ===========================================================================
 // MAIN ENTRY POINT
 // ===========================================================================
+// ===========================================================================
+// SECTION 14: Handles move. A fillet is asked for by name.
+// ===========================================================================
+//
+// Dragging a corner used to round it, which meant a rectangle could not be
+// resized from its corners at all -- the one thing corners are for in every
+// other tool that has them. So every handle moves now, and a round is asked
+// for: hover the corner, press F.
+static void testSection14_HandlesAndFillets() {
+    std::printf("\n--- Section 14: Handles Move, Fillets Are Named ---\n");
+    if (!brep::available()) { std::printf("  (needs the exact kernel)\n"); return; }
+
+    Scene scene; Camera camera; UndoStack undo;
+    PrimitiveSpec plate;
+    plate.kind = PrimitiveKind::Box;
+    plate.box = {120, 120, 10};
+    const ObjectId id = scene.addPrimitive(PrimitiveKind::Box, plate);
+
+    camera.viewportW = 1600;
+    camera.viewportH = 900;
+    camera.distance = 240.0f;
+    camera.target = {0, 0, 0};
+    camera.yaw = 0.0f;
+    camera.pitch = 1.5707f;
+    camera.snapToGoal();
+
+    // Where a point of the sketch plane lands on screen. The plane has to be
+    // read from the tool each time: a lambda that captured it would outlive it.
+    auto pixelAt = [&](const CreateTool& t, Vec2 uv) {
+        Vec2 p{};
+        camera.projectToPixel(t.plane().toWorld(uv), p);
+        return p;
+    };
+
+    // A rectangle on the top face, drawn corner to corner with snapping off so
+    // the numbers here are the ones that were asked for.
+    auto freshRect = [&](CreateTool& t) {
+        t.start(PrimitiveKind::Box);
+        t.setHoveredPlane(PlaneChoice::Face, {0, 0, 5}, {0, 0, 1}, id, 0);
+        t.commitPlaneSelection(camera);
+        camera.snapToGoal();
+        t.update(scene, camera, pixelAt(t, {-20, -15}), false);
+        t.handleMouseDown(pixelAt(t, {-20, -15}), scene, camera, undo);
+        t.update(scene, camera, pixelAt(t, {20, 15}), false);
+        t.handleMouseDown(pixelAt(t, {20, 15}), scene, camera, undo);
+        camera.snapToGoal();
+    };
+
+    std::printf("--- a corner drag resizes, it does not round ---\n");
+    {
+        CreateTool t;
+        freshRect(t);
+        auto px = [&](Vec2 uv) { return pixelAt(t, uv); };
+        check(t.stage() == CreateStage::AdjustProfile, "drawn and adjusting");
+        check(near(t.profileMin().x, -20.0) && near(t.profileMax().x, 20.0), "40 wide");
+
+        // Hover the top-right corner, grab it, pull it out.
+        t.update(scene, camera, px({20, 15}), false);
+        t.handleMouseDown(px({20, 15}), scene, camera, undo);
+        t.update(scene, camera, px({34, 27}), false);
+        t.handleMouseUp(px({34, 27}), camera);
+
+        check(near(t.profileMax().x, 34.0, 0.2) && near(t.profileMax().y, 27.0, 0.2),
+              "the corner went where it was pulled");
+        check(near(t.profileMin().x, -20.0, 1e-3) && near(t.profileMin().y, -15.0, 1e-3),
+              "and the opposite corner stayed put");
+        check(t.uniformCornerRadius() == 0.0, "nothing got rounded by accident");
+        std::printf("  corner pulled to %.2f, %.2f\n", t.profileMax().x, t.profileMax().y);
+    }
+
+    std::printf("--- the centre handle moves the whole profile ---\n");
+    {
+        CreateTool t;
+        freshRect(t);
+        auto px = [&](Vec2 uv) { return pixelAt(t, uv); };
+        const Vec2 sizeBefore = t.profileMax() - t.profileMin();
+
+        t.update(scene, camera, px({0, 0}), false);
+        t.handleMouseDown(px({0, 0}), scene, camera, undo);
+        t.update(scene, camera, px({12, -8}), false);
+        t.handleMouseUp(px({12, -8}), camera);
+
+        const Vec2 centre = (t.profileMin() + t.profileMax()) * 0.5;
+        check(near(centre.x, 12.0, 0.2) && near(centre.y, -8.0, 0.2), "slid to the cursor");
+        const Vec2 sizeAfter = t.profileMax() - t.profileMin();
+        check(near(sizeAfter.x, sizeBefore.x, 1e-6) && near(sizeAfter.y, sizeBefore.y, 1e-6),
+              "and kept its size");
+    }
+
+    std::printf("--- hover a corner, press F, and it rounds ---\n");
+    {
+        CreateTool t;
+        freshRect(t);
+        auto px = [&](Vec2 uv) { return pixelAt(t, uv); };
+
+        t.update(scene, camera, px({20, 15}), false);      // hover the corner
+        check(t.handleKey('F', false, false, camera, scene, undo), "F was taken");
+        check(t.rounding(), "and started a round");
+        check(t.fieldCount() == 1 && std::string(t.fieldName(0)) == "Radius",
+              "the dimension being asked for is a radius");
+
+        // Pull away from the corner: the distance is the radius.
+        t.update(scene, camera, px({20, 9}), false);
+        check(near(t.cornerRadius(1), 6.0, 0.2), "radius follows the pointer");
+        check(t.cornerRadius(0) == 0.0 && t.cornerRadius(2) == 0.0,
+              "only the corner that was hovered");
+
+        check(t.handleKey(13, false, false, camera, scene, undo), "Enter was taken");
+        check(!t.rounding(), "and confirmed it");
+        check(near(t.cornerRadius(1), 6.0, 0.2), "the round stayed");
+        check(t.stage() == CreateStage::AdjustProfile,
+              "Enter finished the round, not the profile");
+    }
+
+    std::printf("--- Esc during a round puts the corner back ---\n");
+    {
+        CreateTool t;
+        freshRect(t);
+        auto px = [&](Vec2 uv) { return pixelAt(t, uv); };
+        t.update(scene, camera, px({20, -15}), false);
+        t.handleKey('F', false, false, camera, scene, undo);
+        t.update(scene, camera, px({20, -9}), false);
+        check(t.cornerRadius(0) > 1.0, "rounding");
+        t.handleKey(27, false, false, camera, scene, undo);
+        check(!t.rounding(), "Esc ended the round");
+        check(t.cornerRadius(0) == 0.0, "and put the corner back sharp");
+        check(t.stage() == CreateStage::AdjustProfile, "without cancelling the tool");
+    }
+
+    std::printf("--- a rectangle cannot keep a round it no longer fits ---\n");
+    {
+        CreateTool t;
+        freshRect(t);
+        auto px = [&](Vec2 uv) { return pixelAt(t, uv); };
+        t.setCornerRadius(8.0);
+        check(near(t.cornerRadius(1), 8.0), "8mm rounds on a 40 x 30 profile");
+
+        // Pull the top-right corner right in.
+        t.update(scene, camera, px({20, 15}), false);
+        t.handleMouseDown(px({20, 15}), scene, camera, undo);
+        t.update(scene, camera, px({-14, -9}), false);
+        t.handleMouseUp(px({-14, -9}), camera);
+        check(t.uniformCornerRadius() < 3.1,
+              "the rounds came down with it rather than turning the profile inside out");
+        std::printf("  %.2f x %.2f profile, rounds now %.2f\n",
+                    t.profileMax().x - t.profileMin().x,
+                    t.profileMax().y - t.profileMin().y, t.cornerRadius(1));
+    }
+
+    std::printf("--- a typed dimension is fixed; the others are not ---\n");
+    {
+        CreateTool t;
+        t.start(PrimitiveKind::Box);
+        t.setHoveredPlane(PlaneChoice::Face, {0, 0, 5}, {0, 0, 1}, id, 0);
+        t.commitPlaneSelection(camera);
+        camera.snapToGoal();
+        auto px = [&](Vec2 uv) { return pixelAt(t, uv); };
+        t.update(scene, camera, px({0, 0}), false);
+        t.handleMouseDown(px({0, 0}), scene, camera, undo);
+        check(t.stage() == CreateStage::DrawProfile_Pt2, "placing the second corner");
+
+        t.handleKey('2', false, false, camera, scene, undo);
+        t.handleKey('5', false, false, camera, scene, undo);
+        check(t.fieldFixed(0), "the width is held by the keyboard");
+        check(near(t.fieldValue(0), 25.0), "at 25");
+        check(near(t.fieldDisplay(0), 25.0), "and the profile is already 25 wide");
+
+        // The mouse still has the depth. This is the whole point: the old tool
+        // froze every dimension the moment anything was typed.
+        t.update(scene, camera, px({60, 40}), false);
+        check(near(t.fieldDisplay(0), 25.0), "the width did not move");
+        check(near(t.fieldDisplay(1), 40.0, 0.2), "the depth followed the pointer");
+
+        // Which side of the first corner is still the cursor's to say. Until
+        // the second click the two points are the corners as drawn, not sorted,
+        // so "to the left" means the second one has gone negative.
+        t.update(scene, camera, px({-60, 40}), false);
+        check(near(std::fabs(t.profileMax().x - t.profileMin().x), 25.0, 1e-3),
+              "still 25 wide");
+        check(t.profileMax().x < -1.0, "but now drawn to the left");
+
+        // Backspacing it empty hands it back.
+        t.handleKey(8, false, false, camera, scene, undo);
+        t.handleKey(8, false, false, camera, scene, undo);
+        check(!t.fieldFixed(0), "emptied, so the mouse has it again");
+        t.update(scene, camera, px({50, 40}), false);
+        check(near(t.fieldDisplay(0), 50.0, 0.2), "and it follows");
+    }
+}
+
 int main() {
     std::printf("=========================================================\n");
     std::printf("  Running Comprehensive Object Creation Test Suite       \n");
@@ -1218,11 +1672,14 @@ int main() {
     testSection2_StandaloneObjectsOnPlanes();
     testSection3_PreExtrudeModifications();
     testSection4_ExtrusionDistancesAndDirections();
-    testSection5_PositiveExtrudeAutoJoin();
-    testSection6_NegativeExtrudeCuts();
-    testSection7_MultiOperationSequences();
     testSection8_SceneLifecycleAndTransforms();
     testSection9_EditsLandInTheHistory();
+    testSection10_CreateOperation();
+    testSection10b_Reach();
+    testSection11_NumericEntry();
+    testSection12_ParametricOnAnyPlane();
+    testSection13_SnapToGeometry();
+    testSection14_HandlesAndFillets();
 
     std::printf("\n=========================================================\n");
     std::printf("  Test Suite Summary: %s\n", gFailures == 0 ? "ALL PASS" : "FAILED");

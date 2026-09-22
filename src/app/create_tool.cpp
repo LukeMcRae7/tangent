@@ -1,11 +1,14 @@
 #include "app/create_tool.h"
 
+#include "app/overlay_shapes.h"
+#include "ui/command_panel.h"
+#include "ui/widgets.h"
+#include "app/snap_overlay.h"
+
 #include "app/camera.h"
 #include "app/undo.h"
 #include "core/palette.h"
-#include "mesh/boolean.h"
-#include "mesh/operations.h"
-#include "mesh/primitives.h"
+#include "geom/operations.h"
 #include "render/renderer.h"
 #include "scene/scene.h"
 
@@ -21,7 +24,7 @@ namespace {
 
 constexpr Vec4 kCreateCol(0.20f, 0.60f, 0.95f, 0.70f);
 constexpr Vec4 kCutCol(0.95f, 0.35f, 0.20f, 0.70f);
-constexpr ImVec4 kAccentIm(0.20f, 0.60f, 0.95f, 1.0f);
+const ImVec4 kAccentIm(palette::kBrand.r, palette::kBrand.g, palette::kBrand.b, 1.0f);
 
 bool intersectRayPlane(const Ray& ray, Vec3 p0, Vec3 normal, float& outT, Vec3& outPt) {
     const float denom = dot(normal, ray.dir);
@@ -279,17 +282,99 @@ std::vector<Vec2> CreateTool::getCurrentProfile() const {
     }
 }
 
-Mesh CreateTool::buildCurrentSolid(Real depth) const {
-    Mesh out;
-    const std::vector<Vec2> prof = getCurrentProfile();
-    if (prof.empty() || std::fabs(depth) < 1e-4) return out;
+void CreateTool::getCurrentProfileArcs(std::vector<Vec3>& points, std::vector<Real>& arcs) const {
+    points.clear();
+    arcs.clear();
 
-    if (depth > 0.0) {
-        makePrismMesh(prof, planeOrigin_, planeU_, planeV_, planeNormal_, 0.0, depth, out);
+    // The sagitta of a quarter circle: how far the arc stands off the middle of
+    // its chord. Every corner here is a quarter, whether it is a rounded corner
+    // or one of the four spans that make a circle.
+    auto quarter = [](Real r) { return r * (1.0 - std::sqrt(2.0) * 0.5); };
+
+    std::vector<Vec2> uv;
+    std::vector<Real> bulge;
+
+    if (kind_ == PrimitiveKind::Cylinder) {
+        const Real r = currentRadius_;
+        if (r <= 1e-9) return;
+        for (int i = 0; i < 4; ++i) {
+            const Real a = kHalfPi * i;
+            uv.push_back({pt1_.x + r * std::cos(a), pt1_.y + r * std::sin(a)});
+            bulge.push_back(quarter(r));
+        }
     } else {
-        makePrismMesh(prof, planeOrigin_, planeU_, planeV_, planeNormal_, depth, 0.0, out);
+        const Real uMin = std::min(pt1_.x, pt2_.x), uMax = std::max(pt1_.x, pt2_.x);
+        const Real vMin = std::min(pt1_.y, pt2_.y), vMax = std::max(pt1_.y, pt2_.y);
+        if (uMax - uMin < 1e-9 || vMax - vMin < 1e-9) return;
+
+        // Clamped the same way the polygon path clamps: a corner cannot eat
+        // more than half the side it sits on.
+        const Real lim = std::min(uMax - uMin, vMax - vMin) * 0.5;
+        Real r[4];
+        for (int i = 0; i < 4; ++i) r[i] = clampf(cornerRadii_[i], 0.0f, static_cast<float>(lim));
+
+        // Counter-clockwise from the bottom-right corner, matching the corner
+        // order the tool stores: 0 BR, 1 TR, 2 TL, 3 BL.
+        struct Corner { Vec2 in, out, centre; Real radius; };
+        const Corner corners[4] = {
+            {{uMax - r[0], vMin}, {uMax, vMin + r[0]}, {uMax - r[0], vMin + r[0]}, r[0]},
+            {{uMax, vMax - r[1]}, {uMax - r[1], vMax}, {uMax - r[1], vMax - r[1]}, r[1]},
+            {{uMin + r[2], vMax}, {uMin, vMax - r[2]}, {uMin + r[2], vMax - r[2]}, r[2]},
+            {{uMin, vMin + r[3]}, {uMin + r[3], vMin}, {uMin + r[3], vMin + r[3]}, r[3]},
+        };
+        for (const Corner& c : corners) {
+            uv.push_back(c.in);
+            if (c.radius > 1e-9) {
+                bulge.push_back(quarter(c.radius));   // the corner arc
+                uv.push_back(c.out);
+                bulge.push_back(0.0);                 // the straight side after it
+            } else {
+                bulge.push_back(0.0);                 // a sharp corner: no arc at all
+            }
+        }
     }
-    return out;
+    if (uv.size() < 3) return;
+
+    // Which way the profile winds decides which side of a chord its arcs bulge
+    // towards. Measuring it is cheaper than reasoning about whether the plane's
+    // basis came out right-handed.
+    Real area = 0.0;
+    for (size_t i = 0; i < uv.size(); ++i) {
+        const Vec2 a = uv[i], b = uv[(i + 1) % uv.size()];
+        area += a.x * b.y - b.x * a.y;
+    }
+    const Real sign = area > 0 ? -1.0 : 1.0;
+
+    points.reserve(uv.size());
+    for (size_t i = 0; i < uv.size(); ++i) {
+        points.push_back(planeOrigin_ + planeU_ * uv[i].x + planeV_ * uv[i].y);
+        arcs.push_back(bulge[i] * sign);
+    }
+}
+
+Body CreateTool::buildCurrentSolid(Real depth, Backend backend) const {
+    if (std::fabs(depth) < 1e-4) return Body{};
+    const Real z0 = depth > 0.0 ? 0.0 : depth;
+    const Real z1 = depth > 0.0 ? depth : 0.0;
+
+    if (backend == Backend::Brep) {
+        std::vector<Vec3> points;
+        std::vector<Real> arcs;
+        getCurrentProfileArcs(points, arcs);
+        Body out;
+        std::string why;
+        if (makeProfileSolid(points, arcs, planeNormal_, z0, z1, out, 0, &why)) return out;
+        // Falling through to a mesh would put a body in the scene that cannot
+        // be combined with the exact one it was drawn on. Better to hand back
+        // nothing and let the caller say so.
+        return Body{};
+    }
+
+    const std::vector<Vec2> prof = getCurrentProfile();
+    if (prof.empty()) return Body{};
+    Mesh out;
+    makePrismMesh(prof, planeOrigin_, planeU_, planeV_, planeNormal_, z0, z1, out);
+    return Body(std::move(out));
 }
 
 // ---------------------------------------------------------------------------
@@ -298,6 +383,9 @@ Mesh CreateTool::buildCurrentSolid(Real depth) const {
 
 void CreateTool::start(PrimitiveKind kind) {
     lastError_.clear();
+    choice_.reset();
+    reach_.clear();
+    adjusted_ = false;
     kind_ = kind;
     stage_ = CreateStage::SelectPlane;
     hoveredPlane_ = PlaneChoice::XY;
@@ -324,17 +412,13 @@ void CreateTool::start(PrimitiveKind kind) {
     isFilleting_ = false;
     activeFilletCorners_.clear();
     typedValue_.clear();
+    typedField_ = 0;
 }
 
 void CreateTool::cancel(Camera& camera) {
     if (stage_ == CreateStage::DrawProfile_Pt1 || stage_ == CreateStage::DrawProfile_Pt2) {
         // Restore perspective camera if canceling from orthographic
-        camera.target = savedCamera_.target;
-        camera.distance = savedCamera_.distance;
-        camera.yaw = savedCamera_.yaw;
-        camera.pitch = savedCamera_.pitch;
-        camera.orthographic = savedCamera_.orthographic;
-        camera.snapToGoal();
+        restoreCamera(camera);
     }
     stage_ = CreateStage::None;
     activeHandle_ = HandleId::None;
@@ -344,6 +428,7 @@ void CreateTool::cancel(Camera& camera) {
     isDragging_ = false;
     isFilleting_ = false;
     typedValue_.clear();
+    typedField_ = 0;
 }
 
 void CreateTool::setHoveredPlane(PlaneChoice choice, Vec3 point, Vec3 normal,
@@ -357,6 +442,41 @@ void CreateTool::setHoveredPlane(PlaneChoice choice, Vec3 point, Vec3 normal,
     faceIndex_ = faceIdx;
 }
 
+Vec2 CreateTool::handlePointUV(HandleId id) const {
+    const Real uMin = pt1_.x, uMax = pt2_.x;
+    const Real vMin = pt1_.y, vMax = pt2_.y;
+    switch (id) {
+        case HandleId::Corner0:    return {uMax, vMin};
+        case HandleId::Corner1:    return {uMax, vMax};
+        case HandleId::Corner2:    return {uMin, vMax};
+        case HandleId::Corner3:    return {uMin, vMin};
+        case HandleId::EdgeLeft:   return {uMin, (vMin + vMax) * 0.5};
+        case HandleId::EdgeRight:  return {uMax, (vMin + vMax) * 0.5};
+        case HandleId::EdgeBottom: return {(uMin + uMax) * 0.5, vMin};
+        case HandleId::EdgeTop:    return {(uMin + uMax) * 0.5, vMax};
+        case HandleId::FaceCenter: return (pt1_ + pt2_) * 0.5;
+        case HandleId::RadiusHandle: return {pt1_.x + currentRadius_, pt1_.y};
+        case HandleId::None:       break;
+    }
+    return pt1_;
+}
+
+void CreateTool::clampCornerRadii() {
+    const Real maxR = std::min(currentWidth_, currentDepth_) * 0.499;
+    for (int i = 0; i < 4; ++i) cornerRadii_[i] = clampf(cornerRadii_[i], 0.0, maxR);
+}
+
+// Puts the view back where the tool found it.
+//
+// Over the animation rather than in one frame, the same as going in: the view
+// is being handed back to the user, and a camera that teleports leaves them to
+// work out for themselves where their model went.
+void CreateTool::restoreCamera(Camera& camera) {
+    camera.animateTo(savedCamera_.target, savedCamera_.distance,
+                     savedCamera_.yaw, savedCamera_.pitch);
+    camera.orthographic = savedCamera_.orthographic;
+}
+
 void CreateTool::commitPlaneSelection(Camera& camera) {
     if (stage_ != CreateStage::SelectPlane) return;
     selectedPlane_ = hoveredPlane_;
@@ -368,15 +488,15 @@ void CreateTool::commitPlaneSelection(Camera& camera) {
     savedCamera_.pitch = camera.pitch;
     savedCamera_.orthographic = camera.orthographic;
 
-    // Set camera target to plane center and face strictly head-on perpendicular
-    camera.target = planeOrigin_;
-    const float p = std::asin(clampf(planeNormal_.z, -0.9999f, 0.9999f));
-    const float y = std::atan2(planeNormal_.x, -planeNormal_.y);
-    camera.pitch = p;
-    camera.yaw = y;
+    // Square up to the plane: the pivot on it, the eye straight out along its
+    // normal, and orthographic, because a profile drawn in perspective is drawn
+    // against a picture of itself rather than against its dimensions.
+    float y = 0.0f, p = 0.0f;
+    Camera::anglesFor(planeNormal_, y, p);
+    camera.animateTo(planeOrigin_, camera.distance, y, p);
     camera.orthographic = true;
-    camera.snapToGoal();
 
+    clearFields();   // each step asks its own questions
     stage_ = CreateStage::DrawProfile_Pt1;
     pt1_ = Vec2{0, 0};
     pt2_ = Vec2{0, 0};
@@ -409,6 +529,38 @@ void CreateTool::choosePlane(PlaneChoice choice, Camera& camera, const Scene& sc
 void CreateTool::update(const Scene& scene, const Camera& camera, Vec2 mousePx, bool snap) {
     if (stage_ == CreateStage::None) return;
 
+    // Lengths and positions want different ladders, and conflating them is why
+    // this used to carry three fixed steps that were all wrong at some zoom.
+    //
+    //   a position lands on a line you can see -- the decimal grid, handled by
+    //   snapOnPlane, because a point that sits where there is no line leaves the
+    //   user holding a number that disagrees with the screen;
+    //
+    //   a length is a number you would choose -- 0.25, 0.5, 1, 2.5, 5 -- which
+    //   is finer than the decades and is what a depth or a radius is actually
+    //   typed as.
+    //
+    // Ten pixels a step, so a steady hand can reach every value on the ladder.
+    const Real step = snap ? static_cast<Real>(camera.snapStep(planeOrigin_)) : 0.0;
+    auto quantise = [step](Real v) {
+        return step > 0.0 ? std::round(v / step) * step : v;
+    };
+
+    // Where the point goes, and why. Not only what is under the cursor: being
+    // level with a hole on the far side of the part is as much a place as the
+    // hole itself, and is most of what makes a sketch land where it was meant.
+    activeSnap_ = PlaneSnap{};
+    auto placePoint = [&](Vec2 freeUV, bool useStartPoint) {
+        if (!snap) return freeUV;
+        std::vector<SnapPoint> extra;
+        if (useStartPoint) {
+            const Vec3 world = planeOrigin_ + planeU_ * pt1_.x + planeV_ * pt1_.y;
+            extra.push_back({world, pt1_, SnapKind::Vertex, kNoObject, 0.0});
+        }
+        activeSnap_ = snapOnPlane(scene, camera, plane(), mousePx, freeUV, {}, extra);
+        return activeSnap_.valid() ? activeSnap_.uv : freeUV;
+    };
+
     if (stage_ == CreateStage::SelectPlane) {
         // Raycast against scene objects first
         const Ray ray = camera.rayThroughPixel(mousePx.x, mousePx.y);
@@ -417,14 +569,14 @@ void CreateTool::update(const Scene& scene, const Camera& camera, Vec2 mousePx, 
             const SceneObject* o = scene.find(hit.object);
             if (o) {
                 const Mat4 model = o->modelMatrix();
-                const Vec3 localN = o->mesh.faceNormal(hit.face);
+                const Vec3 localN = o->body.faceNormal(hit.face);
                 const Vec3 worldN = normalize(transformVector(normalMatrix(model), localN));
 
                 // Compute face center in local space and transform to world space
-                std::vector<Index> fv;
-                o->mesh.faceVertices(hit.face, fv);
+                std::vector<VertexId> fv;
+                o->body.faceVertices(hit.face, fv);
                 Vec3 localCenter{0, 0, 0};
-                for (Index v : fv) localCenter += o->mesh.verts[v].position;
+                for (VertexId v : fv) localCenter += o->body.vertexPosition(v);
                 if (!fv.empty()) localCenter *= (1.0f / static_cast<float>(fv.size()));
                 const Vec3 worldCenter = transformPoint(model, localCenter);
 
@@ -465,11 +617,7 @@ void CreateTool::update(const Scene& scene, const Camera& camera, Vec2 mousePx, 
     if (stage_ == CreateStage::DrawProfile_Pt1) {
         Vec2 uv{0, 0};
         if (unprojectToPlane(camera, mousePx, uv)) {
-            if (snap) {
-                const Real gridStep = 5.0;
-                uv.x = std::round(uv.x / gridStep) * gridStep;
-                uv.y = std::round(uv.y / gridStep) * gridStep;
-            }
+            uv = placePoint(uv, false);
             pt1_ = uv;
             pt2_ = uv;
         }
@@ -479,17 +627,61 @@ void CreateTool::update(const Scene& scene, const Camera& camera, Vec2 mousePx, 
     if (stage_ == CreateStage::DrawProfile_Pt2) {
         Vec2 uv{0, 0};
         if (unprojectToPlane(camera, mousePx, uv)) {
-            if (snap) {
-                const Real gridStep = 5.0;
-                uv.x = std::round(uv.x / gridStep) * gridStep;
-                uv.y = std::round(uv.y / gridStep) * gridStep;
-            }
-            pt2_ = uv;
+            // The point already placed is a reference in its own right: keeping
+            // the second corner level with the first is the commonest thing
+            // anyone does here, and the scene knows nothing about it.
+            uv = placePoint(uv, true);
+
             if (kind_ == PrimitiveKind::Cylinder) {
-                currentRadius_ = std::max(length(pt2_ - pt1_), Real(1.0));
+                if (fieldFixed_[0]) {
+                    // Typed. The cursor still says which way round, and nothing
+                    // more: the radius is the user's.
+                    const Vec2 dir = uv - pt1_;
+                    const Real len = length(dir);
+                    pt2_ = len > 1e-9 ? pt1_ + dir * (fieldValue_[0] / len)
+                                      : pt1_ + Vec2{fieldValue_[0], 0};
+                    currentRadius_ = fieldValue_[0];
+                } else {
+                    // A circle is drawn by its radius, so that is what has to
+                    // land on a round number -- snapping the point on the rim
+                    // leaves the radius at whatever the diagonal happened to
+                    // be. When the rim has caught something real, the point
+                    // wins: matching a hole exactly is worth more than a tidy
+                    // number.
+                    pt2_ = uv;
+                    const bool onFeature =
+                        activeSnap_.valid() && activeSnap_.kind != SnapKind::GridPoint &&
+                        activeSnap_.kind != SnapKind::GridLine;
+                    Real r = std::max(length(pt2_ - pt1_), Real(1.0));
+                    if (!onFeature && snap) {
+                        r = std::max(quantise(r), Real(0.1));
+                        const Vec2 dir = pt2_ - pt1_;
+                        const Real len = length(dir);
+                        pt2_ = len > 1e-9 ? pt1_ + dir * (r / len) : pt1_ + Vec2{r, 0};
+                    }
+                    currentRadius_ = r;
+                }
             } else {
-                currentWidth_ = std::max(std::fabs(pt2_.x - pt1_.x), Real(1.0));
-                currentDepth_ = std::max(std::fabs(pt2_.y - pt1_.y), Real(1.0));
+                // Each side independently: a width that has been typed stays
+                // typed while the depth is swept out by hand. Which side of the
+                // first corner the rectangle goes is always the cursor's, even
+                // for a dimension that is fixed -- that is direction, not size.
+                const Real w = fieldFixed_[0] ? fieldValue_[0]
+                                              : std::max(std::fabs(uv.x - pt1_.x), Real(1.0));
+                const Real d = fieldFixed_[1] ? fieldValue_[1]
+                                              : std::max(std::fabs(uv.y - pt1_.y), Real(1.0));
+                pt2_ = {pt1_.x + (uv.x < pt1_.x ? -w : w),
+                        pt1_.y + (uv.y < pt1_.y ? -d : d)};
+                currentWidth_ = w;
+                currentDepth_ = d;
+
+                // An alignment along an axis the cursor no longer controls is
+                // not what put the corner there, so it is not claimed.
+                if (activeSnap_.kind == SnapKind::Alignment &&
+                    (activeSnap_.refs[0].alongU ? fieldFixed_[0] : fieldFixed_[1]))
+                    activeSnap_ = PlaneSnap{};
+                else if (activeSnap_.valid() && fieldFixed_[0] && fieldFixed_[1])
+                    activeSnap_ = PlaneSnap{};
             }
         }
         return;
@@ -499,39 +691,86 @@ void CreateTool::update(const Scene& scene, const Camera& camera, Vec2 mousePx, 
         Vec2 currentUV{};
         unprojectToPlane(camera, mousePx, currentUV);
 
+        // Rounding a corner is a mode now, not a drag.
+        //
+        // It used to be what a corner handle did when you pulled on it, which
+        // meant the profile could not be resized from its corners at all -- the
+        // one thing a rectangle's corners are for in every other tool that has
+        // them. So dragging moves, and a fillet is asked for by name: hover the
+        // corner and press F.
+        if (isFilleting_) {
+            if (!fieldFixed_[0]) {
+                // Sit on the corner for nothing, pull away for more. The same
+                // gesture the main fillet tool uses, and the same ladder.
+                const Real dist = quantise(length(currentUV - filletRefUV_));
+                const Real maxR = std::min(currentWidth_, currentDepth_) * 0.499;
+                const Real r = clampf(dist, 0.0, maxR);
+                for (int c : activeFilletCorners_) cornerRadii_[c] = r;
+            }
+            return;
+        }
+
         if (isDragging_ && activeHandle_ != HandleId::None) {
-            if (isFilleting_) {
-                // Fillet measured from mouse distance away from reference point!
-                // Mouse on corner/reference point creates 0 fillet (sharp), further away creates more fillet!
-                Real dist = length(currentUV - filletRefUV_);
-                if (snap) dist = std::round(dist / 0.5) * 0.5;
-                const Real maxDim = std::min(currentWidth_, currentDepth_) * 0.499f;
-                const Real newR = clampf(dist, 0.0f, maxDim);
-                for (int c : activeFilletCorners_) {
-                    cornerRadii_[c] = newR;
+            // The handle is what moves, so the handle is what snaps: the
+            // cursor's own position is an accident of where inside the grab
+            // circle the press landed. A corner brought level with a hole below
+            // has to be the corner that got there, not the pointer.
+            const Vec2 placed = placePoint(currentUV + dragGrabOffset_, false);
+
+            // An alignment on an axis this handle does not move says nothing
+            // about where it went, so it is not shown.
+            const bool movesU = activeHandle_ != HandleId::EdgeBottom &&
+                                activeHandle_ != HandleId::EdgeTop;
+            const bool movesV = activeHandle_ != HandleId::EdgeLeft &&
+                                activeHandle_ != HandleId::EdgeRight;
+            if (activeSnap_.kind == SnapKind::Alignment &&
+                (activeSnap_.refs[0].alongU ? !movesU : !movesV))
+                activeSnap_ = PlaneSnap{};
+
+            // Never inside out, and never smaller than something that can still
+            // be grabbed by its own handles.
+            constexpr Real kMin = 0.5;
+            switch (activeHandle_) {
+                case HandleId::RadiusHandle:
+                    currentRadius_ = std::max(quantise(length(currentUV - pt1_)), Real(0.1));
+                    pt2_ = pt1_ + Vec2{currentRadius_, 0};
+                    break;
+
+                // The whole profile follows, keeping its size.
+                case HandleId::FaceCenter: {
+                    const Vec2 half = (pt2_ - pt1_) * 0.5;
+                    pt1_ = placed - half;
+                    pt2_ = placed + half;
+                    break;
                 }
-            } else if (kind_ == PrimitiveKind::Cylinder && activeHandle_ == HandleId::RadiusHandle) {
-                currentRadius_ = std::max(length(currentUV - pt1_), Real(1.0));
-                if (snap) currentRadius_ = std::round(currentRadius_ / 1.0) * 1.0;
-                pt2_ = pt1_ + Vec2{currentRadius_, 0};
-            } else {
-                // Edge dragging (held mouse button):
-                // pt1_ is always (uMin, vMin) and pt2_ is always (uMax, vMax)
-                if (activeHandle_ == HandleId::EdgeLeft) {
-                    pt1_.x = std::min(currentUV.x, dragStartPt2_.x - 1.0);
-                    if (snap) pt1_.x = std::round(pt1_.x / 1.0) * 1.0;
-                } else if (activeHandle_ == HandleId::EdgeRight) {
-                    pt2_.x = std::max(currentUV.x, dragStartPt1_.x + 1.0);
-                    if (snap) pt2_.x = std::round(pt2_.x / 1.0) * 1.0;
-                } else if (activeHandle_ == HandleId::EdgeBottom) {
-                    pt1_.y = std::min(currentUV.y, dragStartPt2_.y - 1.0);
-                    if (snap) pt1_.y = std::round(pt1_.y / 1.0) * 1.0;
-                } else if (activeHandle_ == HandleId::EdgeTop) {
-                    pt2_.y = std::max(currentUV.y, dragStartPt1_.y + 1.0);
-                    if (snap) pt2_.y = std::round(pt2_.y / 1.0) * 1.0;
-                }
+
+                case HandleId::Corner0:
+                    pt2_.x = std::max(placed.x, pt1_.x + kMin);
+                    pt1_.y = std::min(placed.y, pt2_.y - kMin);
+                    break;
+                case HandleId::Corner1:
+                    pt2_.x = std::max(placed.x, pt1_.x + kMin);
+                    pt2_.y = std::max(placed.y, pt1_.y + kMin);
+                    break;
+                case HandleId::Corner2:
+                    pt1_.x = std::min(placed.x, pt2_.x - kMin);
+                    pt2_.y = std::max(placed.y, pt1_.y + kMin);
+                    break;
+                case HandleId::Corner3:
+                    pt1_.x = std::min(placed.x, pt2_.x - kMin);
+                    pt1_.y = std::min(placed.y, pt2_.y - kMin);
+                    break;
+
+                case HandleId::EdgeLeft:   pt1_.x = std::min(placed.x, pt2_.x - kMin); break;
+                case HandleId::EdgeRight:  pt2_.x = std::max(placed.x, pt1_.x + kMin); break;
+                case HandleId::EdgeBottom: pt1_.y = std::min(placed.y, pt2_.y - kMin); break;
+                case HandleId::EdgeTop:    pt2_.y = std::max(placed.y, pt1_.y + kMin); break;
+                case HandleId::None:       break;
+            }
+            if (kind_ != PrimitiveKind::Cylinder) {
                 currentWidth_ = pt2_.x - pt1_.x;
                 currentDepth_ = pt2_.y - pt1_.y;
+                clampCornerRadii();
             }
             return;
         }
@@ -581,11 +820,12 @@ void CreateTool::update(const Scene& scene, const Camera& camera, Vec2 mousePx, 
     }
 
     if (stage_ == CreateStage::ExtrudeDepth) {
-        Real d = rayPlaneExtrudeDepth(camera, mousePx);
-        if (snap) {
-            d = std::round(d / 1.0) * 1.0;
+        if (!fieldFixed_[0]) {                  // typed, so the mouse is out of it
+            const Real d = quantise(rayPlaneExtrudeDepth(camera, mousePx));
+            if (std::fabs(d) > 1e-4) extrudeDepth_ = d;
         }
-        if (std::fabs(d) > 0.1) extrudeDepth_ = d;
+        choice_.follow(extrudeDepth_, faceObject_ != kNoObject);
+        refreshReach(scene);
         return;
     }
 }
@@ -602,21 +842,20 @@ void CreateTool::handleMouseDown(Vec2 mousePx, Scene& scene, Camera& camera, Und
         return;
     }
 
+    // Both point stages commit what update() placed this frame, which is the
+    // snapped point. Re-unprojecting the cursor here is what the click used to
+    // do, and it threw the snap away at the one moment it mattered: the
+    // indicator said "centre", the dotted line said which centre, and the point
+    // landed a third of a millimetre off it. update() runs before input for
+    // exactly this reason.
     if (stage_ == CreateStage::DrawProfile_Pt1) {
-        Vec2 uv{0, 0};
-        if (unprojectToPlane(camera, mousePx, uv)) {
-            pt1_ = uv;
-            pt2_ = uv;
-        }
+        pt2_ = pt1_;
+        clearFields();   // each step asks its own questions
         stage_ = CreateStage::DrawProfile_Pt2;
         return;
     }
 
     if (stage_ == CreateStage::DrawProfile_Pt2) {
-        Vec2 uv{0, 0};
-        if (unprojectToPlane(camera, mousePx, uv)) {
-            pt2_ = uv;
-        }
         if (kind_ != PrimitiveKind::Cylinder) {
             const Real uMin = std::min(pt1_.x, pt2_.x);
             const Real uMax = std::max(pt1_.x, pt2_.x);
@@ -627,18 +866,23 @@ void CreateTool::handleMouseDown(Vec2 mousePx, Scene& scene, Camera& camera, Und
         }
 
         // Restore perspective camera
-        camera.target = savedCamera_.target;
-        camera.distance = savedCamera_.distance;
-        camera.yaw = savedCamera_.yaw;
-        camera.pitch = savedCamera_.pitch;
-        camera.orthographic = savedCamera_.orthographic;
-        camera.snapToGoal();
+        restoreCamera(camera);
 
+        clearFields();   // each step asks its own questions
         stage_ = CreateStage::AdjustProfile;
         return;
     }
 
     if (stage_ == CreateStage::AdjustProfile) {
+        // A click while rounding a corner is what confirms it, the same as it
+        // is for the fillet tool proper.
+        if (isFilleting_) {
+            isFilleting_ = false;
+            activeFilletCorners_.clear();
+            activeHandle_ = HandleId::None;
+            return;
+        }
+
         if (hoveredHandle_ != HandleId::None) {
             activeHandle_ = hoveredHandle_;
             selectedElement_ = hoveredHandle_;
@@ -651,33 +895,11 @@ void CreateTool::handleMouseDown(Vec2 mousePx, Scene& scene, Camera& camera, Und
             Vec2 currentUV{};
             unprojectToPlane(camera, mousePx, currentUV);
             dragStartMouseUV_ = currentUV;
+            dragGrabOffset_ = handlePointUV(activeHandle_) - currentUV;
 
-            const Real uMin = pt1_.x, uMax = pt2_.x;
-            const Real vMin = pt1_.y, vMax = pt2_.y;
-
-            if (activeHandle_ == HandleId::Corner0) {
-                isFilleting_ = true;
-                filletRefUV_ = {uMax, vMin};
-                activeFilletCorners_ = {0};
-            } else if (activeHandle_ == HandleId::Corner1) {
-                isFilleting_ = true;
-                filletRefUV_ = {uMax, vMax};
-                activeFilletCorners_ = {1};
-            } else if (activeHandle_ == HandleId::Corner2) {
-                isFilleting_ = true;
-                filletRefUV_ = {uMin, vMax};
-                activeFilletCorners_ = {2};
-            } else if (activeHandle_ == HandleId::Corner3) {
-                isFilleting_ = true;
-                filletRefUV_ = {uMin, vMin};
-                activeFilletCorners_ = {3};
-            } else if (activeHandle_ == HandleId::FaceCenter) {
-                isFilleting_ = true;
-                filletRefUV_ = (pt1_ + pt2_) * 0.5f;
-                activeFilletCorners_ = {0, 1, 2, 3};
-            } else {
-                isFilleting_ = false;
-            }
+            // A handle grabbed by hand is being taken back from the keyboard:
+            // a dimension cannot be both pinned to a typed number and dragged.
+            clearLocks(activeHandle_);
         }
         return;
     }
@@ -693,9 +915,13 @@ void CreateTool::handleMouseUp(Vec2 mousePx, Camera& camera) {
     (void)camera;
     isMouseDown_ = false;
     if (stage_ == CreateStage::AdjustProfile) {
-        isDragging_ = false;
-        isFilleting_ = false;
-        activeHandle_ = HandleId::None;
+        // Only the drag ends here. Rounding a corner is a mode that a press
+        // began and a press ends, so letting go of the button that started it
+        // must not also finish it.
+        if (!isFilleting_) {
+            isDragging_ = false;
+            activeHandle_ = HandleId::None;
+        }
     }
 }
 
@@ -713,24 +939,208 @@ void CreateTool::handleRightClick(Camera& camera) {
     cancel(camera);
 }
 
+bool CreateTool::handleTypedKey(int key) {
+    // Only where there is a dimension for a number to mean something. In
+    // SelectPlane the digits are already spoken for: 1, 3 and 7 pick a plane.
+    if (stage_ != CreateStage::DrawProfile_Pt2 && stage_ != CreateStage::AdjustProfile &&
+        stage_ != CreateStage::ExtrudeDepth)
+        return false;
+
+    // Every accepted keystroke re-reads the buffer into the dimension, so the
+    // profile follows the digits rather than waiting for Enter. Backspacing a
+    // field back to empty hands it to the mouse again.
+    if (key == 8 || key == 127) {                       // backspace
+        if (typedValue_.empty()) return false;
+        typedValue_.pop_back();
+        syncTypedField();
+        return true;
+    }
+    if (key >= '0' && key <= '9') {
+        typedValue_.push_back(static_cast<char>(key));
+        syncTypedField();
+        return true;
+    }
+    if (key == '.' && typedValue_.find('.') == std::string::npos) {
+        typedValue_.push_back('.');
+        syncTypedField();
+        return true;
+    }
+    // A leading minus only, and only where a negative reads as something: a
+    // depth of -5 is a cut, a width of -5 is nothing.
+    if (key == '-' && typedValue_.empty() && stage_ == CreateStage::ExtrudeDepth) {
+        typedValue_.push_back('-');
+        return true;
+    }
+    return false;
+}
+
+int CreateTool::fieldCount() const {
+    if (stage_ == CreateStage::ExtrudeDepth) return 1;
+    if (stage_ == CreateStage::AdjustProfile && isFilleting_) return 1;
+    return kind_ == PrimitiveKind::Cylinder ? 1 : 2;
+}
+
+const char* CreateTool::fieldName(int field) const {
+    if (stage_ == CreateStage::ExtrudeDepth) return "Depth";
+    if (stage_ == CreateStage::AdjustProfile && isFilleting_) return "Radius";
+    if (kind_ == PrimitiveKind::Cylinder) return "Radius";
+    return field == 0 ? "Width" : "Depth";
+}
+
+Real CreateTool::fieldDisplay(int field) const {
+    if (stage_ == CreateStage::ExtrudeDepth) return extrudeDepth_;
+    if (stage_ == CreateStage::AdjustProfile && isFilleting_)
+        return activeFilletCorners_.empty() ? 0.0 : cornerRadii_[activeFilletCorners_.front()];
+    if (kind_ == PrimitiveKind::Cylinder) return currentRadius_;
+    return field == 0 ? currentWidth_ : currentDepth_;
+}
+
+void CreateTool::setField(int field, Real v) {
+    if (field < 0 || field > 1) return;
+
+    auto fix = [&](Real applied) {
+        fieldFixed_[field] = true;
+        fieldValue_[field] = applied;
+    };
+
+    if (stage_ == CreateStage::ExtrudeDepth) {
+        extrudeDepth_ = v;                      // a cut is a negative depth
+        fix(v);
+        return;
+    }
+
+    if (stage_ == CreateStage::AdjustProfile && isFilleting_) {
+        const Real maxR = std::min(currentWidth_, currentDepth_) * 0.499;
+        const Real r = clampf(v, 0.0, maxR);
+        for (int c : activeFilletCorners_) cornerRadii_[c] = r;
+        fix(r);
+        return;
+    }
+
+    if (v <= 0.0) return;                       // a size has to be positive
+
+    if (kind_ == PrimitiveKind::Cylinder) {
+        currentRadius_ = v;
+        pt2_ = pt1_ + Vec2{currentRadius_, 0};
+        fix(v);
+        return;
+    }
+
+    // Keep the corner the user started from where it is and move the opposite
+    // one, in whichever direction the rectangle is already being drawn.
+    if (field == 0) {
+        currentWidth_ = v;
+        pt2_.x = pt1_.x + (pt2_.x < pt1_.x ? -v : v);
+    } else {
+        currentDepth_ = v;
+        pt2_.y = pt1_.y + (pt2_.y < pt1_.y ? -v : v);
+    }
+    if (stage_ == CreateStage::AdjustProfile) clampCornerRadii();
+    fix(v);
+}
+
+void CreateTool::syncTypedField() {
+    if (typedValue_.empty()) {
+        // Backspaced away to nothing: the mouse has it again.
+        if (typedField_ >= 0 && typedField_ < 2) fieldFixed_[typedField_] = false;
+        return;
+    }
+    Real v = 0.0;
+    try {
+        size_t used = 0;
+        v = std::stod(typedValue_, &used);
+        if (used != typedValue_.size()) return;   // "12." part-way through
+    } catch (...) {
+        return;                                   // "-" or "." on their own
+    }
+    setField(typedField_, v);
+}
+
+void CreateTool::clearLocks(HandleId id) {
+    switch (id) {
+        case HandleId::EdgeLeft:
+        case HandleId::EdgeRight:
+        case HandleId::RadiusHandle:
+            fieldFixed_[0] = false;
+            break;
+        case HandleId::EdgeBottom:
+        case HandleId::EdgeTop:
+            fieldFixed_[1] = false;
+            break;
+        case HandleId::Corner0:
+        case HandleId::Corner1:
+        case HandleId::Corner2:
+        case HandleId::Corner3:
+            fieldFixed_[0] = fieldFixed_[1] = false;
+            break;
+        // Moving the profile does not resize it, so nothing typed is disturbed.
+        case HandleId::FaceCenter:
+        case HandleId::None:
+            break;
+    }
+    typedValue_.clear();
+}
+
+bool CreateTool::applyTypedValue() {
+    if (typedValue_.empty()) return false;
+    syncTypedField();
+    typedValue_.clear();
+    return true;
+}
+
 bool CreateTool::handleKey(int key, bool shift, bool ctrl, Camera& camera, Scene& scene, UndoStack& undo) {
     (void)shift;
     (void)ctrl;
     if (stage_ == CreateStage::None) return false;
 
-    // Esc = Cancel
+    // Esc undoes the smallest thing it can: what is half-typed, then the
+    // dimension it was pinning, then the fillet being adjusted, and only then
+    // the tool itself. A modal key that always cancels everything is one users
+    // learn not to press.
     if (key == 27) {
+        if (typing()) {
+            typedValue_.clear();
+            syncTypedField();               // releases the field to the mouse
+            return true;
+        }
+        if (typedField_ < 2 && fieldFixed_[typedField_]) {
+            fieldFixed_[typedField_] = false;
+            return true;
+        }
+        if (isFilleting_) {
+            for (int i = 0; i < 4; ++i) cornerRadii_[i] = dragStartFillets_[i];
+            isFilleting_ = false;
+            activeFilletCorners_.clear();
+            activeHandle_ = HandleId::None;
+            clearFields();
+            return true;
+        }
         cancel(camera);
         return true;
     }
 
-    // E = Extrude, Enter, Space
+    // Tab moves between the dimensions this stage has, fixing whatever was
+    // typed for the one being left.
+    if (key == 9 && fieldCount() > 1 &&
+        (stage_ == CreateStage::DrawProfile_Pt2 || stage_ == CreateStage::AdjustProfile)) {
+        applyTypedValue();
+        typedField_ = (typedField_ + 1) % fieldCount();
+        return true;
+    }
+
+    // Digits, a point, a leading minus, backspace.
+    if (handleTypedKey(key)) return true;
+
+    // E = Extrude, Enter, Space. Anything typed is committed before the stage
+    // moves on, so "25 Enter" sets the width and advances in one gesture.
     if (key == 'E' || key == 'e' || key == 13 || key == 32) {
+        applyTypedValue();
         if (stage_ == CreateStage::SelectPlane) {
             commitPlaneSelection(camera);
             return true;
         }
         if (stage_ == CreateStage::DrawProfile_Pt1) {
+            clearFields();   // each step asks its own questions
             stage_ = CreateStage::DrawProfile_Pt2;
             return true;
         }
@@ -743,16 +1153,23 @@ bool CreateTool::handleKey(int key, bool shift, bool ctrl, Camera& camera, Scene
                 pt1_ = {uMin, vMin};
                 pt2_ = {uMax, vMax};
             }
-            camera.target = savedCamera_.target;
-            camera.distance = savedCamera_.distance;
-            camera.yaw = savedCamera_.yaw;
-            camera.pitch = savedCamera_.pitch;
-            camera.orthographic = savedCamera_.orthographic;
-            camera.snapToGoal();
+            restoreCamera(camera);
+            clearFields();   // each step asks its own questions
             stage_ = CreateStage::AdjustProfile;
             return true;
         }
         if (stage_ == CreateStage::AdjustProfile) {
+            // Enter finishes what is in front of you. While a corner is being
+            // rounded that is the round, not the extrude: moving on before the
+            // fillet is settled is never what was meant.
+            if (isFilleting_) {
+                isFilleting_ = false;
+                activeFilletCorners_.clear();
+                activeHandle_ = HandleId::None;
+                clearFields();
+                return true;
+            }
+            clearFields();   // each step asks its own questions
             stage_ = CreateStage::ExtrudeDepth;
             extrudeBaseDepth_ = 20.0;
             extrudeDepth_ = 20.0;
@@ -771,9 +1188,15 @@ bool CreateTool::handleKey(int key, bool shift, bool ctrl, Camera& camera, Scene
             const Real uMin = pt1_.x, uMax = pt2_.x;
             const Real vMin = pt1_.y, vMax = pt2_.y;
 
+            // A mode rather than a drag: nothing is being held down, so the
+            // radius follows the pointer until a click or Enter confirms it,
+            // and Esc puts back what was there.
             isFilleting_ = true;
-            isDragging_ = true;
+            isDragging_ = false;
             activeHandle_ = target;
+            selectedElement_ = target;
+            for (int i = 0; i < 4; ++i) dragStartFillets_[i] = cornerRadii_[i];
+            clearFields();
 
             if (target == HandleId::Corner0) {
                 filletRefUV_ = {uMax, vMin};
@@ -808,6 +1231,17 @@ bool CreateTool::handleKey(int key, bool shift, bool ctrl, Camera& camera, Scene
         }
     }
 
+    // Operation, while the depth is being set. Picking one ends the depth's
+    // say in it.
+    if (stage_ == CreateStage::ExtrudeDepth) {
+        ExtrudeOp picked;
+        if (extrudeOpForKey(key, picked)) {
+            choice_.pick(picked);
+            refreshReach(scene);
+            return true;
+        }
+    }
+
     // Number keys for direct plane selection in SelectPlane
     if (stage_ == CreateStage::SelectPlane) {
         if (key == '1') { setHoveredPlane(PlaneChoice::XZ, {0, 0, 0}, {0, -1, 0}); commitPlaneSelection(camera); return true; }
@@ -830,124 +1264,137 @@ bool CreateTool::handleKey(int key, bool shift, bool ctrl, Camera& camera) {
 
 bool CreateTool::finishCreation(Scene& scene, Camera& camera, UndoStack& undo) {
     if (stage_ != CreateStage::ExtrudeDepth && stage_ != CreateStage::AdjustProfile) return false;
+    if (std::fabs(extrudeDepth_) < 1e-4) {
+        cancel(camera);
+        return false;
+    }
+    // A refusal leaves the tool where it was, so the operation or the bodies
+    // can be changed and Finish tried again.
+    if (!commitExtrusion(scene, undo)) return false;
+    stage_ = CreateStage::Applied;
+    return true;
+}
 
+bool CreateTool::recommit(Scene& scene, Camera& camera, UndoStack& undo) {
+    (void)camera;
+    if (stage_ != CreateStage::Applied) return false;
+    return commitExtrusion(scene, undo);
+}
+
+void CreateTool::refreshReach(const Scene& scene) {
+    if (choice_.op == ExtrudeOp::NewBody || scene.defaultBackend() != Backend::Brep) {
+        reach_.refresh(scene, Body{}, faceObject_, choice_.op, extrudeDepth_, "none");
+        return;
+    }
+    // The tool, and what it is made from: the same profile at the same depth
+    // is the same tool, and the bodies it reaches need not be measured again.
+    char key[256];
+    std::snprintf(key, sizeof key, "%d|%.6g,%.6g,%.6g,%.6g|%.6g,%.6g,%.6g,%.6g|%.6g|%.6g|%.6g,%.6g,%.6g|%.6g,%.6g,%.6g",
+                  static_cast<int>(kind_), pt1_.x, pt1_.y, pt2_.x, pt2_.y, cornerRadii_[0],
+                  cornerRadii_[1], cornerRadii_[2], cornerRadii_[3], currentRadius_, extrudeDepth_,
+                  planeOrigin_.x, planeOrigin_.y, planeOrigin_.z, planeNormal_.x, planeNormal_.y,
+                  planeNormal_.z);
+    if (reachToolKey_ != key) {
+        reachTool_ = buildCurrentSolid(extrudeDepth_, Backend::Brep);
+        reachToolKey_ = key;
+    }
+    reach_.refresh(scene, reachTool_, faceObject_, choice_.op, extrudeDepth_, key);
+}
+
+bool CreateTool::commitExtrusion(Scene& scene, UndoStack& undo) {
     const Real depth = extrudeDepth_;
     if (std::fabs(depth) < 1e-4) {
-        cancel(camera);
+        lastError_ = "The depth is zero";
         return false;
     }
-
-    const Mesh solid = buildCurrentSolid(depth);
+    const Body solid = buildCurrentSolid(depth, scene.defaultBackend());
     if (solid.empty()) {
-        cancel(camera);
+        lastError_ = "That profile could not be turned into a solid";
         return false;
     }
 
-    if (depth < 0.0) {
-        // Negative Extrude = Boolean Difference Cut
-        SceneObject* target = nullptr;
-        if (faceObject_ != kNoObject) {
-            target = scene.find(faceObject_);
+    // Measured now rather than trusted from the last frame: this is what the
+    // extrusion is about to act on.
+    choice_.follow(depth, faceObject_ != kNoObject);
+    refreshReach(scene);
+    const ExtrudeOp op = choice_.op;
+    const std::vector<ObjectId> bodies = reach_.included();
+    // A join that reaches nothing has nothing to join, and is a body of its
+    // own -- as it is in Fusion.
+    const bool asNewBody = op == ExtrudeOp::NewBody || (op == ExtrudeOp::Join && bodies.empty());
+
+    if (!asNewBody) {
+        const SceneObject* drawnOn = scene.find(faceObject_);
+        if (scene.defaultBackend() != Backend::Brep) {
+            lastError_ = std::string(extrudeOpName(op)) +
+                         " needs the exact kernel, which this build does not have";
+            return false;
         }
-        if (!target) {
-            // Find first intersecting body in scene
-            const AABB solidBox = solid.bounds();
-            for (const auto& obj : scene.objects()) {
-                if (solidBox.overlaps(obj->worldBounds(), 1e-4)) {
-                    target = obj.get();
-                    break;
-                }
+        if (bodies.empty()) {
+            lastError_ = drawnOn && drawnOn->body.isMesh()
+                             ? std::string(extrudeOpName(op)) + " needs a solid, and this is a mesh: "
+                                                                "Modify > Convert to Solid first"
+                         : op == ExtrudeOp::Cut ? "Nothing there to cut into"
+                                                : "Nothing there to intersect with";
+            return false;
+        }
+
+        std::vector<std::unique_ptr<Command>> parts;
+        const char* label = op == ExtrudeOp::Join ? "Extrude Join"
+                          : op == ExtrudeOp::Cut  ? "Extrude Cut" : "Extrude Intersect";
+        ObjectId ownerDone = kNoObject;
+
+        // Into the face it was drawn on, a cut starts a little outside that
+        // face, so its entry is a clean crossing rather than a coincident
+        // plane. Only for that body: pushed past it, the overshoot would nick
+        // whatever sits against the face.
+        if (op == ExtrudeOp::Cut && faceObject_ != kNoObject && reach_.includes(faceObject_)) {
+            SceneObject* target = scene.find(faceObject_);
+            const Real overshoot = std::max(std::fabs(depth) * 0.05, Real(1.0));
+            const Real cz0 = depth < 0.0 ? depth : -overshoot;
+            const Real cz1 = depth < 0.0 ? overshoot : depth;
+            Body cutter;
+            std::vector<Vec3> points;
+            std::vector<Real> arcs;
+            getCurrentProfileArcs(points, arcs);
+            std::string why;
+            if (!makeProfileSolid(points, arcs, planeNormal_, cz0, cz1, cutter, 0, &why)) {
+                lastError_ = why.empty() ? "The cutter could not be built" : "Cut failed: " + why;
+                return false;
             }
-        }
-
-        if (target) {
-            // Extend cutter slightly outside the entrance face to ensure clean, non-degenerate intersection
-            Mesh cutter;
-            const std::vector<Vec2> prof = getCurrentProfile();
-            makePrismMesh(prof, planeOrigin_, planeU_, planeV_, planeNormal_, depth, 1.0, cutter);
-
-            // Transform cutter into target object's local coordinate space
-            const Mat4 toLocal = inverse(target->modelMatrix());
-            for (MeshVertex& v : cutter.verts) v.position = transformPoint(toLocal, v.position);
-
-            // The cut goes into the history, not over the mesh.
-            //
-            // Assigning target->mesh here left the feature chain still
-            // describing the body as it was before the cut, and featureCache
-            // holding that same stale body. Everything downstream trusted it:
-            // committing a fillet replayed the chain and either failed to find
-            // the edges it had just previewed, or found them on the uncut body
-            // and threw the cut away. Re-evaluating for any other reason -- a
-            // History checkbox, a dimension nudged in the Inspector -- deleted
-            // the cut outright.
-            const ObjectId targetId = target->id;
+            // Into the target's own space, where its chain lives -- and into
+            // the chain, not over the body: a cut written straight onto the
+            // body was thrown away by the next thing that re-ran the history.
+            cutter.transform(inverse(target->modelMatrix()));
             std::vector<Feature> chainBefore = target->features;
-
             Feature f;
             f.kind = FeatureKind::Boolean;
             f.booleanOp = BooleanOp::Difference;
-            f.bakedMesh = std::move(cutter);
-
-            std::string why;
-            if (scene.addFeature(targetId, std::move(f), &why)) {
-                SceneObject* cutObj = scene.find(targetId);
-                undo.push(std::make_unique<FeatureCommand>(
-                    targetId, std::move(chainBefore), cutObj->features, "Extrude Cut"));
-                scene.select(targetId);
-                stage_ = CreateStage::None;
-                return true;
+            f.bakedBody = std::move(cutter);
+            f.toolName = primitiveName(kind_);
+            if (!scene.addFeature(faceObject_, std::move(f), &why)) {
+                lastError_ = why.empty() ? "Cut failed: no valid solid came out of it" : "Cut failed: " + why;
+                return false;
             }
-
-            // Refuse, rather than falling through to "add as a new object" and
-            // dropping the cutter into the scene as a solid.
-            lastError_ = why.empty() ? "Cut failed: no valid solid came out of it"
-                                     : "Cut failed: " + why;
-            stage_ = CreateStage::None;
-            return false;
+            parts.push_back(std::make_unique<FeatureCommand>(faceObject_, std::move(chainBefore),
+                                                             target->features, label));
+            ownerDone = faceObject_;
         }
 
-        lastError_ = "Nothing there to cut into";
-        stage_ = CreateStage::None;
-        return false;
-    }
-
-    // Positive Extrude on an existing face (auto-join)
-    if (depth > 0.0 && faceObject_ != kNoObject) {
-        SceneObject* target = scene.find(faceObject_);
-        if (target) {
-            // Transform solid into target object's local coordinate space
-            const Mat4 toLocal = inverse(target->modelMatrix());
-            Mesh localSolid = solid;
-            for (MeshVertex& v : localSolid.verts) v.position = transformPoint(toLocal, v.position);
-
-            // As with the cut above: through the chain, so the history keeps
-            // describing the body the user can see.
-            const ObjectId targetId = target->id;
-            std::vector<Feature> chainBefore = target->features;
-
-            Feature f;
-            f.kind = FeatureKind::Boolean;
-            f.booleanOp = BooleanOp::Union;
-            f.bakedMesh = std::move(localSolid);
-
-            std::string why;
-            if (scene.addFeature(targetId, std::move(f), &why)) {
-                SceneObject* joined = scene.find(targetId);
-                undo.push(std::make_unique<FeatureCommand>(
-                    targetId, std::move(chainBefore), joined->features, "Extrude Join"));
-                scene.select(targetId);
-                stage_ = CreateStage::None;
-                return true;
-            }
-
-            // The join is the operation that was asked for, so a failure is a
-            // failure -- not grounds for leaving a separate body floating in
-            // the same place, which is what falling through would do.
-            lastError_ = why.empty() ? "Join failed: no valid solid came out of it"
-                                     : "Join failed: " + why;
-            stage_ = CreateStage::None;
+        std::string error;
+        if (!applyExtrude(scene, solid, op, bodies, ownerDone, primitiveName(kind_), label, parts, error)) {
+            unwind(scene, parts);
+            lastError_ = error;
             return false;
         }
+        if (parts.empty()) {
+            lastError_ = std::string(extrudeOpName(op)) + " changed nothing: it does not reach into those bodies";
+            return false;
+        }
+        if (parts.size() == 1) undo.push(std::move(parts.front()));
+        else                   undo.push(std::make_unique<CompositeCommand>(std::move(parts), label));
+        if (scene.find(bodies.front())) scene.select(bodies.front());
+        return true;
     }
 
     // Add as new standalone object in scene
@@ -956,7 +1403,12 @@ bool CreateTool::finishCreation(Scene& scene, Camera& camera, UndoStack& undo) {
                              cornerRadii_[0] < 1e-4 && cornerRadii_[1] < 1e-4 &&
                              cornerRadii_[2] < 1e-4 && cornerRadii_[3] < 1e-4);
 
-    if (isSharpBox && selectedPlane_ == PlaneChoice::XY && faceObject_ == kNoObject) {
+    // The plane's own axes, as a rotation. A box drawn on the front plane is
+    // still a box: it used to be baked into a mesh, and lose its dimensions
+    // from the Inspector, purely because nothing recorded which way it faced.
+    const Quat orientation = Quat::fromFrame(planeU_, planeV_, planeNormal_);
+
+    if (isSharpBox) {
         PrimitiveSpec spec;
         spec.kind = PrimitiveKind::Box;
         spec.box.width = currentWidth_;
@@ -966,8 +1418,8 @@ bool CreateTool::finishCreation(Scene& scene, Camera& camera, UndoStack& undo) {
         const Vec3 pos = planeOrigin_ + planeU_ * centerUV.x + planeV_ * centerUV.y +
                          planeNormal_ * (depth * 0.5f);
         id = scene.addPrimitive(PrimitiveKind::Box, spec, pos);
-    } else if (kind_ == PrimitiveKind::Cylinder &&
-               selectedPlane_ == PlaneChoice::XY && faceObject_ == kNoObject) {
+        scene.setBasePlacement(id, Transform{pos, orientation, {1, 1, 1}});
+    } else if (kind_ == PrimitiveKind::Cylinder) {
         PrimitiveSpec spec;
         spec.kind = PrimitiveKind::Cylinder;
         spec.cylinder.radius = currentRadius_;
@@ -975,17 +1427,18 @@ bool CreateTool::finishCreation(Scene& scene, Camera& camera, UndoStack& undo) {
         const Vec3 pos = planeOrigin_ + planeU_ * pt1_.x + planeV_ * pt1_.y +
                          planeNormal_ * (depth * 0.5f);
         id = scene.addPrimitive(PrimitiveKind::Cylinder, spec, pos);
+        scene.setBasePlacement(id, Transform{pos, orientation, {1, 1, 1}});
     } else {
         // Any rounded rectangle with fillet, or arbitrary plane, or custom profile
-        id = scene.addMesh(solid, {0, 0, 0}, kind_ == PrimitiveKind::Box ? "Box" : "Cylinder");
+        id = scene.addBody(solid, {0, 0, 0}, kind_ == PrimitiveKind::Box ? "Box" : "Cylinder");
     }
 
-    if (id != kNoObject) {
-        undo.push(ExistenceCommand::forCreate(scene, {id}));
-        scene.select(id);
+    if (id == kNoObject) {
+        lastError_ = "The new body could not be made";
+        return false;
     }
-
-    stage_ = CreateStage::None;
+    undo.push(ExistenceCommand::forCreate(scene, {id}));
+    scene.select(id);
     return true;
 }
 
@@ -994,7 +1447,11 @@ bool CreateTool::finishCreation(Scene& scene, Camera& camera, UndoStack& undo) {
 // ---------------------------------------------------------------------------
 
 void CreateTool::drawOverlay(const Scene& scene, const Camera& camera, Renderer& renderer) const {
-    if (stage_ == CreateStage::None) return;
+    if (stage_ == CreateStage::None || stage_ == CreateStage::Applied) return;
+
+    // What the cursor has caught, and what it was inferred from. See
+    // app/snap_overlay.h for the shapes and why they are those shapes.
+    drawSnapIndicator(renderer, camera, activeSnap_);
 
     if (stage_ == CreateStage::SelectPlane) {
         const float sz = std::max(camera.distance * 0.35f, 25.0f);
@@ -1030,7 +1487,7 @@ void CreateTool::drawOverlay(const Scene& scene, const Camera& camera, Renderer&
         // Object Face Highlight
         if (hoveredPlane_ == PlaneChoice::Face && faceObject_ != kNoObject) {
             const SceneObject* o = scene.find(faceObject_);
-            if (o && faceIndex_ < o->mesh.faceCount()) {
+            if (o && faceIndex_ < o->body.faceCount()) {
                 const RenderMesh& rm = o->render;
                 const Mat4 model = o->modelMatrix();
                 for (size_t i = 0; i < rm.triangleFace.size(); ++i) {
@@ -1047,15 +1504,40 @@ void CreateTool::drawOverlay(const Scene& scene, const Camera& camera, Renderer&
         return;
     }
 
-    // In 2D Profile & Extrude stages: draw plane grid and profile
-    const float gridSpan = 80.0f;
-    const float step = 10.0f;
-    const Vec4 gridCol(0.4f, 0.5f, 0.6f, 0.12f);
-    for (float i = -gridSpan; i <= gridSpan; i += step) {
-        renderer.addLine(planeOrigin_ + planeU_ * i - planeV_ * gridSpan,
-                         planeOrigin_ + planeU_ * i + planeV_ * gridSpan, gridCol);
-        renderer.addLine(planeOrigin_ - planeU_ * gridSpan + planeV_ * i,
-                         planeOrigin_ + planeU_ * gridSpan + planeV_ * i, gridCol);
+    // The sketch grid, at the levels the snapper pulls to.
+    //
+    // It used to be a fixed 10mm step across a fixed 160mm square, which was
+    // the wrong grid at every zoom but one and -- worse -- was not the grid the
+    // point actually landed on. A line you can see that the cursor passes
+    // straight through teaches the user not to trust the grid at all.
+    const Real gridSpan = std::max<Real>(camera.distance * 1.6, 20.0);
+    const GridLevels levels = gridLevelsAt(camera, planeOrigin_);
+    auto drawLevel = [&](Real stepMm, Vec4 col) {
+        if (stepMm <= 0.0) return false;
+        const int n = static_cast<int>(gridSpan / stepMm);
+        if (n > 240) return false;          // denser than it can be read; leave it out
+        for (int i = -n; i <= n; ++i) {
+            const Real t = static_cast<Real>(i) * stepMm;
+            renderer.addLine(planeOrigin_ + planeU_ * t - planeV_ * gridSpan,
+                             planeOrigin_ + planeU_ * t + planeV_ * gridSpan, col);
+            renderer.addLine(planeOrigin_ - planeU_ * gridSpan + planeV_ * t,
+                             planeOrigin_ + planeU_ * gridSpan + planeV_ * t, col);
+        }
+        return true;
+    };
+    // Exactly the lines the snapper will call a snap, and no others.
+    //
+    // gridLevelsAt picks `main` so its cells stay at least twelve pixels wide,
+    // which is the coarsest thing a person can still land on by hand; anything
+    // finer the snapper steps through without claiming, so drawing it would
+    // promise a line that means nothing. One level to land on and the decade
+    // above it to count by.
+    const Real ladder[3] = {levels.main, levels.major, levels.major * 10.0};
+    for (int i = 0; i < 2; ++i) {
+        if (drawLevel(ladder[i], Vec4{0.45f, 0.55f, 0.65f, 0.13f})) {
+            drawLevel(ladder[i + 1], Vec4{0.50f, 0.60f, 0.70f, 0.28f});
+            break;
+        }
     }
     // Main U/V axes on the plane
     renderer.addLine(planeOrigin_ - planeU_ * gridSpan, planeOrigin_ + planeU_ * gridSpan, Vec4{0.9f, 0.3f, 0.3f, 0.4f});
@@ -1065,7 +1547,9 @@ void CreateTool::drawOverlay(const Scene& scene, const Camera& camera, Renderer&
     const std::vector<Vec2> prof = getCurrentProfile();
     if (prof.size() >= 3) {
         const Vec4 outlineCol = toVec4(palette::kBrand, 0.95f);
-        const Vec4 fillCol = (stage_ == CreateStage::ExtrudeDepth && extrudeDepth_ < 0.0) ? kCutCol : kCreateCol;
+        const Vec4 fillCol = (stage_ == CreateStage::ExtrudeDepth &&
+                               (choice_.op == ExtrudeOp::Cut || choice_.op == ExtrudeOp::Intersect))
+                                  ? kCutCol : kCreateCol;
 
         // Boundary lines
         for (size_t i = 0; i < prof.size(); ++i) {
@@ -1084,20 +1568,46 @@ void CreateTool::drawOverlay(const Scene& scene, const Camera& camera, Renderer&
         }
     }
 
-    // Handles in AdjustProfile stage
+    // Handles in AdjustProfile stage.
+    //
+    // Each shape says what pulling on it does, because they no longer all do
+    // the same thing: a square corner resizes both ways, a bar moves the side
+    // it lies along, and the cross in the middle slides the whole profile. They
+    // used to be nine identical crosses, four of which quietly rounded a corner
+    // instead of moving it.
     if (stage_ == CreateStage::AdjustProfile) {
-        auto drawDotHandle = [&](Vec3 pos, bool active, bool isCorner = false) {
-            const float r = active ? 3.0f : (isCorner ? 2.0f : 1.5f);
-            const Vec4 col = active ? Vec4{1.0f, 0.9f, 0.2f, 1.0f}
-                                    : (isCorner ? Vec4{0.95f, 0.6f, 0.2f, 0.9f} : toVec4(palette::kBrand, 0.9f));
-            renderer.addLine(pos - planeU_ * r, pos + planeU_ * r, col);
-            renderer.addLine(pos - planeV_ * r, pos + planeV_ * r, col);
-            renderer.addLine(pos - planeNormal_ * r, pos + planeNormal_ * r, col);
+        using overlay::frameAt;
+        const Vec4 idle = toVec4(palette::kBrand, 0.92f);
+        const Vec4 lit{1.0f, 0.82f, 0.35f, 1.0f};
+        const Vec4 dark{0.10f, 0.10f, 0.11f, 0.95f};
+
+        auto state = [&](HandleId id) {
+            return hoveredHandle_ == id || activeHandle_ == id;
+        };
+
+        // Filled, with a dark rim: a profile is drawn over a face that may be
+        // any colour, and an outline alone disappears against a light one.
+        auto corner = [&](Vec3 pos, HandleId id) {
+            const bool on = state(id);
+            overlay::square(renderer, camera, pos, frameAt(camera, pos),
+                            on ? 5.6 : 4.4, on ? lit : idle, dark, 1.6);
+        };
+
+        // A bar lying along the edge it moves, so which side it belongs to is
+        // never in doubt.
+        auto edge = [&](Vec3 pos, HandleId id, bool horizontal) {
+            const bool on = state(id);
+            const Real half = on ? 11.0 : 9.0, thick = on ? 3.0 : 2.4;
+            const Real ax = horizontal ? half : thick;
+            const Real ay = horizontal ? thick : half;
+            const Vec2 pts[4] = {{-ax, -ay}, {ax, -ay}, {ax, ay}, {-ax, ay}};
+            overlay::filled(renderer, pos, frameAt(camera, pos), pts, 4, on ? lit : idle);
         };
 
         if (kind_ == PrimitiveKind::Cylinder) {
             const Vec3 rPt = planeOrigin_ + planeU_ * (pt1_.x + currentRadius_) + planeV_ * pt1_.y;
-            drawDotHandle(rPt, hoveredHandle_ == HandleId::RadiusHandle || activeHandle_ == HandleId::RadiusHandle);
+            const bool on = state(HandleId::RadiusHandle);
+            overlay::disc(renderer, rPt, frameAt(camera, rPt), on ? 5.0 : 3.8, on ? lit : idle);
         } else {
             const Real uMin = pt1_.x, uMax = pt2_.x;
             const Real vMin = pt1_.y, vMax = pt2_.y;
@@ -1107,57 +1617,78 @@ void CreateTool::drawOverlay(const Scene& scene, const Camera& camera, Renderer&
             const Vec3 c2 = planeOrigin_ + planeU_ * uMin + planeV_ * vMax; // TL
             const Vec3 c3 = planeOrigin_ + planeU_ * uMin + planeV_ * vMin; // BL
 
-            drawDotHandle(c0, hoveredHandle_ == HandleId::Corner0 || activeHandle_ == HandleId::Corner0, true);
-            drawDotHandle(c1, hoveredHandle_ == HandleId::Corner1 || activeHandle_ == HandleId::Corner1, true);
-            drawDotHandle(c2, hoveredHandle_ == HandleId::Corner2 || activeHandle_ == HandleId::Corner2, true);
-            drawDotHandle(c3, hoveredHandle_ == HandleId::Corner3 || activeHandle_ == HandleId::Corner3, true);
+            corner(c0, HandleId::Corner0);
+            corner(c1, HandleId::Corner1);
+            corner(c2, HandleId::Corner2);
+            corner(c3, HandleId::Corner3);
 
-            drawDotHandle((c0 + c3) * 0.5f, hoveredHandle_ == HandleId::EdgeBottom || activeHandle_ == HandleId::EdgeBottom);
-            drawDotHandle((c0 + c1) * 0.5f, hoveredHandle_ == HandleId::EdgeRight  || activeHandle_ == HandleId::EdgeRight);
-            drawDotHandle((c1 + c2) * 0.5f, hoveredHandle_ == HandleId::EdgeTop    || activeHandle_ == HandleId::EdgeTop);
-            drawDotHandle((c2 + c3) * 0.5f, hoveredHandle_ == HandleId::EdgeLeft   || activeHandle_ == HandleId::EdgeLeft);
+            edge((c0 + c3) * 0.5f, HandleId::EdgeBottom, true);
+            edge((c0 + c1) * 0.5f, HandleId::EdgeRight,  false);
+            edge((c1 + c2) * 0.5f, HandleId::EdgeTop,    true);
+            edge((c2 + c3) * 0.5f, HandleId::EdgeLeft,   false);
 
-            // Face center handle
+            // The four-way cross every tool uses for "move this".
             const Vec3 mFace = (c0 + c2) * 0.5f;
-            drawDotHandle(mFace, hoveredHandle_ == HandleId::FaceCenter || activeHandle_ == HandleId::FaceCenter);
-
-            // If filleting, draw guide line from reference point to cursor
-            if (isFilleting_) {
-                const Vec3 refPt3D = planeOrigin_ + planeU_ * filletRefUV_.x + planeV_ * filletRefUV_.y;
-                for (int c : activeFilletCorners_) {
-                    const float rad = cornerRadii_[c];
-                    if (rad > 0.1f) {
-                        renderer.addLine(refPt3D, refPt3D + planeU_ * rad, Vec4{1.0f, 0.9f, 0.2f, 0.8f});
-                    }
-                }
+            const bool onFace = state(HandleId::FaceCenter);
+            const overlay::ScreenFrame ff = frameAt(camera, mFace);
+            const Real arm = onFace ? 11.0 : 9.0;
+            const Vec4 fc = onFace ? lit : idle;
+            renderer.addFrontLine(camera, mFace - ff.right * (arm - 3.0),
+                                  mFace + ff.right * (arm - 3.0), fc, 2.6);
+            renderer.addFrontLine(camera, mFace - ff.up * (arm - 3.0),
+                                  mFace + ff.up * (arm - 3.0), fc, 2.6);
+            for (int k = 0; k < 4; ++k) {
+                const Vec3 dir = (k & 1) ? ff.up : ff.right;
+                const Real sgn = (k & 2) ? -1.0 : 1.0;
+                const Vec3 across = (k & 1) ? ff.right : ff.up;
+                const Vec3 tip = mFace + dir * (arm * sgn);
+                renderer.addFrontTriangle(tip, tip - dir * (sgn * 4.5) + across * 3.6,
+                                          tip - dir * (sgn * 4.5) - across * 3.6, fc);
             }
+        }
+
+        // While a corner is being rounded, a ring on the corner that is
+        // listening. Not the arc as well: the profile outline already draws
+        // exactly that curve, and the same line in two colours reads as a bug.
+        if (isFilleting_) {
+            const Vec3 ref = planeOrigin_ + planeU_ * filletRefUV_.x + planeV_ * filletRefUV_.y;
+            overlay::ring(renderer, camera, ref, overlay::frameAt(camera, ref), 8.0,
+                          Vec4{1.0f, 0.82f, 0.35f, 1.0f}, 2.2);
         }
     }
 
     // 3D Extrusion Solid Preview
     if (stage_ == CreateStage::ExtrudeDepth && std::fabs(extrudeDepth_) > 0.05) {
-        const Mesh solid = buildCurrentSolid(extrudeDepth_);
+        // The preview is drawn every frame, so it is built the cheap way even
+        // when the scene is exact: what it shows is the same shape, and the
+        // solid that gets committed is built exactly. If the exact path ever
+        // becomes cheap enough to run per frame, this is the only line that
+        // has to change.
+        const Body solid = buildCurrentSolid(extrudeDepth_, Backend::Mesh);
         if (!solid.empty()) {
-            const Vec4 wireCol = (extrudeDepth_ < 0.0) ? Vec4{1.0f, 0.4f, 0.3f, 0.9f} : toVec4(palette::kBrand, 0.9f);
-            const Vec4 faceTint = (extrudeDepth_ < 0.0) ? kCutCol : kCreateCol;
+            // Red for what takes material away, the brand colour for what adds it.
+            const bool removes = choice_.op == ExtrudeOp::Cut || choice_.op == ExtrudeOp::Intersect;
+            const Vec4 wireCol = removes ? Vec4{1.0f, 0.4f, 0.3f, 0.9f} : toVec4(palette::kBrand, 0.9f);
+            const Vec4 faceTint = removes ? kCutCol : kCreateCol;
 
-            for (Index h = 0; h < solid.halfedgeCount(); ++h) {
-                const Index tw = solid.halfedges[h].twin;
-                if (h < tw || tw == kInvalid) {
-                    const Vec3 pA = solid.verts[solid.fromVertex(h)].position;
-                    const Vec3 pB = solid.verts[solid.halfedges[h].vertex].position;
-                    renderer.addLine(pA, pB, wireCol);
-                }
+            std::vector<EdgeId> edges;
+            solid.allEdges(edges);
+            for (EdgeId e : edges) {
+                Vec3 pA, pB;
+                solid.edgePositions(e, pA, pB);
+                renderer.addLine(pA, pB, wireCol);
             }
 
-            for (Index f = 0; f < solid.faceCount(); ++f) {
-                std::vector<Index> fv;
+            std::vector<FaceId> faces;
+            std::vector<VertexId> fv;
+            solid.allFaces(faces);
+            for (FaceId f : faces) {
                 solid.faceVertices(f, fv);
                 if (fv.size() < 3) continue;
-                const Vec3 v0 = solid.verts[fv[0]].position;
-                for (size_t i = 1; i + 1 < fv.size(); ++i) {
-                    renderer.addTriangle(v0, solid.verts[fv[i]].position, solid.verts[fv[i + 1]].position, faceTint);
-                }
+                const Vec3 v0 = solid.vertexPosition(fv[0]);
+                for (size_t i = 1; i + 1 < fv.size(); ++i)
+                    renderer.addTriangle(v0, solid.vertexPosition(fv[i]),
+                                         solid.vertexPosition(fv[i + 1]), faceTint);
             }
         }
     }
@@ -1167,107 +1698,203 @@ void CreateTool::drawOverlay(const Scene& scene, const Camera& camera, Renderer&
 // ImGui 2D HUD Overlays
 // ---------------------------------------------------------------------------
 
+// One row, whatever the stage is asking for.
+//
+// A dimension the keyboard is holding is shown in brackets and in the accent
+// colour; one the mouse still drives is plain. Without that the two are
+// indistinguishable, and a user who typed a width has no way of knowing why it
+// stopped following the pointer.
+void CreateTool::drawDimensionFields() {
+    const int n = fieldCount();
+    for (int f = 0; f < n; ++f) {
+        if (f) ImGui::SameLine(0.0f, 16.0f);
+        ImGui::TextDisabled("%s", fieldName(f));
+        ImGui::SameLine(0.0f, 6.0f);
+
+        if (f == typedField_ && typing()) {
+            ImGui::TextColored(kAccentIm, "%s_", typedValue_.c_str());
+        } else if (fieldFixed_[f]) {
+            ImGui::TextColored(kAccentIm, "[%.2f]", fieldDisplay(f));
+        } else {
+            ImGui::Text("%.2f", fieldDisplay(f));
+        }
+    }
+}
+
 bool CreateTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& outFinished) {
     if (stage_ == CreateStage::None) return false;
     outFinished = false;
 
-    ImGuiIO& io = ImGui::GetIO();
-    const ImVec2 displaySize = io.DisplaySize;
+    // The panel says what is being done now, which during a round is not the
+    // same as what the command is called.
+    const bool rounding = stage_ == CreateStage::AdjustProfile && isFilleting_;
+    const Glyph icon = rounding                           ? Glyph::Fillet
+                     : kind_ == PrimitiveKind::Cylinder   ? Glyph::Cylinder
+                     : kind_ == PrimitiveKind::Sphere     ? Glyph::Sphere
+                     : kind_ == PrimitiveKind::Cone       ? Glyph::Cone
+                     : kind_ == PrimitiveKind::Torus      ? Glyph::Torus
+                                                          : Glyph::Box;
+    char title[64];
+    if (rounding)
+        std::snprintf(title, sizeof title, "Round %s",
+                      activeFilletCorners_.size() > 1 ? "Corners" : "Corner");
+    else
+        std::snprintf(title, sizeof title, "Create %s", primitiveName(kind_));
 
-    // Top action banner
-    ImGui::SetNextWindowPos(ImVec2(displaySize.x * 0.5f, 50.0f), ImGuiCond_Always, ImVec2(0.5f, 0.0f));
-    ImGui::SetNextWindowBgAlpha(0.85f);
-    ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
-                            ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
-                            ImGuiWindowFlags_NoNav;
+    if (!ui::beginCommand("##create", title, icon)) return true;
 
-    if (ImGui::Begin("##CreateToolHud", nullptr, flags)) {
-        if (stage_ == CreateStage::SelectPlane) {
-            ImGui::TextColored(kAccentIm, "Select Plane for %s", primitiveName(kind_));
-            ImGui::SameLine();
-            ImGui::TextDisabled("| Click origin tile or object face");
-            ImGui::Spacing();
-            if (ImGui::Button("Top (XY / 7)"))   choosePlane(PlaneChoice::XY, camera, scene);
-            ImGui::SameLine();
-            if (ImGui::Button("Front (XZ / 1)")) choosePlane(PlaneChoice::XZ, camera, scene);
-            ImGui::SameLine();
-            if (ImGui::Button("Right (YZ / 3)")) choosePlane(PlaneChoice::YZ, camera, scene);
-            ImGui::SameLine();
-            if (ImGui::Button("Cancel (Esc)")) cancel(camera);
-        } else if (stage_ == CreateStage::DrawProfile_Pt1) {
-            ImGui::TextColored(kAccentIm, "Step 1: Click to set %s",
-                              kind_ == PrimitiveKind::Cylinder ? "Center Point" : "First Corner");
-            ImGui::SameLine();
-            if (ImGui::Button("Cancel (Esc)")) cancel(camera);
-        } else if (stage_ == CreateStage::DrawProfile_Pt2) {
-            if (kind_ == PrimitiveKind::Cylinder) {
-                ImGui::TextColored(kAccentIm, "Radius: %.2f mm", currentRadius_);
-            } else {
-                ImGui::TextColored(kAccentIm, "Width: %.2f mm  |  Depth: %.2f mm", currentWidth_, currentDepth_);
-            }
-            ImGui::SameLine();
-            ImGui::TextDisabled("(Click to set / E to adjust)");
-            ImGui::SameLine();
-            if (ImGui::Button("Cancel (Esc)")) cancel(camera);
-        } else if (stage_ == CreateStage::AdjustProfile) {
-            ImGui::TextColored(kAccentIm, "Adjust Profile");
-            ImGui::SameLine();
-            ImGui::TextDisabled("| Drag edge to resize, drag corner for fillet (F)");
-            ImGui::Separator();
+    // How far a bar reaches. What is being drawn is being drawn in this view,
+    // so the view's own height is the natural extent for a side or a depth:
+    // it does not move while the bar is pulled, and it grows when the user
+    // zooms out to draw something bigger. A corner round is bounded by the
+    // profile it sits in, the same bound setField applies.
+    const double extent = niceStepAbove(static_cast<double>(camera.orthoHeight()) * 0.5);
+    const double fieldMax = (stage_ == CreateStage::AdjustProfile && isFilleting_)
+                                ? std::min(currentWidth_, currentDepth_) * 0.499
+                                : extent;
 
-            if (kind_ == PrimitiveKind::Cylinder) {
-                ImGui::SetNextItemWidth(120.0f);
-                if (ImGui::DragScalar("Radius", ImGuiDataType_Double, &currentRadius_, 0.1f, nullptr, nullptr, "%.2f mm")) {
-                    pt2_ = pt1_ + Vec2{currentRadius_, 0};
-                }
-            } else {
-                ImGui::SetNextItemWidth(100.0f);
-                if (ImGui::DragScalar("Width", ImGuiDataType_Double, &currentWidth_, 0.1f, nullptr, nullptr, "%.2f mm")) {
-                    pt2_.x = pt1_.x + currentWidth_;
-                }
-                ImGui::SameLine();
-                ImGui::SetNextItemWidth(100.0f);
-                if (ImGui::DragScalar("Depth", ImGuiDataType_Double, &currentDepth_, 0.1f, nullptr, nullptr, "%.2f mm")) {
-                    pt2_.y = pt1_.y + currentDepth_;
-                }
-                ImGui::SameLine();
-                ImGui::SetNextItemWidth(100.0f);
-                Real avgFillet = uniformCornerRadius();
-                if (ImGui::DragScalar("All Fillets (F)", ImGuiDataType_Double, &avgFillet, 0.1f, nullptr, nullptr, "%.2f mm")) {
-                    setCornerRadius(avgFillet);
-                }
-            }
-
-            ImGui::Spacing();
-            ImGui::PushStyleColor(ImGuiCol_Button, kAccentIm);
-            if (ImGui::Button("  OK / Extrude (E)  ")) {
-                stage_ = CreateStage::ExtrudeDepth;
-                extrudeBaseDepth_ = 20.0;
-                extrudeDepth_ = 20.0;
-            }
-            ImGui::PopStyleColor();
-            ImGui::SameLine();
-            if (ImGui::Button("Cancel (Esc)")) cancel(camera);
-        } else if (stage_ == CreateStage::ExtrudeDepth) {
-            if (extrudeDepth_ >= 0.0) {
-                ImGui::TextColored(kAccentIm, "Extrude: +%.2f mm (Solid / Join)", extrudeDepth_);
-            } else {
-                ImGui::TextColored(ImVec4(0.95f, 0.35f, 0.25f, 1.0f), "Extrude: %.2f mm (Boolean Cut)", extrudeDepth_);
-            }
-            ImGui::SameLine();
-            ImGui::TextDisabled("| Move mouse, click/E to finalize");
-            ImGui::Spacing();
-            ImGui::PushStyleColor(ImGuiCol_Button, kAccentIm);
-            if (ImGui::Button("  Finish (Click / E)  ")) {
-                finishCreation(scene, camera, undo);
-                outFinished = true;
-            }
-            ImGui::PopStyleColor();
-            ImGui::SameLine();
-            if (ImGui::Button("Cancel (Esc)")) cancel(camera);
+    // A number pulled on the panel is a number typed: the bar fixes the field
+    // the way the keyboard would, and the pointer lets go of it.
+    auto pulled = [&](int f, const ui::NumberEdit& e) {
+        if (e.dragged) {
+            char b[48];
+            std::snprintf(b, sizeof b, "%.6g", e.value);
+            typedField_ = f;
+            typedValue_ = b;
+            syncTypedField();
+            typedValue_.clear();
+        } else if (e.clicked) {
+            typedField_ = f;
         }
+    };
+
+    int footer = 0;
+    switch (stage_) {
+    // -----------------------------------------------------------------------
+    case CreateStage::SelectPlane: {
+        ui::commandRow("Plane");
+        if (ImGui::Button("Top")) choosePlane(PlaneChoice::XY, camera, scene);
+        ImGui::SameLine();
+        if (ImGui::Button("Front")) choosePlane(PlaneChoice::XZ, camera, scene);
+        ImGui::SameLine();
+        if (ImGui::Button("Right")) choosePlane(PlaneChoice::YZ, camera, scene);
+        ui::commandHint("Or click a face of an object to draw on it.  7 / 1 / 3 pick a plane.");
+        footer = ui::commandFooter(nullptr);
+        break;
     }
-    ImGui::End();
+
+    // -----------------------------------------------------------------------
+    case CreateStage::DrawProfile_Pt1: {
+        char at[64];
+        std::snprintf(at, sizeof at, "%.2f, %.2f", pt1_.x, pt1_.y);
+        ui::commandValue(kind_ == PrimitiveKind::Cylinder ? "Centre" : "Corner", at);
+        ui::commandHint("Click to place it.  Ctrl for free placement.");
+        footer = ui::commandFooter(nullptr);
+        break;
+    }
+
+    // -----------------------------------------------------------------------
+    case CreateStage::DrawProfile_Pt2: {
+        for (int f = 0; f < fieldCount(); ++f)
+            pulled(f, ui::commandNumber(fieldName(f), fieldDisplay(f), "mm", fieldFixed_[f],
+                                        f == typedField_ && typing(), typedValue_.c_str(),
+                                        0.0, fieldMax));
+        ui::commandHint(fieldCount() > 1
+            ? "Type a number to fix a side; the other still follows the mouse.  Tab next, Enter confirm."
+            : "Type a number to fix the radius.  Enter confirms.");
+        footer = ui::commandFooter(nullptr);
+        break;
+    }
+
+    // -----------------------------------------------------------------------
+    case CreateStage::AdjustProfile: {
+        for (int f = 0; f < fieldCount(); ++f)
+            pulled(f, ui::commandNumber(fieldName(f), fieldDisplay(f), "mm", fieldFixed_[f],
+                                        f == typedField_ && typing(), typedValue_.c_str(),
+                                        0.0, fieldMax));
+
+        if (kind_ != PrimitiveKind::Cylinder && !isFilleting_) {
+            ui::commandRow("Corners");
+            char r[32];
+            std::snprintf(r, sizeof r, "%.2f mm", uniformCornerRadius());
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted(r);
+            ImGui::SameLine();
+            if (ui::pillButton("Round all", false)) {
+                isFilleting_ = true;
+                isDragging_ = false;
+                activeHandle_ = HandleId::FaceCenter;
+                filletRefUV_ = (pt1_ + pt2_) * 0.5;
+                activeFilletCorners_ = {0, 1, 2, 3};
+                for (int i = 0; i < 4; ++i) dragStartFillets_[i] = cornerRadii_[i];
+                clearFields();
+            }
+        }
+
+        ui::commandHint(isFilleting_
+            ? "Move away from the corner to open it out.  Click or Enter confirms, Esc puts it back."
+            : "Drag a handle to move it.  Hover one and press F to round that corner.");
+        footer = ui::commandFooter(isFilleting_ ? "Done" : "Extrude");
+        break;
+    }
+
+    // -----------------------------------------------------------------------
+    case CreateStage::ExtrudeDepth:
+    case CreateStage::Applied: {
+        const bool applied = stage_ == CreateStage::Applied;
+        {
+            // Either way. As far as the view is tall.
+            const double span = std::max(extent, std::fabs(extrudeDepth_));
+            const ui::NumberEdit e = ui::commandNumber("Depth", extrudeDepth_, "mm", fieldFixed_[0],
+                                                       !applied && typing(), typedValue_.c_str(),
+                                                       -span, span, true);
+            if (applied) {
+                // Nothing follows the pointer now: the bar sets the depth
+                // itself, and the extrusion is made again at it.
+                if (e.dragged && std::fabs(e.value) > 1e-4 && e.value != extrudeDepth_) {
+                    extrudeDepth_ = e.value;
+                    adjusted_ = true;
+                }
+            } else {
+                pulled(0, e);
+            }
+        }
+
+        if (drawExtrudeChoice(choice_)) {
+            refreshReach(scene);
+            if (applied) adjusted_ = true;
+        }
+        if (applied) refreshReach(scene);
+        const ObjectId toggled = drawReachedBodies(scene, reach_, choice_.op, faceObject_);
+        if (toggled != kNoObject) {
+            reach_.toggle(toggled);
+            if (applied) adjusted_ = true;
+        }
+
+        if (applied) ui::commandApplied("Extrude");
+        ui::commandHint(applied ? "Change the depth, the operation or the bodies, and it is made again."
+                                : "Move to set the depth, drag the bar, or type one.  Click a body above to leave it out.");
+        footer = applied ? ui::commandFooter("Done", true, nullptr) : ui::commandFooter("Finish");
+        break;
+    }
+
+    case CreateStage::None:
+        break;
+    }
+
+    if (footer > 0 && stage_ == CreateStage::Applied) {
+        stage_ = CreateStage::None;
+        outFinished = true;
+    } else if (footer > 0) {
+        // The same path the keys take, so there is one answer to what a step
+        // means rather than two that can drift apart.
+        handleKey(13, false, false, camera, scene, undo);
+        if (!active()) outFinished = true;
+    } else if (footer < 0) {
+        cancel(camera);
+    }
+
+    ui::endCommand();
     return true;
 }
 

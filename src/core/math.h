@@ -40,15 +40,50 @@ inline Real clampf(Real v, Real lo, Real hi) { return v < lo ? lo : (v > hi ? hi
 inline Real lerpf(Real a, Real b, Real t) { return a + (b - a) * t; }
 inline Real sign(Real v) { return v < 0.0f ? -1.0f : (v > 0.0f ? 1.0f : 0.0f); }
 
-// Rounds a rough magnitude to the nearest "nice" value: 1, 2 or 5 times a
-// power of ten. Used to turn a desired snap distance in millimetres into one a
-// person would actually choose -- 0.5, 1, 2, 5, 10 -- rather than 0.734.
+// Rounds a rough magnitude to the nearest "nice" value: 1, 2.5 or 5 times a
+// power of ten. Turns a desired snap distance in millimetres into one a person
+// would actually choose -- 0.1, 0.25, 0.5, 1, 2.5, 5, 10 -- rather than 0.734.
+//
+// A quarter rather than a fifth. Halving is how people divide a measurement
+// when they are looking at it: half of ten is five and half of five is 2.5, so
+// the ladder lands where the hand already wants to stop. A 2 in the middle
+// gives 2 and 5, which are not related to each other by anything.
+// The largest nice value that does not exceed `cap`. niceStep rounds to the
+// nearest, which can round *up* past a limit it was meant to respect -- ask it
+// for 1.75 and it gives 2.5.
+inline Real niceStepBelow(Real cap) {
+    if (!(cap > 0.0f)) return 0.0f;
+    Real e = std::floor(std::log10(cap));
+    for (int i = 0; i < 4; ++i) {
+        const Real base = std::pow(10.0f, e);
+        for (const Real mult : {5.0f, 2.5f, 1.0f})
+            if (base * mult <= cap * 1.000001f) return base * mult;
+        e -= 1.0f;
+    }
+    return cap;
+}
+
+// The smallest nice value that is at least `floor`. The mirror of
+// niceStepBelow, for when a step has a minimum it must clear -- a tick spacing
+// the eye can separate, say -- and rounding to the nearest would land under it.
+inline Real niceStepAbove(Real floorValue) {
+    if (!(floorValue > 0.0f)) return 0.0f;
+    Real e = std::floor(std::log10(floorValue));
+    for (int i = 0; i < 4; ++i) {
+        const Real base = std::pow(10.0f, e);
+        for (const Real mult : {1.0f, 2.5f, 5.0f})
+            if (base * mult >= floorValue * 0.999999f) return base * mult;
+        e += 1.0f;
+    }
+    return floorValue;
+}
+
 inline Real niceStep(Real approx) {
     if (!(approx > 0.0f)) return 0.0f;
     const Real e = std::floor(std::log10(approx));
     const Real base = std::pow(10.0f, e);
     const Real m = approx / base;             // in [1, 10)
-    const Real mult = m < 1.5f ? 1.0f : (m < 3.5f ? 2.0f : (m < 7.5f ? 5.0f : 10.0f));
+    const Real mult = m < 1.75f ? 1.0f : (m < 3.75f ? 2.5f : (m < 7.5f ? 5.0f : 10.0f));
     return base * mult;
 }
 
@@ -314,6 +349,37 @@ struct Quat {
         Real cz = std::cos(e.z*0.5f), sz = std::sin(e.z*0.5f);
         return {sx*cy*cz - cx*sy*sz, cx*sy*cz + sx*cy*sz,
                 cx*cy*sz - sx*sy*cz, cx*cy*cz + sx*sy*sz};
+    }
+
+    // The rotation that takes the world axes onto the given frame, which must
+    // be orthonormal and right-handed. Used where an object is built on a plane
+    // rather than on the ground: the plane's own axes are the frame, and the
+    // primitive stays a primitive instead of being baked into a mesh because
+    // nobody could say which way it was pointing.
+    static Quat fromFrame(Vec3 x, Vec3 y, Vec3 z) {
+        // Shepperd: pick the branch whose divisor is largest, so the square
+        // root never runs into a near-zero.
+        Quat q;
+        const Real t = x.x + y.y + z.z;
+        if (t > 0) {
+            const Real s = std::sqrt(t + 1.0f) * 2.0f;
+            q = {(y.z - z.y) / s, (z.x - x.z) / s, (x.y - y.x) / s, 0.25f * s};
+        } else if (x.x > y.y && x.x > z.z) {
+            const Real s = std::sqrt(1.0f + x.x - y.y - z.z) * 2.0f;
+            q = {0.25f * s, (y.x + x.y) / s, (z.x + x.z) / s, (y.z - z.y) / s};
+        } else if (y.y > z.z) {
+            const Real s = std::sqrt(1.0f + y.y - x.x - z.z) * 2.0f;
+            q = {(y.x + x.y) / s, 0.25f * s, (z.y + y.z) / s, (z.x - x.z) / s};
+        } else {
+            const Real s = std::sqrt(1.0f + z.z - x.x - y.y) * 2.0f;
+            q = {(z.x + x.z) / s, (z.y + y.z) / s, 0.25f * s, (x.y - y.x) / s};
+        }
+        // Normalised here rather than through the free function, which is
+        // declared further down this header and so is not visible from inside
+        // the class body.
+        const Real l = std::sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
+        if (l < kEps) return Quat();
+        return {q.x / l, q.y / l, q.z / l, q.w / l};
     }
 
     static Quat fromTo(Vec3 from, Vec3 to) {

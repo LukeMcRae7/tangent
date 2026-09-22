@@ -1,0 +1,221 @@
+// Tangent - the B-rep backend when the project is built without OpenCASCADE.
+//
+// Every answer here is the empty one. Nothing constructs a BrepShape in this
+// build, so none of these can actually be reached through a body; they exist so
+// that body.cpp compiles and links identically either way, and so that Body has
+// one layout across the whole program rather than one per translation unit.
+#include "geom/brep.h"
+
+namespace tg {
+
+// Never defined in this build: no one can make one, so no one can ask about one.
+struct BrepShape {};
+
+namespace brep {
+
+bool available() { return false; }
+
+BrepRef clone(const BrepShape&) { return {}; }
+BrepRef detach(const BrepShape&) { return {}; }
+
+BrepRef primitive(const PrimitiveSpec&) { return {}; }
+
+BrepRef booleanOp(const BrepShape&, const BrepShape&, BooleanOp, ElementId, std::string* reason) {
+    if (reason) *reason = "built without OpenCASCADE";
+    return {};
+}
+BrepRef filletEdges(const BrepShape&, const std::vector<EdgeId>&, const std::vector<Real>&,
+                    ElementId, std::string* reason, const std::vector<Real>*, bool) {
+    if (reason) *reason = "built without OpenCASCADE";
+    return {};
+}
+BrepRef extrudeFaces(const BrepRef&, const std::vector<FaceId>&, Real, ElementId,
+                     std::vector<ElementId>*, std::string* reason, bool, Vec3, bool) {
+    if (reason) *reason = "built without OpenCASCADE";
+    return {};
+}
+
+BrepRef sweptFaces(const BrepRef&, const std::vector<FaceId>&, Real, Vec3, ElementId,
+                   std::string* reason) {
+    if (reason) *reason = "built without OpenCASCADE";
+    return {};
+}
+
+bool touches(const BrepShape&, const BrepShape&, Real) { return false;
+}
+BrepRef rotateFaces(const BrepRef&, const std::vector<FaceId>&, Real, Vec3, Vec3,
+                    ElementId, std::string* reason) {
+    if (reason) *reason = "rotating a face needs the exact kernel";
+    return {};
+}
+
+BrepRef scaleFaces(const BrepRef&, const std::vector<FaceId>&, Real, ElementId,
+                   std::string* reason) {
+    if (reason) *reason = "scaling a face needs the exact kernel";
+    return {};
+}
+
+BrepRef mergeDivisions(const BrepRef&, ElementId, std::string* reason) {
+    if (reason) *reason = "merging faces needs the exact kernel";
+    return {};
+}
+
+BrepRef divideBody(const BrepRef&, Vec3, Vec3, ElementId, std::string* reason) {
+    if (reason) *reason = "dividing a face needs the exact kernel";
+    return {};
+}
+
+BrepRef insetFaces(const BrepRef&, const std::vector<FaceId>&, Real, ElementId,
+                   std::vector<ElementId>*, std::string* reason) {
+    if (reason) *reason = "built without OpenCASCADE";
+    return {};
+}
+BrepRef shell(const BrepRef&, const std::vector<FaceId>&, Real, ElementId,
+              std::string* reason) {
+    if (reason) *reason = "built without OpenCASCADE";
+    return {};
+}
+BrepRef sketchSolid(const Sketch&, const SketchProfile&, Real, Real, ElementId,
+                    std::string* reason) {
+    if (reason) *reason = "built without OpenCASCADE";
+    return {};
+}
+BrepRef sketchSolids(const Sketch&, const std::vector<SketchProfile>&, const std::vector<SketchId>&,
+                     Real, Real, ElementId, std::string* reason) {
+    if (reason) *reason = "built without OpenCASCADE";
+    return {};
+}
+bool pinAcross(BrepRef&, BrepRef&, Vec3, Vec3, const SplitPins&, ElementId,
+               std::string* reason) {
+    if (reason) *reason = "built without OpenCASCADE";
+    return false;
+}
+BrepRef threadFace(const BrepRef&, FaceId, Real, Real, bool, ElementId, std::string* reason) {
+    if (reason) *reason = "built without OpenCASCADE";
+    return {};
+}
+BrepRef offsetBody(const BrepRef&, Real, ElementId, std::string* reason) {
+    if (reason) *reason = "built without OpenCASCADE";
+    return {};
+}
+BrepRef removeFaces(const BrepRef&, const std::vector<FaceId>&, ElementId, std::string* reason) {
+    if (reason) *reason = "built without OpenCASCADE";
+    return {};
+}
+BrepRef draftFaces(const BrepRef&, const std::vector<FaceId>&, Real, Vec3, Vec3, ElementId,
+                   std::string* reason) {
+    if (reason) *reason = "built without OpenCASCADE";
+    return {};
+}
+BrepRef drillHole(const BrepRef&, Vec3, Vec3, const HoleCut&, ElementId, std::string* reason) {
+    if (reason) *reason = "built without OpenCASCADE";
+    return {};
+}
+BrepRef revolveSketch(const Sketch&, const std::vector<SketchProfile>&,
+                      const std::vector<SketchId>&, Vec2, Vec2, Real, ElementId,
+                      std::string* reason) {
+    if (reason) *reason = "built without OpenCASCADE";
+    return {};
+}
+BrepRef prism(const std::vector<Vec3>&, const std::vector<Real>&, Vec3, Real, Real,
+              ElementId, std::string* reason) {
+    if (reason) *reason = "built without OpenCASCADE";
+    return {};
+}
+bool encode(const BrepShape&, std::string&, std::vector<ElementId>&) { return false; }
+BrepRef decode(const std::string&, const std::vector<ElementId>&) { return {}; }
+void findFaces(const BrepShape&, ElementId, std::vector<FaceId>& out) { out.clear(); }
+
+bool empty(const BrepShape&) { return true; }
+int  faceCount(const BrepShape&) { return 0; }
+int  edgeCount(const BrepShape&) { return 0; }
+int  vertexCount(const BrepShape&) { return 0; }
+
+bool hasFace(const BrepShape&, FaceId) { return false; }
+bool hasEdge(const BrepShape&, EdgeId) { return false; }
+bool hasVertex(const BrepShape&, VertexId) { return false; }
+
+void allFaces(const BrepShape&, std::vector<FaceId>& out) { out.clear(); }
+void allEdges(const BrepShape&, std::vector<EdgeId>& out) { out.clear(); }
+void allVertices(const BrepShape&, std::vector<VertexId>& out) { out.clear(); }
+
+void faceEdges(const BrepShape&, FaceId, std::vector<EdgeId>& out) { out.clear(); }
+void faceVertices(const BrepShape&, FaceId, std::vector<VertexId>& out) { out.clear(); }
+int  faceDegree(const BrepShape&, FaceId) { return 0; }
+
+void edgeEnds(const BrepShape&, EdgeId, VertexId& a, VertexId& b) { a = kInvalid; b = kInvalid; }
+void edgeFaces(const BrepShape&, EdgeId, FaceId& a, FaceId& b) { a = kInvalid; b = kInvalid; }
+void vertexEdges(const BrepShape&, VertexId, std::vector<EdgeId>& out) { out.clear(); }
+
+Vec3 faceNormal(const BrepShape&, FaceId) { return {0, 0, 0}; }
+Vec3 faceCentroid(const BrepShape&, FaceId) { return {0, 0, 0}; }
+Vec3 facePoint(const BrepShape&, FaceId) { return {0, 0, 0}; }
+Real faceArea(const BrepShape&, FaceId) { return 0.0; }
+AABB faceBounds(const BrepShape&, FaceId) { return {}; }
+Vec3 vertexPosition(const BrepShape&, VertexId) { return {0, 0, 0}; }
+AABB bounds(const BrepShape&) { return {}; }
+void edgePositions(const BrepShape&, EdgeId, Vec3& a, Vec3& b) { a = {0, 0, 0}; b = {0, 0, 0}; }
+Vec3 edgeDirection(const BrepShape&, EdgeId) { return {0, 0, 0}; }
+
+SurfaceKind faceKind(const BrepShape&, FaceId) { return SurfaceKind::Plane; }
+CurveKind   edgeKind(const BrepShape&, EdgeId) { return CurveKind::Line; }
+bool edgeCircle(const BrepShape&, EdgeId, Vec3&, Vec3&, Real&) { return false; }
+bool faceCylinder(const BrepShape&, FaceId, Vec3&, Vec3&, Real&) { return false; }
+Real edgeLength(const BrepShape&, EdgeId) { return 0.0; }
+Vec3 edgeMidpoint(const BrepShape&, EdgeId) { return {0, 0, 0}; }
+void edgePolyline(const BrepShape&, EdgeId, Real, std::vector<Vec3>& out) { out.clear(); }
+
+ElementId faceName(const BrepShape&, FaceId) { return kNoId; }
+ElementId edgeName(const BrepShape&, EdgeId) { return kNoId; }
+ElementId vertexName(const BrepShape&, VertexId) { return kNoId; }
+
+FaceId   findFace(const BrepShape&, ElementId) { return kInvalid; }
+EdgeId   findEdge(const BrepShape&, ElementId) { return kInvalid; }
+VertexId findVertex(const BrepShape&, ElementId) { return kInvalid; }
+
+void tessellate(const BrepShape&, RenderMesh& out, TessellationQuality) { out.clear(); }
+bool closedShell(const BrepShape&) { return false; }
+
+bool validate(const BrepShape&, std::string* err) {
+    if (err) *err = "built without OpenCASCADE";
+    return false;
+}
+MeshHealth health(const BrepShape&, bool) { return {}; }
+
+BrepRef transformed(const BrepShape&, const Mat4&) { return {}; }
+BrepRef mirrored(const BrepShape&, Vec3, Vec3) { return {}; }
+size_t separateSolids(const BrepShape&, std::vector<BrepRef>& out) { out.clear(); return 0; }
+bool splitByPlane(const BrepShape&, Vec3, Vec3, ElementId, BrepRef&, BrepRef&, std::string* reason) {
+    if (reason) *reason = "splitting an exact body needs the exact kernel, which this build does not have";
+    return false;
+}
+
+bool writeStep(const std::vector<const BrepShape*>&, const std::string&,
+               std::string* reason) {
+    if (reason) *reason = "STEP needs the exact kernel, which this build does not have";
+    return false;
+}
+
+bool readStep(const std::string&, ElementId, std::vector<BrepRef>&, std::string* reason) {
+    if (reason) *reason = "STEP needs the exact kernel, which this build does not have";
+    return false;
+}
+
+BrepRef solidFromPlanarRegions(const PlanarRegions&, ElementId, std::string* reason) {
+    if (reason)
+        *reason = "converting a mesh to a solid needs the exact kernel, "
+                  "which this build does not have";
+    return {};
+}
+
+BrepRef solidFromTriangles(const std::vector<Vec3>&, const std::vector<uint32_t>&,
+                           const std::vector<uint32_t>&, const std::vector<uint32_t>&,
+                           ElementId, std::string* reason) {
+    if (reason)
+        *reason = "converting a mesh to a solid needs the exact kernel, "
+                  "which this build does not have";
+    return {};
+}
+
+} // namespace brep
+} // namespace tg

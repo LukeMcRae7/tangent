@@ -57,7 +57,16 @@ public:
     void update(Scene& scene, const Camera& camera, Vec2 mousePx, bool snap);
 
     // Commits and yields the undo command, or nullptr if nothing moved.
+    //
+    // Objects are moved, turned and scaled by steps in their history: the
+    // gesture shows itself by setting their transforms, and confirming it
+    // records what that came to as a Move, Rotate or Scale, folded into the
+    // one before when that was the same. A vertex drag is still a vertex drag.
     std::unique_ptr<Command> confirm(Scene& scene);
+
+    // Why an object did not take the gesture, or empty. A sketch has no body
+    // to scale, for one. Reading it clears it.
+    std::string takeError() { std::string e; e.swap(error_); return e; }
     void cancel(Scene& scene);
 
     // One-line readout for the status bar, e.g. "Move X  12.50 mm".
@@ -73,11 +82,14 @@ private:
     struct Entry {
         ObjectId  id;
         Transform before;
+        // The pivot in the object's own space. A scale is a change of shape
+        // about this point, so it is where the object's geometry stays put.
+        Vec3      pivotLocal{};
     };
 
     // Object-space vertex positions captured at the start of the gesture.
     struct VertexEntry {
-        Index vertex;
+        VertexId vertex;
         Vec3  before;
     };
 
@@ -109,6 +121,9 @@ private:
     float snapStep_ = 0.0f;
     float amount_ = 0.0f;    // last applied scalar, for the readout
     Vec3  delta_{};          // last applied translation, for the readout
+    Quat  rot_{};            // last applied turn
+    Vec3  scl_{1, 1, 1};     // last applied stretch
+    std::string error_;
 };
 
 const char* transformModeName(TransformMode m);

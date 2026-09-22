@@ -1,5 +1,6 @@
 #include "mesh/halfedge.h"
 
+#include <algorithm>
 #include <cassert>
 #include <cstdio>
 #include <unordered_set>
@@ -219,19 +220,23 @@ Vec3 Mesh::faceCentroid(Index f) const {
 }
 
 Real Mesh::faceArea(Index f) const {
-    // Fan the polygon from its first corner; valid for planar polygons and a
-    // good approximation otherwise.
+    // Sum of p_i x p_i+1 around the loop, which is twice the area times the
+    // normal for any planar polygon, and independent of where the origin is.
+    //
+    // Not a fan from the first corner summing unsigned triangle areas, which is
+    // what this was: on a face the fan origin cannot see all of, the triangles
+    // overlap and their areas add instead of cancelling. Convex faces were
+    // right and every primitive is convex, so it went unnoticed until faces
+    // with a hole bridged into them turned up -- such a face wraps around the
+    // hole and is never convex. A bored plate's top read 25% over.
+    Vec3 acc{};
     const Index start = faces[f].halfedge;
-    const Vec3& a = verts[fromVertex(start)].position;
-    Real area = 0.0f;
-    Index he = halfedges[start].next;
-    while (halfedges[he].next != start) {
-        const Vec3& b = verts[fromVertex(he)].position;
-        const Vec3& c = verts[halfedges[he].vertex].position;
-        area += length(cross(b - a, c - a)) * 0.5f;
+    Index he = start;
+    do {
+        acc += cross(verts[fromVertex(he)].position, verts[halfedges[he].vertex].position);
         he = halfedges[he].next;
-    }
-    return area;
+    } while (he != start);
+    return length(acc) * 0.5;
 }
 
 AABB Mesh::bounds() const {
@@ -379,13 +384,78 @@ void Mesh::buildRenderMesh(RenderMesh& out, Real creaseAngleDeg) const {
     }
 
     // Wireframe follows polygon edges only, so n-gons do not show their
-    // internal triangulation.
+    // internal triangulation -- and skips the cuts that only exist because a
+    // face cannot hold a hole, which are not on the model either.
+    //
+    // Face normals are already to hand here, so the coplanarity half of the test
+    // is a dot product; the rest only runs for a pair that passes it, which is
+    // a small minority of edges.
+    const Real flatCos = std::cos(radians(0.5));
     for (Index he = 0; he < static_cast<Index>(halfedges.size()); ++he) {
-        if (halfedges[he].face == kInvalid) continue;            // boundary loop
+        const Index f1 = halfedges[he].face;
+        if (f1 == kInvalid) continue;                             // boundary loop
         const Index tw = halfedges[he].twin;
-        if (halfedges[tw].face != kInvalid && tw < he) continue;  // emit once
+        const Index f2 = halfedges[tw].face;
+        if (f2 != kInvalid && tw < he) continue;                  // emit once
+
+        if (f2 != kInvalid && f1 != f2 &&
+            dot(faceNormals[f1], faceNormals[f2]) >= flatCos) {
+            int shared = 0;
+            const Index start = faces[f1].halfedge;
+            Index h = start;
+            do {
+                if (halfedges[halfedges[h].twin].face == f2) ++shared;
+                h = halfedges[h].next;
+            } while (h != start && shared < 2);
+            if (shared > 1) continue;
+        }
+
         out.edgeLines.push_back(cornerOf[he]);
         out.edgeLines.push_back(cornerOf[halfedges[he].next]);
+    }
+}
+
+// ---------------------------------------------------------------------------
+bool Mesh::isBridgeEdge(Index he, Real toleranceDegrees) const {
+    if (he < 0 || he >= halfedgeCount()) return false;
+    const Index tw = halfedges[he].twin;
+    if (tw == kInvalid) return false;
+    const Index f1 = halfedges[he].face, f2 = halfedges[tw].face;
+    if (f1 == kInvalid || f2 == kInvalid || f1 == f2) return false;
+
+    if (dot(faceNormal(f1), faceNormal(f2)) < std::cos(radians(toleranceDegrees)))
+        return false;
+
+    // Walk the shorter of the two and count how often it meets the other.
+    int shared = 0;
+    const Index start = faces[f1].halfedge;
+    Index h = start;
+    do {
+        if (halfedges[halfedges[h].twin].face == f2 && ++shared > 1) return true;
+        h = halfedges[h].next;
+    } while (h != start);
+    return false;
+}
+
+void Mesh::coplanarFaceGroup(Index f, std::vector<Index>& out, Real toleranceDegrees) const {
+    out.clear();
+    if (f < 0 || f >= faceCount()) return;
+
+    out.push_back(f);
+    for (size_t i = 0; i < out.size(); ++i) {
+        const Index cur = out[i];
+        const Index start = faces[cur].halfedge;
+        if (start == kInvalid) continue;
+        Index h = start;
+        do {
+            if (isBridgeEdge(h, toleranceDegrees)) {
+                const Index nf = halfedges[halfedges[h].twin].face;
+                if (nf != kInvalid &&
+                    std::find(out.begin(), out.end(), nf) == out.end())
+                    out.push_back(nf);
+            }
+            h = halfedges[h].next;
+        } while (h != start);
     }
 }
 
@@ -487,6 +557,84 @@ bool Mesh::validate(std::string* err) const {
             return fail("non-manifold vertex " + std::to_string(v));
     }
     return true;
+}
+
+// ---------------------------------------------------------------------------
+size_t splitShells(const Mesh& mesh, std::vector<Mesh>& out) {
+    out.clear();
+    if (mesh.empty()) return 0;
+
+    // Flood fill across shared edges to label each face with its piece.
+    const size_t nf = static_cast<size_t>(mesh.faceCount());
+    std::vector<int> shell(nf, -1);
+    std::vector<Index> stack;
+    int count = 0;
+    for (Index f = 0; f < mesh.faceCount(); ++f) {
+        if (shell[f] >= 0) continue;
+        const int id = count++;
+        shell[f] = id;
+        stack.push_back(f);
+        while (!stack.empty()) {
+            const Index cur = stack.back();
+            stack.pop_back();
+            const Index start = mesh.faces[cur].halfedge;
+            Index he = start;
+            do {
+                const Index across = mesh.halfedges[mesh.halfedges[he].twin].face;
+                if (across != kInvalid && shell[across] < 0) {
+                    shell[across] = id;
+                    stack.push_back(across);
+                }
+                he = mesh.halfedges[he].next;
+            } while (he != start);
+        }
+    }
+    if (count == 1) {
+        out.push_back(mesh);
+        return 1;
+    }
+
+    // Each piece rebuilt from its own faces, vertices renumbered densely and
+    // every name carried across, so a reference into the whole still finds its
+    // element in whichever piece it went to.
+    std::vector<std::vector<Index>> facesOf(static_cast<size_t>(count));
+    for (Index f = 0; f < mesh.faceCount(); ++f) facesOf[shell[f]].push_back(f);
+
+    std::vector<int32_t> remap(mesh.verts.size(), -1);
+    std::vector<Index> loop;
+    for (const std::vector<Index>& faces : facesOf) {
+        std::vector<Vec3> positions;
+        std::vector<uint32_t> sizes, indices;
+        Mesh::Names names;
+        std::vector<Index> used;
+        sizes.reserve(faces.size());
+        names.faces.reserve(faces.size());
+        for (Index f : faces) {
+            mesh.faceVertices(f, loop);
+            sizes.push_back(static_cast<uint32_t>(loop.size()));
+            names.faces.push_back(mesh.faces[f].id);
+            for (Index v : loop) {
+                if (remap[v] < 0) {
+                    remap[v] = static_cast<int32_t>(positions.size());
+                    positions.push_back(mesh.verts[v].position);
+                    names.vertices.push_back(mesh.verts[v].id);
+                    used.push_back(v);
+                }
+                indices.push_back(static_cast<uint32_t>(remap[v]));
+            }
+        }
+        for (Index v : used) remap[v] = -1;
+
+        Mesh piece;
+        if (piece.build(positions, sizes, indices, &names)) out.push_back(std::move(piece));
+    }
+
+    // Largest first: the biggest piece is the one the user thinks of as "the
+    // part", so it should keep the original object. Stable, so pieces of equal
+    // size come out in the order they were found and the answer never varies.
+    std::stable_sort(out.begin(), out.end(),
+                     [](const Mesh& a, const Mesh& b) { return a.faceCount() > b.faceCount(); });
+    return out.size();
 }
 
 } // namespace tg

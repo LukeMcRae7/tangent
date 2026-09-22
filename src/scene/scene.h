@@ -6,6 +6,7 @@
 // tells the renderer its cached buffers went stale.
 #pragma once
 
+#include "app/printability.h"
 #include "mesh/health.h"
 #include "scene/feature.h"
 
@@ -28,42 +29,99 @@ struct Transform {
     }
 };
 
+// Where the history puts an object that started at `base`: every Move and
+// Rotate in it, in order, the ones turned off left out.
+Transform placementOf(const Transform& base, const std::vector<Feature>& features);
+
+// How much bigger the history has made the body along each of its own axes:
+// every Scale step, multiplied together. What the inspector calls its scale.
+Vec3 scaleOf(const std::vector<Feature>& features);
+
 struct SceneObject {
     ObjectId      id = kNoObject;
     std::string   name;
+
+    // Where the object is. Derived, not set: `base` is where it was made --
+    // the point a box was drawn at, the plane a part was drawn on -- and the
+    // Move and Rotate steps in its history take it on from there. Scene keeps
+    // the two in step every time the chain changes; anything that sets
+    // `transform` directly is showing something, like a gesture in progress,
+    // and the next evaluation puts it back where the history says.
+    //
+    // The scale is always one, but for the moment a Scale gesture is being
+    // dragged: a scale is a change of shape, so it is a step in the chain.
     Transform     transform;
+    Transform     base;
     PrimitiveSpec spec;
 
     // The chain the mesh is evaluated from. The first entry is the base
     // primitive; later entries are operations applied in order.
     std::vector<Feature> features;
 
-    // featureCache[i] is the mesh as it stood after feature i, so an edit only
+    // featureCache[i] is the body as it stood after feature i, so an edit only
     // has to re-run from the feature it touched.
-    std::vector<Mesh> featureCache;
+    std::vector<Body> featureCache;
 
-    Mesh       mesh;
+    Body       body;
     RenderMesh render;
     AABB       localBounds;
     bool       visible = true;
 
-    // Bumped on every geometry change; the renderer re-uploads when it differs
-    // from the version it last saw.
+    // Bumped whenever `render` changes, for any reason; the renderer re-uploads
+    // when it differs from the version it last saw.
     uint32_t meshVersion = 1;
+
+    // Bumped when the body itself changes -- not when the same body is merely
+    // drawn at a different tolerance. What is worked out from the geometry, and
+    // costs real time, hangs off this: the printability check and the health
+    // report are about the part, and a zoom does not change the part.
+    uint32_t geometryVersion = 1;
+
+    // The chord tolerance `render` was built at, or 0 for "whatever the backend
+    // chose". An exact body is re-tessellated as the view changes -- see
+    // render/lod.h -- and this is what that decision is made against.
+    Real renderDeviation = 0.0;
 
     // Cached printability report. Self-intersection testing is too costly to
     // repeat every frame, so it is refreshed only when the geometry changes.
     MeshHealth health;
     uint32_t   healthVersion = 0;
 
+    // What a printer would make of it, worked out when the geometry moves and
+    // kept until it moves again. A ray per face against the triangles is a few
+    // milliseconds on a small part and tens on a large one -- affordable once
+    // per edit, not once per frame.
+    PrintReport printCheck;
+    // The flagged triangles themselves, in the body's own space, gathered once
+    // when the check runs. Drawing them used to search every triangle of the
+    // body for every flagged face on every frame -- invisible on a part with a
+    // few hundred triangles and twenty-five million comparisons a frame on an
+    // imported mesh with walls to complain about.
+    std::vector<Vec3> printTriangles;
+    uint32_t    printVersion = 0;
+
     Mat4 modelMatrix() const { return transform.matrix(); }
 
     // Recomputes everything derived from `mesh` and marks the GPU copy stale.
     // Any code that edits vertex positions must call this.
     void refreshDerived() {
-        mesh.buildRenderMesh(render);
-        localBounds = mesh.bounds();
+        body.tessellate(render);
+        // The backend chose the tolerance, so the view has not had its say yet.
+        renderDeviation = 0.0;
+        localBounds = body.bounds();
+        // An object that is only a sketch has no body to be measured, but it is
+        // somewhere and it has a size: without this, framing the view on one or
+        // drawing a box round it would have nothing to work from.
+        if (body.empty()) {
+            for (const Feature& f : features) {
+                if (f.kind != FeatureKind::Sketch || !f.sketchShown || !f.enabled) continue;
+                for (const SketchEntity& e : f.sketch.entities)
+                    for (Vec2 p : sketchEntityPoints(f.sketch, e))
+                        localBounds.expand(f.sketch.plane.toWorld(p));
+            }
+        }
         ++meshVersion;
+        ++geometryVersion;
     }
     AABB worldBounds() const;
     void markMeshChanged() { ++meshVersion; }
@@ -106,9 +164,46 @@ struct RayHit {
 class Scene {
 public:
     // ---- Contents --------------------------------------------------------
+    // Adds a body that came from outside -- a STEP import, or a mesh read from
+    // a file. Its chain root is BaseMesh: geometry with no parameters behind
+    // it, because the file does not carry how it was made. Everything after
+    // that root behaves like any other feature.
+    ObjectId addImportedBody(Body body, const std::string& name);
+
+    // A salt for the next import, so two imports of the same file do not name
+    // their faces identically and a feature written against one does not
+    // silently attach to the other.
+    ElementId nextImportSalt() { return nextFeatureUid_++; }
+
     ObjectId addPrimitive(PrimitiveKind kind, const PrimitiveSpec& spec = {},
                           Vec3 position = {});
-    ObjectId addMesh(Mesh mesh, Vec3 position = {}, const std::string& name = "Object");
+
+    // Which kernel new bodies are built with. Exact where the build has it,
+    // and a mesh otherwise, so the same code path serves both -- and so a build
+    // without OpenCASCADE behaves exactly as it did before the backend existed.
+    //
+    // Per scene rather than per call: it is a mode, not a parameter, and the
+    // mesh side comes back as a mode too when imported geometry gets its own
+    // place in the interface.
+    Backend defaultBackend() const { return defaultBackend_; }
+    void setDefaultBackend(Backend b) { defaultBackend_ = b; }
+    ObjectId addBody(Body body, Vec3 position = {}, const std::string& name = "Object");
+
+    // Adds an object made entirely by its history -- a part that begins as a
+    // sketch and a region swept out of it, with no primitive underneath. The
+    // chain is evaluated first, and nothing is added unless every step of it
+    // succeeds; `error` then says which step did not.
+    //
+    // A chain of nothing but sketches is allowed and leaves the object with no
+    // body: a sketch is a thing in the scene before anything is built from it.
+    ObjectId addFeatureChain(std::vector<Feature> features, const std::string& name,
+                             std::string* error = nullptr);
+
+    // The same, but the object is kept whatever the chain does. For a file: a
+    // step that no longer evaluates -- a sketch extruded in a build that has no
+    // exact kernel -- is marked and skipped, and dropping the object instead
+    // would lose the work rather than report it.
+    ObjectId addChainAsIs(std::vector<Feature> features, const std::string& name);
     bool     removeObject(ObjectId id);
     ObjectId duplicateObject(ObjectId id);
 
@@ -137,6 +232,46 @@ public:
     // tell the user beyond "refused".
     bool addFeature(ObjectId id, Feature feature, std::string* error = nullptr);
 
+    // Swaps an object's whole chain for another. For an edit that is not an
+    // append: a pattern of the last boolean stands *where that boolean stood*
+    // rather than after it, because the pattern's first copy is that boolean
+    // and keeping both would cut the same hole twice. All or nothing -- a chain
+    // that will not evaluate leaves the object as it was.
+    bool setFeatures(ObjectId id, std::vector<Feature> features,
+                     std::string* error = nullptr);
+
+    // Appends a feature whose result has already been built -- by a preview on
+    // another thread, from this object's current body -- instead of building it
+    // again. For a step that takes seconds, like reducing a large mesh, which a
+    // user has just watched finish and should not wait for twice.
+    //
+    // The caller vouches that `result` is exactly what evaluating `feature` on
+    // the current body gives, which for a deterministic operation means: the
+    // same body, the same parameters, and the same uid, since the uid names what
+    // it makes. The feature must arrive with that uid already set.
+    void addFeatureWithResult(ObjectId id, Feature feature, Body result);
+
+    // Sets where an object was made, and puts it where its history then says.
+    // For creation -- a box drawn at a point, a part on a plane -- and for a
+    // file, never for moving something the user has placed: that is a Move.
+    void setBasePlacement(ObjectId id, const Transform& base);
+
+    // Moving, turning and scaling a whole object, as steps in its history.
+    //
+    // Each folds into the step before it when that is the same kind of step --
+    // and, for a turn or a scale, about the same point -- so nudging an object
+    // about leaves one Move behind rather than one per nudge, the way a fillet
+    // added to next to another becomes part of it. A step folded back to
+    // nothing is removed. Placement is cheap: a move or a turn changes no
+    // geometry, so nothing is rebuilt. A scale is a change of shape and is
+    // built like any other; false, with the reason, if it cannot be.
+    bool recordMove(ObjectId id, Vec3 by);
+    bool recordRotate(ObjectId id, Quat turn, Vec3 aboutWorld);
+    bool recordScale(ObjectId id, Vec3 factors, Vec3 aboutLocal, std::string* error = nullptr);
+
+    // Puts an object where its base and its history say it is.
+    void place(SceneObject& obj) const { obj.transform = placementOf(obj.base, obj.features); }
+
     // For serialisation, which has to preserve the counter alongside the
     // features it has already handed numbers to.
     uint64_t nextFeatureUid() const { return nextFeatureUid_; }
@@ -151,6 +286,18 @@ public:
     // Re-runs only from `fromFeature` onward, reusing the cached intermediate
     // before it. Pass 0 to rebuild everything.
     bool reevaluateFrom(ObjectId id, size_t fromFeature);
+
+    // A feature that failed during the last re-evaluation, phrased for the
+    // status bar, or empty. Reading it clears it.
+    //
+    // The History panel has always marked a failed step, but a chain is re-run
+    // by edits that have nothing to do with the step that breaks: nudging a
+    // base dimension, undoing, toggling something earlier. The fillet then
+    // quietly disappears from the viewport and the only sign of it is a panel
+    // the user may not have open. Only a step that has *newly* failed is
+    // reported, so a chain carrying a known-bad step does not repeat itself on
+    // every frame of a slider drag.
+    std::string takeChainNotice() { std::string s; s.swap(chainNotice_); return s; }
 
     // ---- Selection -------------------------------------------------------
     const std::vector<ObjectId>& selection() const { return selection_; }
@@ -178,6 +325,15 @@ public:
     // Nearest surface hit along the ray, in world space.
     RayHit raycast(const Ray& ray) const;
 
+    // Every surface the ray meets at the nearest depth, one hit per body.
+    //
+    // Usually one. More where faces of different bodies lie in the same plane
+    // -- two parts flush on the build plate, a copy left where the original
+    // is -- and fight over the same pixels, so that whichever the depth buffer
+    // happens to draw is no guide to which a click means. The caller cycles
+    // through them. In scene order, so the cycle is the same every time.
+    std::vector<RayHit> raycastCoincident(const Ray& ray) const;
+
     // Resolves a click to the specific vertex, edge or face under the cursor,
     // the way a CAD tool does: whatever is nearest in *screen* space wins, with
     // vertices beating edges beating the face behind them. Tolerances are in
@@ -189,18 +345,29 @@ public:
                            int viewportW, int viewportH, Vec2 cursorPx,
                            float vertexTolPx = 16.0f, float edgeTolPx = 12.0f) const;
 
+    // Everything a click could mean there: what pickElement would choose on
+    // each body raycastCoincident finds, each once. The first is what
+    // pickElement returns.
+    std::vector<ElementHit> pickElements(const Ray& ray, const Mat4& viewProj,
+                                         int viewportW, int viewportH, Vec2 cursorPx,
+                                         float vertexTolPx = 16.0f, float edgeTolPx = 12.0f) const;
+
     // ---- Sub-object selection --------------------------------------------
     const std::vector<ElementRef>& elementSelection() const { return elements_; }
     bool isElementSelected(const ElementRef& e) const;
+    // Every piece of the face `e` names: itself, plus anything it was split
+    // from because a face cannot hold a hole. Anything else is just `e`.
+    std::vector<ElementRef> faceGroup(const ElementRef& e) const;
+
     void selectElement(const ElementRef& e, bool additive = false);
     void toggleElement(const ElementRef& e);
     void clearElementSelection() { elements_.clear(); }
 
-    // Faces currently selected on one object, for feeding the mesh operations.
-    std::vector<Index> selectedFaces(ObjectId id) const;
+    // Faces currently selected on one object, for feeding the operations.
+    std::vector<FaceId> selectedFaces(ObjectId id) const;
 
-    // Selected edges on one object, named by canonical half-edge.
-    std::vector<Index> selectedEdges(ObjectId id) const;
+    // Selected edges on one object, as canonical edge handles.
+    std::vector<EdgeId> selectedEdges(ObjectId id) const;
 
     // Drops any element selection referring to geometry that no longer exists.
     // Mesh edits renumber faces wholesale, so stale refs must not survive one.
@@ -217,7 +384,13 @@ private:
     // Handed to each new feature so it has an identity independent of where it
     // sits in the chain. Saved with the project: reloading and then adding a
     // feature must not reissue a number an existing feature already holds.
+    // Fills chainNotice_ from whatever the last evaluation marked, ignoring
+    // steps that were already failing when it started.
+    void noteNewFailures(const SceneObject& obj, const std::vector<ElementId>& wasBroken);
+
+    Backend defaultBackend_ = brep::available() ? Backend::Brep : Backend::Mesh;
     uint64_t nextFeatureUid_ = 1;
+    std::string chainNotice_;
 };
 
 } // namespace tg
