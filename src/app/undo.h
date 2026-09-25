@@ -171,6 +171,29 @@ private:
     std::string          what_;
 };
 
+// A change to an object's whole history, the steps after the rollback marker
+// as well as those before it: moving the marker, putting a step somewhere
+// else, re-pointing a failed step at what it should act on.
+class HistoryCommand : public Command {
+public:
+    struct State {
+        std::vector<Feature> features, ahead;
+    };
+    HistoryCommand(ObjectId id, State before, State after, std::string what)
+        : id_(id), before_(std::move(before)), after_(std::move(after)), what_(std::move(what)) {}
+    static State of(const SceneObject& o) { return {o.features, o.ahead}; }
+
+    void undo(Scene& scene) override { apply(scene, before_); }
+    void redo(Scene& scene) override { apply(scene, after_); }
+    std::string label() const override { return what_; }
+
+private:
+    void apply(Scene& scene, const State& s);
+    ObjectId id_;
+    State before_, after_;
+    std::string what_;
+};
+
 // Several commands that must move together. A boolean edits one object's chain
 // and removes another; undoing half of that would leave the scene inconsistent.
 class CompositeCommand : public Command {

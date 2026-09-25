@@ -58,9 +58,25 @@ struct SceneObject {
     // primitive; later entries are operations applied in order.
     std::vector<Feature> features;
 
+    // The steps after the rollback marker: kept, and not run. What the view
+    // shows and what the next operation builds on is `features` alone, so an
+    // operation done while rolled back goes in at the marker -- and moving the
+    // marker down again runs these on top of it, each finding what it names
+    // on the geometry as it now is. Empty when the marker is at the end.
+    std::vector<Feature> ahead;
+    // What those waiting steps built when they last ran, and its fingerprints:
+    // rolled forward again with nothing changed below them, they need not run.
+    std::vector<Body> aheadCache;
+    std::vector<uint64_t> aheadKeys;
+
     // featureCache[i] is the body as it stood after feature i, so an edit only
     // has to re-run from the feature it touched.
     std::vector<Body> featureCache;
+    // featureKeys[i] is the fingerprint (featureKey) of the step the cache holds
+    // the result of at i -- how a re-run knows where the history first differs
+    // from what was built, and starts there. Shorter than the cache when not
+    // known, which only costs a longer re-run.
+    std::vector<uint64_t> featureKeys;
 
     Body       body;
     RenderMesh render;
@@ -281,7 +297,18 @@ public:
     // Re-runs an object's chain as it stands. rebuild() pushes the inspector's
     // spec into the base feature first; this does not, which is what undo
     // needs when restoring a whole chain.
-    bool reevaluate(ObjectId id) { return reevaluateFrom(id, 0); }
+    // Re-runs from the first step that differs from what the cache was built
+    // from -- nothing, if nothing does.
+    bool reevaluate(ObjectId id);
+    // Every step, from the root, whatever the cache holds.
+    bool reevaluateAll(ObjectId id) { return reevaluateFrom(id, 0); }
+
+    // Moves the rollback marker so that the first `active` steps of the whole
+    // history run and the rest wait after it -- see SceneObject::ahead. False
+    // when a step that now runs fails; it is marked, as any failing step is.
+    bool rollTo(ObjectId id, size_t active);
+    // Every step, run or waiting.
+    size_t historyLength(ObjectId id) const;
 
     // Re-runs only from `fromFeature` onward, reusing the cached intermediate
     // before it. Pass 0 to rebuild everything.

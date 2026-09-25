@@ -289,6 +289,10 @@ bool readSketch(Reader& r, Sketch& s, uint32_t version) {
     return !r.bad;
 }
 
+// Set while a step is written for its fingerprint rather than for a file:
+// see featureKey().
+thread_local bool gBodiesByIdentity = false;
+
 void writeFeature(Writer& w, const Feature& f) {
     w.u32(static_cast<uint32_t>(f.kind));
     w.u8(f.enabled ? 1 : 0);
@@ -306,7 +310,28 @@ void writeFeature(Writer& w, const Feature& f) {
     w.ids(f.verts);
     w.u32(static_cast<uint32_t>(f.offsets.size()));
     for (const Vec3& o : f.offsets) w.vec3(o);
-    if (f.bakedBody.isMesh()) {
+    if (gBodiesByIdentity) {
+        // For a fingerprint, not a file: which body it is, not all of it --
+        // encoding a whole baked shape on every edit would cost more than the
+        // re-run it saves. A body copied is the same shape underneath; a mesh
+        // is summed, since a copy of one is not the same object.
+        const Body& b = f.bakedBody;
+        w.u8(b.isMesh() ? 1 : 0);
+        if (b.isMesh()) {
+            const Mesh& m = b.mesh();
+            w.u64(m.verts.size());
+            w.u64(m.faces.size());
+            Vec3 sum{0, 0, 0};
+            for (const MeshVertex& v : m.verts) sum += v.position;
+            w.vec3(sum);
+        } else if (b.brepRef()) {
+            w.u64(reinterpret_cast<uintptr_t>(b.brepRef().get()));
+            w.u32(static_cast<uint32_t>(b.faceCount()));
+            const AABB box = b.bounds();
+            w.vec3(box.min);
+            w.vec3(box.max);
+        }
+    } else if (f.bakedBody.isMesh()) {
         w.u32(kBodyMesh);
         writeMesh(w, f.bakedBody.mesh());
     } else {
@@ -402,6 +427,8 @@ void writeFeature(Writer& w, const Feature& f) {
     w.u8(f.revolveReverse ? 1 : 0);
     w.u32(static_cast<uint32_t>(f.loftFaceNames.size()));
     for (ElementId id : f.loftFaceNames) w.u64(id);
+    // v23: what a person called the step.
+    w.text(f.label);
 }
 
 // `version` is the file's, not this build's: a project written before bodies
@@ -585,6 +612,7 @@ bool readFeature(Reader& r, Feature& f, uint32_t version) {
         if (faces > 10000u) return false;
         for (uint32_t i = 0; i < faces && !r.bad; ++i) f.loftFaceNames.push_back(r.u64());
     }
+    if (version >= 23) f.label = r.text();
     return !r.bad;
 }
 
@@ -614,6 +642,9 @@ ProjectResult saveProject(const Scene& scene, const std::string& path) {
 
         w.u32(static_cast<uint32_t>(obj->features.size()));
         for (const Feature& f : obj->features) writeFeature(w, f);
+        // v23: the steps after the rollback marker, which wait there.
+        w.u32(static_cast<uint32_t>(obj->ahead.size()));
+        for (const Feature& f : obj->ahead) writeFeature(w, f);
         ++res.objects;
     }
 
@@ -693,6 +724,16 @@ ProjectResult loadProject(Scene& scene, const std::string& path) {
             if (!readFeature(r, f, version)) { res.error = "bad feature"; return res; }
             chain.push_back(std::move(f));
         }
+        std::vector<Feature> ahead;
+        if (version >= 23) {
+            const uint32_t waiting = r.u32();
+            if (waiting > 100000u) { res.error = "bad feature count"; return res; }
+            for (uint32_t k = 0; k < waiting && !r.bad; ++k) {
+                Feature f;
+                if (!readFeature(r, f, version)) { res.error = "bad feature"; return res; }
+                ahead.push_back(std::move(f));
+            }
+        }
         if (r.bad) { res.error = "truncated file"; return res; }
 
         // Before version 13 a sketch could not be shown or hidden, because a
@@ -749,6 +790,7 @@ ProjectResult loadProject(Scene& scene, const std::string& path) {
         o->name = name;
         o->visible = visible;
         o->features = std::move(chain);
+        o->ahead = std::move(ahead);
         loaded.setBasePlacement(newId, t);
         // Re-runs the recipe. A chain that no longer evaluates leaves the
         // object as its base primitive rather than failing the whole load.
@@ -762,6 +804,16 @@ ProjectResult loadProject(Scene& scene, const std::string& path) {
 }
 
 // ---------------------------------------------------------------------------
+uint64_t featureKey(const Feature& f) {
+    gBodiesByIdentity = true;
+    Writer w;
+    writeFeature(w, f);
+    gBodiesByIdentity = false;
+    uint64_t h = 1469598103934665603ULL;   // FNV-1a
+    for (uint8_t b : w.buf) { h ^= b; h *= 1099511628211ULL; }
+    return h;
+}
+
 std::string encodeFeatures(const std::vector<Feature>& features) {
     Writer w;
     w.u32(kProjectVersion);

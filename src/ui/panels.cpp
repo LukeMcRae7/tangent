@@ -695,19 +695,77 @@ void drawHistorySection(UiContext& ctx, SceneObject& obj) {
     bool changed = false;
     ImGuiStorage* store = ImGui::GetStateStorage();
     ImDrawList* dl = ImGui::GetWindowDrawList();
+    Scene& scene = *ctx.scene;
 
-    // The last step is where the model stands: it is what the viewport shows
-    // and what the next operation builds on.
-    size_t current = obj.features.empty() ? 0 : obj.features.size() - 1;
-    for (size_t i = obj.features.size(); i-- > 0;) {
-        if (obj.features[i].enabled) { current = i; break; }
-    }
+    // Every step, the ones after the rollback marker too: `active` of them run.
+    const size_t active = obj.features.size();
+    const size_t total = active + obj.ahead.size();
+    auto stepAt = [&](size_t g) -> Feature& { return g < active ? obj.features[g] : obj.ahead[g - active]; };
 
-    for (size_t i = 0; i < obj.features.size(); ++i) {
-        Feature& f = obj.features[i];
-        ImGui::PushID(static_cast<int>(f.uid ? f.uid : i + 1));
+    auto history = [&](UiActions::HistoryEdit what, size_t at, size_t to = 0) {
+        ctx.actions.historyEdit = what;
+        ctx.actions.historyObject = obj.id;
+        ctx.actions.historyAt = at;
+        ctx.actions.historyTo = to;
+    };
+
+    // Whether a step names faces or edges -- what a failed one can be pointed
+    // at again, from what is selected.
+    auto namesFaces = [](const Feature& f) { return !f.faces.empty(); };
+    auto namesEdges = [](const Feature& f) { return !f.edges.empty(); };
+    auto sketchOf = [&](const Feature& f) -> ElementId {
+        if (f.kind == FeatureKind::Sketch) return f.uid;
+        return f.sketchUid;
+    };
+
+    // The marker: an orange bar between the last step that runs and the
+    // first that waits. Dragged onto a step, it goes after that step.
+    auto markerRow = [&]() {
+        const float w = ImGui::GetContentRegionAvail().x;
+        const ImVec2 at = ImGui::GetCursorScreenPos();
+        const float h = obj.ahead.empty() ? 14.0f : 30.0f;
+        ImGui::InvisibleButton("##marker", ImVec2(std::max(10.0f, w * 0.45f), h));
+        const bool hovered = ImGui::IsItemHovered();
+        if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceNoPreviewTooltip)) {
+            const int dummy = 0;
+            ImGui::SetDragDropPayload("TG_MARKER", &dummy, sizeof dummy);
+            ImGui::TextUnformatted("Roll back to...");
+            ImGui::EndDragDropSource();
+        }
+        const float y = at.y + (obj.ahead.empty() ? h * 0.5f : 8.0f);
+        const float alpha = obj.ahead.empty() ? (hovered ? 0.9f : 0.35f) : 1.0f;
+        dl->AddRectFilled(ImVec2(at.x, y - 1.5f), ImVec2(at.x + w, y + 1.5f), u32(palette::kBrand, alpha), 1.5f);
+        dl->AddTriangleFilled(ImVec2(at.x, y - 5.0f), ImVec2(at.x + 7.0f, y), ImVec2(at.x, y + 5.0f),
+                              u32(palette::kBrand, alpha));
+        if (hovered)
+            ImGui::SetTooltip(obj.ahead.empty()
+                                  ? "The end of the history. Drag this up onto a step to roll back to it."
+                                  : "Rolled back. Drag onto a step to move the marker there.");
+        if (!obj.ahead.empty()) {
+            char text[96];
+            std::snprintf(text, sizeof text, "Rolled back, %zu waiting", obj.ahead.size());
+            pushFont(FontWeight::Medium, uiFonts().size * 0.86f);
+            dl->AddText(ImVec2(at.x + 12.0f, y + 4.0f), u32(palette::kBrand), text);
+            ImGui::PopFont();
+            ImGui::SetCursorScreenPos(ImVec2(at.x + w - 132.0f, y + 2.0f));
+            if (ui::quietButton("Step on")) history(UiActions::HistoryEdit::RollTo, active + 1);
+            ui::hoverTip("Run the next step as well");
+            ImGui::SameLine(0.0f, 4.0f);
+            if (ui::quietButton("To end")) history(UiActions::HistoryEdit::RollTo, total);
+            ui::hoverTip("Run every step again, on the model as it now is");
+        }
+        ImGui::SetCursorScreenPos(ImVec2(at.x, at.y + h + 2.0f));
+    };
+
+    for (size_t g = 0; g < total; ++g) {
+        if (g == active) markerRow();
+        Feature& f = stepAt(g);
+        const bool waiting = g >= active;
+        ImGui::PushID(static_cast<int>(f.uid ? f.uid : g + 1));
         const ImGuiID openKey = ImGui::GetID("open");
+        const ImGuiID renameKey = ImGui::GetID("renaming");
         bool open = store->GetBool(openKey, false);
+        const bool renaming = store->GetBool(renameKey, false) && !waiting;
 
         const float h = 26.0f;
         const float w = ImGui::GetContentRegionAvail().x;
@@ -716,30 +774,93 @@ void drawHistorySection(UiContext& ctx, SceneObject& obj) {
         const bool clicked = ImGui::InvisibleButton("##row", ImVec2(std::max(10.0f, w - rightW), h));
         const bool hovered = ImGui::IsItemHovered();
         if (clicked) { open = !open; store->SetBool(openKey, open); }
+        if (hovered && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && !waiting) {
+            store->SetBool(renameKey, true);
+            store->SetBool(openKey, !open);
+        }
 
-        const bool isCurrent = i == current;
+        // Dragged to move it; dropped on, a step moves here, or the marker
+        // goes after this step.
+        if (!waiting && g > 0 && ImGui::BeginDragDropSource()) {
+            const size_t from = g;
+            ImGui::SetDragDropPayload("TG_STEP", &from, sizeof from);
+            ImGui::TextUnformatted(f.label.empty() ? f.summary().c_str() : f.label.c_str());
+            ImGui::EndDragDropSource();
+        }
+        if (ImGui::BeginDragDropTarget()) {
+            if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("TG_STEP")) {
+                const size_t from = *static_cast<const size_t*>(p->Data);
+                if (!waiting && g > 0 && from != g) history(UiActions::HistoryEdit::Move, from, g);
+            }
+            if (ImGui::AcceptDragDropPayload("TG_MARKER")) history(UiActions::HistoryEdit::RollTo, g + 1);
+            ImGui::EndDragDropTarget();
+        }
+
+        // Right-click: the things done to a step as a whole.
+        if (ImGui::BeginPopupContextItem("##stepmenu")) {
+            if (waiting) {
+                if (ImGui::MenuItem("Roll forward to here")) history(UiActions::HistoryEdit::RollTo, g + 1);
+            } else {
+                if (ImGui::MenuItem("Roll back to here")) history(UiActions::HistoryEdit::RollTo, g + 1);
+                if (g > 0 && ImGui::MenuItem("Insert before this")) history(UiActions::HistoryEdit::RollTo, g);
+                ImGui::Separator();
+                if (ImGui::MenuItem("Rename")) store->SetBool(renameKey, true);
+                if (g > 1 && ImGui::MenuItem("Move up")) history(UiActions::HistoryEdit::Move, g, g - 1);
+                if (g > 0 && g + 1 < active && ImGui::MenuItem("Move down"))
+                    history(UiActions::HistoryEdit::Move, g, g + 1);
+            }
+            ImGui::EndPopup();
+        }
+
+        const bool isCurrent = g + 1 == active;
         const ImVec2 lo(at.x, at.y), hi(at.x + w, at.y + h);
         if (isCurrent)     dl->AddRectFilled(lo, hi, u32(palette::kRaised), 5.0f);
         else if (hovered)  dl->AddRectFilled(lo, hi, u32(palette::kHover, 0.5f), 5.0f);
 
-        const float alpha = f.enabled ? 1.0f : 0.45f;
+        const float alpha = waiting ? 0.4f : f.enabled ? 1.0f : 0.45f;
         drawGlyph(dl, open ? Glyph::ChevronDown : Glyph::ChevronRight, ImVec2(at.x + 8.0f, at.y + h * 0.5f),
-                  13.0f, u32(palette::kTextFaint));
+                  13.0f, u32(palette::kTextFaint, waiting ? 0.5f : 1.0f));
         drawGlyph(dl, glyphFor(f), ImVec2(at.x + 24.0f, at.y + h * 0.5f), 15.0f,
                   u32(f.errored ? palette::kBrand : palette::kTextDim, alpha));
 
-        // The name, and what is special about it beside the name. Clipped
-        // short of the row's own controls: a long summary ends under them
-        // rather than running through them.
+        // The name -- what it was called, or else what it does -- and what is
+        // special about it beside the name. Clipped short of the row's own
+        // controls: a long one ends under them rather than running through.
         const float textRight = hi.x - rightW - 4.0f;
         const std::string summary = f.summary();
-        dl->PushClipRect(ImVec2(at.x, at.y), ImVec2(textRight, hi.y), true);
-        pushFont(isCurrent ? FontWeight::Medium : FontWeight::Regular);
-        dl->AddText(ImVec2(at.x + 40.0f, at.y + (h - ImGui::GetTextLineHeight()) * 0.5f),
-                    u32(palette::kText, alpha), summary.c_str());
-        const float textW = ImGui::CalcTextSize(summary.c_str()).x;
-        ImGui::PopFont();
-        dl->PopClipRect();
+        const std::string& shown = f.label.empty() ? summary : f.label;
+        float textW = 0.0f;
+        if (renaming) {
+            // One name is edited at a time; its text lives here while it is.
+            static char buf[96];
+            static ImGuiID bufFor = 0;
+            if (bufFor != renameKey) {
+                bufFor = renameKey;
+                std::snprintf(buf, sizeof buf, "%s", f.label.empty() ? summary.c_str() : f.label.c_str());
+            }
+            ImGui::SetCursorScreenPos(ImVec2(at.x + 38.0f, at.y + (h - ImGui::GetFrameHeight()) * 0.5f));
+            ImGui::SetNextItemWidth(textRight - (at.x + 38.0f));
+            if (!ImGui::IsAnyItemActive()) ImGui::SetKeyboardFocusHere();
+            ImGui::InputText("##label", buf, sizeof buf, ImGuiInputTextFlags_AutoSelectAll);
+            if (ImGui::IsItemDeactivated()) {
+                store->SetBool(renameKey, false);
+                bufFor = 0;
+                // Its own description back is no name at all.
+                const std::string name = buf == summary ? std::string() : std::string(buf);
+                if (name != f.label && !ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+                    f.label = name;
+                    changed = true;
+                }
+            }
+        } else {
+            dl->PushClipRect(ImVec2(at.x, at.y), ImVec2(textRight, hi.y), true);
+            pushFont(isCurrent ? FontWeight::Medium : FontWeight::Regular);
+            dl->AddText(ImVec2(at.x + 40.0f, at.y + (h - ImGui::GetTextLineHeight()) * 0.5f),
+                        u32(palette::kText, alpha), shown.c_str());
+            textW = ImGui::CalcTextSize(shown.c_str()).x;
+            ImGui::PopFont();
+            dl->PopClipRect();
+        }
 
         const float tagX = at.x + 40.0f + textW + 8.0f;
         auto rowTag = [&](const char* text, Rgb col) {
@@ -750,17 +871,24 @@ void drawHistorySection(UiContext& ctx, SceneObject& obj) {
             ImGui::SetCursorScreenPos(ImVec2(tagX, at.y + (h - ImGui::GetFrameHeight()) * 0.5f));
             ui::tag(text, col, false);
         };
-        if (f.errored)       rowTag("failed", palette::kBrand);
-        else if (!f.enabled) rowTag("off", palette::kTextDim);
-        else if (isCurrent)  rowTag("current", palette::kTextDim);
-        if (hovered) {
-            if (f.errored) ImGui::SetTooltip("%s", f.error.c_str());
-            else if (textW > textRight - (at.x + 40.0f)) ImGui::SetTooltip("%s", summary.c_str());
+        if (!renaming) {
+            if (f.errored)       rowTag("failed", palette::kBrand);
+            else if (waiting)    rowTag("waiting", palette::kTextDim);
+            else if (!f.enabled) rowTag("off", palette::kTextDim);
+            else if (isCurrent)  rowTag("current", palette::kTextDim);
+        }
+        if (hovered && !renaming) {
+            std::string tip = f.label.empty() ? std::string() : summary + "\n";
+            if (f.errored) tip += f.error + "\n";
+            if (waiting) tip += "After the rollback marker: not run until the marker moves past it.\n";
+            tip += "Double-click to rename; drag to move; right-click for more.";
+            ImGui::SetTooltip("%s", tip.c_str());
         }
 
         // The enable dot, then the close. Both live at the right of the row
         // and show up when it is being looked at.
-        if (hovered || isCurrent || !f.enabled || ImGui::IsMouseHoveringRect(ImVec2(hi.x - rightW, lo.y), hi)) {
+        if (!waiting &&
+            (hovered || isCurrent || !f.enabled || ImGui::IsMouseHoveringRect(ImVec2(hi.x - rightW, lo.y), hi))) {
             ImGui::SetCursorScreenPos(ImVec2(hi.x - rightW + 2.0f, at.y + 3.0f));
             const bool tog = ImGui::InvisibleButton("##on", ImVec2(20.0f, 20.0f));
             const ImVec2 c(hi.x - rightW + 12.0f, at.y + h * 0.5f);
@@ -774,7 +902,7 @@ void drawHistorySection(UiContext& ctx, SceneObject& obj) {
             if (f.kind != FeatureKind::Primitive) {
                 ImGui::SetCursorScreenPos(ImVec2(hi.x - 22.0f, at.y + (h - 19.0f) * 0.5f));
                 if (ui::closeButton("del", 14.0f)) {
-                    obj.features.erase(obj.features.begin() + static_cast<long>(i));
+                    obj.features.erase(obj.features.begin() + static_cast<long>(g));
                     changed = true;
                     ImGui::PopID();
                     break;
@@ -787,13 +915,51 @@ void drawHistorySection(UiContext& ctx, SceneObject& obj) {
         if (open) {
             ImGui::Indent(14.0f);
             ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8.0f, 4.0f));
-            featureDetails(ctx, obj, f, changed);
+            // A failed step: what went wrong, and the way back to working.
+            if (f.errored) {
+                ImGui::PushTextWrapPos(0.0f);
+                ImGui::TextColored(im(palette::kBrand), "%s", f.error.c_str());
+                ImGui::PopTextWrapPos();
+                const bool faces = namesFaces(f), edges = namesEdges(f);
+                if (!waiting && (faces || edges)) {
+                    if (ui::quietButton("Fix: roll back to just before it"))
+                        history(UiActions::HistoryEdit::RollTo, g);
+                    ui::hoverTip("See the model it had to work with, and select what it should act on");
+                } else if (waiting && g == active && (faces || edges)) {
+                    const size_t selFaces = scene.selectedFaces(obj.id).size();
+                    const size_t selEdges = scene.selectedEdges(obj.id).size();
+                    ImGui::TextColored(im(palette::kTextDim), "Select the %s it should act on, then:",
+                                       faces ? "faces" : "edges");
+                    if (faces && ui::quietButton("Use the selected faces", ImVec2(0, 0), selFaces > 0))
+                        history(UiActions::HistoryEdit::UseFaces, g);
+                    if (edges && ui::quietButton("Use the selected edges", ImVec2(0, 0), selEdges > 0))
+                        history(UiActions::HistoryEdit::UseEdges, g);
+                    ui::hoverTip("Points the step at them, and runs it and every step after it again");
+                } else if (waiting && (faces || edges)) {
+                    if (ui::quietButton("Roll to just before it"))
+                        history(UiActions::HistoryEdit::RollTo, g);
+                }
+                if (const ElementId sk = sketchOf(f); sk != 0 && !waiting) {
+                    if (ui::quietButton("Edit its sketch")) {
+                        ctx.actions.editSketchObject = obj.id;
+                        ctx.actions.editSketchUid = sk;
+                    }
+                }
+                ImGui::Dummy(ImVec2(0, 2));
+            }
+            if (waiting) {
+                ImGui::TextColored(im(palette::kTextDim), "Waiting after the marker.");
+                if (ui::quietButton("Roll forward to here")) history(UiActions::HistoryEdit::RollTo, g + 1);
+            } else {
+                featureDetails(ctx, obj, f, changed);
+            }
             ImGui::PopStyleVar();
             ImGui::Unindent(14.0f);
             ImGui::Dummy(ImVec2(0, 4));
         }
         ImGui::PopID();
     }
+    if (active == total) markerRow();
 
     if (changed) {
         ctx.actions.featuresEdited = obj.id;
@@ -890,7 +1056,8 @@ void sketchInspector(UiContext& ctx, Scene::SketchRef ref) {
         ImGui::PopFont();
     }
     ImGui::Dummy(ImVec2(0, 6));
-    const std::vector<SketchProfile> regions = sketchProfiles(f->sketch);
+    const size_t regionCount = ctx.sketchRegions >= 0 ? static_cast<size_t>(ctx.sketchRegions)
+                                                      : sketchProfiles(f->sketch).size();
     const ImVec4 dim = im(palette::kTextDim);
     auto row = [&](const char* label, const std::string& value) {
         ImGui::TextColored(dim, "%s", label);
@@ -898,7 +1065,7 @@ void sketchInspector(UiContext& ctx, Scene::SketchRef ref) {
         ImGui::TextUnformatted(value.c_str());
     };
     row("Curves", std::to_string(f->sketch.entities.size()));
-    row("Regions", regions.empty() ? std::string("none closed yet") : std::to_string(regions.size()) + " closed");
+    row("Regions", regionCount == 0 ? std::string("none closed yet") : std::to_string(regionCount) + " closed");
     row("Sizes", std::to_string(std::count_if(f->sketch.constraints.begin(), f->sketch.constraints.end(),
                                                [](const SketchConstraint& k) { return isDimension(k.rule); })) +
                      " dimensions");

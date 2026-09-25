@@ -72,6 +72,14 @@ inline constexpr FeatureKind kLastFeatureKind = FeatureKind::LoftProfile;
 
 const char* featureKindName(FeatureKind k);
 
+struct Feature;
+// A fingerprint of everything a step is -- two steps with the same key build
+// the same thing from the same input -- so a history re-run can start at the
+// first step that changed instead of at the root. Baked bodies count by which
+// body they are, not by their contents. Defined with the file format, which
+// already writes every field of a step.
+uint64_t featureKey(const Feature& f);
+
 // What a feature acts on, expressed so that it still means the same thing after
 // the steps before it change.
 //
@@ -270,6 +278,10 @@ struct Feature {
     // them. Several regions are one step, swept together and combined with the
     // body once: an imported drawing is hundreds of regions, and a step each
     // was hundreds of booleans.
+    // What a person called this step, if anything: shown in the history in
+    // place of what it does, which stays in the tooltip.
+    std::string label;
+
     ElementId sketchUid = 0;
     std::vector<SketchId> profileKeys;
 

@@ -17,6 +17,7 @@ modes=(
   "--sweep-demo 1" "--sweep-demo 2" "--sweep-demo 3" "--sweep-demo 4"
   "--loft-demo 1" "--loft-demo 2" "--loft-demo 3" "--loft-demo 4"
   "--pen-demo 1" "--pen-demo 2" "--project-demo 1" "--plane-demo 1"
+  "--timeline-demo 1" "--timeline-demo 2"
   "--hole-demo 1" "--hole-demo 2" "--hole-demo 3"
   "--draft-demo 1" "--draft-demo 2" "--draft-demo 3"
   "--delete-face-demo 1" "--delete-face-demo 2" "--delete-face-demo 3"
@@ -26,6 +27,7 @@ modes=(
   "--inset-demo 2" "--shell-demo 2" "--split-demo 3" "--offset-demo 1"
   "--thread-demo 1" "--thread-demo 2" "--thread-demo 3"
   "--split-demo 4" "--split-demo 5"
+  "--perf-scene 1 --perf-size 6" "--perf-scene 2 --perf-size 6" "--perf-scene 3 --perf-size 6"
 )
 
 fail=0
@@ -73,8 +75,9 @@ done
 
 # The pen's corners draw straight sides, so a triangle of them extruded has the
 # prism's volume; and a sketch projected from a face goes round the face after
-# the part is widened, not round where the face was.
-for dm in "pen 1" "project 1"; do
+# the part is widened, not round where the face was; and a round rolled past a
+# step put in under it finds its edge again and rounds all of it.
+for dm in "pen 1" "project 1" "timeline 1"; do
   set -- $dm
   out=$(timeout 200 ./build/tangent --$1-demo $2 --smoke-test 20 2>&1)
   line=$(echo "$out" | grep "\[$1-demo\]" | head -1)

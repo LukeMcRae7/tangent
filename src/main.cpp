@@ -6,6 +6,8 @@
 
 int main(int argc, char** argv) {
     tg::Application app;
+    int perfScene = 0, perfSize = 0;
+    bool perfRound = false;
 
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--native-frame") == 0) {
@@ -98,6 +100,14 @@ int main(int argc, char** argv) {
             app.setPenDemo(std::atoi(argv[++i]));
         } else if (std::strcmp(argv[i], "--project-demo") == 0 && i + 1 < argc) {
             app.setProjectDemo(std::atoi(argv[++i]));
+        } else if (std::strcmp(argv[i], "--perf-scene") == 0 && i + 1 < argc) {
+            perfScene = std::atoi(argv[++i]);
+        } else if (std::strcmp(argv[i], "--perf-size") == 0 && i + 1 < argc) {
+            perfSize = std::atoi(argv[++i]);
+        } else if (std::strcmp(argv[i], "--perf-round") == 0) {
+            perfRound = true;
+        } else if (std::strcmp(argv[i], "--timeline-demo") == 0 && i + 1 < argc) {
+            app.setTimelineDemo(std::atoi(argv[++i]));
         } else if (std::strcmp(argv[i], "--plane-demo") == 0 && i + 1 < argc) {
             app.setPlaneDemo(std::atoi(argv[++i]));
         } else if (std::strcmp(argv[i], "--sketch-demo") == 0 && i + 1 < argc) {
@@ -147,6 +157,7 @@ int main(int argc, char** argv) {
         }
     }
 
+    if (perfScene > 0) app.setPerfScene(perfScene, perfSize, perfRound);
     if (!app.init()) {
         app.shutdown();
         return 1;

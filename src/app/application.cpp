@@ -35,6 +35,22 @@
 #include <set>
 
 namespace tg {
+
+namespace {
+// The face of `o` that faces most nearly along `n`, for the demos and the
+// audit that point at one.
+FaceId facingFaceOf(const SceneObject& o, Vec3 n) {
+    std::vector<FaceId> fs;
+    o.body.allFaces(fs);
+    FaceId best = kNoFace;
+    Real bestDot = -2.0;
+    for (FaceId f : fs) {
+        const Real d = dot(normalize(o.body.faceNormal(f)), normalize(n));
+        if (d > bestDot) { bestDot = d; best = f; }
+    }
+    return best;
+}
+} // namespace
 namespace {
 
 constexpr int kGlMajor = 3;
@@ -770,6 +786,252 @@ bool Application::init() {
         sketchTool_.start();
         sketchTool_.planePicker().setMethod(PlaneMethod::ThreePoints);
         std::fprintf(stderr, "[plane-demo] 1: the plane picker, asking for three points\n");
+    }
+
+    if (perfScene_ > 0) {
+        // Heavy scenes, built the way the tools build them, with every step
+        // timed. Run with --frame-probe to see what a frame costs once built:
+        //   1 a plate cut with a grid of holes -- hundreds of faces -- a face
+        //     of it selected
+        //   2 a part with a long history, rolled back to its middle
+        //   3 a sketch of thousands of circles, selected
+        scene_.clear();
+        camera_.yaw = 0.7f;
+        camera_.pitch = 0.6f;
+        camera_.distance = 320.0f;
+        camera_.target = {0, 0, 0};
+        camera_.snapToGoal();
+        using Clock = std::chrono::steady_clock;
+        auto since = [](Clock::time_point t) {
+            return std::chrono::duration<double, std::milli>(Clock::now() - t).count();
+        };
+        const int n = perfSceneSize_ > 0 ? perfSceneSize_ : 20;
+        if (perfScene_ == 1) {
+            // A 200 mm plate, n x n holes of 3 mm radius on a 9 mm pitch, cut as
+            // one step from a sketch on its top face.
+            PrimitiveSpec spec;
+            spec.kind = PrimitiveKind::Box;
+            spec.box = {200, 200, 10};
+            const ObjectId id = scene_.addPrimitive(PrimitiveKind::Box, spec, {0, 0, 0});
+            SceneObject* o = scene_.find(id);
+            const AABB bb = o->worldBounds();
+            Sketch holes;
+            holes.plane.origin = {0, 0, bb.max.z};
+            const Real pitch = 9.0, start = -pitch * (n - 1) * 0.5;
+            for (int i = 0; i < n; ++i)
+                for (int j = 0; j < n; ++j) {
+                    const SketchId c = holes.addCircle(holes.addPoint({start + i * pitch, start + j * pitch}), 3.0);
+                    (void)c;
+                }
+            Feature sk;
+            sk.kind = FeatureKind::Sketch;
+            sk.uid = scene_.takeFeatureUid();
+            sk.sketch = holes;
+            sk.sketchShown = false;
+            Feature cut;
+            cut.kind = FeatureKind::ExtrudeProfile;
+            cut.uid = scene_.takeFeatureUid();
+            cut.sketchUid = sk.uid;
+            for (const SketchProfile& r : sketchProfiles(holes))
+                if (r.holes.empty()) cut.profileKeys.push_back(r.key);
+            cut.distance = -12.0;
+            cut.extrudeOp = ExtrudeOp::Cut;
+            std::vector<Feature> chain = o->features;
+            chain.push_back(sk);
+            chain.push_back(cut);
+            auto t = Clock::now();
+            std::string why;
+            const bool ok = scene_.setFeatures(id, chain, &why);
+            const double cutMs = since(t);
+            o = scene_.find(id);
+            t = Clock::now();
+            scene_.reevaluate(id);
+            const double evalMs = since(t);
+            t = Clock::now();
+            RenderMesh mesh;
+            o->body.tessellate(mesh);
+            const double tessMs = since(t);
+            // A pick in the middle of it, as a click there does.
+            t = Clock::now();
+            const Ray ray = camera_.rayThroughPixel(camera_.viewportW * 0.5f, camera_.viewportH * 0.5f);
+            for (int k = 0; k < 20; ++k)
+                (void)scene_.pickElements(ray, camera_.viewProjection(), camera_.viewportW, camera_.viewportH,
+                                          {camera_.viewportW * 0.5, camera_.viewportH * 0.5});
+            const double pickMs = since(t) / 20.0;
+            std::fprintf(stderr, "[perf] plate %dx%d holes: %s in %.0f ms, re-run %.0f ms, %d faces, "
+                         "tessellated %.0f ms (%zu triangles), a pick %.2f ms%s%s\n",
+                         n, n, ok ? "cut" : "refused", cutMs, evalMs, o->body.faceCount(), tessMs,
+                         mesh.triangles.size() / 3, pickMs, why.empty() ? "" : "  ", why.c_str());
+            // Every rim rounded at once: the heaviest thing a person asks of it.
+            if (perfSceneRound_) {
+                std::vector<EdgeId> rims;
+                std::vector<EdgeId> es;
+                o->body.allEdges(es);
+                for (EdgeId e : es)
+                    if (o->body.edgeKind(e) == CurveKind::Circle) {
+                        Vec3 a, b;
+                        o->body.edgePositions(e, a, b);
+                        if (a.z > bb.max.z - 1e-6) rims.push_back(e);
+                    }
+                Feature round;
+                round.kind = FeatureKind::Bevel;
+                round.edges = nameEdges(o->body, rims, true);
+                round.width = 0.5;
+                t = Clock::now();
+                const bool rounded = scene_.addFeature(id, round, &why);
+                std::fprintf(stderr, "[perf] %zu rims rounded 0.5: %s in %.0f ms, %d faces%s%s\n", rims.size(),
+                             rounded ? "built" : "refused", since(t), scene_.find(id)->body.faceCount(),
+                             why.empty() ? "" : "  ", why.c_str());
+            }
+            scene_.selectElement({id, ElementKind::Face, facingFaceOf(*scene_.find(id), {0, 0, 1})});
+        } else if (perfScene_ == 2) {
+            // A 40 mm cube pushed and pulled on alternate faces, n times each way.
+            PrimitiveSpec spec;
+            spec.kind = PrimitiveKind::Box;
+            spec.box = {40, 40, 40};
+            const ObjectId id = scene_.addPrimitive(PrimitiveKind::Box, spec, {0, 0, 0});
+            const Vec3 dirs[4] = {{0, 0, 1}, {1, 0, 0}, {0, 1, 0}, {-1, 0, 0}};
+            auto t = Clock::now();
+            for (int k = 0; k < n * 2; ++k) {
+                SceneObject* o = scene_.find(id);
+                Feature f;
+                f.kind = FeatureKind::Extrude;
+                f.distance = (k % 2 == 0) ? 2.0 : -1.0;
+                f.mergeFlush = true;
+                f.faces = nameFaces(o->body, {facingFaceOf(*o, dirs[k % 4])});
+                scene_.addFeature(id, f, nullptr);
+            }
+            const double buildMs = since(t);
+            SceneObject* o = scene_.find(id);
+            t = Clock::now();
+            scene_.reevaluate(id);
+            const double evalMs = since(t);
+            const size_t total = scene_.historyLength(id);
+            t = Clock::now();
+            scene_.rollTo(id, total / 2);
+            const double backMs = since(t);
+            t = Clock::now();
+            scene_.rollTo(id, total);
+            const double forwardMs = since(t);
+            t = Clock::now();
+            scene_.rollTo(id, total / 2);
+            const double againMs = since(t);
+            std::fprintf(stderr, "[perf] history of %zu steps: built in %.0f ms, re-run %.0f ms, rolled back to "
+                         "the middle %.0f ms, forward %.0f ms, back again %.0f ms, %d failed\n",
+                         total, buildMs, evalMs, backMs, forwardMs, againMs,
+                         static_cast<int>(std::count_if(o->features.begin(), o->features.end(),
+                                                        [](const Feature& f) { return f.errored; })));
+            scene_.select(id);
+        } else {
+            // n x n x 5 circles in one sketch, standing on its own, selected.
+            Sketch many;
+            for (int i = 0; i < n * 5; ++i)
+                for (int j = 0; j < n; ++j) many.addCircle(many.addPoint({i * 4.0 - n * 10.0, j * 4.0 - n * 2.0}), 1.5);
+            Feature sk;
+            sk.kind = FeatureKind::Sketch;
+            sk.uid = scene_.takeFeatureUid();
+            sk.sketch = many;
+            auto t = Clock::now();
+            const ObjectId id = scene_.addFeatureChain({sk}, "Sketch", nullptr);
+            const double keepMs = since(t);
+            t = Clock::now();
+            const size_t regions = sketchProfiles(scene_.find(id)->features.front().sketch).size();
+            const double regionsMs = since(t);
+            std::fprintf(stderr, "[perf] a sketch of %d circles: kept in %.0f ms, its %zu regions found in %.0f ms\n",
+                         n * n * 5, keepMs, regions, regionsMs);
+            scene_.selectSketch({id, sk.uid});
+        }
+    }
+
+    if (timelineDemo_ > 0) {
+        // The history edited as the panel edits it: through the same actions
+        // its marker, its rows and its fix buttons send.
+        scene_.clear();
+        camera_.yaw = 0.7f;
+        camera_.pitch = 0.6f;
+        camera_.distance = 110.0f;
+        camera_.target = {0, 0, 12};
+        camera_.snapToGoal();
+        PrimitiveSpec spec;
+        spec.kind = PrimitiveKind::Box;
+        spec.box = {20, 20, 20};
+        const ObjectId id = scene_.addPrimitive(PrimitiveKind::Box, spec, {0, 0, 0});
+        auto facingFace = [&](Vec3 n) {
+            const SceneObject* o = scene_.find(id);
+            std::vector<FaceId> fs;
+            o->body.allFaces(fs);
+            for (FaceId f : fs)
+                if (dot(normalize(o->body.faceNormal(f)), n) > 0.999) return f;
+            return kNoFace;
+        };
+        auto roll = [&](size_t to) {
+            UiActions a;
+            a.historyEdit = UiActions::HistoryEdit::RollTo;
+            a.historyObject = id;
+            a.historyAt = to;
+            applyHistoryEdit(a);
+        };
+        auto push = [&](Real by, const char* label) {
+            Feature f;
+            f.kind = FeatureKind::Extrude;
+            f.distance = by;
+            f.mergeFlush = true;
+            f.faces = nameFaces(scene_.find(id)->body, {facingFace({0, 0, 1})});
+            f.label = label;
+            scene_.addFeature(id, f, nullptr);
+        };
+        // A 3 mm round on one upright edge.
+        {
+            const SceneObject* o = scene_.find(id);
+            std::vector<EdgeId> es;
+            o->body.allEdges(es);
+            for (EdgeId e : es) {
+                Vec3 p, q;
+                o->body.edgePositions(e, p, q);
+                if (std::fabs((q - p).z) > 5.0 && std::fabs(q.x - p.x) < 1e-9 && std::fabs(q.y - p.y) < 1e-9) {
+                    Feature f;
+                    f.kind = FeatureKind::Bevel;
+                    f.edges = nameEdges(o->body, {e}, false);
+                    f.width = 3.0;
+                    f.label = "Rounded corner";
+                    scene_.addFeature(id, f, nullptr);
+                    break;
+                }
+            }
+        }
+        if (timelineDemo_ == 1) {
+            roll(1);
+            push(10.0, "Taller");
+            roll(scene_.historyLength(id));
+            const SceneObject* o = scene_.find(id);
+            const Real got = o->body.health(false).volume;
+            const Real expected = 12000.0 - 9.0 * (1.0 - kPi / 4.0) * 30.0;
+            const bool found = o->features.size() == 3 && !o->features.back().errored;
+            std::fprintf(stderr, "[timeline-demo] 1: rolled back, pushed, rolled forward: %zu steps, round %s, "
+                         "%.2f mm3, arithmetic says %.2f, agrees=%d\n",
+                         o->features.size(), found ? "found its edge" : "lost its edge", static_cast<double>(got),
+                         static_cast<double>(expected), found && std::fabs(got - expected) < 1e-3 ? 1 : 0);
+            roll(2);   // left with the round waiting, to be seen
+            scene_.select(id);
+        } else {
+            // A step naming a face nobody has, as a file might bring one: it
+            // fails. Then rolled back to just before it, the top selected.
+            SceneObject* o = scene_.find(id);
+            Feature lost;
+            lost.kind = FeatureKind::Extrude;
+            lost.distance = 5.0;
+            lost.mergeFlush = true;
+            lost.faces.ids = {0xdeadbeefULL};
+            lost.label = "Raised top";
+            o->features.push_back(lost);
+            scene_.reevaluate(id);
+            const bool failed = o->features.back().errored;
+            roll(2);
+            scene_.selectElement({id, ElementKind::Face, facingFace({0, 0, 1})});
+            std::fprintf(stderr, "[timeline-demo] 2: a step failed=%d, rolled back to just before it, %zu waiting\n",
+                         failed ? 1 : 0, o->ahead.size());
+        }
+        camera_.snapToGoal();
     }
 
     if (revolveDemo_ > 0 || sweepDemo_ > 0 || loftDemo_ > 0) {
@@ -2503,14 +2765,17 @@ void Application::drawSelectionHighlights() {
 
         // Nudge toward the eye by a fixed number of pixels' worth of world
         // distance, so the highlight sits on the surface at any zoom instead of
-        // z-fighting with it.
-        auto lift = [&](Vec3 p) {
-            const Vec3 world = transformPoint(model, p);
-            const Vec3 toEye = camera_.eye() - world;
-            const float len = length(toEye);
-            if (len < 1e-6f) return world;
-            return world + toEye * (camera_.pixelWorldSize(world) * 2.0f / len);
-        };
+        // z-fighting with it. One nudge for the whole highlight, measured at
+        // its middle and taken along the view: a face of a plate with hundreds
+        // of holes is tens of thousands of vertices, and working the distance
+        // out for each one was most of an idle frame.
+        AABB box;
+        for (const Vec3& p : h.tris) box.expand(p);
+        for (const Vec3& p : h.lines) box.expand(p);
+        if (!box.valid()) continue;
+        const Vec3 mid = transformPoint(model, box.center());
+        const Vec3 nudge = -camera_.forward() * static_cast<Real>(camera_.pixelWorldSize(mid) * 2.0f);
+        auto lift = [&](Vec3 p) { return transformPoint(model, p) + nudge; };
         for (size_t i = 0; i + 1 < h.lines.size(); i += 2)
             renderer_.addLine(lift(h.lines[i]), lift(h.lines[i + 1]), edgeCol);
         for (size_t i = 0; i + 2 < h.tris.size(); i += 3)
@@ -7045,35 +7310,245 @@ void Application::beginAddPrimitivePrompt(PrimitiveKind kind) {
 // built from yet is all there is to see of the object that holds it. The one
 // being edited is left out -- the tool draws that itself, in the colours of
 // what is still free to move.
-void Application::drawSceneSketches() {
+namespace {
+
+// FNV-1a over plain numbers: a fingerprint of what a sketch's drawing is made
+// of, cheap enough to take every frame.
+struct Hasher {
+    uint64_t h = 1469598103934665603ULL;
+    void bytes(const void* p, size_t n) {
+        const auto* b = static_cast<const uint8_t*>(p);
+        for (size_t i = 0; i < n; ++i) { h ^= b[i]; h *= 1099511628211ULL; }
+    }
+    template <typename T> void add(const T& v) { bytes(&v, sizeof v); }
+};
+
+uint64_t sketchShapeKey(const Sketch& s, const Mat4& model) {
+    Hasher k;
+    k.bytes(&model, sizeof model);
+    k.add(s.plane.origin); k.add(s.plane.xAxis); k.add(s.plane.yAxis);
+    for (const SketchPoint& p : s.points) { k.add(p.id); k.add(p.at); }
+    for (const SketchEntity& e : s.entities) {
+        k.add(e.id); k.add(e.curve); k.add(e.construction);
+        k.add(e.a); k.add(e.b); k.add(e.c); k.add(e.d); k.add(e.radius);
+    }
+    return k.h;
+}
+
+} // namespace
+
+Application::SketchLines* Application::sketchLinesOf(ObjectId object, ElementId uid) {
+    for (SketchLines& l : sketchLines_)
+        if (l.object == object && l.uid == uid) return &l;
+    return nullptr;
+}
+
+void Application::refreshSketchLines() {
+    for (SketchLines& l : sketchLines_) l.used = false;
+    Hasher v;
+    const Mat4 vp = camera_.viewProjection();
+    v.bytes(&vp, sizeof vp);
+    v.add(camera_.viewportW);
+    v.add(camera_.viewportH);
+    const uint64_t view = v.h;
+
     for (const auto& obj : scene_.objects()) {
         if (!obj->visible) continue;
-        const bool selected = scene_.isSelected(obj->id);
         const Mat4 model = obj->modelMatrix();
         for (const Feature& f : obj->features) {
             if (f.kind != FeatureKind::Sketch || !f.sketchShown || !f.enabled) continue;
-            if (sketchTool_.editing() && sketchTool_.editingUid() == f.uid) continue;
-
-            // The selected sketch in the brand colour and heavier; the one under
-            // the pointer lit, so it is plain what a click would take.
-            const Scene::SketchRef ref{obj->id, f.uid};
-            const bool picked = scene_.selectedSketch() == ref;
-            const bool lit = !picked && hoverSketch_ == ref && !profileTool_.active();
-            const Vec4 col = picked || selected ? toVec4(palette::kBrand, 0.95f)
-                           : lit                ? Vec4{1.0f, 0.82f, 0.35f, 0.95f}
-                                                : Vec4{0.55f, 0.62f, 0.72f, 0.75f};
-            const Real width = picked ? 2.8 : lit ? 2.4 : 1.8;
-            for (const SketchEntity& e : f.sketch.entities) {
-                const std::vector<Vec2> pts = sketchEntityPoints(f.sketch, e);
-                for (size_t i = 0; i + 1 < pts.size(); ++i) {
-                    const Vec3 a = transformPoint(model, f.sketch.plane.toWorld(pts[i]));
-                    const Vec3 b = transformPoint(model, f.sketch.plane.toWorld(pts[i + 1]));
-                    if (e.construction) renderer_.addFrontDashes(camera_, a, b, col, 1.2);
-                    else                renderer_.addFrontLine(camera_, a, b, col, width);
+            SketchLines* l = sketchLinesOf(obj->id, f.uid);
+            if (!l) {
+                sketchLines_.push_back({});
+                l = &sketchLines_.back();
+                l->object = obj->id;
+                l->uid = f.uid;
+            }
+            l->used = true;
+            const uint64_t shape = sketchShapeKey(f.sketch, model);
+            if (shape != l->shape || l->start.empty()) {
+                l->shape = shape;
+                l->points.clear();
+                l->start.clear();
+                l->construction.clear();
+                l->regionsKnown = false;
+                l->regions.clear();
+                l->view = 0;
+                // A few thousand curves are drawn a little coarser than a few.
+                const int steps = f.sketch.entities.size() > 500 ? 16 : 32;
+                for (const SketchEntity& e : f.sketch.entities) {
+                    l->start.push_back(static_cast<uint32_t>(l->points.size()));
+                    l->construction.push_back(e.construction ? 1 : 0);
+                    for (Vec2 q : sketchEntityPoints(f.sketch, e, steps))
+                        l->points.push_back(transformPoint(model, f.sketch.plane.toWorld(q)));
                 }
+                l->start.push_back(static_cast<uint32_t>(l->points.size()));
+            }
+            // On the screen, again only when the view has moved.
+            if (l->view != view) {
+                l->view = view;
+                l->px.resize(l->points.size());
+                l->onScreen.resize(l->points.size());
+                for (size_t i = 0; i < l->points.size(); ++i) {
+                    Vec2 px{};
+                    l->onScreen[i] = camera_.projectToPixel(l->points[i], px) ? 1 : 0;
+                    l->px[i] = px;
+                }
+                const size_t curves = l->start.size() - 1;
+                l->boxLo.assign(curves, Vec2{1e30, 1e30});
+                l->boxHi.assign(curves, Vec2{-1e30, -1e30});
+                for (size_t k = 0; k < curves; ++k)
+                    for (uint32_t i = l->start[k]; i < l->start[k + 1]; ++i) {
+                        if (!l->onScreen[i]) continue;
+                        l->boxLo[k] = {std::min(l->boxLo[k].x, l->px[i].x), std::min(l->boxLo[k].y, l->px[i].y)};
+                        l->boxHi[k] = {std::max(l->boxHi[k].x, l->px[i].x), std::max(l->boxHi[k].y, l->px[i].y)};
+                    }
             }
         }
     }
+    // Sketches no longer shown, or gone.
+    sketchLines_.erase(std::remove_if(sketchLines_.begin(), sketchLines_.end(),
+                                      [](const SketchLines& l) { return !l.used; }),
+                       sketchLines_.end());
+}
+
+const std::vector<SketchProfile>& Application::sketchLineRegions(SketchLines& l) {
+    if (!l.regionsKnown) {
+        if (const Feature* f = scene_.sketchFeature({l.object, l.uid})) l.regions = sketchProfiles(f->sketch);
+        l.regionsKnown = true;
+    }
+    return l.regions;
+}
+
+void Application::drawSceneSketches() {
+    refreshSketchLines();
+    const Scene::SketchRef picked = scene_.selectedSketch();
+    for (const SketchLines& l : sketchLines_) {
+        if (sketchTool_.editing() && sketchTool_.editingUid() == l.uid) continue;
+        // The selected sketch in the brand colour and heavier; the one under
+        // the pointer lit, so it is plain what a click would take.
+        const Scene::SketchRef ref{l.object, l.uid};
+        const bool isPicked = picked == ref;
+        const bool lit = !isPicked && hoverSketch_ == ref && !profileTool_.active();
+        const Vec4 col = isPicked || scene_.isSelected(l.object) ? toVec4(palette::kBrand, 0.95f)
+                       : lit                                      ? Vec4{1.0f, 0.82f, 0.35f, 0.95f}
+                                                                  : Vec4{0.55f, 0.62f, 0.72f, 0.75f};
+        const Real width = isPicked ? 2.8 : lit ? 2.4 : 1.8;
+        // A drawing of thousands of curves in hairlines, which cost nothing to
+        // place; a few, as lines of a width that reads.
+        const bool many = l.points.size() > 6000;
+        for (size_t k = 0; k + 1 < l.start.size(); ++k)
+            for (uint32_t i = l.start[k]; i + 1 < l.start[k + 1]; ++i) {
+                const Vec3& a = l.points[i];
+                const Vec3& b = l.points[i + 1];
+                if (many)                 renderer_.addLine(a, b, col);
+                else if (l.construction[k]) renderer_.addFrontDashes(camera_, a, b, col, 1.2);
+                else                        renderer_.addFrontLine(camera_, a, b, col, width);
+            }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The history, edited as a whole
+// ---------------------------------------------------------------------------
+
+void Application::applyHistoryEdit(const UiActions& a) {
+    dismissSettled();
+    if (tool_.active() || createTool_.active() || sketchTool_.active() || editToolActive()) {
+        setNotice("Finish the current operation first");
+        return;
+    }
+    SceneObject* o = scene_.find(a.historyObject);
+    if (!o) return;
+    const HistoryCommand::State before = HistoryCommand::of(*o);
+    const size_t total = o->features.size() + o->ahead.size();
+    // How many of the steps that run failed: said after a change, since a
+    // step that stops building is the thing a person needs to hear about.
+    auto failures = [&] {
+        return std::count_if(o->features.begin(), o->features.end(), [](const Feature& f) { return f.errored; });
+    };
+    const auto wasFailing = failures();
+    std::string what;
+
+    switch (a.historyEdit) {
+    case UiActions::HistoryEdit::RollTo: {
+        const size_t to = std::clamp<size_t>(a.historyAt, 1, total);
+        if (to == o->features.size()) return;
+        what = to < o->features.size() ? "Roll Back" : "Roll Forward";
+        scene_.rollTo(o->id, to);
+        break;
+    }
+    case UiActions::HistoryEdit::Move: {
+        const size_t from = a.historyAt, to = a.historyTo;
+        // The first step is what the part starts from, and stays first; a
+        // step moves among the ones that run.
+        if (from == 0 || to == 0 || from >= o->features.size() || to >= o->features.size() || from == to) return;
+        std::vector<Feature> chain = o->features;
+        Feature moved = chain[from];
+        chain.erase(chain.begin() + static_cast<long>(from));
+        chain.insert(chain.begin() + static_cast<long>(to), moved);
+        // A step cannot go before a sketch it is built from: said, rather than
+        // made and left failing.
+        for (size_t i = 0; i < chain.size(); ++i) {
+            std::vector<ElementId> needs;
+            const Feature& f = chain[i];
+            if (f.sketchUid) needs.push_back(f.sketchUid);
+            if (f.pathSketchUid) needs.push_back(f.pathSketchUid);
+            for (ElementId u : f.loftSketchUids) if (u) needs.push_back(u);
+            for (ElementId u : needs) {
+                const bool earlier = std::any_of(chain.begin(), chain.begin() + static_cast<long>(i),
+                                                 [&](const Feature& g) { return g.uid == u; });
+                if (!earlier) {
+                    setNotice("\"" + (f.label.empty() ? f.summary() : f.label) +
+                              "\" is built from a sketch that would then come after it");
+                    return;
+                }
+            }
+        }
+        std::string why;
+        if (!scene_.setFeatures(o->id, chain, &why)) {
+            setNotice("That order does not build: " + why);
+            return;
+        }
+        what = "Move Step";
+        break;
+    }
+    case UiActions::HistoryEdit::UseFaces:
+    case UiActions::HistoryEdit::UseEdges: {
+        // The step just after the marker, pointed at what is selected on the
+        // model as it stands there -- which is the model it acts on -- then
+        // every step after the marker run again.
+        if (a.historyAt != o->features.size() || o->ahead.empty()) return;
+        Feature& f = o->ahead.front();
+        const bool faces = a.historyEdit == UiActions::HistoryEdit::UseFaces;
+        if (faces) {
+            const std::vector<FaceId> sel = scene_.selectedFaces(o->id);
+            if (sel.empty()) { setNotice("Select the faces it should act on first"); return; }
+            f.faces = nameFaces(o->body, sel);
+        } else {
+            const std::vector<EdgeId> sel = scene_.selectedEdges(o->id);
+            if (sel.empty()) { setNotice("Select the edges it should act on first"); return; }
+            f.edges = nameEdges(o->body, sel, f.radii.empty());
+            // A radius per edge follows the edges it was for; a new set of
+            // edges takes the first radius all round.
+            if (!f.radii.empty()) f.radii.assign(sel.size(), f.radii.front());
+        }
+        scene_.clearElementSelection();
+        scene_.rollTo(o->id, total);
+        what = "Fix Step";
+        break;
+    }
+    case UiActions::HistoryEdit::None:
+        return;
+    }
+
+    undo_.push(std::make_unique<HistoryCommand>(o->id, before, HistoryCommand::of(*o), what));
+    const auto nowFailing = failures();
+    if (nowFailing > wasFailing)
+        setNotice(std::to_string(nowFailing) + (nowFailing == 1 ? " step no longer builds" : " steps no longer build") +
+                  ": it is marked in the history, with what went wrong");
+    else if (nowFailing < wasFailing && nowFailing == 0)
+        setNotice("Every step builds again");
 }
 
 void Application::beginExtrudeSketch() {
@@ -7101,11 +7576,14 @@ void Application::deleteSelectedSketch() {
     if (!sk.valid() || !obj) return;
     // Something built from it would lose what it was built from: said, rather
     // than done and left failing.
-    const size_t uses = std::count_if(obj->features.begin(), obj->features.end(), [&](const Feature& f) {
+    auto usesIt = [&](const Feature& f) {
         return f.uid != sk.uid &&
                (f.sketchUid == sk.uid || f.pathSketchUid == sk.uid ||
                 std::find(f.loftSketchUids.begin(), f.loftSketchUids.end(), sk.uid) != f.loftSketchUids.end());
-    });
+    };
+    // The steps waiting after the rollback marker count too: they will run.
+    const size_t uses = std::count_if(obj->features.begin(), obj->features.end(), usesIt) +
+                        std::count_if(obj->ahead.begin(), obj->ahead.end(), usesIt);
     if (uses > 0) {
         char msg[160];
         std::snprintf(msg, sizeof msg, "%zu step%s built from this sketch: delete %s first, or hide the sketch",
@@ -7114,7 +7592,7 @@ void Application::deleteSelectedSketch() {
         return;
     }
     scene_.clearSketchSelection();
-    const bool onlyThis = obj->body.empty() && obj->features.size() == 1;
+    const bool onlyThis = obj->body.empty() && obj->features.size() == 1 && obj->ahead.empty();
     if (onlyThis) {
         renderer_.forget(obj->id);
         undo_.push(ExistenceCommand::forDelete(scene_, {obj->id}));
@@ -7136,58 +7614,59 @@ void Application::deleteSelectedSketch() {
 // or -- when `inside` is set, for a click -- a closed region the pointer is
 // in, if no body is in front of it. Hidden sketches are not in the view to be
 // pointed at; the outliner reaches those.
-Scene::SketchRef Application::sketchAt(Vec2 cursor, bool inside) const {
+Scene::SketchRef Application::sketchAt(Vec2 cursor, bool inside) {
+    refreshSketchLines();
     Scene::SketchRef best;
     Real bestPx = 8.0;
-    const Ray ray = camera_.rayThroughPixel(cursor.x, cursor.y);
-    Real bestT = 1e300;
-    const RayHit body = scene_.raycast(ray);
-    const Real bodyT = body.hit() ? static_cast<Real>(body.t) : 1e300;
-    Scene::SketchRef inRegion;
-    for (const auto& o : scene_.objects()) {
-        if (!o->visible) continue;
-        const Mat4 model = o->modelMatrix();
-        for (const Feature& f : o->features) {
-            if (f.kind != FeatureKind::Sketch || !f.sketchShown || !f.enabled) continue;
-            if (sketchTool_.editing() && sketchTool_.editingUid() == f.uid) continue;
-            for (const SketchEntity& e : f.sketch.entities) {
-                Vec2 prev{};
-                bool have = false;
-                for (Vec2 q : sketchEntityPoints(f.sketch, e, 16)) {
-                    Vec2 px{};
-                    const bool on = camera_.projectToPixel(transformPoint(model, f.sketch.plane.toWorld(q)), px);
-                    if (on && have) {
-                        const Vec2 ab = px - prev;
-                        const Real len = lengthSq(ab);
-                        const Real t = len > 1e-18 ? std::clamp(dot(cursor - prev, ab) / len, Real(0), Real(1)) : 0;
-                        const Real d = length(cursor - (prev + ab * t));
-                        if (d < bestPx) { bestPx = d; best = {o->id, f.uid}; }
-                    }
-                    prev = px;
-                    have = on;
-                }
+    for (const SketchLines& l : sketchLines_) {
+        if (sketchTool_.editing() && sketchTool_.editingUid() == l.uid) continue;
+        for (size_t k = 0; k + 1 < l.start.size(); ++k) {
+            // A curve nowhere near the pointer is passed over whole.
+            if (cursor.x < l.boxLo[k].x - bestPx || cursor.x > l.boxHi[k].x + bestPx ||
+                cursor.y < l.boxLo[k].y - bestPx || cursor.y > l.boxHi[k].y + bestPx)
+                continue;
+            for (uint32_t i = l.start[k]; i + 1 < l.start[k + 1]; ++i) {
+                if (!l.onScreen[i] || !l.onScreen[i + 1]) continue;
+                const Vec2 a = l.px[i], ab = l.px[i + 1] - a;
+                const Real len = lengthSq(ab);
+                const Real t = len > 1e-18 ? std::clamp(dot(cursor - a, ab) / len, Real(0), Real(1)) : 0;
+                const Real d = length(cursor - (a + ab * t));
+                if (d < bestPx) { bestPx = d; best = {l.object, l.uid}; }
             }
-            if (!inside || best.valid()) continue;
-            // Inside one of its regions, in front of any body.
-            const Vec3 origin = transformPoint(model, f.sketch.plane.origin);
-            const Vec3 xa = transformVector(model, f.sketch.plane.xAxis);
-            const Vec3 ya = transformVector(model, f.sketch.plane.yAxis);
-            const Vec3 n = normalize(cross(xa, ya));
-            const Real denom = dot(n, ray.dir);
-            if (std::fabs(denom) < 1e-9) continue;
-            const Real t = dot(origin - ray.origin, n) / denom;
-            if (t < 0.0 || t >= bestT || t > bodyT + 1e-3) continue;
-            const Vec3 d = ray.origin + ray.dir * t - origin;
-            const Vec2 uv{dot(d, xa) / lengthSq(xa), dot(d, ya) / lengthSq(ya)};
-            for (const SketchProfile& r : sketchProfiles(f.sketch))
-                if (sketchProfileContains(f.sketch, r, uv)) {
-                    bestT = t;
-                    inRegion = {o->id, f.uid};
-                    break;
-                }
         }
     }
-    return best.valid() ? best : inRegion;
+    if (best.valid() || !inside) return best;
+
+    // Inside one of a sketch's regions, in front of any body.
+    const Ray ray = camera_.rayThroughPixel(cursor.x, cursor.y);
+    const RayHit body = scene_.raycast(ray);
+    const Real bodyT = body.hit() ? static_cast<Real>(body.t) : 1e300;
+    Real bestT = 1e300;
+    Scene::SketchRef inRegion;
+    for (SketchLines& l : sketchLines_) {
+        if (sketchTool_.editing() && sketchTool_.editingUid() == l.uid) continue;
+        const SceneObject* o = scene_.find(l.object);
+        const Feature* f = scene_.sketchFeature({l.object, l.uid});
+        if (!o || !f) continue;
+        const Mat4 model = o->modelMatrix();
+        const Vec3 origin = transformPoint(model, f->sketch.plane.origin);
+        const Vec3 xa = transformVector(model, f->sketch.plane.xAxis);
+        const Vec3 ya = transformVector(model, f->sketch.plane.yAxis);
+        const Vec3 n = normalize(cross(xa, ya));
+        const Real denom = dot(n, ray.dir);
+        if (std::fabs(denom) < 1e-9) continue;
+        const Real t = dot(origin - ray.origin, n) / denom;
+        if (t < 0.0 || t >= bestT || t > bodyT + 1e-3) continue;
+        const Vec3 d = ray.origin + ray.dir * t - origin;
+        const Vec2 uv{dot(d, xa) / lengthSq(xa), dot(d, ya) / lengthSq(ya)};
+        for (const SketchProfile& r : sketchLineRegions(l))
+            if (sketchProfileContains(f->sketch, r, uv)) {
+                bestT = t;
+                inRegion = {l.object, l.uid};
+                break;
+            }
+    }
+    return inRegion;
 }
 
 void Application::beginProfileBuild(ProfileBuild build) {
@@ -8411,6 +8890,8 @@ void Application::applyActions() {
         }
     }
 
+    if (a.historyEdit != UiActions::HistoryEdit::None) applyHistoryEdit(a);
+
     if (a.featuresEdited != kNoObject) {
         SceneObject* o = scene_.find(a.featuresEdited);
         if (o) {
@@ -9016,6 +9497,12 @@ int Application::run() {
             ui_.toolStatus = tool_.statusText();
         } else {
             ui_.toolStatus.clear();
+            // A part rolled back is a part that is not what it will be: said,
+            // while it is the one in hand.
+            if (const SceneObject* o = scene_.find(scene_.contextObject()); o && !o->ahead.empty())
+                ui_.toolStatus = "Rolled back: " + std::to_string(o->ahead.size()) +
+                                 (o->ahead.size() == 1 ? " step waits" : " steps wait") +
+                                 " after the marker. New steps go in here.";
         }
 
         // What a printer would make of the part, when nothing else is being
@@ -9040,9 +9527,29 @@ int Application::run() {
         }
 
         gProbe.begin();
+        // The selected sketch's regions, for the inspector: from the drawn
+        // lines' cache when it is shown, and counted once per shape otherwise.
+        ui_.sketchRegions = -1;
+        if (const Scene::SketchRef sk = scene_.selectedSketch(); sk.valid()) {
+            refreshSketchLines();
+            if (SketchLines* l = sketchLinesOf(sk.object, sk.uid)) {
+                ui_.sketchRegions = static_cast<int>(sketchLineRegions(*l).size());
+            } else if (const SceneObject* o = scene_.find(sk.object)) {
+                const Feature* f = scene_.sketchFeature(sk);
+                const uint64_t shape = sketchShapeKey(f->sketch, o->modelMatrix());
+                if (shape != hiddenRegionsShape_) {
+                    hiddenRegionsShape_ = shape;
+                    hiddenRegions_ = static_cast<int>(sketchProfiles(f->sketch).size());
+                }
+                ui_.sketchRegions = hiddenRegions_;
+            }
+        }
         buildUi();
+        gProbe.end("ui");
+        gProbe.begin();
         handleViewportMouse();
         handleShortcuts();
+        gProbe.end("input");
 
         // The create tool can refuse from any of the three above -- the HUD's
         // Finish button, a click in the viewport, or the E shortcut -- so it is
@@ -9052,8 +9559,9 @@ int Application::run() {
         if (std::string sketchErr = sketchTool_.takeError(); !sketchErr.empty())
             setNotice(sketchErr);
 
-        gProbe.end("ui");
+        gProbe.begin();
         applyActions();
+        gProbe.end("actions");
 
         // A feature that dropped out of the chain during any of the above.
         // Drained here, after the actions have run, because a re-evaluation is

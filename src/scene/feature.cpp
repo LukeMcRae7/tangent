@@ -474,12 +474,17 @@ bool evaluateFrom(std::vector<Feature>& features, size_t from,
     if (from > 0) body = cache[from - 1];
 
     cache.resize(features.size());
-    bool any = from > 0 || false;
+    // Resumed part-way, what the steps before `from` made is what the cache
+    // says: a solid if its last entry is one, and a drawing if any of them was
+    // a sketch -- a history of nothing but sketches is a whole one.
+    bool any = from > 0 && !body.empty();
 
     // A chain can legitimately produce no solid: a sketch on its own is a thing
     // in the scene, drawn and saved and later extruded, and refusing it would
     // mean a sketch could only exist inside a part that already had a body.
     bool drew = false;
+    for (size_t i = 0; i < from; ++i)
+        if (features[i].kind == FeatureKind::Sketch && features[i].enabled) drew = true;
 
     std::vector<FaceId> scratchFaces;
     std::vector<EdgeId> scratchEdges;

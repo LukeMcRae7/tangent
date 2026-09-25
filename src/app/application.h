@@ -159,6 +159,15 @@ public:
     void setProjectDemo(int step) { projectDemo_ = step; }
     // The plane picker, three points, two picked: left there to be seen.
     void setPlaneDemo(int step) { planeDemo_ = step; }
+    // The history as a whole: 1 a corner rounded, rolled back, the top pushed
+    // up there, rolled forward -- the round has to find its edge again -- and
+    // left rolled back; 2 a step that fails, rolled back to just before it,
+    // with the faces it should act on selected.
+    void setTimelineDemo(int step) { timelineDemo_ = step; }
+    // A heavy scene, every step of building it timed: 1 a plate cut with n x n
+    // holes (and, with `round`, every rim rounded), 2 a history of 2n steps
+    // rolled back and forward, 3 a sketch of 5n^2 circles. For --frame-probe.
+    void setPerfScene(int scene, int n, bool round) { perfScene_ = scene; perfSceneSize_ = n; perfSceneRound_ = round; }
     // Revolve, sweep and loft through the tool that builds them, each checked
     // against arithmetic and against leaving nothing standing beside the part:
     //   revolve 1 a ring, 2 a quarter of it, 3 a groove cut round a cylinder,
@@ -261,6 +270,10 @@ private:
     int  penDemo_ = 0;
     int  projectDemo_ = 0;
     int  planeDemo_ = 0;
+    int  timelineDemo_ = 0;
+    int  perfScene_ = 0;
+    int  perfSceneSize_ = 0;
+    bool perfSceneRound_ = false;
     int  revolveDemo_ = 0;
     int  sweepDemo_ = 0;
     int  loftDemo_ = 0;
@@ -1226,11 +1239,43 @@ private:
     void beginProfileBuild(ProfileBuild build);
     // The selected sketch: its regions extruded, or the sketch taken out.
     void beginExtrudeSketch();
+    // Rolls the marker, moves a step, or re-points a failed one -- see
+    // UiActions::HistoryEdit.
+    void applyHistoryEdit(const UiActions& a);
     void deleteSelectedSketch();
     // The sketch drawn under the pointer; see the .cpp.
-    Scene::SketchRef sketchAt(Vec2 cursor, bool inside) const;
+    Scene::SketchRef sketchAt(Vec2 cursor, bool inside);
     // The one the pointer is over, lit in the view.
     Scene::SketchRef hoverSketch_;
+    // Each sketch shown in the view, as drawn: its curves sampled once in the
+    // world, and projected once per view. Sampling and projecting every curve
+    // of every sketch on every frame -- to draw them and to find the one under
+    // the pointer -- was most of a frame for a sketch of a few thousand
+    // circles; now that is done when the sketch, its part's placement or the
+    // view changes, and not otherwise.
+    struct SketchLines {
+        ObjectId object = kNoObject;
+        ElementId uid = 0;
+        uint64_t shape = 0;                 // of the sketch and where it stands
+        std::vector<Vec3> points;           // every curve's samples, one after another
+        std::vector<uint32_t> start;        // curve k is points[start[k] .. start[k + 1])
+        std::vector<uint8_t> construction;
+        uint64_t view = 0;                  // what `px` was projected for
+        std::vector<Vec2> px;
+        std::vector<uint8_t> onScreen;
+        std::vector<Vec2> boxLo, boxHi;     // each curve's extent on screen
+        bool regionsKnown = false;
+        std::vector<SketchProfile> regions;
+        bool used = false;
+    };
+    std::vector<SketchLines> sketchLines_;
+    // The cached lines of every sketch shown, brought up to date.
+    void refreshSketchLines();
+    SketchLines* sketchLinesOf(ObjectId object, ElementId uid);
+    const std::vector<SketchProfile>& sketchLineRegions(SketchLines& lines);
+    // The same count for a selected sketch that is hidden, and what it was of.
+    uint64_t hiddenRegionsShape_ = 0;
+    int hiddenRegions_ = 0;
 
     void beginAddPrimitivePrompt(PrimitiveKind kind);
     void beginSketch();

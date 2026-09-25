@@ -205,6 +205,21 @@ panel opens with its regions picked. A sketch's plane can stand off the plane
 or face it was put on by any distance, which is how the next outline of a loft
 is drawn above the first.
 
+**The history can be gone back into.** Every part keeps the steps that made
+it, in order, in the inspector. The orange marker under them is where the model
+stands: drag it up onto a step, or right-click a step for Roll back to here or
+Insert before this, and the steps after it wait, dimmed, while the view shows
+the part as it was there. Whatever is done then goes in at the marker; Step on
+and To end run the waiting steps again on top of it, each finding the faces
+and edges it names on the part as it now is -- push a cube's top up under a
+rounded corner and the round rounds the taller edge. A step dragged to another
+place runs from there, refused if it would come before the sketch it is built
+from. Double-click a step to name it: "Bolt circle" reads better than what it
+does, which stays in the tooltip. A step that no longer builds is marked with
+what went wrong, and its Fix rolls back to just before it: select the faces or
+edges it should act on, click Use the selected faces, and it and everything
+after it run again.
+
 ### The interface
 
 One dark surface with the model lit in the middle of it. Along the top, the

@@ -101,6 +101,17 @@ void FeatureCommand::apply(Scene& scene, const std::vector<Feature>& chain) {
     scene.clearElementSelection();
 }
 
+void HistoryCommand::apply(Scene& scene, const State& s) {
+    SceneObject* o = scene.find(id_);
+    if (!o) return;
+    o->features = s.features;
+    o->ahead = s.ahead;
+    for (const Feature& f : o->features)
+        if (f.kind == FeatureKind::Primitive) { o->spec = f.primitive; break; }
+    scene.reevaluate(id_);
+    scene.clearElementSelection();
+}
+
 bool FeatureCommand::mergeWith(const Command& other) {
     const auto* rhs = dynamic_cast<const FeatureCommand*>(&other);
     if (!rhs || rhs->id_ != id_ || rhs->what_ != what_) return false;

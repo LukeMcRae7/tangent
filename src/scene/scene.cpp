@@ -66,17 +66,62 @@ Feature* trailing(SceneObject& obj, FeatureKind kind) {
     return f.enabled && f.kind == kind ? &f : nullptr;
 }
 
+// A step's fingerprint chained onto the one before it: two histories agree at
+// step i only if every step up to i agrees, so a cached result is never
+// trusted after something before it has changed -- a step put in ahead of it
+// included.
+uint64_t chainKey(uint64_t before, const Feature& f) {
+    uint64_t h = before ^ featureKey(f);
+    h *= 1099511628211ULL;
+    return h ^ (h >> 29);
+}
+constexpr uint64_t kChainSeed = 0x9e3779b97f4a7c15ULL;
+
+// How many leading steps of `features` are what the cache holds.
+size_t builtPrefix(const SceneObject& obj, const std::vector<Feature>& features) {
+    const size_t known = std::min(obj.featureKeys.size(), obj.featureCache.size());
+    uint64_t k = kChainSeed;
+    size_t i = 0;
+    for (; i < features.size() && i < known; ++i) {
+        k = chainKey(k, features[i]);
+        if (k != obj.featureKeys[i]) break;
+    }
+    return i;
+}
+
+// The fingerprints kept beside the cache, made true again after the steps from
+// `from` on were run: those are what the cache now holds. Fingerprints before
+// `from` are kept only when all of them are known; a gap means the next re-run
+// starts at the gap, which is the safe direction to be wrong in.
+void syncKeys(SceneObject& obj, size_t from) {
+    if (from == 0 || obj.featureKeys.size() < from) {
+        obj.featureKeys.resize(std::min(obj.featureKeys.size(), from));
+        if (from != 0) return;
+    }
+    obj.featureKeys.resize(from);
+    const size_t n = std::min(obj.features.size(), obj.featureCache.size());
+    uint64_t k = from > 0 ? obj.featureKeys[from - 1] : kChainSeed;
+    for (size_t i = from; i < n; ++i) {
+        k = chainKey(k, obj.features[i]);
+        obj.featureKeys.push_back(k);
+    }
+}
+
 // A placement step appended without evaluating anything: the body after it is
 // the body before it, so the cache only needs that body repeated.
 void appendUnchanged(SceneObject& obj, Feature f) {
     const bool whole = obj.featureCache.size() == obj.features.size();
     obj.features.push_back(std::move(f));
-    if (whole) obj.featureCache.push_back(obj.body);
+    if (whole) {
+        obj.featureCache.push_back(obj.body);
+        syncKeys(obj, obj.features.size() - 1);
+    }
 }
 
 void dropLast(SceneObject& obj) {
     obj.features.pop_back();
     if (obj.featureCache.size() > obj.features.size()) obj.featureCache.resize(obj.features.size());
+    if (obj.featureKeys.size() > obj.features.size()) obj.featureKeys.resize(obj.features.size());
 }
 
 } // namespace
@@ -160,6 +205,7 @@ bool Scene::recordScale(ObjectId id, Vec3 factors, Vec3 aboutLocal, std::string*
     if (from < obj->features.size()) {
         Body next;
         const bool ok = evaluateFrom(obj->features, from, obj->featureCache, next);
+        syncKeys(*obj, from);
         if (!ok || obj->features[from].errored) {
             if (error) *error = obj->features[from].error.empty() ? "the body could not be scaled"
                                                                   : obj->features[from].error;
@@ -174,6 +220,7 @@ bool Scene::recordScale(ObjectId id, Vec3 factors, Vec3 aboutLocal, std::string*
         Body back;
         if (!evaluateFrom(obj->features, obj->features.size(), obj->featureCache, back))
             evaluateFeatures(obj->features, back);
+        syncKeys(*obj, obj->features.size());
         obj->body = std::move(back);
     }
     obj->refreshDerived();
@@ -302,6 +349,7 @@ std::unique_ptr<SceneObject> buildFromChain(std::vector<Feature> features, bool&
     obj->spec.kind = PrimitiveKind::Custom;
     obj->features = std::move(features);
     built = evaluateFrom(obj->features, 0, obj->featureCache, obj->body);
+    syncKeys(*obj, 0);
     return obj;
 }
 
@@ -351,6 +399,55 @@ ObjectId Scene::addChainAsIs(std::vector<Feature> features, const std::string& n
     const ObjectId id = obj->id;
     objects_.push_back(std::move(obj));
     return id;
+}
+
+bool Scene::rollTo(ObjectId id, size_t active) {
+    SceneObject* o = find(id);
+    if (!o) return false;
+    // Every step, and what each built as far as that is known: the steps that
+    // ran, then what the waiting ones built when they last ran. Which of it
+    // still holds is for the fingerprints to say -- they are chained, so a
+    // step put in at the marker makes every one after it disagree.
+    const bool runWhole = o->featureCache.size() >= o->features.size() && o->featureKeys.size() >= o->features.size();
+    const bool aheadWhole = runWhole && o->aheadCache.size() == o->ahead.size() &&
+                            o->aheadKeys.size() == o->ahead.size();
+    std::vector<Feature> all = std::move(o->features);
+    const size_t ran = all.size();
+    std::vector<Body> cache = std::move(o->featureCache);
+    std::vector<uint64_t> keys = std::move(o->featureKeys);
+    cache.resize(std::min(cache.size(), ran));
+    keys.resize(std::min(keys.size(), ran));
+    all.insert(all.end(), std::make_move_iterator(o->ahead.begin()), std::make_move_iterator(o->ahead.end()));
+    if (aheadWhole) {
+        cache.insert(cache.end(), o->aheadCache.begin(), o->aheadCache.end());
+        keys.insert(keys.end(), o->aheadKeys.begin(), o->aheadKeys.end());
+    }
+    o->ahead.clear();
+    o->aheadCache.clear();
+    o->aheadKeys.clear();
+
+    // The first step is what the part starts from; there is no model before it.
+    active = std::clamp<size_t>(active, all.empty() ? 0 : 1, all.size());
+    o->ahead.assign(std::make_move_iterator(all.begin() + static_cast<long>(active)),
+                    std::make_move_iterator(all.end()));
+    all.resize(active);
+    o->features = std::move(all);
+    if (cache.size() > active) {
+        o->aheadCache.assign(cache.begin() + static_cast<long>(active), cache.end());
+        cache.resize(active);
+    }
+    if (keys.size() > active) {
+        o->aheadKeys.assign(keys.begin() + static_cast<long>(active), keys.end());
+        keys.resize(active);
+    }
+    o->featureCache = std::move(cache);
+    o->featureKeys = std::move(keys);
+    return reevaluate(id);
+}
+
+size_t Scene::historyLength(ObjectId id) const {
+    const SceneObject* o = find(id);
+    return o ? o->features.size() + o->ahead.size() : 0;
 }
 
 bool Scene::removeObject(ObjectId id) {
@@ -460,6 +557,15 @@ void Scene::noteNewFailures(const SceneObject& obj,
     if (count > 1) chainNotice_ += " (and " + std::to_string(count - 1) + " more)";
 }
 
+bool Scene::reevaluate(ObjectId id) {
+    SceneObject* obj = find(id);
+    if (!obj) return false;
+    // From the first step that is not what the cache was built from. With
+    // nothing changed that is past the end, and nothing runs: the body is the
+    // cached one, which is what undo and rolling back mostly are.
+    return reevaluateFrom(id, builtPrefix(*obj, obj->features));
+}
+
 bool Scene::reevaluateFrom(ObjectId id, size_t fromFeature) {
     SceneObject* obj = find(id);
     if (!obj) return false;
@@ -474,7 +580,12 @@ bool Scene::reevaluateFrom(ObjectId id, size_t fromFeature) {
     // Evaluate into a scratch body: a chain that produces nothing must not
     // destroy the geometry the user can still see.
     Body next;
+    // Where evaluateFrom will really start: from the root when the cache
+    // cannot supply the point asked for.
+    const size_t start = fromFeature > 0 && (obj->featureCache.size() < fromFeature ||
+                                              fromFeature > obj->features.size()) ? 0 : fromFeature;
     const bool ok = evaluateFrom(obj->features, fromFeature, obj->featureCache, next);
+    syncKeys(*obj, start);
 
     // Either way: evaluateFrom has marked each step it ran, and a chain that
     // produced nothing at all is exactly the case worth saying something about.
@@ -500,19 +611,16 @@ bool Scene::addFeature(ObjectId id, Feature feature, std::string* error) {
     obj->features.push_back(std::move(feature));
 
     // Only the new feature needs running; everything before it is cached.
+    const size_t last = obj->features.size() - 1;
+    const size_t start = last > 0 && obj->featureCache.size() < last ? 0 : last;
     Body next;
-    if (!evaluateFrom(obj->features, obj->features.size() - 1,
-                      obj->featureCache, next)) {
+    const bool ran = evaluateFrom(obj->features, last, obj->featureCache, next);
+    syncKeys(*obj, start);
+    // A feature that errored did nothing; keeping it would leave a step in
+    // the timeline that has no effect and cannot be fixed.
+    if (!ran || obj->features.back().errored) {
         if (error) *error = obj->features.back().error;
-        obj->features.pop_back();
-        return false;
-    }
-    // A feature that evaluated but errored did nothing; keeping it would leave
-    // a step in the timeline that has no effect and cannot be fixed.
-    if (obj->features.back().errored) {
-        if (error) *error = obj->features.back().error;
-        obj->features.pop_back();
-        obj->featureCache.resize(obj->features.size());
+        dropLast(*obj);
         return false;
     }
 
@@ -534,10 +642,12 @@ void Scene::addFeatureWithResult(ObjectId id, Feature feature, Body result) {
     if (obj->featureCache.size() != obj->features.size()) {
         Body current;
         evaluateFrom(obj->features, 0, obj->featureCache, current);
+        syncKeys(*obj, 0);
     }
     if (feature.uid == 0) feature.uid = nextFeatureUid_++;
     obj->features.push_back(std::move(feature));
     obj->featureCache.push_back(result);
+    syncKeys(*obj, obj->features.size() - 1);
     obj->body = std::move(result);
     obj->refreshDerived();
     place(*obj);
@@ -552,13 +662,17 @@ bool Scene::setFeatures(ObjectId id, std::vector<Feature> features, std::string*
     for (Feature& f : features)
         if (f.uid == 0) f.uid = nextFeatureUid_++;
 
+    // Where the new history first differs from what the cache was built
+    // from: everything before that is already built. A step appended, or one
+    // near the end changed, costs that step rather than the whole part.
+    const size_t from = builtPrefix(*obj, features);
+
     std::vector<Feature> previous = std::move(obj->features);
-    std::vector<Body>    cache = std::move(obj->featureCache);
     obj->features = std::move(features);
-    obj->featureCache.clear();
 
     Body next;
-    const bool built = evaluateFeatures(obj->features, next);
+    const bool built = evaluateFrom(obj->features, from, obj->featureCache, next);
+    syncKeys(*obj, from);
     size_t bad = obj->features.size();
     for (size_t i = 0; i < obj->features.size(); ++i)
         if (obj->features[i].errored) { bad = i; break; }
@@ -567,8 +681,10 @@ bool Scene::setFeatures(ObjectId id, std::vector<Feature> features, std::string*
         if (error)
             *error = bad < obj->features.size() ? obj->features[bad].error
                                                 : "the chain produced nothing";
+        // Back as it was. The cache now holds the refused history from `from`
+        // on, and its fingerprints say so, so this re-runs just those steps.
         obj->features = std::move(previous);
-        obj->featureCache = std::move(cache);
+        reevaluate(id);
         return false;
     }
 

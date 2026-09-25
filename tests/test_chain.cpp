@@ -18,6 +18,7 @@
 #include "mesh/decimate.h"
 #include "mesh/health.h"
 
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -166,11 +167,213 @@ static ObjectId buildChain(Scene& s) {
     return id;
 }
 
+// A vertical edge of a body: the first one taller than `atLeast`.
+static EdgeId upright(const Body& b, Real atLeast) {
+    std::vector<EdgeId> es;
+    b.allEdges(es);
+    for (EdgeId e : es) {
+        Vec3 p, q;
+        b.edgePositions(e, p, q);
+        if (std::fabs((q - p).z) > atLeast && std::fabs(q.x - p.x) < 1e-9 && std::fabs(q.y - p.y) < 1e-9) return e;
+    }
+    return kInvalid;
+}
+
+static void testHistory() {
+    std::printf("--- rolled back, a step put in, rolled forward ---\n");
+    {
+        // A 20 mm cube with one upright edge rounded 3 mm. Roll back to the
+        // bare cube, push its top up 10 mm there, and roll forward: the round
+        // has to find its edge on a taller cube, and round all 30 mm of it.
+        Scene s;
+        PrimitiveSpec spec;
+        spec.kind = PrimitiveKind::Box;
+        spec.box = {20, 20, 20};
+        const ObjectId id = s.addPrimitive(PrimitiveKind::Box, spec);
+        Feature round;
+        round.kind = FeatureKind::Bevel;
+        round.edges = nameEdges(s.find(id)->body, {upright(s.find(id)->body, 5.0)}, false);
+        round.width = 3.0;
+        round.label = "Rounded corner";
+        std::string why;
+        check(s.addFeature(id, round, &why), "the round goes on: " + why);
+        const Real corner = 9.0 * (1.0 - kPi / 4.0);   // what a 3 mm round takes off, per mm of edge
+        check(near(s.find(id)->body.health(false).volume, 8000.0 - corner * 20.0, 1e-3), "off a 20 mm edge");
+
+        check(s.rollTo(id, 1), "rolled back to the cube");
+        SceneObject* o = s.find(id);
+        check(o->features.size() == 1 && o->ahead.size() == 1, "the round waits after the marker");
+        check(near(o->body.health(false).volume, 8000.0, 1e-6), "and the model is the bare cube");
+
+        Feature push;
+        push.kind = FeatureKind::Extrude;
+        push.distance = 10.0;
+        push.mergeFlush = true;
+        push.faces = nameFaces(o->body, {facing(o->body, {0, 0, 1})});
+        check(s.addFeature(id, push, &why), "a step goes in at the marker: " + why);
+        check(o->features.size() == 2 && o->features.back().kind == FeatureKind::Extrude &&
+                  o->ahead.size() == 1,
+              "before the round, which still waits");
+
+        check(s.rollTo(id, s.historyLength(id)), "rolled forward");
+        check(o->features.size() == 3 && o->ahead.empty(), "every step runs");
+        check(!o->features.back().errored, "the round found its edge again: " + o->features.back().error);
+        check(o->features.back().label == "Rounded corner", "and kept its name");
+        check(near(o->body.health(false).volume, 12000.0 - corner * 30.0, 1e-3),
+              "rounding the whole 30 mm of it: " + std::to_string(o->body.health(false).volume));
+    }
+
+    std::printf("--- two steps swapped ---\n");
+    {
+        // Pushing the top up 5 and the right side out 5 do not depend on each
+        // other: in either order the part is 25 x 20 x 25.
+        Scene s;
+        PrimitiveSpec spec;
+        spec.kind = PrimitiveKind::Box;
+        spec.box = {20, 20, 20};
+        const ObjectId id = s.addPrimitive(PrimitiveKind::Box, spec);
+        auto pushFace = [&](Vec3 dir) {
+            Feature f;
+            f.kind = FeatureKind::Extrude;
+            f.distance = 5.0;
+            f.mergeFlush = true;
+            f.faces = nameFaces(s.find(id)->body, {facing(s.find(id)->body, dir)});
+            std::string why;
+            check(s.addFeature(id, f, &why), "pushed: " + why);
+        };
+        pushFace({0, 0, 1});
+        pushFace({1, 0, 0});
+        std::vector<Feature> chain = s.find(id)->features;
+        std::swap(chain[1], chain[2]);
+        std::string why;
+        check(s.setFeatures(id, chain, &why), "the other way round builds: " + why);
+        const SceneObject* o = s.find(id);
+        check(!o->features[1].errored && !o->features[2].errored, "each step still finds its face");
+        check(near(o->body.health(false).volume, 25.0 * 20.0 * 25.0, 1e-6),
+              "into the same part: " + std::to_string(o->body.health(false).volume));
+    }
+
+    std::printf("--- a failed step, pointed again ---\n");
+    {
+        // A push that names a face nobody has: it fails, and is marked. Rolled
+        // back to just before it and pointed at the top, it builds.
+        Scene s;
+        PrimitiveSpec spec;
+        spec.kind = PrimitiveKind::Box;
+        spec.box = {20, 20, 20};
+        const ObjectId id = s.addPrimitive(PrimitiveKind::Box, spec);
+        std::vector<Feature> chain = s.find(id)->features;
+        Feature lost;
+        lost.kind = FeatureKind::Extrude;
+        lost.distance = 5.0;
+        lost.mergeFlush = true;
+        lost.faces.ids = {0xdeadbeefULL};
+        chain.push_back(lost);
+        // As a file with it in would come back: the step there, marked failed.
+        s.find(id)->features = chain;
+        s.reevaluate(id);
+        SceneObject* o = s.find(id);
+        check(o->features.size() == 2 && o->features.back().errored, "a step that names nothing there fails");
+
+        s.rollTo(id, 1);
+        if (o->ahead.empty()) return;
+        o->ahead.front().faces = nameFaces(o->body, {facing(o->body, {0, 0, 1})});
+        s.rollTo(id, s.historyLength(id));
+        check(!o->features.back().errored, "pointed at the top, it builds: " + o->features.back().error);
+        check(near(o->body.health(false).volume, 20.0 * 20.0 * 25.0, 1e-6), "and the part is 25 high");
+    }
+
+    std::printf("--- a re-run starts at the change, and is right ---\n");
+    {
+        // Re-runs start at the first step that differs from what was built.
+        // What that must never do is hand back a stale body: a step changed and
+        // changed back, edited in place, or put back by undo, has to come out
+        // as the arithmetic says every time.
+        Scene s;
+        PrimitiveSpec spec;
+        spec.kind = PrimitiveKind::Box;
+        spec.box = {20, 20, 20};
+        const ObjectId id = s.addPrimitive(PrimitiveKind::Box, spec);
+        auto push = [&](Vec3 dir, Real by) {
+            Feature f;
+            f.kind = FeatureKind::Extrude;
+            f.distance = by;
+            f.mergeFlush = true;
+            f.faces = nameFaces(s.find(id)->body, {facing(s.find(id)->body, dir)});
+            s.addFeature(id, f, nullptr);
+        };
+        push({0, 0, 1}, 5);
+        push({1, 0, 0}, 5);
+        const std::vector<Feature> original = s.find(id)->features;
+        auto volume = [&] { return s.find(id)->body.health(false).volume; };
+        check(near(volume(), 25.0 * 20.0 * 25.0, 1e-6), "25 x 20 x 25 to start");
+
+        std::vector<Feature> taller = original;
+        taller[1].distance = 10.0;
+        std::string why;
+        check(s.setFeatures(id, taller, &why), "the first push made 10: " + why);
+        check(near(volume(), 25.0 * 20.0 * 30.0, 1e-6), "25 x 20 x 30: " + std::to_string(volume()));
+        check(s.setFeatures(id, original, &why), "and put back: " + why);
+        check(near(volume(), 25.0 * 20.0 * 25.0, 1e-6), "25 x 20 x 25 again, not the cached 30: " +
+                                                            std::to_string(volume()));
+
+        // Edited in place, the way the history panel edits, then re-run.
+        s.find(id)->features[2].distance = 15.0;
+        check(s.reevaluate(id), "an edit in place re-runs");
+        check(near(volume(), 35.0 * 20.0 * 25.0, 1e-6), "35 x 20 x 25: " + std::to_string(volume()));
+        s.find(id)->features[2].distance = 5.0;
+        check(s.reevaluate(id), "and back");
+        check(near(volume(), 25.0 * 20.0 * 25.0, 1e-6), "25 x 20 x 25: " + std::to_string(volume()));
+
+        // Nothing changed: nothing runs, and the body is the same.
+        const auto t0 = std::chrono::steady_clock::now();
+        check(s.reevaluate(id), "a re-run of nothing changed");
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        check(near(volume(), 25.0 * 20.0 * 25.0, 1e-6), "is the same body");
+        std::printf("  a re-run with nothing changed: %.2f ms\n", ms);
+    }
+
+    std::printf("--- rolled back, through a file ---\n");
+    {
+        Scene s;
+        PrimitiveSpec spec;
+        spec.kind = PrimitiveKind::Box;
+        spec.box = {20, 20, 20};
+        const ObjectId id = s.addPrimitive(PrimitiveKind::Box, spec);
+        Feature push;
+        push.kind = FeatureKind::Extrude;
+        push.distance = 5.0;
+        push.mergeFlush = true;
+        push.faces = nameFaces(s.find(id)->body, {facing(s.find(id)->body, {0, 0, 1})});
+        push.label = "Taller";
+        s.addFeature(id, push, nullptr);
+        s.rollTo(id, 1);
+        const std::string file = tempPath("rolled.tng");
+        check(saveProject(s, file).ok, "saved rolled back");
+        Scene back;
+        const ProjectResult loaded = loadProject(back, file);
+        check(loaded.ok, "loaded: " + loaded.error);
+        if (loaded.ok && back.objectCount() == 1) {
+            SceneObject* o = back.objects().front().get();
+            check(o->features.size() == 1 && o->ahead.size() == 1, "still rolled back, the step waiting");
+            check(o->ahead.front().label == "Taller", "with its name");
+            check(near(o->body.health(false).volume, 8000.0, 1e-6), "the model as it stood at the marker");
+            back.rollTo(o->id, back.historyLength(o->id));
+            check(near(o->body.health(false).volume, 10000.0, 1e-6), "and rolled forward, the rest");
+        }
+        std::remove(file.c_str());
+    }
+}
+
 int main() {
     if (!brep::available()) {
         std::printf("exact kernel not built; a chain needs one\n");
         return 0;
     }
+    // Unbuffered, so a step that takes the process down leaves the checks
+    // before it on the screen.
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
+    testHistory();
 
     Scene s;
     const ObjectId id = buildChain(s);

@@ -123,6 +123,17 @@ struct UiActions {
 
     // Set when the timeline changed a feature: the chain as it was, so the
     // edit can be re-evaluated and recorded.
+    // The history's own edits, beyond a step changed in place: the rollback
+    // marker moved so `historyAt` steps run; a step moved from `historyAt` to
+    // `historyTo`; or the step at `historyAt`, just after the marker, pointed
+    // at the faces or edges now selected, and the marker taken to the end.
+    // Indices count the whole history, the steps after the marker too.
+    enum class HistoryEdit { None, RollTo, Move, UseFaces, UseEdges };
+    HistoryEdit historyEdit = HistoryEdit::None;
+    ObjectId    historyObject = kNoObject;
+    size_t      historyAt = 0;
+    size_t      historyTo = 0;
+
     ObjectId             featuresEdited = kNoObject;
     std::vector<Feature> featuresBefore;
 };
@@ -181,6 +192,10 @@ struct UiContext {
     FrameState   frame;
     // Some operation has the view: the selected sketch's bar stands aside.
     bool         toolBusy = false;
+    // How many closed regions the selected sketch has, worked out once per
+    // shape of it rather than on every frame the inspector is drawn. -1: not
+    // known, and the inspector works it out itself.
+    int          sketchRegions = -1;
 };
 
 // The logo, from assets. Without it the bar shows the wordmark in text.
