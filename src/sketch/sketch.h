@@ -66,6 +66,12 @@ struct SketchEntity {
     SketchId a = kNoSketchId, b = kNoSketchId, c = kNoSketchId, d = kNoSketchId;
 
     Real radius = 0;   // Circle and Arc; kept in step with the points by the solver
+
+    // Non-zero: this was projected from the body edge with this name, and
+    // follows it -- the history moves it to wherever the edge has gone before
+    // the sketch is solved. Its points are held by Fix rules, which the move
+    // re-states.
+    uint64_t source = 0;
 };
 
 // New rules go on the end, for the same reason as SketchCurve.
@@ -82,6 +88,9 @@ enum class SketchRule : uint8_t {
     Distance,       // point, point, value
     Radius,         // arc or circle, value
     Angle,          // line, line, value in radians
+    Smooth,         // Bezier, Bezier: the first ends where the second starts, and
+                    // the handles either side of that point are held mirrored
+                    // about it -- a join with no corner in it
 };
 
 // A rule that sizes something, as opposed to one that only relates things.
@@ -264,5 +273,29 @@ std::vector<Vec2> sketchLoopPoints(const Sketch& sketch, const SketchLoop& loop)
 // Whether a point lies inside a region: within its outer loop and outside every
 // hole in it.
 bool sketchProfileContains(const Sketch& sketch, const SketchProfile& profile, Vec2 at);
+
+// ---- Paths ------------------------------------------------------------------
+
+// A run of entities joined end to end, in the order it runs: what a sweep
+// follows. Open, or closed back on itself; a circle alone is a closed one.
+struct SketchPath {
+    std::vector<SketchId> entities;
+    std::vector<bool>     reversed;   // traversed from its end back to its start
+    bool closed = false;
+};
+
+// The given entities put in the order they run. False, with the reason, when
+// they are not one path: two that do not meet, a point three of them meet at,
+// construction geometry, or a circle along with anything else.
+bool sketchPathOf(const Sketch& sketch, const std::vector<SketchId>& entities, SketchPath& out,
+                  std::string* reason = nullptr);
+
+// The path `entity` is part of: everything joined to it end to end, out to
+// where it stops or branches. What clicking one curve of a path picks.
+bool sketchPathThrough(const Sketch& sketch, SketchId entity, SketchPath& out,
+                       std::string* reason = nullptr);
+
+// Points along a path from its start to its end, exact at the joins.
+std::vector<Vec2> sketchPathPoints(const Sketch& sketch, const SketchPath& path, int steps = 48);
 
 } // namespace tg

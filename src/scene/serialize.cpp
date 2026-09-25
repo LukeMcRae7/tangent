@@ -222,9 +222,15 @@ void writeSketch(Writer& w, const Sketch& s) {
         w.f64(k.value);
         w.f64(k.value2);
     }
+    // v22: the projected entities, and the edge each follows.
+    uint32_t linked = 0;
+    for (const SketchEntity& e : s.entities) linked += e.source != 0;
+    w.u32(linked);
+    for (const SketchEntity& e : s.entities)
+        if (e.source != 0) { w.u32(e.id); w.u64(e.source); }
 }
 
-bool readSketch(Reader& r, Sketch& s) {
+bool readSketch(Reader& r, Sketch& s, uint32_t version) {
     s.plane.origin = r.vec3();
     s.plane.xAxis = r.vec3();
     s.plane.yAxis = r.vec3();
@@ -263,12 +269,22 @@ bool readSketch(Reader& r, Sketch& s) {
     for (SketchConstraint& k : s.constraints) {
         k.id = r.u32();
         const uint8_t rule = r.u8();
-        if (rule > static_cast<uint8_t>(SketchRule::Angle)) return false;
+        if (rule > static_cast<uint8_t>(SketchRule::Smooth)) return false;
         k.rule = static_cast<SketchRule>(rule);
         k.first = r.u32();
         k.second = r.u32();
         k.value = r.f64();
         k.value2 = r.f64();
+    }
+    // v22: which entities were projected from a body edge, and from which.
+    if (version >= 22) {
+        const uint32_t linked = r.u32();
+        if (r.bad || !r.need(static_cast<size_t>(linked) * 12)) return false;
+        for (uint32_t i = 0; i < linked; ++i) {
+            const SketchId id = r.u32();
+            const uint64_t source = r.u64();
+            if (SketchEntity* e = s.entity(id)) e->source = source;
+        }
     }
     return !r.bad;
 }
@@ -371,6 +387,21 @@ void writeFeature(Writer& w, const Feature& f) {
     w.f64(f.threadHeight);
     w.u8(f.threadExternal ? 1 : 0);
     w.i32(f.threadFastener);
+    // v20: the path a sweep follows, and the outlines a loft runs through.
+    w.u64(f.pathSketchUid);
+    w.u32(static_cast<uint32_t>(f.pathEntities.size()));
+    for (SketchId id : f.pathEntities) w.u32(id);
+    w.u32(static_cast<uint32_t>(f.loftKeys.size()));
+    for (size_t i = 0; i < f.loftKeys.size(); ++i) {
+        w.u64(i < f.loftSketchUids.size() ? f.loftSketchUids[i] : 0);
+        w.u32(f.loftKeys[i]);
+    }
+    w.u8(f.loftRuled ? 1 : 0);
+    // v21: a revolve about an axis of the world, and faces a loft runs through.
+    w.u8(f.revolveAxis3D ? 1 : 0);
+    w.u8(f.revolveReverse ? 1 : 0);
+    w.u32(static_cast<uint32_t>(f.loftFaceNames.size()));
+    for (ElementId id : f.loftFaceNames) w.u64(id);
 }
 
 // `version` is the file's, not this build's: a project written before bodies
@@ -472,7 +503,7 @@ bool readFeature(Reader& r, Feature& f, uint32_t version) {
     }
     // Older files have no sketches in them.
     if (version >= 12) {
-        if (!readSketch(r, f.sketch)) return false;
+        if (!readSketch(r, f.sketch, version)) return false;
         f.sketchUid = r.u64();
         const SketchId first = r.u32();
         f.profileKeys.clear();
@@ -531,6 +562,28 @@ bool readFeature(Reader& r, Feature& f, uint32_t version) {
         f.threadExternal = r.u8() != 0;
         f.threadFastener = r.i32();
         if (!(f.threadPitch > 0.0) || !(f.threadHeight > 0.0)) return false;
+    }
+    // Before this there were no sweeps or lofts to read one for.
+    if (version >= 20) {
+        f.pathSketchUid = r.u64();
+        const uint32_t curves = r.u32();
+        if (curves > 1000000u) return false;
+        for (uint32_t i = 0; i < curves && !r.bad; ++i) f.pathEntities.push_back(r.u32());
+        const uint32_t outlines = r.u32();
+        if (outlines > 10000u) return false;
+        for (uint32_t i = 0; i < outlines && !r.bad; ++i) {
+            f.loftSketchUids.push_back(r.u64());
+            f.loftKeys.push_back(r.u32());
+        }
+        f.loftRuled = r.u8() != 0;
+    }
+    // Before this, everything those three built from was a sketch.
+    if (version >= 21) {
+        f.revolveAxis3D = r.u8() != 0;
+        f.revolveReverse = r.u8() != 0;
+        const uint32_t faces = r.u32();
+        if (faces > 10000u) return false;
+        for (uint32_t i = 0; i < faces && !r.bad; ++i) f.loftFaceNames.push_back(r.u64());
     }
     return !r.bad;
 }

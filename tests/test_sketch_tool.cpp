@@ -563,7 +563,174 @@ void testImporting() {
           "one step back is before the drawing, however it was changed");
 }
 
+void testFinishing() {
+    std::printf("--- finishing keeps the sketch, and it is built from afterwards ---\n");
+    Scene scene;
+    UndoStack undo;
+    Camera camera;
+    SketchTool tool;
+    tool.start();
+    tool.setPlane(topPlane(), kNoObject, nullptr);
+    drawRectangle(tool, {0, 0}, {30, 20});
+    // Enter, with nothing half drawn, is Finish -- not Extrude.
+    tool.handleKey(13, false, false, scene, camera, undo);
+    check(!tool.active() && scene.objectCount() == 1, "Enter finishes: the sketch is kept");
+    const Scene::SketchRef kept = scene.selectedSketch();
+    check(kept.valid() && kept == tool.lastKept(), "and it is what is selected");
+    check(scene.find(kept.object)->body.empty(), "nothing is built from it yet");
+
+    if (!brep::available()) return;
+    check(tool.startExtrude(scene, kept.object, kept.uid), "a kept sketch opens to be extruded");
+    check(tool.stage() == SketchStage::Regions && tool.chosenRegions().size() == 1,
+          "at choosing its regions, the one there is picked");
+    check(tool.beginDepth(), "then the depth");
+    tool.setDepth(5.0);
+    check(tool.finish(scene, camera, undo, true), "and it builds: " + tool.takeError());
+    const SceneObject* part = scene.find(kept.object);
+    check(part && near(part->body.health(false).volume, 30.0 * 20.0 * 5.0, 1e-6), "30 x 20 x 5, in the same object");
+    check(part && part->features.size() == 2, "the sketch and its extrusion");
+
+    // Leaving the regions leaves the tool, and the sketch as it was.
+    SketchTool again;
+    check(again.startExtrude(scene, kept.object, kept.uid), "and it can be opened again");
+    again.handleKey(27, false, false, scene, camera, undo);
+    check(!again.active() && scene.find(kept.object)->features.size() == 2, "Esc leaves it untouched");
+}
+
+void testPen() {
+    std::printf("--- the pen ---\n");
+    Scene scene;
+    UndoStack undo;
+    Camera camera;
+    {
+        // Three clicks and a click on the first: a triangle of curves whose
+        // handles lie along the sides, so it is a triangle.
+        SketchTool tool;
+        tool.start();
+        tool.setPlane(topPlane(), kNoObject, nullptr);
+        tool.setMode(SketchMode::Curve);
+        for (Vec2 p : {Vec2{0, 0}, Vec2{30, 0}, Vec2{0, 30}}) {
+            tool.clickAt(p);
+            check(tool.penDown(p), "an anchor goes down");
+            tool.penUp();
+        }
+        tool.clickAt({0, 0});   // on the first anchor
+        check(tool.penDown({0, 0}), "clicking the first anchor closes it");
+        check(tool.penAnchors() == 0, "and ends the path");
+        const Sketch& sk = tool.sketch();
+        check(sk.entities.size() == 3 && std::all_of(sk.entities.begin(), sk.entities.end(),
+              [](const SketchEntity& e) { return e.curve == SketchCurve::Bezier; }), "three curves");
+        check(tool.regions().size() == 1 && near(tool.regions().front().area, 450.0, 1e-3),
+              "closing one region, the triangle's: " +
+                  (tool.regions().empty() ? std::string("none") : std::to_string(tool.regions().front().area)));
+        check(countRule(sk, SketchRule::Smooth) == 0, "with corners, nothing held smooth");
+    }
+    {
+        // A press dragged out: a smooth anchor, its handles mirrored, and a
+        // rule that keeps them so.
+        SketchTool tool;
+        tool.start();
+        tool.setPlane(topPlane(), kNoObject, nullptr);
+        tool.setMode(SketchMode::Curve);
+        tool.clickAt({0, 0});
+        tool.penDown({0, 0});
+        tool.penUp();
+        tool.clickAt({20, 0});
+        tool.penDown({20, 0});
+        tool.penDrag({25, 5});      // pulled up and on
+        tool.penUp();
+        tool.clickAt({40, 0});
+        tool.penDown({40, 0});
+        tool.penUp();
+        tool.handleKey(13, false, false, scene, camera, undo);   // Enter ends the open path
+        const Sketch& sk = tool.sketch();
+        check(sk.entities.size() == 2, "two curves");
+        check(countRule(sk, SketchRule::Smooth) == 1, "joined smooth at the middle anchor");
+        check(tool.solveState().solved, "and the sketch solves");
+        const SketchEntity& first = sk.entities[0];
+        const SketchEntity& second = sk.entities[1];
+        const Vec2 in = sk.point(first.c)->at, out = sk.point(second.b)->at, mid = sk.point(second.a)->at;
+        check(near(out.x, 25.0) && near(out.y, 5.0), "the handle going out is where it was pulled to");
+        check(near(in.x + out.x, 2 * mid.x) && near(in.y + out.y, 2 * mid.y), "the one coming in is its mirror");
+
+        // Dragging the outgoing handle later swings the other with it.
+        check(tool.beginDrag(second.b), "a handle can be taken hold of");
+        tool.dragTo({30, 10});
+        tool.endDrag();
+        const Sketch& after = tool.sketch();
+        const Vec2 in2 = after.point(after.entities[0].c)->at, out2 = after.point(after.entities[1].b)->at;
+        const Vec2 mid2 = after.point(after.entities[1].a)->at;
+        check(near(in2.x + out2.x, 2 * mid2.x, 1e-6) && near(in2.y + out2.y, 2 * mid2.y, 1e-6),
+              "and the join stays smooth");
+        check(length(out2 - Vec2{25, 5}) > 1.0, "the handle did move");
+    }
+}
+
+void testProjecting() {
+    std::printf("--- projecting a body's edges ---\n");
+    if (!brep::available()) return;
+    Scene scene;
+    UndoStack undo;
+    Camera camera;
+    PrimitiveSpec spec;
+    spec.kind = PrimitiveKind::Box;
+    spec.box = {10, 10, 10};
+    const ObjectId box = scene.addPrimitive(PrimitiveKind::Box, spec, {0, 0, 0});
+    const SceneObject* o = scene.find(box);
+    std::vector<FaceId> fs;
+    o->body.allFaces(fs);
+    FaceId top = kNoFace;
+    for (FaceId f : fs)
+        if (normalize(o->body.faceNormal(f)).z > 0.999) top = f;
+    const Real z = o->worldBounds().max.z;
+
+    SketchTool tool;
+    tool.start();
+    tool.setPlane(topPlane(z + 5.0), box, nullptr);   // above the box, in its part
+    tool.setMode(SketchMode::Project);
+    check(tool.projectElement(scene, box, true, top), "the top face's edges come onto the plane: " + tool.takeError());
+    check(tool.sketch().entities.size() == 4, "four lines");
+    check(tool.regions().size() == 1 && near(tool.regions().front().area, 100.0, 1e-6),
+          "meeting at shared corners, closing the face's outline");
+    check(tool.solveState().solved && tool.solveState().freedoms == 0, "held fixed");
+    check(std::all_of(tool.sketch().entities.begin(), tool.sketch().entities.end(),
+                      [](const SketchEntity& e) { return e.source != 0; }),
+          "each following the edge it came from");
+    check(tool.finish(scene, camera, undo, false), "kept, in the box's history");
+
+    // The box grows; the projection follows.
+    std::vector<Feature> chain = scene.find(box)->features;
+    chain.front().primitive.box.width = 16;
+    std::string why;
+    check(scene.setFeatures(box, chain, &why), "the box widens: " + why);
+    const Feature* sk = nullptr;
+    for (const Feature& f : scene.find(box)->features) if (f.kind == FeatureKind::Sketch) sk = &f;
+    const std::vector<SketchProfile> rs = sk ? sketchProfiles(sk->sketch) : std::vector<SketchProfile>{};
+    check(sk && !sk->errored && rs.size() == 1 && near(rs.front().area, 160.0, 1e-6),
+          "and the sketch goes round the wider face: " + (rs.empty() ? std::string("none") : std::to_string(rs.front().area)));
+}
+
+void testPlaneShift() {
+    std::printf("--- a plane stood off and tilted ---\n");
+    SketchTool tool;
+    tool.start();
+    tool.setPlane(topPlane(), kNoObject, nullptr);
+    drawRectangle(tool, {0, 0}, {10, 10});
+    tool.setPlaneOffset(20.0);
+    check(near(tool.sketch().plane.origin.z, 20.0), "offset 20 lifts it 20");
+    tool.setPlaneTilt(kPi * 0.25);
+    const Vec3 n = tool.sketch().plane.normal();
+    check(near(n.z, std::cos(kPi * 0.25), 1e-9) && near(std::fabs(n.y), std::sin(kPi * 0.25), 1e-9),
+          "a tilt of 45 degrees leans it about its horizontal");
+    check(near(tool.sketch().plane.xAxis.x, 1.0), "which stays where it was");
+    check(tool.sketch().entities.size() == 4, "and the drawing goes with it");
+}
+
 int main() {
+    testFinishing();
+    testPen();
+    testProjecting();
+    testPlaneShift();
     testDrawing();
     testImporting();
     testSizes();

@@ -78,6 +78,8 @@ ImWchar glyphCodepoint(Glyph g) {
     case Glyph::Shell:         return 0xee0c;   // box-model: a hollow tray
     case Glyph::Inset:         return 0xef23;   // box-model-2: a face inside a face
     case Glyph::Revolve:       return 0xef85;   // rotate-360
+    case Glyph::Sweep:         return 0xeb17;   // route: a path with its ends marked
+    case Glyph::Loft:          return 0xeef7;   // stack-2: outlines one over another
     case Glyph::Hole:          return 0xefb1;   // circle-dot
     case Glyph::Counterbore:   return 0xece5;   // circles
     case Glyph::Countersink:   return 0xefdd;   // cone
@@ -139,6 +141,11 @@ ImWchar glyphCodepoint(Glyph g) {
     case Glyph::Circle:        return 0xefb1;   // circle-dot: centre, then rim
     case Glyph::Arc:           return 0xf565;   // vector-spline
     case Glyph::Dimension:     return 0xef37;   // arrow-autofit-width
+    case Glyph::Bezier:        return 0xef1d;   // vector-bezier: a curve and its handles
+    case Glyph::Project:       return 0xec88;   // arrow-bar-to-down: an edge brought down onto the plane
+    case Glyph::ThreePoints:   return 0xeca8;   // vector-triangle
+    case Glyph::AlongEdge:     return 0xef46;   // axis-y: a plane standing on a line
+    case Glyph::Edit:          return 0xea98;   // edit
 
     case Glyph::Count:         break;
     }

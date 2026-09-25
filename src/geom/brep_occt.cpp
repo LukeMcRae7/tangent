@@ -96,6 +96,7 @@
 #include <BRepBndLib.hxx>
 #include <BRepOffsetAPI_MakeOffset.hxx>
 #include <BRepOffsetAPI_MakePipeShell.hxx>
+#include <BRepOffsetAPI_ThruSections.hxx>
 #include <BRepOffsetAPI_MakeOffsetShape.hxx>
 #include <BRepOffsetAPI_MakeThickSolid.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
@@ -3071,17 +3072,21 @@ SketchId loopKey(const SketchLoop& loop) {
                                  : *std::min_element(loop.entities.begin(), loop.entities.end());
 }
 
-// The flat faces a set of regions makes on the sketch plane, lifted along its
-// normal, and every edge of them against the sketch entity it came from -- so
-// the surface each one sweeps out, straight or turned, can be named for that
-// entity.
+// The flat faces an outline makes -- regions of a sketch, lifted along its
+// normal, or flat faces of a body -- and every edge of them against what it came
+// from: the sketch entity, or the body edge by its name. So the surface each
+// one sweeps out, straight or turned, can be named for that. And where the
+// outline is, which a sweep needs to know which end of its path to start from.
+
 struct SketchFaces {
     std::vector<TopoDS_Face> flat;
-    std::vector<std::pair<TopoDS_Edge, SketchId>> made;
+    std::vector<std::pair<TopoDS_Edge, ElementId>> made;
+    Vec3 centre{0, 0, 0}, normal{0, 0, 1}, origin{0, 0, 0};
 };
 
-bool buildSketchFaces(const Sketch& sk, const std::vector<SweptFace>& faces, Real lift,
-                      SketchFaces& out, std::string* reason) {
+// The edge one sketch entity makes, in the sketch's plane lifted `lift` along
+// its normal, running the way the entity is stored.
+bool sketchEdge(const Sketch& sk, const SketchEntity& e, Real lift, TopoDS_Edge& edge) {
     const SketchPlane& pl = sk.plane;
     const Vec3 n = pl.normal();
     const Vec3 up = n * lift;
@@ -3097,54 +3102,62 @@ bool buildSketchFaces(const Sketch& sk, const std::vector<SweptFace>& faces, Rea
         p = q->at;
         return true;
     };
+    switch (e.curve) {
+    case SketchCurve::Line: {
+        Vec2 a, b;
+        if (!pointOf(e.a, a) || !pointOf(e.b, b) || length(b - a) < 1e-9) return false;
+        edge = BRepBuilderAPI_MakeEdge(at3(a), at3(b)).Edge();
+        return true;
+    }
+    case SketchCurve::Circle: {
+        Vec2 c;
+        if (!pointOf(e.a, c) || e.radius <= 1e-9) return false;
+        edge = BRepBuilderAPI_MakeEdge(gp_Circ(gp_Ax2(at3(c), normal, xDir), e.radius)).Edge();
+        return true;
+    }
+    case SketchCurve::Arc: {
+        Vec2 c, s, t;
+        if (!pointOf(e.a, c) || !pointOf(e.b, s) || !pointOf(e.c, t)) return false;
+        const Real r = length(s - c);
+        if (r <= 1e-9) return false;
+        // Counter-clockwise about the plane's normal, start to end: the
+        // direction the sketch stores an arc in.
+        GC_MakeArcOfCircle arc(gp_Circ(gp_Ax2(at3(c), normal, xDir), r), at3(s), at3(t),
+                               Standard_True);
+        if (!arc.IsDone()) return false;
+        edge = BRepBuilderAPI_MakeEdge(arc.Value()).Edge();
+        return true;
+    }
+    case SketchCurve::Bezier: {
+        Vec2 p0, p1, p2, p3;
+        if (!pointOf(e.a, p0) || !pointOf(e.b, p1) || !pointOf(e.c, p2) || !pointOf(e.d, p3))
+            return false;
+        TColgp_Array1OfPnt poles(1, 4);
+        poles.SetValue(1, at3(p0));
+        poles.SetValue(2, at3(p1));
+        poles.SetValue(3, at3(p2));
+        poles.SetValue(4, at3(p3));
+        Handle(Geom_BezierCurve) curve = new Geom_BezierCurve(poles);
+        edge = BRepBuilderAPI_MakeEdge(curve).Edge();
+        return true;
+    }
+    }
+    return false;
+}
+
+bool buildSketchFaces(const Sketch& sk, const std::vector<SweptFace>& faces, Real lift,
+                      SketchFaces& out, std::string* reason) {
+    const SketchPlane& pl = sk.plane;
+    const Vec3 n = pl.normal();
+    const Vec3 up = n * lift;
+    const gp_Dir normal(n.x, n.y, n.z);
 
     // One edge per entity, as it ended up in the wire, so the wall each one
     // sweeps can be named for the entity rather than for where it happens
     // to sit.
-    std::vector<std::pair<TopoDS_Edge, SketchId>>& made = out.made;
-
-    auto edgeFor = [&](const SketchEntity& e, TopoDS_Edge& edge) -> bool {
-        switch (e.curve) {
-        case SketchCurve::Line: {
-            Vec2 a, b;
-            if (!pointOf(e.a, a) || !pointOf(e.b, b) || length(b - a) < 1e-9) return false;
-            edge = BRepBuilderAPI_MakeEdge(at3(a), at3(b)).Edge();
-            return true;
-        }
-        case SketchCurve::Circle: {
-            Vec2 c;
-            if (!pointOf(e.a, c) || e.radius <= 1e-9) return false;
-            edge = BRepBuilderAPI_MakeEdge(gp_Circ(gp_Ax2(at3(c), normal, xDir), e.radius)).Edge();
-            return true;
-        }
-        case SketchCurve::Arc: {
-            Vec2 c, s, t;
-            if (!pointOf(e.a, c) || !pointOf(e.b, s) || !pointOf(e.c, t)) return false;
-            const Real r = length(s - c);
-            if (r <= 1e-9) return false;
-            // Counter-clockwise about the plane's normal, start to end: the
-            // direction the sketch stores an arc in.
-            GC_MakeArcOfCircle arc(gp_Circ(gp_Ax2(at3(c), normal, xDir), r), at3(s), at3(t),
-                                   Standard_True);
-            if (!arc.IsDone()) return false;
-            edge = BRepBuilderAPI_MakeEdge(arc.Value()).Edge();
-            return true;
-        }
-        case SketchCurve::Bezier: {
-            Vec2 p0, p1, p2, p3;
-            if (!pointOf(e.a, p0) || !pointOf(e.b, p1) || !pointOf(e.c, p2) || !pointOf(e.d, p3))
-                return false;
-            TColgp_Array1OfPnt poles(1, 4);
-            poles.SetValue(1, at3(p0));
-            poles.SetValue(2, at3(p1));
-            poles.SetValue(3, at3(p2));
-            poles.SetValue(4, at3(p3));
-            Handle(Geom_BezierCurve) curve = new Geom_BezierCurve(poles);
-            edge = BRepBuilderAPI_MakeEdge(curve).Edge();
-            return true;
-        }
-        }
-        return false;
+    std::vector<std::pair<TopoDS_Edge, ElementId>>& made = out.made;
+    auto edgeFor = [&](const SketchEntity& e, TopoDS_Edge& edge) {
+        return sketchEdge(sk, e, lift, edge);
     };
 
     auto wireFor = [&](const SketchLoop& loop, bool counterClockwise, TopoDS_Wire& wireOut) {
@@ -3216,6 +3229,14 @@ bool buildSketchFaces(const Sketch& sk, const std::vector<SweptFace>& faces, Rea
                                 " regions have outlines that cross: leave them out, or fix them in the sketch";
         return false;
     }
+
+    out.normal = n;
+    out.origin = pl.origin + up;
+    Vec3 sum{0, 0, 0};
+    int count = 0;
+    for (const SweptFace& f : faces)
+        for (Vec2 p : sketchLoopPoints(sk, *f.outer)) { sum += pl.toWorld(p) + up; ++count; }
+    out.centre = count ? sum * (1.0 / static_cast<Real>(count)) : out.origin;
     return true;
 }
 
@@ -3233,8 +3254,8 @@ struct Swept { TopoDS_Shape shape, first, last; };
 // instead through the result's own edge-to-face map, which is what a prism
 // leaves behind for any number of prisms at once.
 BrepRef assembleSwept(const std::vector<Swept>& solids,
-                      const std::vector<std::pair<TopoDS_Edge, SketchId>>& made,
-                      const std::vector<std::pair<TopoDS_Shape, SketchId>>& walls,
+                      const std::vector<std::pair<TopoDS_Edge, ElementId>>& made,
+                      const std::vector<std::pair<TopoDS_Shape, ElementId>>& walls,
                       ElementId salt, std::string* reason) {
     TopoDS_Shape shape;
     if (solids.size() == 1) {
@@ -3331,124 +3352,6 @@ BrepRef sweepSketchFaces(const Sketch& sk, const std::vector<SweptFace>& faces, 
     }
 }
 
-// Which side of the axis a point is on, in the sketch's own coordinates. Zero
-// on the axis, and the sign says which side.
-Real sideOfAxis(Vec2 at, Vec2 dir, Vec2 p) {
-    return dir.x * (p.y - at.y) - dir.y * (p.x - at.x);
-}
-
-BrepRef revolveSketchFaces(const Sketch& sk, const std::vector<SweptFace>& faces, Vec2 axisAt,
-                           Vec2 axisDir, Real angle, ElementId salt, std::string* reason) {
-    if (reason) reason->clear();
-    if (faces.empty()) {
-        if (reason) *reason = "the profile is empty";
-        return {};
-    }
-    if (length(axisDir) < 1e-9) {
-        if (reason) *reason = "the axis has no direction";
-        return {};
-    }
-    axisDir = normalize(axisDir);
-    if (angle < 1e-6) {
-        if (reason) *reason = "a turn of nothing makes nothing";
-        return {};
-    }
-    const Real full = 2.0 * kPi;
-    if (angle > full + 1e-9) {
-        if (reason) *reason = "more than a full turn would sweep over itself";
-        return {};
-    }
-    angle = std::min(angle, full);
-
-    // A profile that straddles the axis would turn through itself, and what
-    // comes out is not a solid anybody asked for. Touching the axis is fine --
-    // that is how a half-disc makes a sphere -- so this is about crossing it.
-    //
-    // Measured on the sketch's own curves rather than on its points: a Bézier
-    // whose ends sit on one side can still bulge over the axis.
-    {
-        Real most = 0.0, least = 0.0;
-        for (const SweptFace& f : faces) {
-            std::vector<const SketchLoop*> loops{f.outer};
-            for (const SketchLoop* h : f.holes) loops.push_back(h);
-            for (const SketchLoop* loop : loops)
-                for (SketchId id : loop->entities)
-                    if (const SketchEntity* e = sk.entity(id))
-                        for (Vec2 p : sketchEntityPoints(sk, *e, 24)) {
-                            const Real s = sideOfAxis(axisAt, axisDir, p);
-                            most = std::max(most, s);
-                            least = std::min(least, s);
-                        }
-        }
-        if (most > 1e-6 && least < -1e-6) {
-            if (reason) *reason = "the profile crosses the axis it turns about";
-            return {};
-        }
-    }
-
-    try {
-        SketchFaces built;
-        if (!buildSketchFaces(sk, faces, 0.0, built, reason)) return {};
-
-        const SketchPlane& pl = sk.plane;
-        const Vec3 o = pl.toWorld(axisAt);
-        const Vec3 d = normalize(pl.toWorld(axisAt + axisDir) - o);
-        const gp_Ax1 axis(gp_Pnt(o.x, o.y, o.z), gp_Dir(d.x, d.y, d.z));
-
-        std::vector<Swept> solids;
-        std::vector<std::pair<TopoDS_Shape, SketchId>> walls;
-        solids.reserve(built.flat.size());
-        for (const TopoDS_Face& f : built.flat) {
-            BRepPrimAPI_MakeRevol solid(f, axis, angle);
-            solid.Build();
-            if (!solid.IsDone() || solid.Shape().IsNull()) {
-                if (reason) *reason = "the profile could not be turned into a solid";
-                return {};
-            }
-            // A full turn has no ends; a part turn has the profile at each.
-            const bool whole = angle >= full - 1e-9;
-            solids.push_back({solid.Shape(), whole ? TopoDS_Shape() : solid.FirstShape(),
-                              whole ? TopoDS_Shape() : solid.LastShape()});
-            // What each entity turned into, asked of the operation rather than
-            // found afterwards: a full turn closes the profile's edges into
-            // seams, and a seam is in two faces at once.
-            for (const auto& [edge, entity] : built.made) {
-                const TopTools_ListOfShape& gen = solid.Generated(edge);
-                for (TopTools_ListOfShape::Iterator it(gen); it.More(); it.Next())
-                    walls.push_back({it.Value(), entity});
-            }
-        }
-        // Nothing generated means nothing to name from; the map is the better
-        // answer then, and assembleSwept falls back to it on an empty list.
-        BrepRef out = assembleSwept(solids, built.made, walls, salt, reason);
-        if (!out) return out;
-        if (!acceptable(out->shape, reason)) {
-            if (reason && reason->empty()) *reason = "the turn produced no valid solid";
-            return {};
-        }
-        return out;
-    } catch (const Standard_Failure& e) {
-        if (reason) *reason = kernelReason(e, "the profile could not be turned into a solid");
-        return {};
-    }
-}
-
-} // namespace
-
-BrepRef sketchSolid(const Sketch& sk, const SketchProfile& profile, Real from, Real to,
-                    ElementId salt, std::string* reason) {
-    if (profile.outer.entities.empty()) {
-        if (reason) *reason = "the profile is empty";
-        return {};
-    }
-    SweptFace f;
-    f.outer = &profile.outer;
-    for (const SketchLoop& h : profile.holes) f.holes.push_back(&h);
-    return sweepSketchFaces(sk, {f}, from, to, salt, reason);
-}
-
-namespace {
-
 // The faces the chosen regions make: a face per picked region whose
 // surrounding region is not also picked, holed by the loops inside it that
 // were not picked.
@@ -3496,7 +3399,508 @@ bool facesForRegions(const std::vector<SketchProfile>& profiles, const std::vect
     return true;
 }
 
+// Names the faces of a solid built from named pieces: `named` is each wall as
+// it stands in `shape`. A face left without a name is an end -- the one lying
+// on the plane through `startOrigin` is the first cap, any other the last.
+BrepRef nameBuilt(const TopoDS_Shape& shape, const std::vector<std::pair<TopoDS_Shape, ElementId>>& named,
+                  Vec3 startOrigin, Vec3 startNormal, ElementId salt) {
+    TopTools_IndexedMapOfShape fs;
+    TopExp::MapShapes(shape, TopAbs_FACE, fs);
+    std::vector<ElementId> names(static_cast<size_t>(fs.Extent()), kNoId);
+    auto put = [&](const TopoDS_Shape& f, ElementId name) {
+        const int i = fs.FindIndex(f);
+        if (i > 0 && names[static_cast<size_t>(i - 1)] == kNoId) names[static_cast<size_t>(i - 1)] = name;
+    };
+    for (const auto& [face, name] : named) put(face, name);
+    for (int i = 1; i <= fs.Extent(); ++i) {
+        ElementId& n = names[static_cast<size_t>(i - 1)];
+        if (n != kNoId) continue;
+        GProp_GProps g;
+        BRepGProp::SurfaceProperties(fs(i), g);
+        const Vec3 c = toVec3(g.CentreOfMass());
+        const bool first = std::fabs(dot(c - startOrigin, startNormal)) < 1e-6;
+        n = nameId(salt, IdRole::Cap, first ? 0 : 1);
+    }
+    // Two ends found the same way would share a name; the second of any pair
+    // is made a patch so that every face stays findable on its own.
+    std::unordered_set<ElementId> seen;
+    for (size_t i = 0; i < names.size(); ++i)
+        if (!seen.insert(names[i]).second) names[i] = nameId(salt, IdRole::Patch, static_cast<ElementId>(i));
+    return makeBrep(shape, names);
+}
+
+// A solid's volume, made positive by turning it inside out when it came out
+// that way. Zero when it has none worth the name.
+Real orientedVolume(TopoDS_Shape& shape) {
+    GProp_GProps g;
+    BRepGProp::VolumeProperties(shape, g);
+    Real v = g.Mass();
+    if (v < 0.0) {
+        shape.Reverse();
+        v = -v;
+    }
+    return v;
+}
+
+// Points along an edge from where it starts to where it ends, the way it runs
+// in its wire.
+std::vector<Vec3> edgePoints(const TopoDS_Edge& e, int steps) {
+    std::vector<Vec3> out;
+    BRepAdaptor_Curve c(e);
+    const Real a = c.FirstParameter(), b = c.LastParameter();
+    const bool rev = e.Orientation() == TopAbs_REVERSED;
+    for (int i = 0; i <= steps; ++i) {
+        const Real t = static_cast<Real>(i) / steps;
+        out.push_back(toVec3(c.Value(rev ? b - (b - a) * t : a + (b - a) * t)));
+    }
+    return out;
+}
+
+// ---- Outlines ---------------------------------------------------------------
+
+// Flat faces of a body as an outline: copies, so the solid built from them
+// shares nothing with the body it is then combined with, each edge named for
+// the body edge it was.
+bool bodyOutline(const BrepShape& s, const std::vector<FaceId>& faces, SketchFaces& out,
+                 std::string* reason) {
+    if (faces.empty()) {
+        if (reason) *reason = "there is no face to build from";
+        return false;
+    }
+    Vec3 sum{0, 0, 0};
+    for (FaceId f : faces) {
+        if (!validFace(s, f)) {
+            if (reason) *reason = "the face it builds from is gone";
+            return false;
+        }
+        if (brep::faceKind(s, f) != SurfaceKind::Plane) {
+            if (reason) *reason = "a face to build from has to be flat";
+            return false;
+        }
+        const TopoDS_Face& face = faceAt(s, f);
+        BRepBuilderAPI_Copy copy(face);
+        out.flat.push_back(TopoDS::Face(copy.Shape()));
+        for (TopExp_Explorer x(face, TopAbs_EDGE); x.More(); x.Next()) {
+            const int i = s.edges.FindIndex(x.Current());
+            const TopTools_ListOfShape& img = copy.Modified(x.Current());
+            if (i <= 0 || img.IsEmpty()) continue;
+            out.made.push_back({TopoDS::Edge(img.First()), brep::edgeName(s, i - 1)});
+        }
+        sum += brep::faceCentroid(s, f);
+    }
+    out.centre = sum * (1.0 / static_cast<Real>(faces.size()));
+    out.normal = normalize(brep::faceNormal(s, faces.front()));
+    out.origin = brep::facePoint(s, faces.front());
+    return true;
+}
+
+bool outlineOf(const OutlineSource& src, SketchFaces& out, std::string* reason) {
+    if (src.sketch && src.regions) {
+        std::vector<SweptFace> faces;
+        if (!facesForRegions(*src.regions, src.keys, faces, reason)) return false;
+        if (faces.empty()) {
+            if (reason) *reason = "the profile is empty";
+            return false;
+        }
+        return buildSketchFaces(*src.sketch, faces, 0.0, out, reason);
+    }
+    if (src.body) return bodyOutline(*src.body, src.faces, out, reason);
+    if (reason) *reason = "there is nothing to build from";
+    return false;
+}
+
+// ---- Paths ------------------------------------------------------------------
+
+// A path as the edges it runs along, each turned the way it is travelled, and
+// points along it from start to end.
+struct PathEdges {
+    std::vector<TopoDS_Edge> edges;
+    std::vector<Vec3> along;
+    bool closed = false;
+};
+
+void reversePath(PathEdges& p) {
+    std::reverse(p.edges.begin(), p.edges.end());
+    for (TopoDS_Edge& e : p.edges) e = TopoDS::Edge(e.Reversed());
+    std::reverse(p.along.begin(), p.along.end());
+}
+
+// A body's edges put in the order they join, the way sketchPathOf orders a
+// sketch's curves: a branch or a gap is refused rather than guessed across.
+bool orderBodyEdges(const BrepShape& s, const std::vector<EdgeId>& ids, PathEdges& out,
+                    std::string* reason) {
+    auto refuse = [&](const char* why) {
+        if (reason) *reason = why;
+        return false;
+    };
+    if (ids.empty()) return refuse("the path is empty");
+    struct Piece { TopoDS_Edge edge; Vec3 from, to; };
+    std::vector<Piece> pieces;
+    for (EdgeId id : ids) {
+        if (!validEdge(s, id)) return refuse("an edge of the path is gone");
+        const TopoDS_Edge& e = edgeAt(s, id);
+        if (BRep_Tool::Degenerated(e)) continue;
+        const TopoDS_Vertex a = TopExp::FirstVertex(e, Standard_True);
+        const TopoDS_Vertex b = TopExp::LastVertex(e, Standard_True);
+        if (a.IsNull() || b.IsNull()) return refuse("an edge of the path has no ends");
+        pieces.push_back({e, toVec3(BRep_Tool::Pnt(a)), toVec3(BRep_Tool::Pnt(b))});
+    }
+    if (pieces.empty()) return refuse("the path is empty");
+    const Real tol = 1e-5;
+    auto same = [&](Vec3 p, Vec3 q) { return lengthSq(p - q) < tol * tol; };
+
+    // A single closed edge -- a circle's rim -- is a closed path by itself.
+    if (pieces.size() == 1 && same(pieces[0].from, pieces[0].to)) {
+        out.edges = {pieces[0].edge};
+        out.closed = true;
+    } else {
+        auto meeting = [&](Vec3 at) {
+            int n = 0;
+            for (const Piece& p : pieces) n += same(p.from, at) + same(p.to, at);
+            return n;
+        };
+        size_t start = 0;
+        bool startRev = false;
+        int loose = 0;
+        for (size_t i = 0; i < pieces.size(); ++i) {
+            const int f = meeting(pieces[i].from), t = meeting(pieces[i].to);
+            if (f > 2 || t > 2) return refuse("the path branches: three edges meet at one corner");
+            if (f == 1 && loose++ == 0) { start = i; startRev = false; }
+            if (t == 1 && loose++ == 0) { start = i; startRev = true; }
+        }
+        if (loose != 0 && loose != 2) return refuse("the edges of the path do not all join end to end");
+        std::vector<bool> used(pieces.size(), false);
+        size_t at = start;
+        bool rev = startRev;
+        for (;;) {
+            used[at] = true;
+            out.edges.push_back(rev ? TopoDS::Edge(pieces[at].edge.Reversed()) : pieces[at].edge);
+            const Vec3 end = rev ? pieces[at].from : pieces[at].to;
+            bool found = false;
+            for (size_t j = 0; j < pieces.size() && !found; ++j) {
+                if (used[j]) continue;
+                if (same(pieces[j].from, end))    { at = j; rev = false; found = true; }
+                else if (same(pieces[j].to, end)) { at = j; rev = true;  found = true; }
+            }
+            if (!found) break;
+        }
+        if (out.edges.size() != pieces.size())
+            return refuse("the edges of the path do not all join end to end");
+        out.closed = loose == 0;
+    }
+    for (const TopoDS_Edge& e : out.edges) {
+        std::vector<Vec3> pts = edgePoints(e, 16);
+        if (!out.along.empty() && !pts.empty()) pts.erase(pts.begin());
+        out.along.insert(out.along.end(), pts.begin(), pts.end());
+    }
+    return true;
+}
+
+bool pathOf(const PathSource& src, PathEdges& out, std::string* reason) {
+    if (src.sketch) {
+        SketchPath path;
+        if (!sketchPathOf(*src.sketch, src.entities, path, reason)) return false;
+        for (size_t k = 0; k < path.entities.size(); ++k) {
+            const SketchEntity* e = src.sketch->entity(path.entities[k]);
+            TopoDS_Edge edge;
+            if (!e || !sketchEdge(*src.sketch, *e, 0.0, edge)) {
+                if (reason) *reason = "a curve of the path could not be made";
+                return false;
+            }
+            out.edges.push_back(path.reversed[k] ? TopoDS::Edge(edge.Reversed()) : edge);
+        }
+        for (Vec2 p : sketchPathPoints(*src.sketch, path, 16)) out.along.push_back(src.sketch->plane.toWorld(p));
+        out.closed = path.closed;
+        if (out.along.size() < 2) {
+            if (reason) *reason = "the path has no length";
+            return false;
+        }
+        return true;
+    }
+    if (src.body) return orderBodyEdges(*src.body, src.edges, out, reason);
+    if (reason) *reason = "there is no path";
+    return false;
+}
+
+// ---- Revolve, sweep, loft ----------------------------------------------------
+
+BrepRef revolveBuilt(SketchFaces& built, Vec3 axisPoint, Vec3 axisDir, Real angle, ElementId salt,
+                     std::string* reason) {
+    if (length(axisDir) < 1e-9) {
+        if (reason) *reason = "the axis has no direction";
+        return {};
+    }
+    axisDir = normalize(axisDir);
+    if (angle < 1e-6) {
+        if (reason) *reason = "a turn of nothing makes nothing";
+        return {};
+    }
+    const Real full = 2.0 * kPi;
+    if (angle > full + 1e-9) {
+        if (reason) *reason = "more than a full turn would sweep over itself";
+        return {};
+    }
+    angle = std::min(angle, full);
+
+    // An outline that straddles an axis lying in its own plane would turn
+    // through itself. Touching the axis is fine -- that is how a half-disc
+    // makes a sphere -- so this is about crossing it. Measured along the
+    // curves rather than at their ends: a curve can bulge over the axis.
+    const Vec3 n = built.normal;
+    const bool inPlane = std::fabs(dot(axisDir, n)) < 1e-6 && std::fabs(dot(axisPoint - built.origin, n)) < 1e-6;
+    if (inPlane) {
+        Real most = 0.0, least = 0.0;
+        for (const auto& [edge, key] : built.made)
+            for (const Vec3& p : edgePoints(edge, 24)) {
+                const Real side = dot(cross(axisDir, p - axisPoint), n);
+                most = std::max(most, side);
+                least = std::min(least, side);
+            }
+        if (most > 1e-6 && least < -1e-6) {
+            if (reason) *reason = "the profile crosses the axis it turns about";
+            return {};
+        }
+    } else if (std::fabs(dot(axisDir, n)) > 1.0 - 1e-9) {
+        if (reason) *reason = "the axis stands straight out of the profile, so turning it sweeps nothing";
+        return {};
+    }
+
+    try {
+        const gp_Ax1 axis(gp_Pnt(axisPoint.x, axisPoint.y, axisPoint.z), gp_Dir(axisDir.x, axisDir.y, axisDir.z));
+        std::vector<Swept> solids;
+        std::vector<std::pair<TopoDS_Shape, ElementId>> walls;
+        for (const TopoDS_Face& f : built.flat) {
+            BRepPrimAPI_MakeRevol solid(f, axis, angle);
+            solid.Build();
+            if (!solid.IsDone() || solid.Shape().IsNull()) {
+                if (reason) *reason = "the profile could not be turned into a solid";
+                return {};
+            }
+            // A full turn has no ends; a part turn has the profile at each.
+            const bool whole = angle >= full - 1e-9;
+            solids.push_back({solid.Shape(), whole ? TopoDS_Shape() : solid.FirstShape(),
+                              whole ? TopoDS_Shape() : solid.LastShape()});
+            // What each edge turned into, asked of the operation rather than
+            // found afterwards: a full turn closes the profile's edges into
+            // seams, and a seam is in two faces at once.
+            for (const auto& [edge, key] : built.made) {
+                const TopTools_ListOfShape& gen = solid.Generated(edge);
+                for (TopTools_ListOfShape::Iterator it(gen); it.More(); it.Next())
+                    walls.push_back({it.Value(), key});
+            }
+        }
+        BrepRef out = assembleSwept(solids, built.made, walls, salt, reason);
+        if (!out) return out;
+        if (!acceptable(out->shape, reason)) {
+            if (reason && reason->empty()) *reason = "the turn produced no valid solid";
+            return {};
+        }
+        return out;
+    } catch (const Standard_Failure& e) {
+        if (reason) *reason = kernelReason(e, "the profile could not be turned into a solid");
+        return {};
+    }
+}
+
+BrepRef sweepBuilt(SketchFaces& built, PathEdges& path, ElementId salt, std::string* reason) {
+    if (path.along.size() < 2) {
+        if (reason) *reason = "the path has no length";
+        return {};
+    }
+    const Vec3 centre = built.centre;
+    // Carried from the nearer end: a path drawn from the far end is the same
+    // path, and should not put the profile somewhere it was not drawn.
+    if (!path.closed && lengthSq(path.along.back() - centre) < lengthSq(path.along.front() - centre))
+        reversePath(path);
+
+    // A path running along the profile's plane where it meets the profile
+    // carries it edgeways, which sweeps nothing: said, rather than handed to
+    // the kernel to fail at.
+    const Vec3 n = built.normal;
+    const std::vector<Vec3>& along = path.along;
+    {
+        size_t closest = 0;
+        for (size_t i = 1; i < along.size(); ++i)
+            if (lengthSq(along[i] - centre) < lengthSq(along[closest] - centre)) closest = i;
+        const size_t a = closest + 1 < along.size() ? closest : closest - 1;
+        const Vec3 t = normalize(along[a + 1] - along[a]);
+        if (std::fabs(dot(t, n)) < 0.02) {
+            if (reason) *reason = "the path runs along the profile's plane, not out of it";
+            return {};
+        }
+    }
+
+    // How the profile is held as it goes. A path in one plane can only turn in
+    // that plane, so holding the profile square to the plane's normal means it
+    // never twists; a straight path has no plane, and any direction across it
+    // does; a path that leaves every plane follows its own curvature.
+    const Vec3 p0 = along.front();
+    Vec3 plane{0, 0, 0};
+    for (size_t i = 1; i < along.size(); ++i)
+        for (size_t j = i + 1; j < along.size(); ++j) {
+            const Vec3 c = cross(along[i] - p0, along[j] - p0);
+            if (lengthSq(c) > lengthSq(plane)) plane = c;
+        }
+    const bool straight = lengthSq(plane) < 1e-12;
+    bool planar = !straight;
+    if (planar) {
+        plane = normalize(plane);
+        for (const Vec3& p : along)
+            if (std::fabs(dot(p - p0, plane)) > 1e-6) { planar = false; break; }
+    }
+    Vec3 binormal = plane;
+    if (straight) {
+        const Vec3 t = normalize(along.back() - along.front());
+        binormal = normalize(cross(t, std::fabs(t.x) < 0.9 ? Vec3{1, 0, 0} : Vec3{0, 1, 0}));
+    }
+
+    try {
+        BRepBuilderAPI_MakeWire mw;
+        for (const TopoDS_Edge& e : path.edges) {
+            mw.Add(e);
+            if (!mw.IsDone()) {
+                if (reason) *reason = "the curves of the path do not join";
+                return {};
+            }
+        }
+        const TopoDS_Wire spine = mw.Wire();
+
+        // One pipe per loop -- the outline and each hole -- then the holes
+        // taken out; a corner in the path is mitred.
+        std::vector<std::pair<TopoDS_Shape, ElementId>> named;
+        auto pipe = [&](const TopoDS_Wire& loop, TopoDS_Shape& solid) {
+            BRepOffsetAPI_MakePipeShell p(spine);
+            if (straight || planar) p.SetMode(gp_Dir(binormal.x, binormal.y, binormal.z));
+            else                    p.SetMode(Standard_False);
+            p.SetTransitionMode(BRepBuilderAPI_RightCorner);
+            p.Add(loop, Standard_False, Standard_False);
+            p.Build();
+            if (!p.IsDone() || !p.MakeSolid()) return false;
+            solid = p.Shape();
+            for (const auto& [edge, key] : built.made) {
+                const TopTools_ListOfShape& gen = p.Generated(edge);
+                for (TopTools_ListOfShape::Iterator it(gen); it.More(); it.Next())
+                    if (it.Value().ShapeType() == TopAbs_FACE)
+                        named.push_back({it.Value(), nameId(salt, IdRole::Side, key)});
+            }
+            return orientedVolume(solid) > 1e-9;
+        };
+
+        std::vector<TopoDS_Shape> solids;
+        for (const TopoDS_Face& f : built.flat) {
+            const TopoDS_Wire outer = BRepTools::OuterWire(f);
+            TopoDS_Shape body;
+            if (!pipe(outer, body)) {
+                if (reason) *reason = "the profile could not be carried along that path";
+                return {};
+            }
+            for (TopExp_Explorer w(f, TopAbs_WIRE); w.More(); w.Next()) {
+                if (w.Current().IsSame(outer)) continue;
+                TopoDS_Shape bore;
+                if (!pipe(TopoDS::Wire(w.Current()), bore)) {
+                    if (reason) *reason = "a hole in the profile could not be carried along that path";
+                    return {};
+                }
+                BRepAlgoAPI_Cut cut(body, bore);
+                if (!cut.IsDone()) {
+                    if (reason) *reason = "a hole in the profile could not be taken out of the sweep";
+                    return {};
+                }
+                // The names so far, carried through the cut.
+                std::vector<std::pair<TopoDS_Shape, ElementId>> kept;
+                for (const auto& [face, name] : named) {
+                    const TopTools_ListOfShape& images = cut.Modified(face);
+                    if (images.IsEmpty()) { kept.push_back({face, name}); continue; }
+                    for (TopTools_ListOfShape::Iterator it(images); it.More(); it.Next())
+                        kept.push_back({it.Value(), name});
+                }
+                named.swap(kept);
+                body = cut.Shape();
+            }
+            solids.push_back(body);
+        }
+
+        TopoDS_Shape shape;
+        if (solids.size() == 1) {
+            shape = solids.front();
+        } else {
+            BRep_Builder b;
+            TopoDS_Compound c;
+            b.MakeCompound(c);
+            for (const TopoDS_Shape& s : solids) b.Add(c, s);
+            shape = c;
+        }
+        BrepRef out = nameBuilt(shape, named, built.origin, n, salt);
+        if (!out || !acceptable(out->shape, reason)) {
+            if (reason && reason->empty()) *reason = "the sweep produced no valid solid";
+            return {};
+        }
+        return out;
+    } catch (const Standard_Failure& e) {
+        if (reason) *reason = kernelReason(e, "the profile could not be carried along that path");
+        return {};
+    }
+}
+
+BrepRef loftBuilt(std::vector<SketchFaces>& sections, bool ruled, ElementId salt, std::string* reason) {
+    auto refuse = [&](const char* why) {
+        if (reason) *reason = why;
+        return BrepRef{};
+    };
+    if (sections.size() < 2) return refuse("a loft needs at least two outlines");
+    for (const SketchFaces& s : sections) {
+        if (s.flat.size() != 1) return refuse("each outline of a loft is one region or one face");
+        int wires = 0;
+        for (TopExp_Explorer w(s.flat.front(), TopAbs_WIRE); w.More(); w.Next()) ++wires;
+        if (wires > 1) return refuse("a loft goes through outlines: a region or face with a hole in it cannot be one");
+    }
+    // Two outlines on one plane have nothing between them to fill.
+    for (size_t i = 0; i + 1 < sections.size(); ++i) {
+        const Vec3 na = sections[i].normal, nb = sections[i + 1].normal;
+        if (length(cross(na, nb)) < 1e-9 && std::fabs(dot(sections[i + 1].origin - sections[i].origin, na)) < 1e-6)
+            return refuse("two outlines in a row lie on the same plane, with nothing between them");
+    }
+
+    try {
+        BRepOffsetAPI_ThruSections loft(Standard_True, ruled ? Standard_True : Standard_False, 1e-6);
+        loft.CheckCompatibility(Standard_True);
+        for (const SketchFaces& s : sections) loft.AddWire(BRepTools::OuterWire(s.flat.front()));
+        loft.Build();
+        if (!loft.IsDone()) return refuse("the outlines could not be lofted into a solid");
+        TopoDS_Shape shape = loft.Shape();
+        if (orientedVolume(shape) < 1e-9) return refuse("the loft has no volume");
+
+        std::vector<std::pair<TopoDS_Shape, ElementId>> named;
+        for (const auto& [edge, key] : sections.front().made) {
+            const TopoDS_Shape wall = loft.GeneratedFace(edge);
+            if (!wall.IsNull()) named.push_back({wall, nameId(salt, IdRole::Side, key)});
+        }
+        BrepRef out = nameBuilt(shape, named, sections.front().origin, sections.front().normal, salt);
+        if (!out || !acceptable(out->shape, reason)) {
+            if (reason && reason->empty()) *reason = "the loft produced no valid solid";
+            return {};
+        }
+        return out;
+    } catch (const Standard_Failure& e) {
+        if (reason) *reason = kernelReason(e, "the outlines could not be lofted into a solid");
+        return {};
+    }
+}
+
 } // namespace
+
+BrepRef sketchSolid(const Sketch& sk, const SketchProfile& profile, Real from, Real to,
+                    ElementId salt, std::string* reason) {
+    if (profile.outer.entities.empty()) {
+        if (reason) *reason = "the profile is empty";
+        return {};
+    }
+    SweptFace f;
+    f.outer = &profile.outer;
+    for (const SketchLoop& h : profile.holes) f.holes.push_back(&h);
+    return sweepSketchFaces(sk, {f}, from, to, salt, reason);
+}
+
 
 BrepRef sketchSolids(const Sketch& sk, const std::vector<SketchProfile>& profiles,
                      const std::vector<SketchId>& keys, Real from, Real to, ElementId salt,
@@ -3506,12 +3910,88 @@ BrepRef sketchSolids(const Sketch& sk, const std::vector<SketchProfile>& profile
     return sweepSketchFaces(sk, faces, from, to, salt, reason);
 }
 
+
+BrepRef revolveOutline(const OutlineSource& outline, Vec3 axisPoint, Vec3 axisDir, Real angle,
+                       ElementId salt, std::string* reason) {
+    if (reason) reason->clear();
+    try {
+        SketchFaces built;
+        if (!outlineOf(outline, built, reason)) return {};
+        return revolveBuilt(built, axisPoint, axisDir, angle, salt, reason);
+    } catch (const Standard_Failure& e) {
+        if (reason) *reason = kernelReason(e, "the profile could not be turned into a solid");
+        return {};
+    }
+}
+
+BrepRef sweepOutline(const OutlineSource& outline, const PathSource& path, ElementId salt,
+                     std::string* reason) {
+    if (reason) reason->clear();
+    try {
+        PathEdges edges;
+        if (!pathOf(path, edges, reason)) return {};
+        SketchFaces built;
+        if (!outlineOf(outline, built, reason)) return {};
+        return sweepBuilt(built, edges, salt, reason);
+    } catch (const Standard_Failure& e) {
+        if (reason) *reason = kernelReason(e, "the profile could not be carried along that path");
+        return {};
+    }
+}
+
+BrepRef loftOutlines(const std::vector<OutlineSource>& outlines, bool ruled, ElementId salt,
+                     std::string* reason) {
+    if (reason) reason->clear();
+    if (outlines.size() < 2) {
+        if (reason) *reason = "a loft needs at least two outlines";
+        return {};
+    }
+    try {
+        std::vector<SketchFaces> sections(outlines.size());
+        for (size_t i = 0; i < outlines.size(); ++i)
+            if (!outlineOf(outlines[i], sections[i], reason)) return {};
+        return loftBuilt(sections, ruled, salt, reason);
+    } catch (const Standard_Failure& e) {
+        if (reason) *reason = kernelReason(e, "the outlines could not be lofted into a solid");
+        return {};
+    }
+}
+
 BrepRef revolveSketch(const Sketch& sk, const std::vector<SketchProfile>& profiles,
                       const std::vector<SketchId>& keys, Vec2 axisAt, Vec2 axisDir, Real angle,
                       ElementId salt, std::string* reason) {
-    std::vector<SweptFace> faces;
-    if (!facesForRegions(profiles, keys, faces, reason)) return {};
-    return revolveSketchFaces(sk, faces, axisAt, axisDir, angle, salt, reason);
+    if (length(axisDir) < 1e-9) {
+        if (reason) *reason = "the axis has no direction";
+        return {};
+    }
+    const Vec3 at = sk.plane.toWorld(axisAt);
+    const Vec3 dir = sk.plane.toWorld(axisAt + axisDir) - at;
+    return revolveOutline({&sk, &profiles, keys, nullptr, {}}, at, dir, angle, salt, reason);
+}
+
+BrepRef sweepSketch(const Sketch& sk, const std::vector<SketchProfile>& profiles,
+                    const std::vector<SketchId>& keys, const Sketch& pathSketch,
+                    const std::vector<SketchId>& path, ElementId salt, std::string* reason) {
+    return sweepOutline({&sk, &profiles, keys, nullptr, {}}, {&pathSketch, path, nullptr, {}}, salt,
+                        reason);
+}
+
+BrepRef loftSketches(const std::vector<LoftSection>& sections, bool ruled, ElementId salt,
+                     std::string* reason) {
+    // Each section's one region stands alone, so the regions list it is looked
+    // up in is that region.
+    std::vector<std::vector<SketchProfile>> held;
+    held.reserve(sections.size());
+    std::vector<OutlineSource> outlines;
+    for (const LoftSection& s : sections) {
+        if (!s.sketch || !s.region) {
+            if (reason) *reason = "an outline of the loft is missing";
+            return {};
+        }
+        held.push_back({*s.region});
+        outlines.push_back({s.sketch, &held.back(), {s.region->key}, nullptr, {}});
+    }
+    return loftOutlines(outlines, ruled, salt, reason);
 }
 
 BrepRef prism(const std::vector<Vec3>& points, const std::vector<Real>& arcs,

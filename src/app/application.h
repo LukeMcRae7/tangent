@@ -8,6 +8,7 @@
 #include "geom/kernel_guard.h"
 #include "app/create_tool.h"
 #include "app/extrude_ops.h"
+#include "app/profile_tool.h"
 #include "app/sketch_tool.h"
 #include "app/file_dialog.h"
 #include "app/printability.h"
@@ -150,11 +151,27 @@ public:
     // a line half-drawn, 2 choosing regions, 3 setting the depth, 4 the part it
     // made, re-opened for editing.
     void setSketchDemo(int step) { sketchDemo_ = step; }
-    // Turns a profile about an axis, the whole way through the tool: 1 a ring
-    // as a new part, 2 the same as a part turn, 3 a groove cut round a
-    // cylinder. Each prints the volume it made, against the one arithmetic
-    // says it should be.
+    // The pen: 1 a triangle of corner clicks, finished and extruded 10, against
+    // its volume; 2 a smooth shape of dragged anchors, left open in the tool.
+    void setPenDemo(int step) { penDemo_ = step; }
+    // A box's top face projected into a sketch on it, finished, and the box
+    // then widened in its history: the sketch has to follow.
+    void setProjectDemo(int step) { projectDemo_ = step; }
+    // The plane picker, three points, two picked: left there to be seen.
+    void setPlaneDemo(int step) { planeDemo_ = step; }
+    // Revolve, sweep and loft through the tool that builds them, each checked
+    // against arithmetic and against leaving nothing standing beside the part:
+    //   revolve 1 a ring, 2 a quarter of it, 3 a groove cut round a cylinder,
+    //           4 a box's side face turned about its own edge, 5 = 4 left at
+    //           the picking;
+    //   sweep   1 a square round a corner, 2 a round bar round a quarter
+    //           circle, 3 a box's top face along a sketch path, 4 = 3 left
+    //           at the picking;
+    //   loft    1 a square frustum, 2 a round one, 3 from a box's top face
+    //           to a square above it, 4 = 3 left at the picking.
     void setRevolveDemo(int step) { revolveDemo_ = step; }
+    void setSweepDemo(int step) { sweepDemo_ = step; }
+    void setLoftDemo(int step) { loftDemo_ = step; }
     // Drills a hole the way the tool drills one: 1 an M3 clearance hole
     // through a plate, 2 an M4 counterbore adjusted to M5 in its panel,
     // 3 a blind tapped hole whose face then moves under it.
@@ -241,7 +258,12 @@ private:
     Vec2 mouseOverride_{-1.0, -1.0};
     int  snapDemo_ = 0;
     int  sketchDemo_ = 0;
+    int  penDemo_ = 0;
+    int  projectDemo_ = 0;
+    int  planeDemo_ = 0;
     int  revolveDemo_ = 0;
+    int  sweepDemo_ = 0;
+    int  loftDemo_ = 0;
     int  holeDemo_ = 0;
     int  draftDemo_ = 0;
     int  deleteFaceDemo_ = 0;
@@ -1199,6 +1221,16 @@ private:
 
     CreateTool createTool_;
     SketchTool sketchTool_;
+    // Revolve, sweep and loft, from sketches or from faces and edges.
+    ProfileTool profileTool_;
+    void beginProfileBuild(ProfileBuild build);
+    // The selected sketch: its regions extruded, or the sketch taken out.
+    void beginExtrudeSketch();
+    void deleteSelectedSketch();
+    // The sketch drawn under the pointer; see the .cpp.
+    Scene::SketchRef sketchAt(Vec2 cursor, bool inside) const;
+    // The one the pointer is over, lit in the view.
+    Scene::SketchRef hoverSketch_;
 
     void beginAddPrimitivePrompt(PrimitiveKind kind);
     void beginSketch();

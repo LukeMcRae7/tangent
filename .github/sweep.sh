@@ -13,7 +13,10 @@ modes=(
   "--preview-check 1" "--preview-check 2" "--preview-check 3"
   "--preview-check 4" "--preview-check 5" "--preview-check 6"
   "--preview-check 7"
-  "--revolve-demo 1" "--revolve-demo 2" "--revolve-demo 3"
+  "--revolve-demo 1" "--revolve-demo 2" "--revolve-demo 3" "--revolve-demo 4" "--revolve-demo 5"
+  "--sweep-demo 1" "--sweep-demo 2" "--sweep-demo 3" "--sweep-demo 4"
+  "--loft-demo 1" "--loft-demo 2" "--loft-demo 3" "--loft-demo 4"
+  "--pen-demo 1" "--pen-demo 2" "--project-demo 1" "--plane-demo 1"
   "--hole-demo 1" "--hole-demo 2" "--hole-demo 3"
   "--draft-demo 1" "--draft-demo 2" "--draft-demo 3"
   "--delete-face-demo 1" "--delete-face-demo 2" "--delete-face-demo 3"
@@ -51,17 +54,35 @@ for m in 1 2 3 4 5 7; do
   fi
 done
 
-# A turn has to make the volume arithmetic says it makes. The demo prints what
-# it built and what Pappus gives for the same profile, so the check is that the
-# two agree rather than that the run finished.
-for m in 1 2 3; do
-  out=$(timeout 200 ./build/tangent --revolve-demo $m --smoke-test 20 2>&1)
-  line=$(echo "$out" | grep "\[revolve-demo\]" | head -1)
-  if ! echo "$line" | grep -q "agrees=1"; then
-    printf '  FAIL  revolve-demo %s: %s\n' "$m" "$line"
+# Revolve, sweep and loft have to make the volume arithmetic says -- Pappus for
+# a turn, A times the centreline for a mitred bend, the frustum formula for a
+# loft -- whether built from a sketch or from a box's own face and edge, and a
+# sketch picked from has to end up inside the part rather than beside it.
+for dm in "revolve 1" "revolve 2" "revolve 3" "revolve 4" "sweep 1" "sweep 2" "sweep 3" \
+          "loft 1" "loft 2" "loft 3"; do
+  set -- $dm
+  out=$(timeout 200 ./build/tangent --$1-demo $2 --smoke-test 20 2>&1)
+  line=$(echo "$out" | grep "\[$1-demo\]" | head -1)
+  if ! echo "$line" | grep -q "agrees=1 tidy=1"; then
+    printf '  FAIL  %s-demo %s: %s\n' "$1" "$2" "$line"
     fail=1
   else
-    printf '  ok    --revolve-demo %s\n' "$m"
+    printf '  ok    --%s-demo %s\n' "$1" "$2"
+  fi
+done
+
+# The pen's corners draw straight sides, so a triangle of them extruded has the
+# prism's volume; and a sketch projected from a face goes round the face after
+# the part is widened, not round where the face was.
+for dm in "pen 1" "project 1"; do
+  set -- $dm
+  out=$(timeout 200 ./build/tangent --$1-demo $2 --smoke-test 20 2>&1)
+  line=$(echo "$out" | grep "\[$1-demo\]" | head -1)
+  if ! echo "$line" | grep -q "agrees=1"; then
+    printf '  FAIL  %s-demo %s: %s\n' "$1" "$2" "$line"
+    fail=1
+  else
+    printf '  ok    --%s-demo %s\n' "$1" "$2"
   fi
 done
 

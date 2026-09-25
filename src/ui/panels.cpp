@@ -42,6 +42,8 @@ Glyph glyphFor(const Feature& f) {
         case FeatureKind::Extrude:        return f.mergeFlush ? Glyph::PushPull : Glyph::Extrude;
         case FeatureKind::ExtrudeProfile: return Glyph::Extrude;
         case FeatureKind::RevolveProfile: return Glyph::Revolve;
+        case FeatureKind::SweepProfile:   return Glyph::Sweep;
+        case FeatureKind::LoftProfile:    return Glyph::Loft;
         case FeatureKind::Hole:           return Glyph::Hole;
         case FeatureKind::Draft:          return Glyph::Draft;
         case FeatureKind::DeleteFace:     return Glyph::DeleteFace;
@@ -185,15 +187,30 @@ void objectRow(UiContext& ctx, Scene& scene, SceneObject& obj, Glyph glyph) {
 
     const bool clicked = ImGui::InvisibleButton("##row", ImVec2(std::max(10.0f, w - eyeW - 4.0f), h));
     const bool hovered = ImGui::IsItemHovered();
+    // An object that is only a sketch is that sketch: its row selects it, and
+    // a double-click opens it, the way the sketch rows under a part do.
+    const Feature* onlySketch = glyph == Glyph::Sketch && !obj.features.empty() ? &obj.features.front() : nullptr;
     if (clicked) {
-        // The application does it, the same way it does a Ctrl+click on the
-        // body in the view, so the two cannot come to mean different things.
-        ctx.actions.pickObject = obj.id;
-        ctx.actions.pickObjectAdditive = ImGui::GetIO().KeyShift || ImGui::GetIO().KeyCtrl;
+        if (onlySketch) {
+            scene.selectSketch({obj.id, onlySketch->uid});
+        } else {
+            // The application does it, the same way it does a Ctrl+click on
+            // the body in the view, so the two cannot come to mean different
+            // things.
+            ctx.actions.pickObject = obj.id;
+            ctx.actions.pickObjectAdditive = ImGui::GetIO().KeyShift || ImGui::GetIO().KeyCtrl;
+        }
     }
-    if (hovered && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) ctx.actions.frameSelected = true;
+    if (hovered && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+        if (onlySketch) {
+            ctx.actions.editSketchObject = obj.id;
+            ctx.actions.editSketchUid = onlySketch->uid;
+        } else {
+            ctx.actions.frameSelected = true;
+        }
+    }
 
-    const bool selected = scene.isSelected(obj.id);
+    const bool selected = scene.isSelected(obj.id) || (onlySketch && scene.selectedSketch().object == obj.id);
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const ImVec2 lo(at.x, at.y), hi(at.x + w, at.y + h);
     if (selected) {
@@ -226,14 +243,24 @@ void objectRow(UiContext& ctx, Scene& scene, SceneObject& obj, Glyph glyph) {
             const float sh = 22.0f;
             const bool sclicked = ImGui::InvisibleButton("##sk", ImVec2(std::max(10.0f, w - eyeW - 4.0f), sh));
             const bool shover = ImGui::IsItemHovered();
-            if (shover) dl->AddRectFilled(ImVec2(sat.x, sat.y), ImVec2(sat.x + w, sat.y + sh),
-                                          u32(palette::kHover, 0.5f), 5.0f);
-            if (sclicked && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+            const bool ssel = scene.selectedSketch() == Scene::SketchRef{obj.id, f.uid};
+            if (ssel) {
+                dl->AddRectFilled(ImVec2(sat.x, sat.y), ImVec2(sat.x + w, sat.y + sh), u32(palette::kRaised), 5.0f);
+                dl->AddRectFilled(ImVec2(sat.x + 24.0f, sat.y + 4.0f), ImVec2(sat.x + 26.5f, sat.y + sh - 4.0f),
+                                  u32(palette::kBrand), 2.0f);
+            } else if (shover) {
+                dl->AddRectFilled(ImVec2(sat.x, sat.y), ImVec2(sat.x + w, sat.y + sh),
+                                  u32(palette::kHover, 0.5f), 5.0f);
+            }
+            // One click selects it -- its actions are then on the bar over the
+            // view and in the inspector -- and a double-click opens it.
+            if (sclicked) scene.selectSketch({obj.id, f.uid});
+            if (shover && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
                 ctx.actions.editSketchObject = obj.id;
                 ctx.actions.editSketchUid = f.uid;
             }
             if (shover)
-                ImGui::SetTooltip("Double-click to edit it%s",
+                ImGui::SetTooltip("Click to select it, double-click to edit it%s",
                                   f.sketchFreedoms == 0 ? "  (fully constrained)" : "");
             const float salpha = f.sketchShown ? 0.85f : 0.4f;
             drawGlyph(dl, Glyph::Sketch, ImVec2(sat.x + 36.0f, sat.y + sh * 0.5f), 15.0f,
@@ -450,11 +477,22 @@ void featureDetails(UiContext& ctx, SceneObject& obj, Feature& f, bool& changed)
                            f.hole.through ? "through" : "to a depth");
         break;
     }
-    case FeatureKind::RevolveProfile: {
-        double deg = f.revolveAngle * kRad2Deg;
-        if (labelledNumber("Angle", deg, 1.0f, 1.0f, 360.0f)) {
-            f.revolveAngle = clampf(deg, 1.0, 360.0) * kDeg2Rad;
-            changed = true;
+    case FeatureKind::RevolveProfile:
+    case FeatureKind::SweepProfile:
+    case FeatureKind::LoftProfile: {
+        if (f.kind == FeatureKind::RevolveProfile) {
+            double deg = f.revolveAngle * kRad2Deg;
+            if (labelledNumber("Angle", deg, 1.0f, 1.0f, 360.0f)) {
+                f.revolveAngle = clampf(deg, 1.0, 360.0) * kDeg2Rad;
+                changed = true;
+            }
+        } else if (f.kind == FeatureKind::LoftProfile) {
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextColored(dim, "Walls");
+            ImGui::SameLine(ui::labelColumn());
+            if (ui::pillButton("Smooth", !f.loftRuled) && f.loftRuled) { f.loftRuled = false; changed = true; }
+            ImGui::SameLine(0.0f, 3.0f);
+            if (ui::pillButton("Straight", f.loftRuled) && !f.loftRuled) { f.loftRuled = true; changed = true; }
         }
         static const char* const kOps[] = {"Join", "Cut", "Intersect"};
         static const ExtrudeOp kOf[] = {ExtrudeOp::Join, ExtrudeOp::Cut, ExtrudeOp::Intersect};
@@ -472,8 +510,17 @@ void featureDetails(UiContext& ctx, SceneObject& obj, Feature& f, bool& changed)
         // The axis is picked by pointing at the drawing, not typed here: two
         // numbers and a direction in the sketch's own frame are not something
         // anyone can read off and check. What the step can say is where it is.
-        ImGui::TextColored(dim, "turns about the line through (%.2f, %.2f) in the sketch",
-                           f.revolveAxisAt.x, f.revolveAxisAt.y);
+        // The path and the outlines are picked by pointing at sketches, and
+        // change by editing those sketches: here the step says what it uses.
+        if (f.kind == FeatureKind::RevolveProfile)
+            ImGui::TextColored(dim, "turns about the line through (%.2f, %.2f) in the sketch",
+                               f.revolveAxisAt.x, f.revolveAxisAt.y);
+        else if (f.kind == FeatureKind::SweepProfile)
+            ImGui::TextColored(dim, "follows %zu curve%s of another sketch", f.pathEntities.size(),
+                               f.pathEntities.size() == 1 ? "" : "s");
+        else
+            ImGui::TextColored(dim, "runs through %zu outlines, in the order they were picked",
+                               f.loftKeys.size() + 1);
         break;
     }
     case FeatureKind::ExtrudeProfile:
@@ -754,6 +801,131 @@ void drawHistorySection(UiContext& ctx, SceneObject& obj) {
     }
 }
 
+
+// ---- a selected sketch ----------------------------------------------------------
+
+// A glyph and a word, as one button: the selected sketch's actions.
+bool actionButton(const char* id, Glyph glyph, const char* label, const char* tip, bool enabled = true) {
+    ImGui::PushID(id);
+    pushFont(FontWeight::Medium, uiFonts().size * 0.92f);
+    const float h = 30.0f;
+    const float w = ImGui::CalcTextSize(label).x + 36.0f;
+    const ImVec2 at = ImGui::GetCursorScreenPos();
+    const bool clicked = ImGui::InvisibleButton("##b", ImVec2(w, h)) && enabled;
+    const bool hovered = ImGui::IsItemHovered();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    if (hovered && enabled) dl->AddRectFilled(at, ImVec2(at.x + w, at.y + h), u32(palette::kHover), 6.0f);
+    const float alpha = enabled ? 1.0f : 0.4f;
+    drawGlyph(dl, glyph, ImVec2(at.x + 16.0f, at.y + h * 0.5f), 16.0f, u32(palette::kBrand, alpha));
+    dl->AddText(ImVec2(at.x + 28.0f, at.y + (h - ImGui::GetTextLineHeight()) * 0.5f), u32(palette::kText, alpha),
+                label);
+    ImGui::PopFont();
+    if (hovered && tip) ui::hoverTip(tip);
+    ImGui::PopID();
+    return clicked;
+}
+
+// What can be done with the sketch `ref`. `across` lays them out in a row, for
+// the bar over the view; otherwise they wrap to the width they are given.
+void sketchActions(UiContext& ctx, Scene::SketchRef ref, bool across) {
+    Scene& scene = *ctx.scene;
+    Feature* f = nullptr;
+    if (SceneObject* o = scene.find(ref.object))
+        for (Feature& g : o->features)
+            if (g.kind == FeatureKind::Sketch && g.uid == ref.uid) f = &g;
+    if (!f) return;
+    const bool exact = brep::available();
+    const float right = ImGui::GetContentRegionAvail().x + ImGui::GetCursorScreenPos().x;
+    bool first = true;
+    auto next = [&](float w) {
+        if (first) { first = false; return; }
+        ImGui::SameLine(0.0f, 2.0f);
+        if (!across && ImGui::GetCursorScreenPos().x + w > right) ImGui::NewLine();
+    };
+    auto button = [&](const char* id, Glyph g, const char* label, const char* tip, bool enabled = true) {
+        pushFont(FontWeight::Medium, uiFonts().size * 0.92f);
+        const float w = ImGui::CalcTextSize(label).x + 36.0f;
+        ImGui::PopFont();
+        next(w);
+        return actionButton(id, g, label, tip, enabled);
+    };
+    if (button("edit", Glyph::Edit, "Edit", "Open the sketch to draw in it  (double-click)")) {
+        ctx.actions.editSketchObject = ref.object;
+        ctx.actions.editSketchUid = ref.uid;
+    }
+    if (button("extrude", Glyph::Extrude, "Extrude", "Push its regions into a solid  (E)", exact))
+        ctx.actions.extrudeSketch = true;
+    if (button("revolve", Glyph::Revolve, "Revolve", "Turn its regions about an axis", exact))
+        ctx.actions.revolve = true;
+    if (button("sweep", Glyph::Sweep, "Sweep", "Carry its regions along a path", exact))
+        ctx.actions.sweep = true;
+    if (button("loft", Glyph::Loft, "Loft", "Run a region of it through other outlines", exact))
+        ctx.actions.loft = true;
+    if (button("shown", f->sketchShown ? Glyph::EyeOff : Glyph::Eye, f->sketchShown ? "Hide" : "Show",
+               "Show or hide it in the view; hidden, it is still in the history"))
+        f->sketchShown = !f->sketchShown;
+    if (button("delete", Glyph::Trash, "Delete", "Take it out of the history  (Delete)"))
+        ctx.actions.deleteSketch = true;
+}
+
+// The inspector, while a sketch is what is selected.
+void sketchInspector(UiContext& ctx, Scene::SketchRef ref) {
+    Scene& scene = *ctx.scene;
+    const SceneObject* obj = scene.find(ref.object);
+    const Feature* f = scene.sketchFeature(ref);
+    if (!obj || !f) return;
+    {
+        const float box = ImGui::GetFrameHeight();
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        const ImVec2 at = ImGui::GetCursorScreenPos();
+        dl->AddRectFilled(at, ImVec2(at.x + box, at.y + box), u32(palette::kBrand), 6.0f);
+        drawGlyph(dl, Glyph::Sketch, ImVec2(at.x + box * 0.5f, at.y + box * 0.5f), box * 0.7f,
+                  IM_COL32(255, 255, 255, 255));
+        ImGui::Dummy(ImVec2(box, box));
+        ImGui::SameLine(0.0f, 8.0f);
+        pushFont(FontWeight::SemiBold);
+        ImGui::AlignTextToFramePadding();
+        const bool own = obj->body.empty();
+        ImGui::TextUnformatted(own ? obj->name.c_str() : ("Sketch in " + obj->name).c_str());
+        ImGui::PopFont();
+    }
+    ImGui::Dummy(ImVec2(0, 6));
+    const std::vector<SketchProfile> regions = sketchProfiles(f->sketch);
+    const ImVec4 dim = im(palette::kTextDim);
+    auto row = [&](const char* label, const std::string& value) {
+        ImGui::TextColored(dim, "%s", label);
+        ImGui::SameLine(ui::labelColumn());
+        ImGui::TextUnformatted(value.c_str());
+    };
+    row("Curves", std::to_string(f->sketch.entities.size()));
+    row("Regions", regions.empty() ? std::string("none closed yet") : std::to_string(regions.size()) + " closed");
+    row("Sizes", std::to_string(std::count_if(f->sketch.constraints.begin(), f->sketch.constraints.end(),
+                                               [](const SketchConstraint& k) { return isDimension(k.rule); })) +
+                     " dimensions");
+    row("State", f->errored ? "does not solve"
+                 : f->sketchFreedoms == 0 ? "fully constrained"
+                                          : std::to_string(f->sketchFreedoms) + " freedoms left");
+    const size_t built = std::count_if(obj->features.begin(), obj->features.end(), [&](const Feature& g) {
+        return g.sketchUid == ref.uid || g.pathSketchUid == ref.uid ||
+               std::find(g.loftSketchUids.begin(), g.loftSketchUids.end(), ref.uid) != g.loftSketchUids.end();
+    });
+    row("Built from", built == 0 ? std::string("nothing yet") : std::to_string(built) + (built == 1 ? " step" : " steps"));
+
+    ImGui::Dummy(ImVec2(0, 10));
+    pushFont(FontWeight::SemiBold, uiFonts().size);
+    ImGui::TextColored(im(palette::kText), "Actions");
+    ImGui::PopFont();
+    ImGui::Dummy(ImVec2(0, 2));
+    sketchActions(ctx, ref, false);
+    ImGui::Dummy(ImVec2(0, 8));
+    pushFont(FontWeight::Regular, uiFonts().size * 0.88f);
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::TextColored(im(palette::kTextFaint),
+                       "Double-click it in the view or in the outliner to draw in it. Extrude, revolve, "
+                       "sweep and loft start with its regions picked.");
+    ImGui::PopTextWrapPos();
+    ImGui::PopFont();
+}
 } // namespace
 
 // -----------------------------------------------------------------------------
@@ -777,6 +949,13 @@ void drawAddMenuItems(UiContext& ctx) {
     if (ui::menuEntry(Glyph::Sketch, "Sketch", "Shift+S", brep::available())) ctx.actions.sketch = true;
     ui::menuNote(brep::available() ? "lines, circles and arcs, kept and sized"
                                    : "needs the exact kernel");
+    ui::menuGap();
+    if (ui::menuEntry(Glyph::Revolve, "Revolve...", nullptr, brep::available())) ctx.actions.revolve = true;
+    ui::menuNote("a region or a flat face, turned about a line, an edge or an axis");
+    if (ui::menuEntry(Glyph::Sweep, "Sweep...", nullptr, brep::available())) ctx.actions.sweep = true;
+    ui::menuNote("a region or a flat face, carried along sketch curves or edges");
+    if (ui::menuEntry(Glyph::Loft, "Loft...", nullptr, brep::available())) ctx.actions.loft = true;
+    ui::menuNote("a solid through two or more outlines, regions or flat faces");
 }
 
 // -----------------------------------------------------------------------------
@@ -832,6 +1011,13 @@ void drawInspector(UiContext& ctx) {
     ImGui::PopStyleVar();
 
     Scene& scene = *ctx.scene;
+    // A sketch is a thing of its own when it is what is selected: what it is,
+    // and what can be built from it.
+    if (const Scene::SketchRef sk = scene.selectedSketch(); sk.valid()) {
+        sketchInspector(ctx, sk);
+        ImGui::End();
+        return;
+    }
     SceneObject* obj = scene.find(scene.contextObject());
     if (!obj) {
         ImGui::Dummy(ImVec2(0, 6));
@@ -1131,4 +1317,38 @@ void drawMeasurePanel(UiContext& ctx) {
     ui::endCommand();
 }
 
+
+void drawSketchBar(UiContext& ctx, float x, float y, float w) {
+    Scene& scene = *ctx.scene;
+    const Scene::SketchRef sk = scene.selectedSketch();
+    if (!sk.valid() || ctx.toolBusy) return;
+    const SceneObject* obj = scene.find(sk.object);
+    if (!obj) return;
+    // Centred along the top of the view, clear of the view cube.
+    ImGui::SetNextWindowPos(ImVec2(x + w * 0.5f, y + 12.0f), ImGuiCond_Always, ImVec2(0.5f, 0.0f));
+    ImGui::SetNextWindowBgAlpha(0.96f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8.0f, 6.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 8.0f);
+    const ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                                   ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
+                                   ImGuiWindowFlags_NoNav;
+    if (ImGui::Begin("##sketchbar", nullptr, flags)) {
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        const ImVec2 at = ImGui::GetCursorScreenPos();
+        drawGlyph(dl, Glyph::Sketch, ImVec2(at.x + 10.0f, at.y + 15.0f), 16.0f, u32(palette::kBrand));
+        // The title drawn into a space of the buttons' own height, so the row
+        // of them lines up with it.
+        const std::string title = obj->body.empty() ? obj->name : "Sketch in " + obj->name;
+        pushFont(FontWeight::SemiBold, uiFonts().size * 0.92f);
+        const float tw = ImGui::CalcTextSize(title.c_str()).x;
+        dl->AddText(ImVec2(at.x + 24.0f, at.y + (30.0f - ImGui::GetTextLineHeight()) * 0.5f), u32(palette::kText),
+                    title.c_str());
+        ImGui::PopFont();
+        ImGui::Dummy(ImVec2(24.0f + tw, 30.0f));
+        ImGui::SameLine(0.0f, 12.0f);
+        sketchActions(ctx, sk, true);
+    }
+    ImGui::End();
+    ImGui::PopStyleVar(2);
+}
 } // namespace tg

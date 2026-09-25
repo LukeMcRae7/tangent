@@ -56,6 +56,8 @@ enum class FeatureKind {
     DeleteFace,  // named faces taken off, the gap closed behind them
     Offset,      // every face moved along its own normal: the whole body grows
     Thread,      // a helical groove cut on a named round face
+    SweepProfile,   // a region of a sketch carried along a path drawn in another
+    LoftProfile,    // a solid through the outlines of regions of several sketches
 
     // New kinds go on the end and nowhere else. The value is what is written
     // to a file, so inserting one in the middle renumbers every kind after it
@@ -66,7 +68,7 @@ enum class FeatureKind {
 // here rather than in the loader so that adding a kind above is one edit and
 // not two: a kind the loader does not know about is refused as a corrupt file,
 // and that refusal is silent about why.
-inline constexpr FeatureKind kLastFeatureKind = FeatureKind::Thread;
+inline constexpr FeatureKind kLastFeatureKind = FeatureKind::LoftProfile;
 
 const char* featureKindName(FeatureKind k);
 
@@ -279,6 +281,34 @@ struct Feature {
     Vec2 revolveAxisAt{0, 0};
     Vec2 revolveAxisDir{0, 1};
     Real revolveAngle = 2.0 * kPi;
+
+    // SweepProfile: the path the regions are carried along -- curves of an
+    // earlier sketch, joined end to end. Named by the sketch's own ids, so a
+    // dimension that moves the path moves the sweep, and the path is still the
+    // path.
+    ElementId pathSketchUid = 0;
+    std::vector<SketchId> pathEntities;
+
+    // LoftProfile: the outlines after the first, in order, each one region of
+    // an earlier sketch named by its key. The first is sketchUid's, the one
+    // region in profileKeys. `loftRuled` joins them with straight walls.
+    std::vector<ElementId> loftSketchUids;
+    std::vector<SketchId> loftKeys;
+    bool loftRuled = false;
+
+    // Revolve, sweep and loft may build from the part itself as well as from
+    // sketches. With no sketchUid, the profile is `faces`: flat faces of the
+    // body as it stands before this step. A sweep with no pathSketchUid follows
+    // `edges`. A revolve with `edges` turns about that one straight edge; with
+    // `revolveAxis3D` about axisPoint and axisDir, in the part's frame (one of
+    // the world's axes, picked on the panel); otherwise about revolveAxisAt and
+    // revolveAxisDir in its sketch. A loft outline whose loftSketchUids entry
+    // is 0 is the face named in the same place of loftFaceNames.
+    bool revolveAxis3D = false;
+    // Turns the other way round the axis: an edge picked as an axis has no
+    // direction of its own, so which way a part turn goes is chosen.
+    bool revolveReverse = false;
+    std::vector<ElementId> loftFaceNames;
 
     // Hole: what is cut, and what it was chosen for. The face it goes into is
     // in `faces` and where it goes in is `axisPoint` and `axisDir`, so that a

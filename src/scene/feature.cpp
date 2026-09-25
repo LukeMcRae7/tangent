@@ -3,6 +3,7 @@
 #include "mesh/decimate.h"
 
 #include "geom/operations.h"
+#include "scene/sketch_project.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -30,6 +31,8 @@ const char* featureKindName(FeatureKind k) {
         case FeatureKind::Sketch:     return "Sketch";
         case FeatureKind::ExtrudeProfile: return "Extrude Profile";
         case FeatureKind::RevolveProfile: return "Revolve";
+        case FeatureKind::SweepProfile:   return "Sweep";
+        case FeatureKind::LoftProfile:    return "Loft";
         case FeatureKind::Hole:       return "Hole";
         case FeatureKind::Draft:      return "Draft";
         case FeatureKind::DeleteFace: return "Delete Face";
@@ -259,6 +262,18 @@ std::string Feature::summary() const {
             else
                 std::snprintf(buf, sizeof(buf), "Revolve  %.1f deg  (%s)", deg,
                               extrudeOpName(shown));
+            break;
+        }
+        case FeatureKind::SweepProfile: {
+            const ExtrudeOp shown = extrudeOp == ExtrudeOp::Auto ? ExtrudeOp::Join : extrudeOp;
+            std::snprintf(buf, sizeof(buf), "Sweep  along %zu curve%s  (%s)", pathEntities.size(),
+                          pathEntities.size() == 1 ? "" : "s", extrudeOpName(shown));
+            break;
+        }
+        case FeatureKind::LoftProfile: {
+            const ExtrudeOp shown = extrudeOp == ExtrudeOp::Auto ? ExtrudeOp::Join : extrudeOp;
+            std::snprintf(buf, sizeof(buf), "Loft  through %zu outlines%s  (%s)", loftKeys.size() + 1,
+                          loftRuled ? ", straight" : "", extrudeOpName(shown));
             break;
         }
         case FeatureKind::DeleteFace:
@@ -628,6 +643,13 @@ bool evaluateFrom(std::vector<Feature>& features, size_t from,
             // sees the shape its constraints describe -- and so that when its
             // constraints disagree, the sketch is the step named as failing,
             // not the extrude that happened to be built from it.
+            //
+            // What it projected from the body before it goes where those edges
+            // now are, first: a sketch drawn round a hole follows the hole.
+            {
+                std::string why;
+                if (!refreshProjections(f.sketch, body, &why)) { fail(why.c_str()); break; }
+            }
             const SketchSolve solved = solveSketch(f.sketch);
             f.sketchFreedoms = solved.freedoms;
             if (!solved.solved) fail(solved.reason.c_str());
@@ -635,45 +657,156 @@ bool evaluateFrom(std::vector<Feature>& features, size_t from,
         }
 
         case FeatureKind::ExtrudeProfile:
-        case FeatureKind::RevolveProfile: {
-            // The two differ only in what the regions are swept into: pushed
-            // along the plane's normal, or turned about an axis lying in it.
-            // Everything else -- finding the sketch, checking that its regions
-            // still close, and what to do with the solid that comes out -- is
-            // the same, and is written once.
+        case FeatureKind::RevolveProfile:
+        case FeatureKind::SweepProfile:
+        case FeatureKind::LoftProfile: {
+            // These differ only in what the regions become: pushed along the
+            // plane's normal, turned about an axis lying in it, carried along a
+            // path, or lofted through outlines in other sketches. Everything
+            // else -- finding the sketches, checking that their regions still
+            // close, and what to do with the solid that comes out -- is the
+            // same, and is written once.
             const bool turn = f.kind == FeatureKind::RevolveProfile;
-            const Feature* source = nullptr;
-            for (size_t j = 0; j < i; ++j)
-                if (features[j].kind == FeatureKind::Sketch && features[j].uid == f.sketchUid)
-                    source = &features[j];
-            if (!source) { fail(turn ? "the sketch it turns is not earlier in the history"
-                                     : "the sketch it extrudes is not earlier in the history"); break; }
-            if (!source->enabled) { fail(turn ? "the sketch it turns is turned off"
-                                             : "the sketch it extrudes is turned off"); break; }
-            if (source->errored) { fail(turn ? "the sketch it turns does not solve"
-                                            : "the sketch it extrudes does not solve"); break; }
-
-            const std::vector<SketchProfile> regions = sketchProfiles(source->sketch);
-            if (f.profileKeys.empty()) { fail(turn ? "it names no region to turn"
-                                                  : "it names no region to sweep"); break; }
-            const bool allClose = std::all_of(f.profileKeys.begin(), f.profileKeys.end(), [&](SketchId k) {
-                return std::any_of(regions.begin(), regions.end(),
-                                   [k](const SketchProfile& p) { return p.key == k; });
-            });
-            if (!allClose) {
-                fail(f.profileKeys.size() == 1 ? "that region of the sketch no longer closes"
-                                               : "a region of the sketch it sweeps no longer closes");
-                break;
+            const char* verb = f.kind == FeatureKind::RevolveProfile ? "turns"
+                             : f.kind == FeatureKind::SweepProfile   ? "sweeps"
+                             : f.kind == FeatureKind::LoftProfile    ? "lofts"
+                                                                     : "extrudes";
+            std::string said;
+            auto sketchNamed = [&](ElementId uid, const char* which) -> const Feature* {
+                const Feature* found = nullptr;
+                for (size_t j = 0; j < i; ++j)
+                    if (features[j].kind == FeatureKind::Sketch && features[j].uid == uid)
+                        found = &features[j];
+                const char* wrong = !found           ? "is not earlier in the history"
+                                  : !found->enabled  ? "is turned off"
+                                  : found->errored   ? "does not solve"
+                                                     : nullptr;
+                if (!wrong) return found;
+                said = std::string("the ") + which + " " + wrong;
+                return nullptr;
+            };
+            // What it builds from: regions of a sketch, or -- with no sketch
+            // named -- flat faces of the part as it stands before this step.
+            // Held here, with the regions of every sketch read, for as long as
+            // the kernel is reading them.
+            const bool fromBody = f.sketchUid == 0 && f.kind != FeatureKind::ExtrudeProfile;
+            const bool exact = !body.empty() && !body.isMesh();
+            std::vector<SketchProfile> regions;
+            brep::OutlineSource outline;
+            if (fromBody) {
+                std::vector<FaceId> fs;
+                if (!exact || !f.faces.resolveFaces(body, fs) || fs.empty()) {
+                    fail("the face it builds from is gone");
+                    break;
+                }
+                outline.body = &body.brep();
+                outline.faces = fs;
+            } else {
+                const std::string itsSketch = std::string("sketch it ") + verb;
+                const Feature* source = sketchNamed(f.sketchUid, itsSketch.c_str());
+                if (!source) { fail(said.c_str()); break; }
+                regions = sketchProfiles(source->sketch);
+                if (f.profileKeys.empty()) { fail(turn ? "it names no region to turn"
+                                                      : "it names no region to sweep"); break; }
+                const bool allClose = std::all_of(f.profileKeys.begin(), f.profileKeys.end(), [&](SketchId k) {
+                    return std::any_of(regions.begin(), regions.end(),
+                                       [k](const SketchProfile& p) { return p.key == k; });
+                });
+                if (!allClose) {
+                    fail(f.profileKeys.size() == 1 ? "that region of the sketch no longer closes"
+                                                   : "a region of the sketch it sweeps no longer closes");
+                    break;
+                }
+                outline.sketch = &source->sketch;
+                outline.regions = &regions;
+                outline.keys = f.profileKeys;
             }
 
             const bool cut = f.extrudeOp == ExtrudeOp::Cut ||
-                             (!turn && f.extrudeOp == ExtrudeOp::Auto && f.distance < 0.0);
+                             (f.kind == FeatureKind::ExtrudeProfile && f.extrudeOp == ExtrudeOp::Auto &&
+                              f.distance < 0.0);
             std::string why;
-            BrepRef tool = turn ? brep::revolveSketch(source->sketch, regions, f.profileKeys,
-                                                      f.revolveAxisAt, f.revolveAxisDir,
-                                                      f.revolveAngle, f.uid, &why)
-                                : brep::sketchSolids(source->sketch, regions, f.profileKeys, 0.0,
-                                                     f.distance, f.uid, &why);
+            BrepRef tool;
+            if (f.kind == FeatureKind::SweepProfile) {
+                brep::PathSource path;
+                if (f.pathSketchUid != 0) {
+                    const Feature* p = sketchNamed(f.pathSketchUid, "sketch its path is drawn in");
+                    if (!p) { fail(said.c_str()); break; }
+                    path.sketch = &p->sketch;
+                    path.entities = f.pathEntities;
+                } else {
+                    std::vector<EdgeId> es;
+                    if (!exact || !f.edges.resolveEdges(body, es) || es.empty()) {
+                        fail("an edge of its path is gone");
+                        break;
+                    }
+                    path.body = &body.brep();
+                    path.edges = es;
+                }
+                tool = brep::sweepOutline(outline, path, f.uid, &why);
+            } else if (f.kind == FeatureKind::LoftProfile) {
+                if (f.loftKeys.empty() || f.loftKeys.size() != f.loftSketchUids.size()) {
+                    fail("a loft needs at least two outlines");
+                    break;
+                }
+                std::vector<std::vector<SketchProfile>> held;
+                held.reserve(f.loftKeys.size());
+                std::vector<brep::OutlineSource> outlines{outline};
+                bool ok = true;
+                for (size_t k = 0; k < f.loftKeys.size() && ok; ++k) {
+                    brep::OutlineSource o;
+                    if (f.loftSketchUids[k] == 0) {
+                        const FaceId face = k < f.loftFaceNames.size() && exact
+                                                ? body.findFace(f.loftFaceNames[k]) : kNoFace;
+                        if (face == kNoFace) { said = "a face it lofts through is gone"; ok = false; break; }
+                        o.body = &body.brep();
+                        o.faces = {face};
+                    } else {
+                        const Feature* s = sketchNamed(f.loftSketchUids[k], "sketch of one of its outlines");
+                        if (!s) { ok = false; break; }
+                        held.push_back(sketchProfiles(s->sketch));
+                        const bool closes = std::any_of(held.back().begin(), held.back().end(),
+                                                        [&](const SketchProfile& p) { return p.key == f.loftKeys[k]; });
+                        if (!closes) { said = "an outline it lofts through no longer closes"; ok = false; break; }
+                        o.sketch = &s->sketch;
+                        o.regions = &held.back();
+                        o.keys = {f.loftKeys[k]};
+                    }
+                    outlines.push_back(o);
+                }
+                if (!ok) { fail(said.c_str()); break; }
+                tool = brep::loftOutlines(outlines, f.loftRuled, f.uid, &why);
+            } else if (turn) {
+                Vec3 at{}, dir{};
+                if (!f.edges.empty()) {
+                    std::vector<EdgeId> es;
+                    if (!exact || !f.edges.resolveEdges(body, es) || es.empty()) {
+                        fail("the edge it turns about is gone");
+                        break;
+                    }
+                    if (body.edgeKind(es.front()) != CurveKind::Line) {
+                        fail("the edge it turns about is no longer straight");
+                        break;
+                    }
+                    Vec3 b;
+                    body.edgePositions(es.front(), at, b);
+                    dir = b - at;
+                } else if (f.revolveAxis3D) {
+                    at = f.axisPoint;
+                    dir = f.axisDir;
+                } else if (outline.sketch) {
+                    at = outline.sketch->plane.toWorld(f.revolveAxisAt);
+                    dir = outline.sketch->plane.toWorld(f.revolveAxisAt + f.revolveAxisDir) - at;
+                } else {
+                    fail("it has no axis to turn about");
+                    break;
+                }
+                if (f.revolveReverse) dir = -dir;
+                tool = brep::revolveOutline(outline, at, dir, f.revolveAngle, f.uid, &why);
+            } else {
+                tool = brep::sketchSolids(*outline.sketch, regions, f.profileKeys, 0.0, f.distance,
+                                          f.uid, &why);
+            }
             if (!tool) {
                 fail(why.empty() ? (turn ? "the region could not be turned"
                                          : "the region could not be swept")

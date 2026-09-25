@@ -166,7 +166,7 @@ endif()
 
 set(TANGENT_GEOM src/geom/body.cpp src/geom/operations.cpp src/geom/fasteners.cpp
                  src/geom/kernel_guard.cpp src/mesh/decimate.cpp src/sketch/sketch.cpp
-                 src/sketch/svg.cpp
+                 src/sketch/svg.cpp src/scene/sketch_project.cpp
                  ${TANGENT_BREP_SRC})
 
 add_executable(tangent
@@ -176,6 +176,8 @@ add_executable(tangent
   src/app/transform_tool.cpp
   src/app/create_tool.cpp src/app/extrude_ops.cpp
   src/app/sketch_tool.cpp
+  src/app/profile_tool.cpp
+  src/app/plane_pick.cpp
   src/app/measure.cpp
   src/app/snap.cpp
   src/app/drag_axis.cpp
@@ -311,7 +313,7 @@ add_test(NAME io COMMAND test_io)
 
 add_executable(test_create_tool tests/test_create_tool.cpp
   src/app/create_tool.cpp src/app/extrude_ops.cpp src/app/camera.cpp src/app/undo.cpp src/app/snap.cpp
-  src/app/plane_snap.cpp src/app/snap_overlay.cpp src/app/overlay_shapes.cpp
+  src/app/plane_snap.cpp src/app/snap_overlay.cpp src/app/overlay_shapes.cpp src/app/plane_pick.cpp
   src/ui/icons.cpp src/ui/command_panel.cpp src/ui/widgets.cpp src/ui/glyph.cpp src/ui/theme.cpp
   src/scene/scene.cpp src/scene/feature.cpp
   src/mesh/health.cpp ${TANGENT_GEOM} src/mesh/halfedge.cpp src/mesh/primitives.cpp
@@ -323,6 +325,7 @@ add_test(NAME create_tool COMMAND test_create_tool)
 
 add_executable(test_sketch_tool tests/test_sketch_tool.cpp
   src/app/sketch_tool.cpp src/app/create_tool.cpp src/app/extrude_ops.cpp src/app/camera.cpp src/app/undo.cpp
+  src/app/plane_pick.cpp
   src/app/snap.cpp src/app/plane_snap.cpp src/app/snap_overlay.cpp src/app/overlay_shapes.cpp
   src/ui/icons.cpp src/ui/command_panel.cpp src/ui/widgets.cpp src/ui/glyph.cpp src/ui/theme.cpp
   src/scene/scene.cpp src/scene/feature.cpp

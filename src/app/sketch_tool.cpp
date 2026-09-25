@@ -4,6 +4,7 @@
 #include "app/snap_overlay.h"
 #include "core/palette.h"
 #include "geom/brep.h"
+#include "scene/sketch_project.h"
 #include "ui/command_panel.h"
 #include "ui/widgets.h"
 
@@ -24,6 +25,8 @@ const char* sketchModeName(SketchMode mode) {
         case SketchMode::Circle:    return "Circle";
         case SketchMode::Arc:       return "Arc";
         case SketchMode::Dimension: return "Dimension";
+        case SketchMode::Curve:     return "Curve";
+        case SketchMode::Project:   return "Project";
     }
     return "Line";
 }
@@ -46,26 +49,6 @@ const ImVec4 kFixedIm(palette::kValid.r, palette::kValid.g, palette::kValid.b, 1
 
 // The same axes the create tool puts on a plane, so a sketch and a profile
 // drawn on the same face agree about which way is x.
-PlaneFrame frameFor(Vec3 origin, Vec3 normal) {
-    PlaneFrame f;
-    f.origin = origin;
-    f.normal = normalize(normal);
-    if (std::fabs(f.normal.z) > 0.9 || std::fabs(f.normal.y) > 0.9) {
-        f.u = Vec3{1, 0, 0};
-        f.v = normalize(cross(f.normal, f.u));
-        if (dot(cross(f.u, f.v), f.normal) < 0.0) f.v = -f.v;
-    } else if (std::fabs(f.normal.x) > 0.9) {
-        f.u = Vec3{0, 1, 0};
-        f.v = normalize(cross(f.normal, f.u));
-        if (dot(cross(f.u, f.v), f.normal) < 0.0) f.v = -f.v;
-    } else {
-        f.u = normalize(cross(Vec3{0, 0, 1}, f.normal));
-        if (lengthSq(f.u) < 1e-4) f.u = normalize(cross(Vec3{0, 1, 0}, f.normal));
-        f.v = normalize(cross(f.normal, f.u));
-    }
-    return f;
-}
-
 bool rayOntoPlane(const Ray& ray, const PlaneFrame& p, Vec3& hit) {
     const Real denom = dot(p.normal, ray.dir);
     if (std::fabs(denom) < 1e-9) return false;
@@ -223,6 +206,12 @@ void SketchTool::resetDrawing() {
     svgPlace_ = SvgPlacement{};
     svgName_.clear();
     importRequested_ = false;
+    planeOffset_ = 0.0;
+    planeTilt_ = 0.0;
+    planeTyping_ = 0;
+    pen_.clear();
+    pulling_ = false;
+    projObject_ = kNoObject;
 }
 
 void SketchTool::start() {
@@ -232,8 +221,8 @@ void SketchTool::start() {
     editUid_ = 0;
     faceObject_ = kNoObject;
     cameraSaved_ = false;
-    hoveredChoice_ = PlaneChoice::XY;
-    plane_ = frameFor({0, 0, 0}, {0, 0, 1});
+    picker_.reset();
+    plane_ = planeFrameFor({0, 0, 0}, {0, 0, 1});
     stage_ = SketchStage::SelectPlane;
     pendingSvg_ = SvgDrawing{};
     pendingSvgName_.clear();
@@ -337,6 +326,7 @@ bool SketchTool::startEdit(const Scene& scene, ObjectId object, ElementId sketch
     plane_.u = sketch_.plane.xAxis;
     plane_.v = sketch_.plane.yAxis;
     plane_.normal = sketch_.plane.normal();
+    planeBaseFrame_ = plane_;
 
     solved_ = solveNow();
     refreshRegions();
@@ -345,6 +335,39 @@ bool SketchTool::startEdit(const Scene& scene, ObjectId object, ElementId sketch
     // is in it, so that is the tool it opens with.
     mode_ = SketchMode::Select;
     squareUp(camera);
+    return true;
+}
+
+bool SketchTool::startExtrude(const Scene& scene, ObjectId object, ElementId sketchUid) {
+    const SceneObject* obj = scene.find(object);
+    const Feature* source = scene.sketchFeature({object, sketchUid});
+    if (!obj || !source) {
+        error_ = "That sketch is no longer in the history";
+        return false;
+    }
+    resetDrawing();
+    error_.clear();
+    // Extruding a kept sketch is editing it: the regions are swept as a step
+    // of the history it is in, after it.
+    editObject_ = object;
+    editUid_ = sketchUid;
+    faceObject_ = object;
+    cameraSaved_ = false;
+    sketch_ = source->sketch;
+    sketch_.plane = planeToWorld(source->sketch.plane, obj->modelMatrix());
+    plane_.origin = sketch_.plane.origin;
+    plane_.u = sketch_.plane.xAxis;
+    plane_.v = sketch_.plane.yAxis;
+    plane_.normal = sketch_.plane.normal();
+    planeBaseFrame_ = plane_;
+    solved_ = solveNow();
+    refreshRegions();
+    if (regions_.empty()) {
+        error_ = "Nothing in that sketch closes: a region needs a loop that ends where it began";
+        return false;
+    }
+    chooseFilledRegions();
+    stage_ = SketchStage::Regions;
     return true;
 }
 
@@ -386,13 +409,7 @@ void SketchTool::restoreCamera(Camera& camera) {
 
 void SketchTool::choosePlane(PlaneChoice choice, Camera& camera) {
     if (stage_ != SketchStage::SelectPlane) return;
-    switch (choice) {
-        case PlaneChoice::XY: setPlane(frameFor({0, 0, 0}, {0, 0, 1}), kNoObject, &camera); break;
-        case PlaneChoice::XZ: setPlane(frameFor({0, 0, 0}, {0, -1, 0}), kNoObject, &camera); break;
-        case PlaneChoice::YZ: setPlane(frameFor({0, 0, 0}, {1, 0, 0}), kNoObject, &camera); break;
-        case PlaneChoice::Face:
-        case PlaneChoice::None: break;
-    }
+    if (picker_.choose(choice)) setPlane(picker_.frame(), kNoObject, &camera);
 }
 
 void SketchTool::setPlane(const PlaneFrame& frame, ObjectId faceObject, Camera* camera) {
@@ -402,6 +419,7 @@ void SketchTool::setPlane(const PlaneFrame& frame, ObjectId faceObject, Camera* 
     sketch_.plane.origin = frame.origin;
     sketch_.plane.xAxis = frame.u;
     sketch_.plane.yAxis = frame.v;
+    planeBaseFrame_ = frame;
     stage_ = SketchStage::Draw;
     if (pendingSvg_.ok) {
         SvgDrawing d = std::move(pendingSvg_);
@@ -413,6 +431,26 @@ void SketchTool::setPlane(const PlaneFrame& frame, ObjectId faceObject, Camera* 
         squareUp(*camera);
         if (placing()) frameDrawing(*camera);
     }
+}
+
+void SketchTool::setPlaneOffset(Real offset) {
+    if (!std::isfinite(offset)) return;
+    planeOffset_ = offset;
+    applyPlaneShift();
+}
+
+void SketchTool::setPlaneTilt(Real radians) {
+    if (!std::isfinite(radians)) return;
+    planeTilt_ = std::clamp(radians, -kPi * 0.5, kPi * 0.5);
+    applyPlaneShift();
+}
+
+// The plane as offset and tilted from where it was put, and the drawing on it.
+void SketchTool::applyPlaneShift() {
+    plane_ = offsetFrame(planeBaseFrame_, planeOffset_, planeTilt_);
+    sketch_.plane.origin = plane_.origin;
+    sketch_.plane.xAxis = plane_.u;
+    sketch_.plane.yAxis = plane_.v;
 }
 
 void SketchTool::frameDrawing(Camera& camera) {
@@ -493,11 +531,13 @@ SketchId SketchTool::pointAt(Vec2 uv, SketchId reuse) {
 
 void SketchTool::setMode(SketchMode mode) {
     clearPending();
+    if (planeTyping_ != 0) { planeTyping_ = 0; typed_.clear(); }
     mode_ = mode;
     if (mode != SketchMode::Dimension) activeDim_ = kNoSketchId;
 }
 
 void SketchTool::clearPending() {
+    endPen();
     clicks_.clear();
     clickPoints_.clear();
     typed_.clear();
@@ -542,6 +582,8 @@ Vec2 SketchTool::previewEnd() const {
         return s + dir * length(clicks_[1] - s);
     case SketchMode::Select:
     case SketchMode::Dimension:
+    case SketchMode::Curve:
+    case SketchMode::Project:
         break;
     }
     return cursor_;
@@ -549,6 +591,7 @@ Vec2 SketchTool::previewEnd() const {
 
 void SketchTool::clickAt(Vec2 uv) {
     if (stage_ != SketchStage::Draw) return;
+    if (planeTyping_ != 0) { planeTyping_ = 0; typed_.clear(); }
     const SketchId on = nearestPoint(uv, pickMm_);
     cursor_ = on != kNoSketchId ? pointUV(on) : uv;
     cursorValid_ = true;
@@ -582,6 +625,133 @@ void SketchTool::clickAt(Vec2 uv) {
         }
     }
     commitPending();
+}
+
+// ---------------------------------------------------------------------------
+// The pen
+// ---------------------------------------------------------------------------
+
+bool SketchTool::penDown(Vec2 uv) {
+    if (stage_ != SketchStage::Draw || mode_ != SketchMode::Curve) return false;
+    escapeArmed_ = false;
+    const SketchId on = hoverPoint_;
+    // The first anchor: a point, and nothing drawn from it until the next.
+    if (pen_.empty()) {
+        pullBefore_ = sketch_;
+        const SketchId p = pointAt(uv, on);
+        pen_.push_back({p, pointUV(p), false, kNoSketchId});
+        pulling_ = true;
+        return true;
+    }
+    const bool closing = pen_.size() >= 2 && on == pen_.front().point;
+    const PenAnchor prev = pen_.back();
+    if (!closing && on == prev.point) return false;
+    Sketch before = sketch_;
+    const SketchId target = closing ? pen_.front().point : pointAt(uv, on);
+    const Vec2 p0 = pointUV(prev.point), p3 = pointUV(target);
+    if (length(p3 - p0) < 1e-6) {
+        sketch_ = std::move(before);
+        return false;
+    }
+    // The handles: the one the last anchor was pulled out to, or a third of
+    // the way along for a corner, so a row of clicks draws straight lines
+    // that can be bent afterwards by their handles. Closing on a smooth first
+    // anchor mirrors its handle, so the shape closes without a corner.
+    const Vec2 out = prev.smooth ? prev.out : p0 + (p3 - p0) / 3.0;
+    Vec2 in = p3 + (p0 - p3) / 3.0;
+    SketchId firstCurve = kNoSketchId;
+    if (closing && pen_.front().smooth && pen_.size() > 1) {
+        firstCurve = pen_[1].curveIn;
+        if (const SketchEntity* e = sketch_.entity(firstCurve)) in = p3 * 2.0 - pointUV(e->b);
+    }
+    const SketchId b = sketch_.addPoint(out);
+    const SketchId c = sketch_.addPoint(in);
+    const SketchId curve = sketch_.addBezier(prev.point, b, c, target);
+    if (prev.smooth && prev.curveIn != kNoSketchId) sketch_.constrain(SketchRule::Smooth, prev.curveIn, curve);
+    if (firstCurve != kNoSketchId) sketch_.constrain(SketchRule::Smooth, curve, firstCurve);
+    if (!settle(std::move(before), "That curve")) return false;
+    if (closing) {
+        pen_.clear();
+        pulling_ = false;
+        return true;
+    }
+    pullBefore_ = sketch_;
+    pen_.push_back({target, p3, false, curve});
+    pulling_ = true;
+    return true;
+}
+
+void SketchTool::penDrag(Vec2 uv) {
+    if (!pulling_ || pen_.empty()) return;
+    PenAnchor& a = pen_.back();
+    const Vec2 at = pointUV(a.point);
+    // Not far enough from the anchor to mean a handle: still a corner.
+    if (length(uv - at) < pickMm_) {
+        a.smooth = false;
+        return;
+    }
+    a.smooth = true;
+    a.out = uv;
+    // The handle coming in swings round opposite the one going out.
+    if (const SketchEntity* e = sketch_.entity(a.curveIn))
+        if (SketchPoint* c = sketch_.point(e->c)) c->at = at * 2.0 - uv;
+}
+
+void SketchTool::penUp() {
+    if (!pulling_) return;
+    pulling_ = false;
+    solved_ = solveNow();
+    refreshRegions();
+}
+
+void SketchTool::endPen() {
+    // A lone first anchor, with nothing drawn from it, is not kept.
+    if (pen_.size() == 1) {
+        const SketchId p = pen_.front().point;
+        const bool used = std::any_of(sketch_.entities.begin(), sketch_.entities.end(), [&](const SketchEntity& e) {
+            return e.a == p || e.b == p || e.c == p || e.d == p;
+        });
+        if (!used)
+            sketch_.points.erase(std::remove_if(sketch_.points.begin(), sketch_.points.end(),
+                                                [&](const SketchPoint& q) { return q.id == p; }),
+                                 sketch_.points.end());
+    }
+    pen_.clear();
+    pulling_ = false;
+}
+
+// ---------------------------------------------------------------------------
+// Projecting
+// ---------------------------------------------------------------------------
+
+bool SketchTool::projectElement(const Scene& scene, ObjectId object, bool face, Index element) {
+    const SceneObject* o = scene.find(object);
+    if (!o || o->body.empty() || o->body.isMesh() || element == kInvalid) {
+        error_ = "Point at an edge or a face of a solid to project it";
+        return false;
+    }
+    // Following the edge needs it to be in the part the sketch is in, and to
+    // be there when the sketch is: a sketch being edited with steps after it
+    // may be earlier than the edge, so what it projects is a copy then.
+    bool link = object == owner();
+    if (link && editing()) {
+        bool after = false, built = false;
+        for (const Feature& f : o->features) {
+            if (after && f.kind != FeatureKind::Sketch) built = true;
+            if (f.kind == FeatureKind::Sketch && f.uid == editUid_) after = true;
+        }
+        link = !built;
+    }
+    Sketch before = sketch_;
+    std::string why;
+    const bool ok = face ? projectFace(sketch_, o->body, o->modelMatrix(), element, link, nullptr, &why)
+                         : projectEdge(sketch_, o->body, o->modelMatrix(), element, link, nullptr, &why);
+    if (!ok) {
+        sketch_ = std::move(before);
+        error_ = "Nothing to project: " + why;
+        return false;
+    }
+    return settle(std::move(before), "That projection");
 }
 
 // One click's worth of drawing, at the cursor as it was last aimed.
@@ -669,7 +839,8 @@ void SketchTool::endDrag() {
 }
 
 bool SketchTool::commitPending() {
-    if (stage_ != SketchStage::Draw || mode_ == SketchMode::Dimension ||
+    if (stage_ != SketchStage::Draw || mode_ == SketchMode::Dimension || mode_ == SketchMode::Curve ||
+        mode_ == SketchMode::Project ||
         mode_ == SketchMode::Select || !cursorValid_)
         return false;
     escapeArmed_ = false;
@@ -753,14 +924,17 @@ bool SketchTool::commitPending() {
     }
     case SketchMode::Select:
     case SketchMode::Dimension:
+    case SketchMode::Curve:
+    case SketchMode::Project:
         break;
     }
     return false;
 }
 
 bool SketchTool::typeKey(int key) {
-    enum class Target { None, Size, Dimension, Depth } target = Target::None;
+    enum class Target { None, Size, Dimension, Depth, Offset } target = Target::None;
     if (stage_ == SketchStage::Depth) target = Target::Depth;
+    else if (stage_ == SketchStage::Draw && planeTyping_ != 0) target = Target::Offset;
     else if (stage_ == SketchStage::Draw && activeDim_ != kNoSketchId &&
              (mode_ == SketchMode::Dimension || mode_ == SketchMode::Select))
         target = Target::Dimension;
@@ -773,7 +947,7 @@ bool SketchTool::typeKey(int key) {
     if (digit || key == '.') {
         typed_ += static_cast<char>(key);
     } else if (key == '-') {
-        if (target != Target::Depth || !typed_.empty()) return true;
+        if ((target != Target::Depth && target != Target::Offset) || !typed_.empty()) return true;
         typed_ += '-';
     } else if (key == 8) {
         if (typed_.empty()) return false;
@@ -798,6 +972,10 @@ bool SketchTool::typeKey(int key) {
     case Target::Size:
         fixed_[typedField_] = ok && v > 0.0;
         if (fixed_[typedField_]) fixedValue_[typedField_] = v;
+        break;
+    case Target::Offset:
+        if (planeTyping_ == 2) setPlaneTilt((ok ? v : 0.0) * kDeg2Rad);
+        else                   setPlaneOffset(ok ? v : 0.0);
         break;
     case Target::Dimension:
     case Target::None:
@@ -978,91 +1156,18 @@ void SketchTool::toggleRegion(SketchId key) {
         chosen_.push_back(key);
 }
 
-void SketchTool::setTurnAxis(Vec2 at, Vec2 dir, SketchId fromLine) {
-    if (length(dir) < 1e-9) return;
-    axisAt_ = at;
-    axisDir_ = normalize(dir);
-    axisLine_ = fromLine;
-}
-
-bool SketchTool::setTurnAxisLine(SketchId entity) {
-    const SketchEntity* e = sketch_.entity(entity);
-    if (!e || e->curve != SketchCurve::Line) return false;
-    const SketchPoint* a = sketch_.point(e->a);
-    const SketchPoint* b = sketch_.point(e->b);
-    if (!a || !b || length(b->at - a->at) < 1e-9) return false;
-    setTurnAxis(a->at, b->at - a->at, entity);
-    return true;
-}
-
-bool SketchTool::beginTurn() {
-    if (stage_ != SketchStage::Regions) return false;
-    if (chosen_.empty()) {
-        error_ = "Pick a region to turn";
-        return false;
-    }
-    build_ = SketchBuild::Revolve;
-    typed_.clear();
-
-    // An axis to start from, if the one standing has the profile across it: the
-    // sketch's vertical, moved out to the near side of what was chosen, so the
-    // first thing shown is something that can actually be built. The user
-    // moves it from there, or picks a line of the drawing.
-    if (!axisClears()) {
-        Vec2 lo{1e300, 1e300}, hi{-1e300, -1e300};
-        for (const SketchProfile& r : regions_) {
-            if (!contains(chosen_, r.key)) continue;
-            for (Vec2 p : sketchLoopPoints(sketch_, r.outer)) {
-                lo = {std::min(lo.x, p.x), std::min(lo.y, p.y)};
-                hi = {std::max(hi.x, p.x), std::max(hi.y, p.y)};
-            }
-        }
-        if (lo.x > hi.x) {
-            error_ = "There is nothing in those regions to turn";
-            return false;
-        }
-        setTurnAxis({lo.x, lo.y}, {0, 1});
-    }
-    stage_ = SketchStage::Turn;
-    return true;
-}
-
-// Whether the regions to be turned stay on one side of the axis as it stands.
-// The kernel refuses one that crosses, and the panel should not offer it.
-bool SketchTool::axisClears() const {
-    Real most = 0.0, least = 0.0;
-    for (const SketchProfile& r : regions_) {
-        if (!contains(chosen_, r.key)) continue;
-        std::vector<const SketchLoop*> loops{&r.outer};
-        for (const SketchLoop& h : r.holes) loops.push_back(&h);
-        for (const SketchLoop* loop : loops)
-            for (SketchId id : loop->entities) {
-                const SketchEntity* e = sketch_.entity(id);
-                if (!e) continue;
-                for (Vec2 p : sketchEntityPoints(sketch_, *e, 24)) {
-                    const Real side = axisDir_.x * (p.y - axisAt_.y) - axisDir_.y * (p.x - axisAt_.x);
-                    most = std::max(most, side);
-                    least = std::min(least, side);
-                }
-            }
-    }
-    return !(most > 1e-6 && least < -1e-6);
-}
-
 bool SketchTool::beginDepth() {
     if (stage_ != SketchStage::Regions) return false;
     if (chosen_.empty()) {
         error_ = "Pick a region to extrude";
         return false;
     }
-    build_ = SketchBuild::Extrude;
     typed_.clear();
     depthTyped_ = false;
     depthBase_ = depth_;
     stage_ = SketchStage::Depth;
     return true;
 }
-
 
 Vec2 SketchTool::chosenCentre() const {
     Vec2 sum{0, 0};
@@ -1075,8 +1180,7 @@ Vec2 SketchTool::chosenCentre() const {
 }
 
 bool SketchTool::finish(Scene& scene, Camera& camera, UndoStack& undo, bool extrude) {
-    if (stage_ != SketchStage::Draw && stage_ != SketchStage::Regions &&
-        stage_ != SketchStage::Depth && stage_ != SketchStage::Turn)
+    if (stage_ != SketchStage::Draw && stage_ != SketchStage::Regions && stage_ != SketchStage::Depth)
         return false;
     endDrag();
     clearPending();
@@ -1128,13 +1232,15 @@ bool SketchTool::finish(Scene& scene, Camera& camera, UndoStack& undo, bool extr
             return false;
         }
         undo.push(ExistenceCommand::forCreate(scene, {id}));
-        scene.select(id);
+        keptObject_ = id;
+        keptUid_ = scene.find(id)->features.front().uid;
     } else {
         SceneObject* obj = scene.find(target);
         if (!obj) {
             error_ = "The part this sketch belongs to is gone";
             return false;
         }
+        keptObject_ = target;
         const std::vector<Feature> before = obj->features;
         std::vector<Feature> chain = obj->features;
         Sketch local = sketch_;
@@ -1148,11 +1254,13 @@ bool SketchTool::finish(Scene& scene, Camera& camera, UndoStack& undo, bool extr
                 return false;
             }
             it->sketch = std::move(local);
+            keptUid_ = editUid_;
         } else {
             Feature s;
             s.kind = FeatureKind::Sketch;
             s.uid = scene.takeFeatureUid();
             s.sketch = std::move(local);
+            keptUid_ = s.uid;
             chain.push_back(std::move(s));
         }
         std::string why;
@@ -1163,8 +1271,10 @@ bool SketchTool::finish(Scene& scene, Camera& camera, UndoStack& undo, bool extr
         }
         undo.push(std::make_unique<FeatureCommand>(target, before, scene.find(target)->features,
                                                    editing() ? "Edit Sketch" : "Sketch"));
-        scene.select(target);
     }
+    // The sketch just finished is what is selected: its actions -- edit,
+    // extrude, revolve, sweep, loft -- are one click away.
+    scene.selectSketch({keptObject_, keptUid_});
 
     restoreCamera(camera);
     cameraSaved_ = false;
@@ -1190,10 +1300,7 @@ void SketchTool::dismissApplied() {
 
 Body SketchTool::sweptRegions(std::string* why) const {
     if (chosen_.empty()) return Body{};
-    BrepRef all = build_ == SketchBuild::Revolve
-                      ? brep::revolveSketch(sketch_, regions_, chosen_, axisAt_, axisDir_, angle_, 0,
-                                            why)
-                      : brep::sketchSolids(sketch_, regions_, chosen_, 0.0, depth_, 0, why);
+    BrepRef all = brep::sketchSolids(sketch_, regions_, chosen_, 0.0, depth_, 0, why);
     return all ? Body(std::move(all)) : Body{};
 }
 
@@ -1207,20 +1314,8 @@ void SketchTool::refreshReach(const Scene& scene, bool now) {
     // from the plane to the depth. With no body near that box there is
     // nothing to reach, and nothing needs sweeping to know it -- the usual
     // case for a drawing brought in to be a part of its own.
-    //
-    // A turn sweeps a circle about its axis rather than a box along the
-    // normal, so the same box is taken from the solid itself; it is one
-    // region's worth of geometry, not a drawing's.
     AABB swept;
-    if (build_ == SketchBuild::Revolve) {
-        std::string why;
-        const Body turned = sweptRegions(&why);
-        if (turned.empty()) {
-            reach_.refresh(scene, Body{}, owner(), choice_.op, 1.0, "none");
-            return;
-        }
-        swept = turned.bounds();
-    } else {
+    {
         std::vector<SketchId> chosen = chosen_;
         std::sort(chosen.begin(), chosen.end());
         Vec2 lo{1e300, 1e300}, hi{-1e300, -1e300};
@@ -1257,9 +1352,8 @@ void SketchTool::refreshReach(const Scene& scene, bool now) {
     // reaches need not be measured again.
     std::string key;
     char b[160];
-    std::snprintf(b, sizeof b, "%d|%.9g|%.9g|%.6g,%.6g|%.6g,%.6g|%.6g,%.6g,%.6g",
-                  static_cast<int>(build_), depth_, angle_, axisAt_.x, axisAt_.y, axisDir_.x,
-                  axisDir_.y, plane_.origin.x, plane_.origin.y, plane_.origin.z);
+    std::snprintf(b, sizeof b, "%.9g|%.6g,%.6g,%.6g", depth_, plane_.origin.x, plane_.origin.y,
+                  plane_.origin.z);
     key = b;
     for (SketchId k : chosen_) key += "|" + std::to_string(k);
     if (reachToolKey_ != key) {
@@ -1281,7 +1375,6 @@ void SketchTool::refreshReach(const Scene& scene, bool now) {
 bool SketchTool::commitExtrusion(Scene& scene, UndoStack& undo) {
     // Measured now rather than trusted from the last frame: this is what the
     // extrusion is about to act on.
-    const bool turn = build_ == SketchBuild::Revolve;
     choice_.follow(reachDepth(), owner() != kNoObject);
     refreshReach(scene, true);
     ExtrudeOp op = choice_.op;
@@ -1318,15 +1411,12 @@ bool SketchTool::commitExtrusion(Scene& scene, UndoStack& undo) {
     std::sort(keys.begin(), keys.end());
     auto sweep = [&](ElementId sketchUid, ExtrudeOp how) {
         Feature f;
-        f.kind = turn ? FeatureKind::RevolveProfile : FeatureKind::ExtrudeProfile;
+        f.kind = FeatureKind::ExtrudeProfile;
         f.uid = scene.takeFeatureUid();
         f.sketchUid = sketchUid;
         f.profileKeys = keys;
         f.distance = depth_;
         f.extrudeOp = how;
-        f.revolveAxisAt = axisAt_;
-        f.revolveAxisDir = axisDir_;
-        f.revolveAngle = angle_;
         return f;
     };
 
@@ -1345,8 +1435,7 @@ bool SketchTool::commitExtrusion(Scene& scene, UndoStack& undo) {
         std::string why;
         const ObjectId id = scene.addFeatureChain(std::move(chain), "Part", &why);
         if (id == kNoObject) {
-            error_ = std::string(turn ? "Revolve failed: " : "Extrude failed: ") +
-                     (why.empty() ? std::string("no solid came out of it") : why);
+            error_ = "Extrude failed: " + (why.empty() ? std::string("no solid came out of it") : why);
             return false;
         }
         undo.push(ExistenceCommand::forCreate(scene, {id}));
@@ -1374,10 +1463,8 @@ bool SketchTool::commitExtrusion(Scene& scene, UndoStack& undo) {
         return false;
     }
 
-    const char* label = turn ? (op == ExtrudeOp::Join ? "Revolve Join"
-                              : op == ExtrudeOp::Cut  ? "Revolve Cut" : "Revolve Intersect")
-                             : (op == ExtrudeOp::Join ? "Extrude Join"
-                              : op == ExtrudeOp::Cut  ? "Extrude Cut" : "Extrude Intersect");
+    const char* label = op == ExtrudeOp::Join ? "Extrude Join"
+                       : op == ExtrudeOp::Cut ? "Extrude Cut" : "Extrude Intersect";
     const std::vector<Feature> before = obj->features;
     std::vector<Feature> chain = obj->features;
     Sketch local = sketch_;
@@ -1407,8 +1494,7 @@ bool SketchTool::commitExtrusion(Scene& scene, UndoStack& undo) {
 
     std::string why;
     if (!scene.setFeatures(home, std::move(chain), &why)) {
-        error_ = std::string(editing() ? "The edit was not kept: "
-                             : turn    ? "Revolve failed: " : "Extrude failed: ") +
+        error_ = (editing() ? std::string("The edit was not kept: ") : std::string("Extrude failed: ")) +
                  (why.empty() ? std::string("the history would not evaluate") : why);
         return false;
     }
@@ -1421,8 +1507,7 @@ bool SketchTool::commitExtrusion(Scene& scene, UndoStack& undo) {
         std::string error;
         if (tool.empty()) {
             unwind(scene, parts);
-            error_ = std::string(turn ? "Revolve failed: " : "Extrude failed: ") +
-                     (why.empty() ? std::string("the regions could not be swept") : why);
+            error_ = "Extrude failed: " + (why.empty() ? std::string("the regions could not be swept") : why);
             return false;
         }
         if (!applyExtrude(scene, tool, op, bodies, homeActs ? home : kNoObject, "Sketch", label, parts,
@@ -1471,51 +1556,9 @@ void SketchTool::update(const Scene& scene, const Camera& camera, Vec2 mousePx, 
     if (stage_ == SketchStage::None || stage_ == SketchStage::Applied) return;
 
     if (stage_ == SketchStage::SelectPlane) {
-        const Ray ray = camera.rayThroughPixel(static_cast<float>(mousePx.x),
-                                               static_cast<float>(mousePx.y));
-        const RayHit hit = scene.raycast(ray);
-        if (hit.hit() && hit.face != kInvalid) {
-            if (const SceneObject* o = scene.find(hit.object)) {
-                const Mat4 model = o->modelMatrix();
-                const Vec3 n = normalize(transformVector(normalMatrix(model),
-                                                         o->body.faceNormal(hit.face)));
-                std::vector<VertexId> fv;
-                o->body.faceVertices(hit.face, fv);
-                Vec3 centre{0, 0, 0};
-                for (VertexId v : fv) centre += o->body.vertexPosition(v);
-                if (!fv.empty()) centre *= 1.0 / static_cast<Real>(fv.size());
-                plane_ = frameFor(transformPoint(model, centre), n);
-                hoveredChoice_ = PlaneChoice::Face;
-                faceObject_ = hit.object;
-                return;
-            }
-        }
-        // The origin planes, nearest first; the top plane when the pointer is
-        // on none of them.
-        const Real tile = std::max(camera.distance * 0.35, 25.0);
-        struct Option { PlaneChoice choice; Vec3 normal; Vec3 a, b; };
-        const Option options[3] = {
-            {PlaneChoice::XY, {0, 0, 1}, {1, 0, 0}, {0, 1, 0}},
-            {PlaneChoice::XZ, {0, -1, 0}, {1, 0, 0}, {0, 0, 1}},
-            {PlaneChoice::YZ, {1, 0, 0}, {0, 1, 0}, {0, 0, 1}},
-        };
-        Real bestT = 1e300;
-        hoveredChoice_ = PlaneChoice::XY;
-        for (const Option& op : options) {
-            const Real denom = dot(op.normal, ray.dir);
-            if (std::fabs(denom) < 1e-9) continue;
-            const Real t = dot(-ray.origin, op.normal) / denom;
-            if (t < 0.0 || t >= bestT) continue;
-            const Vec3 p = ray.origin + ray.dir * t;
-            if (std::fabs(dot(p, op.a)) > tile || std::fabs(dot(p, op.b)) > tile) continue;
-            bestT = t;
-            hoveredChoice_ = op.choice;
-        }
-        const Vec3 n = hoveredChoice_ == PlaneChoice::XZ ? Vec3{0, -1, 0}
-                     : hoveredChoice_ == PlaneChoice::YZ ? Vec3{1, 0, 0}
-                                                         : Vec3{0, 0, 1};
-        plane_ = frameFor({0, 0, 0}, n);
-        faceObject_ = kNoObject;
+        picker_.update(scene, camera, mousePx);
+        plane_ = picker_.frame();
+        faceObject_ = picker_.choice() == PlaneChoice::Face ? picker_.faceObject() : kNoObject;
         return;
     }
 
@@ -1539,6 +1582,29 @@ void SketchTool::update(const Scene& scene, const Camera& camera, Vec2 mousePx, 
             }
             cursor_ = at;
             dragTo(at);
+            return;
+        }
+        // The pen's handles follow the pointer while the button is down.
+        if (pulling_) {
+            if (cursorValid_) {
+                cursor_ = raw;
+                penDrag(raw);
+            }
+            return;
+        }
+        // Project: the edge, or failing that the face, under the pointer.
+        if (mode_ == SketchMode::Project) {
+            projObject_ = kNoObject;
+            const Ray ray = camera.rayThroughPixel(static_cast<float>(mousePx.x), static_cast<float>(mousePx.y));
+            const ElementHit hit = scene.pickElement(ray, camera.viewProjection(), camera.viewportW,
+                                                     camera.viewportH, mousePx, 0.0f, 10.0f);
+            const SceneObject* o = hit.hit() ? scene.find(hit.ref.object) : nullptr;
+            if (o && !o->body.empty() && !o->body.isMesh() &&
+                (hit.ref.kind == ElementKind::Edge || hit.ref.kind == ElementKind::Face)) {
+                projObject_ = hit.ref.object;
+                projFace_ = hit.ref.kind == ElementKind::Face;
+                projElement_ = hit.ref.index;
+            }
             return;
         }
 
@@ -1652,26 +1718,6 @@ void SketchTool::update(const Scene& scene, const Camera& camera, Vec2 mousePx, 
         return;
     }
 
-    if (stage_ == SketchStage::Turn) {
-        // What the pointer is over, so a line of the drawing can be clicked to
-        // stand the axis on it.
-        hoverEntity_ = kNoSketchId;
-        if (cursorValid_) {
-            Real best = kEntityPickPx * (1.0 / pixelsPerMm(camera, plane_));
-            for (const EntityDraw& d : entityDraw_) {
-                const SketchEntity* e = sketch_.entity(d.id);
-                if (!e || e->curve != SketchCurve::Line) continue;
-                for (size_t i = 0; i + 1 < d.line.size(); ++i) {
-                    const Real dist = distanceToSegment(raw, d.line[i], d.line[i + 1]);
-                    if (dist <= best) { best = dist; hoverEntity_ = d.id; }
-                }
-            }
-        }
-        choice_.follow(reachDepth(), owner() != kNoObject);
-        refreshReach(scene);
-        return;
-    }
-
     if (stage_ == SketchStage::Depth) {
         if (!depthTyped_) {
             Real d = depthFromPointer(camera, mousePx);
@@ -1689,7 +1735,9 @@ void SketchTool::update(const Scene& scene, const Camera& camera, Vec2 mousePx, 
 void SketchTool::handleMouseDown(Scene& scene, Camera& camera, UndoStack& undo) {
     switch (stage_) {
     case SketchStage::SelectPlane:
-        setPlane(plane_, hoveredChoice_ == PlaneChoice::Face ? faceObject_ : kNoObject, &camera);
+        if (picker_.click(scene, camera))
+            setPlane(picker_.frame(), picker_.choice() == PlaneChoice::Face ? picker_.faceObject() : kNoObject,
+                     &camera);
         break;
     case SketchStage::Draw:
         if (mode_ == SketchMode::Select) {
@@ -1708,6 +1756,10 @@ void SketchTool::handleMouseDown(Scene& scene, Camera& camera, UndoStack& undo) 
         } else if (mode_ == SketchMode::Dimension) {
             if (hoverEntity_ != kNoSketchId) dimensionEntity(hoverEntity_);
             else activeDim_ = kNoSketchId;
+        } else if (mode_ == SketchMode::Curve) {
+            penDown(cursor_);
+        } else if (mode_ == SketchMode::Project) {
+            projectElement(scene, projObject_, projFace_, projElement_);
         } else {
             commitPending();
         }
@@ -1718,12 +1770,6 @@ void SketchTool::handleMouseDown(Scene& scene, Camera& camera, UndoStack& undo) 
     case SketchStage::Depth:
         finish(scene, camera, undo, true);
         break;
-    case SketchStage::Turn:
-        // A click on a line of the drawing stands the axis on it; the panel's
-        // buttons are the way to any other axis, and a click on nothing is not
-        // a commit here -- there is no drag to end.
-        if (hoverEntity_ != kNoSketchId) setTurnAxisLine(hoverEntity_);
-        break;
     case SketchStage::Applied:
     case SketchStage::None:
         break;
@@ -1731,6 +1777,7 @@ void SketchTool::handleMouseDown(Scene& scene, Camera& camera, UndoStack& undo) 
 }
 
 void SketchTool::handleMouseUp() {
+    penUp();
     endDrag();
 }
 
@@ -1744,11 +1791,9 @@ void SketchTool::handleRightClick(Camera& camera) {
         clearPending();
         break;
     case SketchStage::Regions:
-        stage_ = SketchStage::Draw;
-        squareUp(camera);
+        cancel(camera);
         break;
     case SketchStage::Depth:
-    case SketchStage::Turn:
         stage_ = SketchStage::Regions;
         break;
     case SketchStage::SelectPlane:
@@ -1769,10 +1814,11 @@ bool SketchTool::handleKey(int key, bool shift, bool ctrl, Scene& scene, Camera&
     endDrag();
 
     if (key == 27) {
-        if (!typed_.empty()) {
+        if (!typed_.empty() || planeTyping_ != 0) {
             typed_.clear();
             fixed_[0] = fixed_[1] = false;
             depthTyped_ = false;
+            planeTyping_ = 0;
             return true;
         }
         switch (stage_) {
@@ -1793,11 +1839,11 @@ bool SketchTool::handleKey(int key, bool shift, bool ctrl, Scene& scene, Camera&
             }
             break;
         case SketchStage::Regions:
-            stage_ = SketchStage::Draw;
-            squareUp(camera);
+            // Reached from a sketch's Extrude, not from drawing: leaving it
+            // leaves the tool, and the sketch as it was.
+            cancel(camera);
             break;
         case SketchStage::Depth:
-        case SketchStage::Turn:
             stage_ = SketchStage::Regions;
             break;
         case SketchStage::Applied:
@@ -1823,10 +1869,18 @@ bool SketchTool::handleKey(int key, bool shift, bool ctrl, Scene& scene, Camera&
         if (key == 'C') { setMode(SketchMode::Circle); return true; }
         if (key == 'A') { setMode(SketchMode::Arc); return true; }
         if (key == 'D') { setMode(SketchMode::Dimension); return true; }
+        if (key == 'B') { setMode(SketchMode::Curve); return true; }
+        if (key == 'P') { setMode(SketchMode::Project); return true; }
         if (key == 'Q') { toggleConstruction(hoverEntity_); return true; }
         if (key == 'K') { finish(scene, camera, undo, false); return true; }
         if (key == 127 || key == 'X') { deleteEntity(hoverEntity_); return true; }
         if (key == 13) {
+            if (planeTyping_ != 0) {
+                if (planeTyping_ == 2) squareUp(camera);
+                planeTyping_ = 0;
+                typed_.clear();
+                return true;
+            }
             if (mode_ == SketchMode::Dimension && activeDim_ != kNoSketchId && !typed_.empty()) {
                 Real v = 0.0;
                 if (parseNumber(typed_, v)) {
@@ -1842,33 +1896,14 @@ bool SketchTool::handleKey(int key, bool shift, bool ctrl, Scene& scene, Camera&
                 else commitPending();
                 return true;
             }
-            if (editing()) finish(scene, camera, undo, false);
-            else beginExtrude(&camera);
-            return true;
-        }
-        if (key == 'E') {
-            beginExtrude(&camera);
+            finish(scene, camera, undo, false);
             return true;
         }
         return typeKey(key);
 
     case SketchStage::Regions:
-        if (key == 'R') { beginTurn(); return true; }
-        if (key == 13 || key == 'E') { build_ = SketchBuild::Extrude; beginDepth(); return true; }
+        if (key == 13 || key == 'E') { beginDepth(); return true; }
         return false;
-
-    case SketchStage::Turn:
-        if (key == 13 || key == 'R') { finish(scene, camera, undo, true); return true; }
-        if (key == 'F') { angle_ = 2.0 * kPi; return true; }
-        {
-            ExtrudeOp picked;
-            if (extrudeOpForKey(key, picked) && !(picked == ExtrudeOp::NewBody && editing())) {
-                choice_.pick(picked);
-                refreshReach(scene);
-                return true;
-            }
-        }
-        return typeKey(key);
 
     case SketchStage::Depth:
         if (key == 13 || key == 'E') { finish(scene, camera, undo, true); return true; }
@@ -2050,31 +2085,7 @@ void SketchTool::drawOverlay(const Scene& scene, const Camera& camera, Renderer&
     const Vec4 lit{1.0f, 0.82f, 0.35f, 1.0f};
 
     if (stage_ == SketchStage::SelectPlane) {
-        const Real sz = std::max(camera.distance * 0.35, 25.0);
-        struct Tile { PlaneChoice choice; Vec3 a, b; Vec4 tint; };
-        const Tile tiles[3] = {
-            {PlaneChoice::XY, {1, 0, 0}, {0, 1, 0}, {0.2f, 0.6f, 0.9f, 0.4f}},
-            {PlaneChoice::XZ, {1, 0, 0}, {0, 0, 1}, {0.3f, 0.8f, 0.4f, 0.4f}},
-            {PlaneChoice::YZ, {0, 1, 0}, {0, 0, 1}, {0.9f, 0.4f, 0.3f, 0.4f}},
-        };
-        for (const Tile& t : tiles) {
-            const Vec4 edge = hoveredChoice_ == t.choice ? brand : t.tint;
-            const Vec3 c[4] = {(-t.a - t.b) * sz, (t.a - t.b) * sz, (t.a + t.b) * sz, (t.b - t.a) * sz};
-            for (int i = 0; i < 4; ++i) renderer.addLine(c[i], c[(i + 1) % 4], edge);
-            const Vec4 fill{t.tint.x, t.tint.y, t.tint.z, 0.08f};
-            renderer.addTriangle(c[0], c[1], c[2], fill);
-            renderer.addTriangle(c[0], c[2], c[3], fill);
-        }
-        if (hoveredChoice_ == PlaneChoice::Face && faceObject_ != kNoObject) {
-            const Real s = std::max(camera.distance * 0.08, 4.0);
-            const Vec3 c[4] = {plane_.origin + (-plane_.u - plane_.v) * s,
-                               plane_.origin + (plane_.u - plane_.v) * s,
-                               plane_.origin + (plane_.u + plane_.v) * s,
-                               plane_.origin + (plane_.v - plane_.u) * s};
-            for (int i = 0; i < 4; ++i) renderer.addFrontLine(camera, c[i], c[(i + 1) % 4], brand, 2.0);
-            renderer.addFrontLine(camera, plane_.origin, plane_.origin + plane_.normal * s * 1.5, brand, 2.0);
-        }
-        (void)scene;
+        picker_.drawOverlay(scene, camera, renderer);
         return;
     }
 
@@ -2158,7 +2169,7 @@ void SketchTool::drawOverlay(const Scene& scene, const Camera& camera, Renderer&
         for (const SketchProfile& r : regions_) {
             const bool on = std::binary_search(chosen.begin(), chosen.end(), r.key);
             const bool hovered = stage_ == SketchStage::Regions && hoverRegion_ == r.key;
-            if (!on && !hovered && stage_ == SketchStage::Depth) continue;
+            if (!on && !hovered && stage_ != SketchStage::Regions) continue;
             Vec4 col = on ? Vec4{0.20f, 0.60f, 0.95f, 0.55f} : Vec4{0.6f, 0.65f, 0.7f, 0.25f};
             if (hovered) col = Vec4{lit.x, lit.y, lit.z, 0.6f};
             const bool fine = on || hovered;
@@ -2292,11 +2303,62 @@ void SketchTool::drawOverlay(const Scene& scene, const Camera& camera, Renderer&
             break;
         case SketchMode::Select:
         case SketchMode::Dimension:
+        case SketchMode::Curve:
+        case SketchMode::Project:
             break;
         }
         for (Vec2 c : clicks_) {
             const Vec3 at = plane_.toWorld(c);
             overlay::disc(renderer, at, overlay::frameAt(camera, at), 3.2, ghost);
+        }
+    }
+
+    // The pen: the curve the next click would make, and the handles of the
+    // anchor just placed.
+    if (stage_ == SketchStage::Draw && mode_ == SketchMode::Curve && !pen_.empty()) {
+        const PenAnchor& a = pen_.back();
+        const Vec2 p0 = pointUV(a.point);
+        auto handle = [&](Vec2 from, Vec2 to) {
+            renderer.addFrontLine(camera, plane_.toWorld(from), plane_.toWorld(to), Vec4{0.7f, 0.75f, 0.85f, 0.9f}, 1.2);
+            const Real r = pickMm_ * 0.5;
+            const Vec3 c = plane_.toWorld(to);
+            renderer.addFrontLine(camera, c - plane_.u * r, c + plane_.u * r, brand, 3.0);
+            renderer.addFrontLine(camera, c - plane_.v * r, c + plane_.v * r, brand, 3.0);
+        };
+        if (a.smooth) {
+            handle(p0, a.out);
+            handle(p0, p0 * 2.0 - a.out);
+        }
+        if (!pulling_ && cursorValid_) {
+            const Vec2 p3 = cursor_;
+            const Vec2 b = a.smooth ? a.out : p0 + (p3 - p0) / 3.0;
+            const Vec2 c = p3 + (p0 - p3) / 3.0;
+            Vec3 prev = plane_.toWorld(p0);
+            for (int i = 1; i <= 32; ++i) {
+                const Real t = i / 32.0, u = 1.0 - t;
+                const Vec2 q = p0 * (u * u * u) + b * (3 * u * u * t) + c * (3 * u * t * t) + p3 * (t * t * t);
+                const Vec3 w = plane_.toWorld(q);
+                renderer.addFrontLine(camera, prev, w, Vec4{brand.x, brand.y, brand.z, 0.6f}, 1.6);
+                prev = w;
+            }
+        }
+    }
+
+    // Project: what a click would bring onto the plane.
+    if (stage_ == SketchStage::Draw && mode_ == SketchMode::Project && projObject_ != kNoObject) {
+        if (const SceneObject* o = scene.find(projObject_)) {
+            const Vec4 lit{1.0f, 0.82f, 0.35f, 1.0f};
+            const Mat4 model = o->modelMatrix();
+            std::vector<EdgeId> es;
+            if (projFace_) o->body.faceEdges(projElement_, es);
+            else           es.push_back(projElement_);
+            for (EdgeId e : es) {
+                std::vector<Vec3> pts;
+                o->body.edgePolyline(e, 0.05, pts);
+                for (size_t i = 0; i + 1 < pts.size(); ++i)
+                    renderer.addFrontLine(camera, transformPoint(model, pts[i]), transformPoint(model, pts[i + 1]),
+                                          lit, 2.6);
+            }
         }
     }
 
@@ -2329,41 +2391,6 @@ void SketchTool::drawOverlay(const Scene& scene, const Camera& camera, Renderer&
                             edge(a, a + lift, 1.4);
                     }
                 }
-            }
-        }
-    }
-
-    // What it turns about, and the circle the far side of it travels: enough
-    // to see which way the solid will come out before it is built.
-    if (stage_ == SketchStage::Turn) {
-        const bool removes = choice_.op == ExtrudeOp::Cut || choice_.op == ExtrudeOp::Intersect;
-        const Vec4 col = removes ? Vec4{1.0f, 0.4f, 0.3f, 0.9f} : brand;
-        const Vec3 on = plane_.toWorld(axisAt_);
-        const Vec3 along = plane_.toWorld(axisAt_ + axisDir_) - on;
-        renderer.addFrontDashes(camera, on - along * span, on + along * span, col, 1.6, 6.0, 4.0);
-
-        // The furthest point of what was picked, swept round: the outline of
-        // the solid, at the angle asked for.
-        Real far = 0.0;
-        Vec2 furthest = axisAt_;
-        for (const SketchProfile& r : regions_) {
-            if (!contains(chosen_, r.key)) continue;
-            for (Vec2 p : sketchLoopPoints(sketch_, r.outer)) {
-                const Vec2 d = p - axisAt_;
-                const Real off = std::fabs(d.x * axisDir_.y - d.y * axisDir_.x);
-                if (off > far) { far = off; furthest = p; }
-            }
-        }
-        if (far > 1e-6) {
-            const Vec3 centre = on + along * dot(plane_.toWorld(furthest) - on, along);
-            const Vec3 arm = plane_.toWorld(furthest) - centre;
-            const Vec3 side = cross(normalize(along), arm);
-            const int n = 64;
-            for (int i = 0; i < n; ++i) {
-                const Real t0 = angle_ * i / n, t1 = angle_ * (i + 1) / n;
-                const Vec3 a = centre + arm * std::cos(t0) + side * std::sin(t0);
-                const Vec3 b = centre + arm * std::cos(t1) + side * std::sin(t1);
-                renderer.addFrontLine(camera, a, b, col, 1.6);
             }
         }
     }
@@ -2461,8 +2488,12 @@ void SketchTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& fi
     finished = false;
     if (stage_ == SketchStage::None) return;
 
-    const char* title = editing() ? "Edit Sketch" : "Sketch";
-    if (!ui::beginCommand("##sketch", title, Glyph::Sketch)) return;
+    // Choosing regions and a depth is extruding the sketch, whichever way it
+    // was reached; drawing is editing it, or making it.
+    const bool extruding = stage_ == SketchStage::Regions || stage_ == SketchStage::Depth ||
+                           stage_ == SketchStage::Applied;
+    const char* title = extruding ? "Extrude" : editing() ? "Edit Sketch" : "Sketch";
+    if (!ui::beginCommand("##sketch", title, extruding ? Glyph::Extrude : Glyph::Sketch)) return;
 
     // A number pulled on the panel goes in the way the keyboard would have put
     // it, one character at a time, so the two cannot disagree about what a
@@ -2487,20 +2518,13 @@ void SketchTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& fi
     int footer = 0;
     switch (stage_) {
     case SketchStage::SelectPlane: {
-        ui::commandRow("Plane");
-        if (ImGui::Button("Top")) choosePlane(PlaneChoice::XY, camera);
-        ImGui::SameLine();
-        if (ImGui::Button("Front")) choosePlane(PlaneChoice::XZ, camera);
-        ImGui::SameLine();
-        if (ImGui::Button("Right")) choosePlane(PlaneChoice::YZ, camera);
-        if (importPending()) {
-            char b[160];
-            std::snprintf(b, sizeof b, "Where %s goes: a plane, or click a face to put it on.  %.1f x %.1f mm.",
+        char hint[200] = "";
+        if (importPending())
+            std::snprintf(hint, sizeof hint, "Where %s goes: a plane, or click a face to put it on.  %.1f x %.1f mm.",
                           pendingSvgName_.c_str(), pendingSvg_.size().x, pendingSvg_.size().y);
-            ui::commandHint(b);
-        } else {
-            ui::commandHint("Or click a face of an object to sketch on it.  7 / 1 / 3 pick a plane.");
-        }
+        else
+            std::snprintf(hint, sizeof hint, "Click a face of a body to sketch on it, or an origin plane.");
+        if (picker_.drawRows(hint)) setPlane(picker_.frame(), kNoObject, &camera);
         footer = ui::commandFooter(nullptr);
         break;
     }
@@ -2508,19 +2532,28 @@ void SketchTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& fi
     case SketchStage::Draw: {
         static const SketchMode kModeOf[6] = {
             SketchMode::Select, SketchMode::Line, SketchMode::Rectangle,
-            SketchMode::Circle, SketchMode::Arc,  SketchMode::Dimension};
+            SketchMode::Circle, SketchMode::Arc,  SketchMode::Curve};
         static const ui::Choice kModes[6] = {
             {Glyph::Select,    "Select", "S", "Drag a point, or a rim, and the constraints hold  (S)"},
             {Glyph::Line,      "Line",   "L", "Click point to point; Enter ends the chain  (L)"},
             {Glyph::Rect,      "Rect",   "R", "Two opposite corners  (R)"},
             {Glyph::Circle,    "Circle", "C", "Centre, then a point on the rim  (C)"},
             {Glyph::Arc,       "Arc",    "A", "Centre, start, end  (A)"},
-            {Glyph::Dimension, "Size",   "D", "Click a line or a circle to size it  (D)"},
+            {Glyph::Bezier,    "Curve",  "B", "The pen: click for a corner, drag for a smooth anchor  (B)"},
         };
-        int on = 0;
+        int on = -1;
         for (int i = 0; i < 6; ++i) if (kModeOf[i] == mode_) on = i;
         const int pick = ui::commandChoices("", kModes, 6, on);
         if (pick >= 0) setMode(kModeOf[pick]);
+        static const SketchMode kMoreOf[2] = {SketchMode::Dimension, SketchMode::Project};
+        static const ui::Choice kMore[2] = {
+            {Glyph::Dimension, "Size",    "D", "Click a line or a circle to size it  (D)"},
+            {Glyph::Project,   "Project", "P", "Click an edge or a face of a body to bring it onto the plane  (P)"},
+        };
+        int onMore = -1;
+        for (int i = 0; i < 2; ++i) if (kMoreOf[i] == mode_) onMore = i;
+        const int more = ui::commandChoices("", kMore, 2, onMore, true);
+        if (more >= 0) setMode(kMoreOf[more]);
 
         // The size of what is being drawn, the way the create tool shows it.
         if (!clicks_.empty() && !(mode_ == SketchMode::Arc && clicks_.size() == 2)) {
@@ -2538,6 +2571,39 @@ void SketchTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& fi
                                          fixed_[0], !typed_.empty(), typed_.c_str(),
                                          0.0, std::max(extent, v)), 0);
             }
+        }
+
+        // How far the plane stands off where it was put: a second outline
+        // for a loft is drawn this way, on the top plane lifted 20.
+        {
+            const double span = std::max(extent, std::fabs(planeOffset_));
+            const ui::NumberEdit e = ui::commandNumber("Offset", planeOffset_, "mm", false, planeTyping_ == 1,
+                                                       typed_.c_str(), -span, span, true);
+            if (e.dragged) {
+                planeTyping_ = 0;
+                typed_.clear();
+                setPlaneOffset(e.value);
+            } else if (e.clicked) {
+                clearPending();
+                planeTyping_ = 1;
+                typed_.clear();
+            }
+        }
+        // And how far it leans, about its own horizontal: an angled plane.
+        {
+            const double deg = planeTilt_ * kRad2Deg;
+            const ui::NumberEdit e = ui::commandNumber("Tilt", deg, "\xC2\xB0", false, planeTyping_ == 2,
+                                                       typed_.c_str(), -90.0, 90.0, true);
+            if (e.dragged) {
+                planeTyping_ = 0;
+                typed_.clear();
+                setPlaneTilt(e.value * kDeg2Rad);
+            } else if (e.clicked) {
+                clearPending();
+                planeTyping_ = 2;
+                typed_.clear();
+            }
+            if (e.released) squareUp(camera);
         }
 
         if (placing()) drawPlacementRows();
@@ -2632,30 +2698,21 @@ void SketchTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& fi
             case SketchMode::Dimension: hint = activeDim_ != kNoSketchId
                                                 ? "Type the new value and press Enter."
                                                 : "Click a line or a circle to size it."; break;
+            case SketchMode::Curve:     hint = pen_.empty() ? "Click for a corner, or press and drag for a smooth point."
+                                             : pen_.size() >= 2 ? "Next point: click, or drag for a smooth one. Click the first to close; Enter ends."
+                                                                : "Next point: click, or drag for a smooth one. Enter ends."; break;
+            case SketchMode::Project:   hint = "Click an edge of a body, or a face for all its edges: they come onto the plane, fixed."; break;
         }
         ui::commandHint(hint);
-        ui::commandHint("S select, L line, R rectangle, C circle, A arc, D dimension. Hover and press X to delete, Q for construction; Ctrl+Z steps back. E goes on to pick regions, Esc leaves.");
+        ui::commandHint("S select, L line, R rectangle, C circle, A arc, B curve, D dimension, P project an edge. "
+                        "Hover and press X to delete, Q for construction; Ctrl+Z steps back. Enter finishes, Esc leaves.");
 
         if (ui::quietButton("Import SVG...")) importRequested_ = true;
         ui::hoverTip("Bring the outlines of an SVG drawing into this sketch");
-        ImGui::SameLine();
-        if (editing()) {
-            if (ui::quietButton("Extrude a region")) beginExtrude(&camera);
-            ui::hoverTip("Sweep one of the closed regions into the part  (E)");
-            footer = ui::commandFooter("Done", !sketch_.empty() && solved_.solved);
-        } else {
-            // A sketch is worth keeping before anything is built from it: it
-            // becomes its own item in the outliner, to extrude whenever.
-            if (ui::quietButton(faceObject_ != kNoObject ? "Keep the sketch only" : "Keep as a sketch")) {
-                if (finish(scene, camera, undo, false)) {
-                    finished = true;
-                    ui::endCommand();
-                    return;
-                }
-            }
-            ui::hoverTip("Keep the drawing without building anything from it  (K)");
-            footer = ui::commandFooter("Extrude", !regions_.empty());
-        }
+        // Finishing keeps the sketch: in the outliner, or in the part it was
+        // drawn on. Building from it -- extrude, revolve, sweep, loft -- is
+        // done from there, with the sketch selected.
+        footer = ui::commandFooter(editing() ? "Done" : "Finish", !sketch_.empty() && solved_.solved);
         break;
     }
 
@@ -2670,90 +2727,15 @@ void SketchTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& fi
         if (ui::quietButton("All")) chooseAllRegions();
         ImGui::SameLine();
         if (ui::quietButton("None")) chooseNoRegions();
-        ui::commandHint("Click a region to add it or take it out. E extrudes them, R turns them about an axis; Esc goes back to drawing.");
-
-        // What the regions become. Turning needs an axis they all stay on one
-        // side of, which most drawings have and a logo across the origin does
-        // not, so the tile says so rather than refusing after the fact.
-        {
-            static const ui::Choice kBuild[2] = {
-                {Glyph::Extrude, "Extrude", "E", "Push the regions along the plane's normal  (E)"},
-                {Glyph::Revolve, "Revolve", "R", "Turn the regions about an axis in the plane  (R)"},
-            };
-            const int pick = ui::commandChoices("Build", kBuild, 2,
-                                                build_ == SketchBuild::Revolve ? 1 : 0);
-            if (pick == 0) build_ = SketchBuild::Extrude;
-            if (pick == 1) build_ = SketchBuild::Revolve;
-        }
-        footer = ui::commandFooter("Next", !chosen_.empty(), "Back");
-        break;
-    }
-
-    case SketchStage::Turn: {
-        {
-            double deg = angle_ * kRad2Deg;
-            const ui::NumberEdit e = ui::commandNumber("Angle", deg, "\xC2\xB0", !typed_.empty(),
-                                                       !typed_.empty(), typed_.c_str(), 1.0, 360.0);
-            pulled(e, 0);
-            if (e.dragged) angle_ = clampf(e.value, 1.0, 360.0) * kDeg2Rad;
-        }
-        ui::commandRow("");
-        if (ui::quietButton("Full turn")) { angle_ = 2.0 * kPi; typed_.clear(); }
-        ui::hoverTip("All the way round  (F)");
-
-        // The axis. Either of the sketch's own, or a line of the drawing --
-        // which is what a part drawn as a half-section wants, and is picked by
-        // clicking that line.
-        {
-            const bool onLine = axisLine_ != kNoSketchId;
-            const bool vertical = !onLine && std::fabs(axisDir_.x) < 1e-9;
-            static const ui::Choice kAxis[3] = {
-                {Glyph::Line, "Up",   nullptr, "The sketch's vertical, through the near side of what was picked"},
-                {Glyph::Line, "Across", nullptr, "The sketch's horizontal, through the near side of what was picked"},
-                {Glyph::Line, "A line", nullptr, "A line of the drawing: click it in the viewport"},
-            };
-            const int pick = ui::commandChoices("Axis", kAxis, 3, onLine ? 2 : vertical ? 0 : 1);
-            if (pick == 0 || pick == 1) {
-                // Stood on the near side of what is being turned, so the axis
-                // starts somewhere it can be built from.
-                Vec2 lo{1e300, 1e300}, hi{-1e300, -1e300};
-                for (const SketchProfile& r : regions_) {
-                    if (!contains(chosen_, r.key)) continue;
-                    for (Vec2 p : sketchLoopPoints(sketch_, r.outer)) {
-                        lo = {std::min(lo.x, p.x), std::min(lo.y, p.y)};
-                        hi = {std::max(hi.x, p.x), std::max(hi.y, p.y)};
-                    }
-                }
-                if (lo.x <= hi.x)
-                    setTurnAxis(lo, pick == 0 ? Vec2{0, 1} : Vec2{1, 0});
-            }
-        }
-        if (!axisClears())
-            ui::commandRefused("The profile crosses that axis: it would turn through itself");
-
-        if (drawExtrudeChoice(choice_, !editing())) refreshReach(scene);
-        const ObjectId toggled = drawReachedBodies(scene, reach_, choice_.op, owner());
-        if (toggled != kNoObject) reach_.toggle(toggled);
-        ui::commandHint("Click a line of the drawing to turn about it, or type an angle. F is a full turn; J joins, D cuts, I intersects, N makes a new body. Enter finishes, Esc goes back.");
-        footer = ui::commandFooter("Finish", axisClears(), "Back");
+        ui::commandHint("Click a region to add it or take it out, then Next to set the depth. Esc cancels.");
+        footer = ui::commandFooter("Next", !chosen_.empty(), "Cancel");
         break;
     }
 
     case SketchStage::Depth:
     case SketchStage::Applied: {
         const bool applied = stage_ == SketchStage::Applied;
-        // A turn that has been applied adjusts its angle where an extrusion
-        // adjusts its depth. Everything below -- the operation, the bodies, the
-        // Done button -- is the same either way, and is not written twice.
-        if (applied && build_ == SketchBuild::Revolve) {
-            double deg = angle_ * kRad2Deg;
-            const ui::NumberEdit e = ui::commandNumber("Angle", deg, "\xC2\xB0", false, false,
-                                                       nullptr, 1.0, 360.0);
-            if (e.dragged && std::fabs(e.value * kDeg2Rad - angle_) > 1e-9) {
-                angle_ = clampf(e.value, 1.0, 360.0) * kDeg2Rad;
-                adjusted_ = true;
-            }
-        } else {
+        {
             const double span = std::max(extent, std::fabs(depth_));
             const ui::NumberEdit e = ui::commandNumber("Depth", depth_, "mm", depthTyped_,
                                                        !applied && !typed_.empty(), typed_.c_str(),
@@ -2780,10 +2762,8 @@ void SketchTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& fi
             reach_.toggle(toggled);
             if (applied) adjusted_ = true;
         }
-        if (applied) ui::commandApplied(build_ == SketchBuild::Revolve ? "Revolve" : "Extrude");
-        ui::commandHint(applied ? (build_ == SketchBuild::Revolve
-                                       ? "Change the angle, the operation or the bodies, and it is made again."
-                                       : "Change the depth, the operation or the bodies, and it is made again.")
+        if (applied) ui::commandApplied("Extrude");
+        ui::commandHint(applied ? "Change the depth, the operation or the bodies, and it is made again."
                                 : "Move to set the depth, drag the bar, or type one. Click a body above to "
                                   "leave it out. J joins, D cuts, I intersects, N makes a new body; "
                                   "Enter finishes, Esc goes back.");
@@ -2801,23 +2781,19 @@ void SketchTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& fi
         // Extrude has to extrude.
         switch (stage_) {
         case SketchStage::Draw:
-            if (editing())            finish(scene, camera, undo, false);
-            else                      beginExtrude(&camera);
+            finish(scene, camera, undo, false);
             break;
         case SketchStage::Regions:
-            if (build_ == SketchBuild::Revolve) beginTurn();
-            else                                beginDepth();
+            beginDepth();
             break;
-        case SketchStage::Depth:
-        case SketchStage::Turn:    finish(scene, camera, undo, true); break;
+        case SketchStage::Depth:   finish(scene, camera, undo, true); break;
         case SketchStage::Applied: dismissApplied(); break;
         case SketchStage::SelectPlane:
         case SketchStage::None:    break;
         }
         if (stage_ == SketchStage::None) finished = true;
     } else if (footer < 0) {
-        if (stage_ == SketchStage::Regions || stage_ == SketchStage::Depth ||
-            stage_ == SketchStage::Turn) {
+        if (stage_ == SketchStage::Regions || stage_ == SketchStage::Depth) {
             handleKey(27, false, false, scene, camera, undo);
         } else {
             cancel(camera);

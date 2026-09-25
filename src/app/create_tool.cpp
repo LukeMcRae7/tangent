@@ -389,6 +389,9 @@ void CreateTool::start(PrimitiveKind kind) {
     kind_ = kind;
     stage_ = CreateStage::SelectPlane;
     hoveredPlane_ = PlaneChoice::XY;
+    picker_.reset();
+    planeOffset_ = 0.0;
+    planeTilt_ = 0.0;
     selectedPlane_ = PlaneChoice::None;
     planeOrigin_ = Vec3{0, 0, 0};
     planeNormal_ = Vec3{0, 0, 1};
@@ -480,6 +483,9 @@ void CreateTool::restoreCamera(Camera& camera) {
 void CreateTool::commitPlaneSelection(Camera& camera) {
     if (stage_ != CreateStage::SelectPlane) return;
     selectedPlane_ = hoveredPlane_;
+    planeBase_ = plane();
+    planeOffset_ = 0.0;
+    planeTilt_ = 0.0;
 
     // Save camera perspective before switching to orthographic head-on
     savedCamera_.target = camera.target;
@@ -500,6 +506,19 @@ void CreateTool::commitPlaneSelection(Camera& camera) {
     stage_ = CreateStage::DrawProfile_Pt1;
     pt1_ = Vec2{0, 0};
     pt2_ = Vec2{0, 0};
+}
+
+void CreateTool::applyPlaneShift() {
+    const PlaneFrame f = offsetFrame(planeBase_, planeOffset_, planeTilt_);
+    planeOrigin_ = f.origin;
+    planeU_ = f.u;
+    planeV_ = f.v;
+    planeNormal_ = f.normal;
+}
+
+void CreateTool::adoptPickedPlane() {
+    const PlaneFrame& f = picker_.frame();
+    setHoveredPlane(picker_.choice(), f.origin, f.normal, picker_.faceObject(), picker_.faceIndex());
 }
 
 void CreateTool::choosePlane(PlaneChoice choice, Camera& camera, const Scene& scene) {
@@ -562,55 +581,10 @@ void CreateTool::update(const Scene& scene, const Camera& camera, Vec2 mousePx, 
     };
 
     if (stage_ == CreateStage::SelectPlane) {
-        // Raycast against scene objects first
-        const Ray ray = camera.rayThroughPixel(mousePx.x, mousePx.y);
-        const RayHit hit = scene.raycast(ray);
-        if (hit.hit() && hit.face != kInvalid) {
-            const SceneObject* o = scene.find(hit.object);
-            if (o) {
-                const Mat4 model = o->modelMatrix();
-                const Vec3 localN = o->body.faceNormal(hit.face);
-                const Vec3 worldN = normalize(transformVector(normalMatrix(model), localN));
-
-                // Compute face center in local space and transform to world space
-                std::vector<VertexId> fv;
-                o->body.faceVertices(hit.face, fv);
-                Vec3 localCenter{0, 0, 0};
-                for (VertexId v : fv) localCenter += o->body.vertexPosition(v);
-                if (!fv.empty()) localCenter *= (1.0f / static_cast<float>(fv.size()));
-                const Vec3 worldCenter = transformPoint(model, localCenter);
-
-                setHoveredPlane(PlaneChoice::Face, worldCenter, worldN, hit.object, hit.face);
-                return;
-            }
-        }
-
-        // Raycast against the 3 origin plane tiles (size 40mm)
-        const float tileSize = std::max(camera.distance * 0.35f, 25.0f);
-        float tXY = 1e9f, tXZ = 1e9f, tYZ = 1e9f;
-        Vec3 pXY{}, pXZ{}, pYZ{};
-        const bool hitXY = intersectRayPlane(ray, {0, 0, 0}, {0, 0, 1}, tXY, pXY) &&
-                           pointInTile(pXY, {0, 0, 0}, {1, 0, 0}, {0, 1, 0}, tileSize);
-        const bool hitXZ = intersectRayPlane(ray, {0, 0, 0}, {0, 1, 0}, tXZ, pXZ) &&
-                           pointInTile(pXZ, {0, 0, 0}, {1, 0, 0}, {0, 0, 1}, tileSize);
-        const bool hitYZ = intersectRayPlane(ray, {0, 0, 0}, {1, 0, 0}, tYZ, pYZ) &&
-                           pointInTile(pYZ, {0, 0, 0}, {0, 1, 0}, {0, 0, 1}, tileSize);
-
-        float bestT = 1e9f;
-        PlaneChoice bestChoice = PlaneChoice::XY;
-        Vec3 bestPt{0, 0, 0};
-        Vec3 bestNorm{0, 0, 1};
-
-        if (hitXY && tXY < bestT) { bestT = tXY; bestChoice = PlaneChoice::XY; bestPt = pXY; bestNorm = {0, 0, 1}; }
-        if (hitXZ && tXZ < bestT) { bestT = tXZ; bestChoice = PlaneChoice::XZ; bestPt = pXZ; bestNorm = {0, -1, 0}; }
-        if (hitYZ && tYZ < bestT) { bestT = tYZ; bestChoice = PlaneChoice::YZ; bestPt = pYZ; bestNorm = {1, 0, 0}; }
-
-        if (bestT < 1e8f) {
-            setHoveredPlane(bestChoice, {0, 0, 0}, bestNorm);
-        } else {
-            // Default to XY plane
-            setHoveredPlane(PlaneChoice::XY, {0, 0, 0}, {0, 0, 1});
-        }
+        // The same picker the sketch tool asks with: a face, an origin plane,
+        // three points or an edge.
+        picker_.update(scene, camera, mousePx);
+        if (picker_.method() == PlaneMethod::Surface) adoptPickedPlane();
         return;
     }
 
@@ -838,6 +812,12 @@ void CreateTool::handleMouseDown(Vec2 mousePx, Scene& scene, Camera& camera, Und
     isMouseDown_ = true;
 
     if (stage_ == CreateStage::SelectPlane) {
+        // Three points or an edge take more than one click, or a click on
+        // the right thing: the picker says when the plane is decided.
+        if (picker_.method() != PlaneMethod::Surface) {
+            if (!picker_.click(scene, camera)) return;
+            adoptPickedPlane();
+        }
         commitPlaneSelection(camera);
         return;
     }
@@ -1454,53 +1434,7 @@ void CreateTool::drawOverlay(const Scene& scene, const Camera& camera, Renderer&
     drawSnapIndicator(renderer, camera, activeSnap_);
 
     if (stage_ == CreateStage::SelectPlane) {
-        const float sz = std::max(camera.distance * 0.35f, 25.0f);
-        const Vec4 activeBorder = toVec4(palette::kBrand, 0.95f);
-
-        // XY Plane Card (Top / Blue)
-        const Vec4 colXY = (hoveredPlane_ == PlaneChoice::XY) ? activeBorder : Vec4{0.2f, 0.6f, 0.9f, 0.4f};
-        renderer.addLine({-sz, -sz, 0}, {sz, -sz, 0}, colXY);
-        renderer.addLine({sz, -sz, 0}, {sz, sz, 0}, colXY);
-        renderer.addLine({sz, sz, 0}, {-sz, sz, 0}, colXY);
-        renderer.addLine({-sz, sz, 0}, {-sz, -sz, 0}, colXY);
-        renderer.addTriangle({-sz, -sz, 0}, {sz, -sz, 0}, {sz, sz, 0}, Vec4{0.2f, 0.6f, 0.9f, 0.08f});
-        renderer.addTriangle({-sz, -sz, 0}, {sz, sz, 0}, {-sz, sz, 0}, Vec4{0.2f, 0.6f, 0.9f, 0.08f});
-
-        // XZ Plane Card (Front / Green)
-        const Vec4 colXZ = (hoveredPlane_ == PlaneChoice::XZ) ? activeBorder : Vec4{0.3f, 0.8f, 0.4f, 0.4f};
-        renderer.addLine({-sz, 0, -sz}, {sz, 0, -sz}, colXZ);
-        renderer.addLine({sz, 0, -sz}, {sz, 0, sz}, colXZ);
-        renderer.addLine({sz, 0, sz}, {-sz, 0, sz}, colXZ);
-        renderer.addLine({-sz, 0, sz}, {-sz, 0, -sz}, colXZ);
-        renderer.addTriangle({-sz, 0, -sz}, {sz, 0, -sz}, {sz, 0, sz}, Vec4{0.3f, 0.8f, 0.4f, 0.08f});
-        renderer.addTriangle({-sz, 0, -sz}, {sz, 0, sz}, {-sz, 0, sz}, Vec4{0.3f, 0.8f, 0.4f, 0.08f});
-
-        // YZ Plane Card (Right / Red)
-        const Vec4 colYZ = (hoveredPlane_ == PlaneChoice::YZ) ? activeBorder : Vec4{0.9f, 0.4f, 0.3f, 0.4f};
-        renderer.addLine({0, -sz, -sz}, {0, sz, -sz}, colYZ);
-        renderer.addLine({0, sz, -sz}, {0, sz, sz}, colYZ);
-        renderer.addLine({0, sz, sz}, {0, -sz, sz}, colYZ);
-        renderer.addLine({0, -sz, sz}, {0, -sz, -sz}, colYZ);
-        renderer.addTriangle({0, -sz, -sz}, {0, sz, -sz}, {0, sz, sz}, Vec4{0.9f, 0.4f, 0.3f, 0.08f});
-        renderer.addTriangle({0, -sz, -sz}, {0, sz, sz}, {0, -sz, sz}, Vec4{0.9f, 0.4f, 0.3f, 0.08f});
-
-        // Object Face Highlight
-        if (hoveredPlane_ == PlaneChoice::Face && faceObject_ != kNoObject) {
-            const SceneObject* o = scene.find(faceObject_);
-            if (o && faceIndex_ < o->body.faceCount()) {
-                const RenderMesh& rm = o->render;
-                const Mat4 model = o->modelMatrix();
-                for (size_t i = 0; i < rm.triangleFace.size(); ++i) {
-                    if (rm.triangleFace[i] != faceIndex_) continue;
-                    renderer.addTriangle(
-                        transformPoint(model, rm.positions[rm.triangles[i * 3 + 0]]),
-                        transformPoint(model, rm.positions[rm.triangles[i * 3 + 1]]),
-                        transformPoint(model, rm.positions[rm.triangles[i * 3 + 2]]),
-                        Vec4{palette::kBrand.r, palette::kBrand.g, palette::kBrand.b, 0.45f});
-                }
-                renderer.addLine(planeOrigin_, planeOrigin_ + planeNormal_ * 15.0f, activeBorder);
-            }
-        }
+        picker_.drawOverlay(scene, camera, renderer);
         return;
     }
 
@@ -1772,13 +1706,8 @@ bool CreateTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& ou
     switch (stage_) {
     // -----------------------------------------------------------------------
     case CreateStage::SelectPlane: {
-        ui::commandRow("Plane");
-        if (ImGui::Button("Top")) choosePlane(PlaneChoice::XY, camera, scene);
-        ImGui::SameLine();
-        if (ImGui::Button("Front")) choosePlane(PlaneChoice::XZ, camera, scene);
-        ImGui::SameLine();
-        if (ImGui::Button("Right")) choosePlane(PlaneChoice::YZ, camera, scene);
-        ui::commandHint("Or click a face of an object to draw on it.  7 / 1 / 3 pick a plane.");
+        if (picker_.drawRows("Click a face of a body to draw on it, or an origin plane."))
+            choosePlane(picker_.choice(), camera, scene);
         footer = ui::commandFooter(nullptr);
         break;
     }
@@ -1788,6 +1717,22 @@ bool CreateTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& ou
         char at[64];
         std::snprintf(at, sizeof at, "%.2f, %.2f", pt1_.x, pt1_.y);
         ui::commandValue(kind_ == PrimitiveKind::Cylinder ? "Centre" : "Corner", at);
+        // Where the plane stands and how it leans: the same two rows a
+        // sketch's plane has, before anything is drawn on it.
+        {
+            const double span = std::max(extent, std::fabs(planeOffset_));
+            const ui::NumberEdit e = ui::commandNumber("Offset", planeOffset_, "mm", false, false, nullptr,
+                                                       -span, span, true);
+            if (e.dragged) { planeOffset_ = e.value; applyPlaneShift(); }
+            const ui::NumberEdit t = ui::commandNumber("Tilt", planeTilt_ * kRad2Deg, "\xC2\xB0", false, false,
+                                                       nullptr, -90.0, 90.0, true);
+            if (t.dragged) { planeTilt_ = std::clamp(t.value, -90.0, 90.0) * kDeg2Rad; applyPlaneShift(); }
+            if (e.released || t.released) {
+                float y = 0.0f, p = 0.0f;
+                Camera::anglesFor(planeNormal_, y, p);
+                camera.animateTo(planeOrigin_, camera.distance, y, p);
+            }
+        }
         ui::commandHint("Click to place it.  Ctrl for free placement.");
         footer = ui::commandFooter(nullptr);
         break;

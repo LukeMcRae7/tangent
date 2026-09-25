@@ -94,8 +94,18 @@ int main(int argc, char** argv) {
             int step = 1;
             if (i + 1 < argc && argv[i + 1][0] != '-') step = std::atoi(argv[++i]);
             app.setSvgDemo(file, step);
+        } else if (std::strcmp(argv[i], "--pen-demo") == 0 && i + 1 < argc) {
+            app.setPenDemo(std::atoi(argv[++i]));
+        } else if (std::strcmp(argv[i], "--project-demo") == 0 && i + 1 < argc) {
+            app.setProjectDemo(std::atoi(argv[++i]));
+        } else if (std::strcmp(argv[i], "--plane-demo") == 0 && i + 1 < argc) {
+            app.setPlaneDemo(std::atoi(argv[++i]));
         } else if (std::strcmp(argv[i], "--sketch-demo") == 0 && i + 1 < argc) {
             app.setSketchDemo(std::atoi(argv[++i]));
+        } else if (std::strcmp(argv[i], "--sweep-demo") == 0 && i + 1 < argc) {
+            app.setSweepDemo(std::atoi(argv[++i]));
+        } else if (std::strcmp(argv[i], "--loft-demo") == 0 && i + 1 < argc) {
+            app.setLoftDemo(std::atoi(argv[++i]));
         } else if (std::strcmp(argv[i], "--revolve-demo") == 0 && i + 1 < argc) {
             app.setRevolveDemo(std::atoi(argv[++i]));
         } else if (std::strcmp(argv[i], "--hole-demo") == 0 && i + 1 < argc) {

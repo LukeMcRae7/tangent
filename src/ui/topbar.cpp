@@ -424,6 +424,23 @@ float drawTopBar(UiContext& ctx) {
                                     : "Sketching needs the exact kernel, which this build does not have",
                   brep::available()))
         ctx.actions.sketch = true;
+    // The three that build from an outline, beside the sketch they usually
+    // start from -- and able to start from a face as well.
+    ImGui::SameLine();
+    if (barButton(ctx, "revolve", Glyph::Revolve,
+                  "Revolve: turn a sketch region or a flat face about a line, an edge or an axis",
+                  brep::available()))
+        ctx.actions.revolve = true;
+    ImGui::SameLine();
+    if (barButton(ctx, "sweep", Glyph::Sweep,
+                  "Sweep: carry a sketch region or a flat face along sketch curves or edges",
+                  brep::available()))
+        ctx.actions.sweep = true;
+    ImGui::SameLine();
+    if (barButton(ctx, "loft", Glyph::Loft,
+                  "Loft: a solid through two or more outlines -- sketch regions or flat faces",
+                  brep::available()))
+        ctx.actions.loft = true;
     ImGui::SameLine();
     if (barButton(ctx, "plane", Glyph::Plane, "A flat plate to start from")) {
         ctx.actions.addRequested = true;

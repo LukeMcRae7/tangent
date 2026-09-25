@@ -314,8 +314,27 @@ public:
     ObjectId contextObject() const {
         if (!selection_.empty()) return selection_.back();
         if (!elements_.empty()) return elements_.front().object;
+        if (sketch_.valid()) return sketch_.object;
         return kNoObject;
     }
+
+    // ---- A sketch, picked as a thing of its own ----------------------------
+    // A sketch is in the model, not only in a history: it can be pointed at in
+    // the view or in the outliner, and then edited or built from. Selecting it
+    // takes the object and element selection out of play, and selecting
+    // anything else drops it.
+    struct SketchRef {
+        ObjectId object = kNoObject;
+        ElementId uid = 0;
+        bool valid() const { return object != kNoObject && uid != 0; }
+        bool operator==(const SketchRef& o) const { return object == o.object && uid == o.uid; }
+    };
+    void selectSketch(SketchRef ref);
+    void clearSketchSelection() { sketch_ = SketchRef{}; }
+    // The selected sketch, or an invalid ref when there is none or it has gone.
+    SketchRef selectedSketch() const;
+    // The Sketch feature `ref` names, or null.
+    const Feature* sketchFeature(SketchRef ref) const;
 
     // ---- Queries ---------------------------------------------------------
     AABB bounds() const;
@@ -379,6 +398,7 @@ private:
     std::vector<std::unique_ptr<SceneObject>> objects_;
     std::vector<ObjectId> selection_;
     std::vector<ElementRef> elements_;
+    SketchRef sketch_;
     ObjectId nextId_ = 1;
 
     // Handed to each new feature so it has an identity independent of where it

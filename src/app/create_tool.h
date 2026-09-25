@@ -2,6 +2,7 @@
 
 #include "app/camera.h"
 #include "app/extrude_ops.h"
+#include "app/plane_pick.h"
 #include "app/plane_snap.h"
 #include "app/snap.h"
 #include "app/undo.h"
@@ -26,7 +27,6 @@ enum class CreateStage {
     Applied            // 6. Done, and adjustable from the panel until Done is pressed
 };
 
-enum class PlaneChoice { None, XY, XZ, YZ, Face };
 
 struct SavedCamera {
     Vec3 target{0.0f, 0.0f, 0.0f};
@@ -183,6 +183,16 @@ private:
 
     // Plane definition
     PlaneChoice hoveredPlane_ = PlaneChoice::XY;
+    // Asks for the plane the way the sketch tool does. adoptPickedPlane takes
+    // what it chose as the plane hovered.
+    PlanePicker picker_;
+    void adoptPickedPlane();
+    // How far the plane stands off where it was put, and how far it leans:
+    // the same two numbers a sketch's plane has.
+    PlaneFrame planeBase_;
+    Real planeOffset_ = 0.0;
+    Real planeTilt_ = 0.0;
+    void applyPlaneShift();
     PlaneChoice selectedPlane_ = PlaneChoice::None;
     Vec3 planeOrigin_{0, 0, 0};
     Vec3 planeNormal_{0, 0, 1};

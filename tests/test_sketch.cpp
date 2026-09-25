@@ -9,6 +9,7 @@
 #include "geom/brep.h"
 #include "scene/scene.h"
 #include "scene/serialize.h"
+#include "scene/sketch_project.h"
 #include "temp_path.h"
 
 #include <algorithm>
@@ -616,6 +617,332 @@ int main() {
             check(!why.empty(), "with a reason: " + why);
         }
 
+        std::printf("--- a path, joined end to end ---\n");
+        // Standing up through the origin: x across, z up. Where the paths below
+        // are drawn, so they leave the top plane a profile is drawn on.
+        auto standing = [] {
+            Sketch s;
+            s.plane.xAxis = {1, 0, 0};
+            s.plane.yAxis = {0, 0, 1};
+            return s;
+        };
+        {
+            Sketch s = standing();
+            const SketchId a = s.addPoint({0, 0}), b = s.addPoint({0, 20}), c = s.addPoint({15, 20});
+            const SketchId up = s.addLine(a, b), over = s.addLine(b, c);
+            SketchPath p;
+            std::string why;
+            check(sketchPathOf(s, {over, up}, p, &why), "two lines meeting make a path: " + why);
+            check(p.entities.size() == 2 && !p.closed, "an open one of two curves");
+            const std::vector<Vec2> pts = sketchPathPoints(s, p);
+            check(pts.size() == 3, "three points along it, the joint once");
+            check(near(length(pts.front() - pts.back()), std::sqrt(15.0 * 15.0 + 20.0 * 20.0)),
+                  "running from one end to the other");
+
+            SketchPath through;
+            check(sketchPathThrough(s, over, through, &why) && through.entities.size() == 2,
+                  "clicking either line picks the whole path");
+
+            // A third line off the corner is a branch no sweep can follow.
+            const SketchId d = s.addPoint({-10, 20});
+            const SketchId spur = s.addLine(b, d);
+            check(!sketchPathOf(s, {up, over, spur}, p, &why), "three lines at one point are refused");
+            check(why.find("branches") != std::string::npos, "as a branch: " + why);
+            check(sketchPathThrough(s, up, through) && through.entities.size() == 1,
+                  "and clicking one stops at the branch");
+
+            const SketchId far1 = s.addPoint({40, 0}), far2 = s.addPoint({40, 10});
+            const SketchId apart = s.addLine(far1, far2);
+            check(!sketchPathOf(s, {up, apart}, p, &why), "two lines that do not meet are refused");
+        }
+
+        std::printf("--- a profile carried along a path ---\n");
+        auto square = [](Real side) {
+            Sketch sk;
+            sk.addRectangle({-side / 2, -side / 2}, side, side);
+            solveSketch(sk);
+            return sk;
+        };
+        {
+            // Straight up: a prism by another name, 4 x 4 x 30.
+            const Sketch sk = square(4);
+            const std::vector<SketchProfile> rs = sketchProfiles(sk);
+            Sketch s = standing();
+            const SketchId line = s.addLine(s.addPoint({0, 0}), s.addPoint({0, 30}));
+            std::string why;
+            BrepRef made = brep::sweepSketch(sk, rs, {rs.front().key}, s, {line}, 31, &why);
+            check(made != nullptr, "a square swept up a line builds: " + why);
+            if (made) {
+                const Body b(std::move(made));
+                check(b.health().solid(), "a solid");
+                check(near(b.health(false).volume, 16.0 * 30.0, 1e-4),
+                      "of 4 x 4 x 30: " + std::to_string(b.health(false).volume));
+                std::vector<FaceId> fs;
+                b.allFaces(fs);
+                check(fs.size() == 6, "with six faces");
+                std::set<ElementId> names;
+                for (FaceId f : fs) names.insert(b.faceName(f));
+                check(names.size() == fs.size() && !names.count(0), "every one named on its own");
+                check(b.findFace(nameId(31, IdRole::Cap, 0)) != kNoFace &&
+                          b.findFace(nameId(31, IdRole::Cap, 1)) != kNoFace,
+                      "the two ends are the caps");
+            }
+
+            // Drawn from the top down it is the same path, and the square is
+            // carried from the end it sits at rather than from the far one.
+            Sketch down = standing();
+            const SketchId back = down.addLine(down.addPoint({0, 30}), down.addPoint({0, 0}));
+            BrepRef same = brep::sweepSketch(sk, rs, {rs.front().key}, down, {back}, 32, &why);
+            check(same != nullptr, "the path drawn the other way builds too: " + why);
+            if (same) {
+                const Body b(std::move(same));
+                const AABB box = b.bounds();
+                check(near(box.min.z, 0.0, 1e-6) && near(box.max.z, 30.0, 1e-6),
+                      "from the profile up, not from the top of the path");
+            }
+        }
+        {
+            // Round a corner: 20 up, then 15 across. A mitred corner on a
+            // section symmetric about the bend adds outside what it takes
+            // inside, so the volume is the area times the centreline's length.
+            const Sketch sk = square(4);
+            const std::vector<SketchProfile> rs = sketchProfiles(sk);
+            Sketch s = standing();
+            const SketchId b = s.addPoint({0, 20});
+            const SketchId up = s.addLine(s.addPoint({0, 0}), b);
+            const SketchId over = s.addLine(b, s.addPoint({15, 20}));
+            std::string why;
+            BrepRef made = brep::sweepSketch(sk, rs, {rs.front().key}, s, {up, over}, 33, &why);
+            check(made != nullptr, "a square round a corner builds: " + why);
+            if (made) {
+                const Body body(std::move(made));
+                check(body.health().solid(), "a solid");
+                check(near(body.health(false).volume, 16.0 * 35.0, 1e-3),
+                      "of the area times 35 along the middle: " +
+                          std::to_string(body.health(false).volume));
+            }
+        }
+        {
+            // A round bar bent a quarter of the way round a 20 mm radius:
+            // Pappus again, pi r^2 times the quarter circle the centre travels.
+            Sketch sk;
+            sk.addCircle(sk.addPoint({20, 0}), 2);
+            solveSketch(sk);
+            const std::vector<SketchProfile> rs = sketchProfiles(sk);
+            Sketch s = standing();
+            const SketchId arc = s.addArc(s.addPoint({0, 0}), s.addPoint({20, 0}), s.addPoint({0, 20}));
+            std::string why;
+            BrepRef made = brep::sweepSketch(sk, rs, {rs.front().key}, s, {arc}, 34, &why);
+            check(made != nullptr, "a circle round an arc builds: " + why);
+            if (made) {
+                const Body b(std::move(made));
+                check(b.health().solid(), "a solid");
+                const Real exact = kPi * 4.0 * (20.0 * kPi / 2.0);
+                check(near(b.health(false).volume, exact, 1e-3),
+                      "of the volume Pappus says: " + std::to_string(b.health(false).volume) +
+                          " against " + std::to_string(exact));
+            }
+        }
+        {
+            // A square tube: the bore is carried along with the outline and
+            // taken out of it.
+            Sketch sk;
+            sk.addRectangle({-5, -5}, 10, 10);
+            sk.addCircle(sk.addPoint({0, 0}), 2);
+            solveSketch(sk);
+            const std::vector<SketchProfile> rs = sketchProfiles(sk);
+            const std::vector<SketchId> filled = sketchFilledProfiles(sk, rs);
+            Sketch s = standing();
+            const SketchId line = s.addLine(s.addPoint({0, 0}), s.addPoint({0, 10}));
+            std::string why;
+            BrepRef made = brep::sweepSketch(sk, rs, filled, s, {line}, 35, &why);
+            check(made != nullptr, "a holed square swept up a line builds: " + why);
+            if (made) {
+                const Body b(std::move(made));
+                check(b.health().solid(), "a solid");
+                check(near(b.health(false).volume, (100.0 - kPi * 4.0) * 10.0, 1e-3),
+                      "with the bore gone all the way: " + std::to_string(b.health(false).volume));
+            }
+        }
+        {
+            // A path lying in the profile's own plane would carry it edgeways.
+            const Sketch sk = square(4);
+            const std::vector<SketchProfile> rs = sketchProfiles(sk);
+            Sketch flat;
+            const SketchId line = flat.addLine(flat.addPoint({0, 0}), flat.addPoint({30, 0}));
+            std::string why;
+            check(!brep::sweepSketch(sk, rs, {rs.front().key}, flat, {line}, 36, &why),
+                  "a path along the profile's plane is refused");
+            check(why.find("along the profile's plane") != std::string::npos, "and says so: " + why);
+        }
+
+        std::printf("--- built from a body's own faces and edges ---\n");
+        {
+            PrimitiveSpec spec;
+            spec.kind = PrimitiveKind::Box;
+            spec.box = {10, 10, 10};
+            const Body box(brep::primitive(spec));
+            const AABB bb = box.bounds();
+            std::vector<FaceId> fs;
+            box.allFaces(fs);
+            auto faceFacing = [&](Vec3 n) {
+                for (FaceId f : fs)
+                    if (dot(normalize(box.faceNormal(f)), n) > 0.999) return f;
+                return kNoFace;
+            };
+            const FaceId side = faceFacing({1, 0, 0}), top = faceFacing({0, 0, 1});
+            check(side != kNoFace && top != kNoFace, "the box has a side and a top");
+
+            // The side face turned a quarter of the way round its own upright
+            // edge: a quarter cylinder, of the face's width in radius.
+            std::string why;
+            const Vec3 hinge{bb.max.x, bb.min.y, bb.min.z};
+            BrepRef turned = brep::revolveOutline({nullptr, nullptr, {}, &box.brep(), {side}}, hinge, {0, 0, 1},
+                                                  kPi * 0.5, 51, &why);
+            check(turned != nullptr, "a box's face turns about its own edge: " + why);
+            if (turned) {
+                const Body b(std::move(turned));
+                check(b.health().solid(), "a solid");
+                check(near(b.health(false).volume, kPi * 100.0 * 10.0 / 4.0, 1e-3),
+                      "a quarter cylinder: " + std::to_string(b.health(false).volume));
+                std::set<ElementId> names;
+                std::vector<FaceId> tf;
+                b.allFaces(tf);
+                for (FaceId f : tf) names.insert(b.faceName(f));
+                check(names.size() == tf.size(), "every face named on its own");
+            }
+
+            // The top face swept down one of the box's own upright edges: the
+            // same box again, swept from the end of the edge the face is at.
+            EdgeId upright = kInvalid;
+            std::vector<EdgeId> es;
+            box.allEdges(es);
+            for (EdgeId e : es) {
+                Vec3 a, c;
+                box.edgePositions(e, a, c);
+                if (std::fabs(a.x - c.x) < 1e-9 && std::fabs(a.y - c.y) < 1e-9) { upright = e; break; }
+            }
+            BrepRef swept = brep::sweepOutline({nullptr, nullptr, {}, &box.brep(), {top}},
+                                               {nullptr, {}, &box.brep(), {upright}}, 52, &why);
+            check(swept != nullptr, "a box's top swept down its own edge: " + why);
+            if (swept)
+                check(near(Body(std::move(swept)).health(false).volume, 1000.0, 1e-3),
+                      "makes the box's volume again");
+
+            // The top face lofted to a 5 mm square standing 10 above it.
+            Sketch above;
+            above.plane.origin = {(bb.min.x + bb.max.x) / 2, (bb.min.y + bb.max.y) / 2, bb.max.z + 10};
+            above.addRectangle({-2.5, -2.5}, 5, 5);
+            solveSketch(above);
+            const std::vector<SketchProfile> ra = sketchProfiles(above);
+            BrepRef lofted = brep::loftOutlines({{nullptr, nullptr, {}, &box.brep(), {top}},
+                                                 {&above, &ra, {ra.front().key}, nullptr, {}}},
+                                                true, 53, &why);
+            check(lofted != nullptr, "a box's top lofts to a sketch above it: " + why);
+            if (lofted)
+                check(near(Body(std::move(lofted)).health(false).volume, 10.0 / 3.0 * 175.0, 1e-3),
+                      "as a frustum");
+
+            // A face that is not flat is refused as a profile.
+            spec.kind = PrimitiveKind::Cylinder;
+            spec.cylinder = {20, 10, 64};
+            const Body can(brep::primitive(spec));
+            std::vector<FaceId> cf;
+            can.allFaces(cf);
+            FaceId round = kNoFace, capTop = kNoFace;
+            for (FaceId f : cf) {
+                if (can.faceKind(f) == SurfaceKind::Cylinder) round = f;
+                else if (normalize(can.faceNormal(f)).z > 0.999) capTop = f;
+            }
+            check(!brep::revolveOutline({nullptr, nullptr, {}, &can.brep(), {round}}, {0, 0, 0}, {0, 0, 1},
+                                        kPi, 54, &why),
+                  "a round face is refused as a profile");
+            check(why.find("flat") != std::string::npos, "and says so: " + why);
+
+            // A small circle carried round the rim of the can's top: a torus,
+            // 2 pi^2 R r^2 -- the path a closed edge of a body.
+            std::vector<EdgeId> rim;
+            can.faceEdges(capTop, rim);
+            const AABB cb = can.bounds();
+            Sketch ring;
+            ring.plane.xAxis = {1, 0, 0};
+            ring.plane.yAxis = {0, 0, 1};
+            ring.addCircle(ring.addPoint({cb.max.x, cb.max.z}), 2);
+            solveSketch(ring);
+            const std::vector<SketchProfile> rr = sketchProfiles(ring);
+            BrepRef torus = brep::sweepOutline({&ring, &rr, {rr.front().key}, nullptr, {}},
+                                               {nullptr, {}, &can.brep(), rim}, 55, &why);
+            check(torus != nullptr, "a circle carried round a rim builds: " + why);
+            if (torus)
+                check(near(Body(std::move(torus)).health(false).volume, 2.0 * kPi * kPi * 20.0 * 4.0, 1e-2),
+                      "a torus");
+        }
+
+        std::printf("--- outlines lofted into a solid ---\n");
+        auto lifted = [](Sketch sk, Real z) {
+            sk.plane.origin = {0, 0, z};
+            return sk;
+        };
+        {
+            // A 10 square at the bottom and a 5 square 10 up, joined straight:
+            // a frustum, h / 3 (A1 + A2 + sqrt(A1 A2)).
+            const Sketch bottom = square(10);
+            const Sketch top = lifted(square(5), 10);
+            const std::vector<SketchProfile> rb = sketchProfiles(bottom), rt = sketchProfiles(top);
+            std::string why;
+            BrepRef made = brep::loftSketches({{&bottom, &rb.front()}, {&top, &rt.front()}}, true, 41, &why);
+            check(made != nullptr, "two squares loft into a frustum: " + why);
+            if (made) {
+                const Body b(std::move(made));
+                check(b.health().solid(), "a solid");
+                const Real exact = 10.0 / 3.0 * (100.0 + 25.0 + 50.0);
+                check(near(b.health(false).volume, exact, 1e-3),
+                      "of the frustum's volume: " + std::to_string(b.health(false).volume));
+                std::vector<FaceId> fs;
+                b.allFaces(fs);
+                check(fs.size() == 6, "six faces: four walls and two ends");
+                std::set<ElementId> names;
+                for (FaceId f : fs) names.insert(b.faceName(f));
+                check(names.size() == fs.size() && !names.count(0), "every one named on its own");
+                check(b.findFace(nameId(41, IdRole::Cap, 0)) != kNoFace, "the bottom is the first cap");
+            }
+        }
+        {
+            // Two equal circles, smoothly: a cylinder.
+            Sketch a;
+            a.addCircle(a.addPoint({0, 0}), 5);
+            solveSketch(a);
+            const Sketch b = lifted(a, 10);
+            const std::vector<SketchProfile> ra = sketchProfiles(a), rb = sketchProfiles(b);
+            std::string why;
+            BrepRef made = brep::loftSketches({{&a, &ra.front()}, {&b, &rb.front()}}, false, 42, &why);
+            check(made != nullptr, "two circles loft: " + why);
+            if (made)
+                check(near(Body(std::move(made)).health(false).volume, kPi * 25.0 * 10.0, 1e-3),
+                      "into a cylinder's volume");
+        }
+        {
+            Sketch holed;
+            holed.addRectangle({-5, -5}, 10, 10);
+            holed.addCircle(holed.addPoint({0, 0}), 2);
+            solveSketch(holed);
+            const Sketch top = lifted(square(5), 10);
+            const std::vector<SketchProfile> rh = sketchProfiles(holed), rt = sketchProfiles(top);
+            const SketchProfile* ring = nullptr;
+            for (const SketchProfile& p : rh) if (!p.holes.empty()) ring = &p;
+            std::string why;
+            check(ring && !brep::loftSketches({{&holed, ring}, {&top, &rt.front()}}, true, 43, &why),
+                  "a region with a hole is refused");
+            check(why.find("hole") != std::string::npos, "and says why: " + why);
+
+            const Sketch same = square(5);
+            const std::vector<SketchProfile> rs = sketchProfiles(same);
+            why.clear();
+            check(!brep::loftSketches({{&same, &rs.front()}, {&same, &rs.front()}}, true, 44, &why),
+                  "two outlines on one plane are refused");
+            check(why.find("same plane") != std::string::npos, "and say why: " + why);
+        }
+
         std::printf("--- a dimension changes, and nothing is renamed ---\n");
         {
             // The reason a sketch is in the history at all. Widen the rectangle
@@ -926,6 +1253,231 @@ int main() {
                       "and it re-evaluates to the same part");
             }
             std::remove(path.c_str());
+        }
+
+        std::printf("--- a revolve of the part's own face about its own edge ---\n");
+        {
+            // A 10 mm box's side face turned a quarter round its upright edge.
+            // One way the quarter cylinder swings out of the box and adds to
+            // it; the other way it swings into the box and adds nothing. The
+            // edge has no direction of its own, so Reverse picks which.
+            Scene scene;
+            PrimitiveSpec spec;
+            spec.kind = PrimitiveKind::Box;
+            spec.box = {10, 10, 10};
+            const ObjectId id = scene.addPrimitive(PrimitiveKind::Box, spec, {0, 0, 0});
+            const Body before = scene.find(id)->body;
+            const AABB bb = before.bounds();
+            std::vector<FaceId> fs;
+            before.allFaces(fs);
+            FaceId side = kNoFace;
+            for (FaceId f : fs)
+                if (normalize(before.faceNormal(f)).x > 0.999) side = f;
+            std::vector<EdgeId> es;
+            before.allEdges(es);
+            EdgeId hinge = kInvalid;
+            for (EdgeId e : es) {
+                Vec3 a, b;
+                before.edgePositions(e, a, b);
+                if (std::fabs(a.x - bb.max.x) < 1e-9 && std::fabs(b.x - bb.max.x) < 1e-9 &&
+                    std::fabs(a.y - bb.min.y) < 1e-9 && std::fabs(b.y - bb.min.y) < 1e-9)
+                    hinge = e;
+            }
+            Feature turn;
+            turn.kind = FeatureKind::RevolveProfile;
+            turn.uid = scene.takeFeatureUid();
+            turn.faces = nameFaces(before, {side});
+            turn.edges = nameEdges(before, {hinge}, false);
+            turn.revolveAngle = kPi * 0.5;
+            turn.extrudeOp = ExtrudeOp::Join;
+            std::string why;
+            check(side != kNoFace && hinge != kInvalid, "the box has the face and the edge");
+            check(scene.addFeature(id, turn, &why), "a revolve of its own face goes in its history: " + why);
+            const Real one = scene.find(id)->body.health(false).volume;
+
+            std::vector<Feature> chain = scene.find(id)->features;
+            chain.back().revolveReverse = true;
+            check(scene.setFeatures(id, chain, &why), "and turned the other way: " + why);
+            const Real other = scene.find(id)->body.health(false).volume;
+            const Real out = 1000.0 + kPi * 100.0 * 10.0 / 4.0;
+            check((near(one, out, 1e-3) && near(other, 1000.0, 1e-3)) ||
+                      (near(one, 1000.0, 1e-3) && near(other, out, 1e-3)),
+                  "one way adds a quarter cylinder, the other nothing: " + std::to_string(one) + ", " +
+                      std::to_string(other));
+
+            // Make it the way that adds, and send it through a file.
+            if (near(other, 1000.0, 1e-3)) {
+                chain.back().revolveReverse = false;
+                scene.setFeatures(id, chain, &why);
+            }
+            const std::string file = tempPath("face_revolve.tng");
+            check(saveProject(scene, file).ok, "saved");
+            Scene back;
+            const ProjectResult loaded = loadProject(back, file);
+            check(loaded.ok, "loaded: " + loaded.error);
+            if (loaded.ok && back.objectCount() == 1) {
+                const Feature& f = back.objects().front()->features.back();
+                check(f.kind == FeatureKind::RevolveProfile && f.sketchUid == 0 && !f.faces.empty() &&
+                          !f.edges.empty(),
+                      "the revolve came back naming the face and the edge");
+                check(near(back.objects().front()->body.health(false).volume, out, 1e-3),
+                      "and re-evaluates to the same part");
+            }
+            std::remove(file.c_str());
+        }
+
+        std::printf("--- a smooth join and a projection through a file ---\n");
+        {
+            Sketch sk;
+            const SketchId a = sk.addPoint({0, 0}), h1 = sk.addPoint({5, 0}), h2 = sk.addPoint({10, 5});
+            const SketchId m = sk.addPoint({15, 5}), h3 = sk.addPoint({20, 5}), h4 = sk.addPoint({25, 0});
+            const SketchId e = sk.addPoint({30, 0});
+            const SketchId c1 = sk.addBezier(a, h1, h2, m);
+            const SketchId c2 = sk.addBezier(m, h3, h4, e);
+            sk.constrain(SketchRule::Smooth, c1, c2);
+            check(solveSketch(sk).solved, "a smooth join solves");
+            // And a box's top face projected into the same sketch, following it.
+            Scene scene;
+            PrimitiveSpec spec;
+            spec.kind = PrimitiveKind::Box;
+            spec.box = {10, 10, 10};
+            const ObjectId id = scene.addPrimitive(PrimitiveKind::Box, spec, {0, 0, 0});
+            const Body& box = scene.find(id)->body;
+            std::vector<FaceId> fs;
+            box.allFaces(fs);
+            FaceId top = kNoFace;
+            for (FaceId f : fs)
+                if (normalize(box.faceNormal(f)).z > 0.999) top = f;
+            sk.plane.origin = {0, 0, box.bounds().max.z};
+            std::string why;
+            check(projectFace(sk, box, Mat4::identity(), top, true, nullptr, &why), "the top face projects: " + why);
+            const SketchId linked = sk.entities.back().id;
+            const uint64_t edgeName = sk.entities.back().source;
+            Feature step = sketchStep(scene.takeFeatureUid(), sk);
+            check(scene.addFeature(id, step, &why), "into the box's history: " + why);
+            const std::string file = tempPath("smooth.tng");
+            check(saveProject(scene, file).ok, "saved");
+            Scene back;
+            const ProjectResult loaded = loadProject(back, file);
+            check(loaded.ok, "loaded: " + loaded.error);
+            if (loaded.ok && back.objectCount() == 1) {
+                const Feature& f2 = back.objects().front()->features.back();
+                const Sketch& s2 = f2.sketch;
+                check(std::any_of(s2.constraints.begin(), s2.constraints.end(),
+                                  [](const SketchConstraint& k) { return k.rule == SketchRule::Smooth; }),
+                      "the smooth join came back");
+                check(edgeName != 0 && s2.entity(linked) && s2.entity(linked)->source == edgeName &&
+                          s2.entity(c1)->source == 0,
+                      "and so did which edge a projected line follows");
+                check(!f2.errored, "and the sketch finds that edge again: " + f2.error);
+            }
+            std::remove(file.c_str());
+        }
+
+        std::printf("--- a sweep and a loft in the history ---\n");
+        {
+            // A 4 mm square up a path 30 long, then the path lengthened in its
+            // own sketch: the sweep follows it, and keeps its faces' names.
+            Sketch plan;
+            plan.addRectangle({-2, -2}, 4, 4);
+            Sketch path = standing();
+            const SketchId top = path.addPoint({0, 30});
+            const SketchId line = path.addLine(path.addPoint({0, 0}), top);
+            Feature sweep;
+            sweep.kind = FeatureKind::SweepProfile;
+            sweep.uid = 3;
+            sweep.sketchUid = 1;
+            sweep.profileKeys = {sketchProfiles(plan).front().key};
+            sweep.pathSketchUid = 2;
+            sweep.pathEntities = {line};
+            std::vector<Feature> chain{sketchStep(1, plan), sketchStep(2, path), sweep};
+            Body body;
+            check(evaluateFeatures(chain, body), "a sketch, a path and a sweep make a body: " + chain[2].error);
+            check(near(body.health(false).volume, 480.0, 1e-4), "of 4 x 4 x 30");
+            const FaceId end = body.findFace(nameId(3, IdRole::Cap, 1));
+            check(end != kNoFace && near(body.faceCentroid(end).z, 30.0, 1e-6), "its far end is at the top");
+
+            chain[1].sketch.point(top)->at = {0, 45};
+            Body longer;
+            check(evaluateFeatures(chain, longer), "re-runs with the path longer");
+            check(near(longer.health(false).volume, 16.0 * 45.0, 1e-4), "and the part follows it");
+            const FaceId end2 = longer.findFace(nameId(3, IdRole::Cap, 1));
+            check(end2 != kNoFace && near(longer.faceCentroid(end2).z, 45.0, 1e-6),
+                  "with the same far end, moved rather than renamed");
+
+            // A path that is no longer earlier in the history fails the step.
+            std::vector<Feature> missing{sketchStep(1, plan), sweep};
+            Body none;
+            evaluateFeatures(missing, none);
+            check(missing[1].errored && missing[1].error.find("path") != std::string::npos,
+                  "a sweep without its path fails, saying so: " + missing[1].error);
+
+            // Through a file and back.
+            Scene scene;
+            std::string why;
+            const ObjectId id = scene.addFeatureChain({sketchStep(1, plan), sketchStep(2, path), sweep},
+                                                      "Swept", &why);
+            check(id != kNoObject, "a swept part is made from a chain: " + why);
+            const std::string file = tempPath("sweep.tng");
+            check(saveProject(scene, file).ok, "saved");
+            Scene back;
+            const ProjectResult loaded = loadProject(back, file);
+            check(loaded.ok, "loaded: " + loaded.error);
+            if (loaded.ok && back.objectCount() == 1) {
+                const Feature& f = back.objects().front()->features.back();
+                check(f.kind == FeatureKind::SweepProfile && f.pathSketchUid == 2 &&
+                          f.pathEntities == std::vector<SketchId>{line},
+                      "the sweep came back with its path");
+                check(near(back.objects().front()->body.health(false).volume, 480.0, 1e-4),
+                      "and re-evaluates to the same part");
+            }
+            std::remove(file.c_str());
+        }
+        {
+            // A 10 square lofted to a 5 square 10 up, straight: the frustum.
+            Sketch bottom;
+            bottom.addRectangle({-5, -5}, 10, 10);
+            Sketch top;
+            top.plane.origin = {0, 0, 10};
+            top.addRectangle({-2.5, -2.5}, 5, 5);
+            Feature loft;
+            loft.kind = FeatureKind::LoftProfile;
+            loft.uid = 3;
+            loft.sketchUid = 1;
+            loft.profileKeys = {sketchProfiles(bottom).front().key};
+            loft.loftSketchUids = {2};
+            loft.loftKeys = {sketchProfiles(top).front().key};
+            loft.loftRuled = true;
+            std::vector<Feature> chain{sketchStep(1, bottom), sketchStep(2, top), loft};
+            Body body;
+            check(evaluateFeatures(chain, body), "two sketches and a loft make a body: " + chain[2].error);
+            check(near(body.health(false).volume, 10.0 / 3.0 * 175.0, 1e-3),
+                  "of the frustum's volume: " + std::to_string(body.health(false).volume));
+
+            // Raised in its own sketch, the top takes the loft with it.
+            chain[1].sketch.plane.origin.z = 20;
+            Body taller;
+            check(evaluateFeatures(chain, taller), "re-runs with the top outline higher");
+            check(near(taller.health(false).volume, 20.0 / 3.0 * 175.0, 1e-3), "twice the height, twice the volume");
+
+            const std::string file = tempPath("loft.tng");
+            Scene scene;
+            std::string why;
+            const ObjectId id = scene.addFeatureChain(chain, "Lofted", &why);
+            check(id != kNoObject, "a lofted part is made from a chain: " + why);
+            check(saveProject(scene, file).ok, "saved");
+            Scene back;
+            const ProjectResult loaded = loadProject(back, file);
+            check(loaded.ok, "loaded: " + loaded.error);
+            if (loaded.ok && back.objectCount() == 1) {
+                const Feature& f = back.objects().front()->features.back();
+                check(f.kind == FeatureKind::LoftProfile && f.loftRuled &&
+                          f.loftSketchUids == std::vector<ElementId>{2} && f.loftKeys == loft.loftKeys,
+                      "the loft came back with its outlines");
+                check(near(back.objects().front()->body.health(false).volume, 20.0 / 3.0 * 175.0, 1e-3),
+                      "and re-evaluates to the same part");
+            }
+            std::remove(file.c_str());
         }
     }
 

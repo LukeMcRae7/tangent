@@ -584,11 +584,12 @@ bool Application::init() {
         camera_.snapToGoal();
 
         if (sketchDemo_ >= 2 && sketchDemo_ <= 4) {
-            // The plate, which is the region with the bore as its hole.
-            if (sketchTool_.beginExtrude(&camera_)) {
-                for (const SketchProfile& r : sketchTool_.regions())
-                    if (r.holes.size() == 1) sketchTool_.toggleRegion(r.key);
-            }
+            // Finished, which leaves it selected, then Extrude on its action
+            // bar: the plate -- the region with the bore as its hole -- is
+            // what comes picked.
+            sketchTool_.finish(scene_, camera_, undo_, false);
+            const Scene::SketchRef kept = sketchTool_.lastKept();
+            sketchTool_.startExtrude(scene_, kept.object, kept.uid);
             camera_.snapToGoal();
         }
         if (sketchDemo_ >= 3 && sketchDemo_ <= 4) {
@@ -615,7 +616,7 @@ bool Application::init() {
                 const SceneObject* o = scene_.objects().front().get();
                 std::fprintf(stderr, "[sketch-demo] kept '%s': %zu features, body empty=%d\n",
                              o->name.c_str(), o->features.size(), (int)o->body.empty());
-                scene_.select(o->id);
+                scene_.selectSketch({o->id, o->features.front().uid});
             }
             camera_.snapToGoal();
         }
@@ -646,74 +647,357 @@ bool Application::init() {
                      sketchTool_.regions().size(), sketchTool_.solveState().freedoms);
     }
 
-    if (revolveDemo_ > 0) {
-        // A profile turned about an axis, driven the way the panel drives it,
-        // and checked against Pappus: the area of what was drawn times the
-        // circle its centroid travels. A volume that is right for the wrong
-        // reason still looks correct, so the demo prints both numbers.
+    if (penDemo_ > 0) {
+        // The pen, driven the way the pointer drives it: a press at each
+        // anchor, a drag away from it for a smooth one, a release.
+        scene_.clear();
+        camera_.yaw = 0.7f;
+        camera_.pitch = 0.6f;
+        camera_.distance = 150.0f;
+        camera_.target = {0, 0, 0};
+        camera_.snapToGoal();
+        sketchTool_.start();
+        sketchTool_.choosePlane(PlaneChoice::XY, camera_);
+        sketchTool_.setMode(SketchMode::Curve);
+        auto anchor = [&](Vec2 at, Vec2 pull, bool drag) {
+            sketchTool_.clickAt(at);
+            sketchTool_.penDown(at);
+            if (drag) sketchTool_.penDrag(pull);
+            sketchTool_.penUp();
+        };
+        if (penDemo_ == 1) {
+            // Corners only: a triangle, 30 along each leg -- then Finish, and
+            // Extrude on the sketch it leaves selected.
+            anchor({0, 0}, {}, false);
+            anchor({30, 0}, {}, false);
+            anchor({0, 30}, {}, false);
+            anchor({0, 0}, {}, false);
+            const bool kept = sketchTool_.finish(scene_, camera_, undo_, false);
+            const Scene::SketchRef sk = sketchTool_.lastKept();
+            bool built = kept && sketchTool_.startExtrude(scene_, sk.object, sk.uid) && sketchTool_.beginDepth();
+            if (built) {
+                sketchTool_.setDepth(10.0);
+                built = sketchTool_.finish(scene_, camera_, undo_, true);
+            }
+            const SceneObject* o = scene_.find(sk.object);
+            const Real got = o ? o->body.health(false).volume : 0.0;
+            std::fprintf(stderr, "[pen-demo] 1: %s, %.2f mm3, arithmetic says 4500.00, agrees=%d%s%s\n",
+                         built ? "built" : "refused", static_cast<double>(got),
+                         built && std::fabs(got - 4500.0) < 1e-3 ? 1 : 0,
+                         built ? "" : "  ", built ? "" : sketchTool_.takeError().c_str());
+        } else {
+            // A drop: smooth anchors pulled round, left open with the last
+            // anchor's handles showing.
+            anchor({0, -20}, {20, -20}, true);
+            anchor({25, 5}, {10, 25}, true);
+            anchor({0, 30}, {-12, 18}, true);
+            anchor({-25, 5}, {-20, -12}, true);
+            size_t smooth = 0;
+            for (const SketchConstraint& k : sketchTool_.sketch().constraints) smooth += k.rule == SketchRule::Smooth;
+            std::fprintf(stderr, "[pen-demo] 2: %zu curves, %zu held smooth, solved=%d\n",
+                         sketchTool_.sketch().entities.size(), smooth, sketchTool_.solveState().solved ? 1 : 0);
+        }
+        camera_.snapToGoal();
+    }
+
+    if (projectDemo_ > 0) {
+        // A box's top face brought into a sketch on it, finished; the box then
+        // widened in its history, and the sketch has to go round the new face.
+        scene_.clear();
+        camera_.yaw = 0.7f;
+        camera_.pitch = 0.6f;
+        camera_.distance = 120.0f;
+        camera_.target = {0, 0, 10};
+        camera_.snapToGoal();
+        PrimitiveSpec spec;
+        spec.kind = PrimitiveKind::Box;
+        spec.box = {20, 20, 10};
+        const ObjectId box = scene_.addPrimitive(PrimitiveKind::Box, spec, {0, 0, 0});
+        const SceneObject* o = scene_.find(box);
+        std::vector<FaceId> fs;
+        o->body.allFaces(fs);
+        FaceId top = kNoFace;
+        for (FaceId f : fs)
+            if (normalize(o->body.faceNormal(f)).z > 0.999) top = f;
+        sketchTool_.start();
+        const AABB bb = o->worldBounds();
+        sketchTool_.setPlane(planeFrameFor({0, 0, bb.max.z}, {0, 0, 1}), box, nullptr);
+        sketchTool_.setMode(SketchMode::Project);
+        const bool projected = sketchTool_.projectElement(scene_, box, true, top);
+        // A circle in the middle of it, for something to have been drawn.
+        sketchTool_.setMode(SketchMode::Circle);
+        const Vec2 c{(bb.min.x + bb.max.x) * 0.5, (bb.min.y + bb.max.y) * 0.5};
+        sketchTool_.clickAt(c);
+        sketchTool_.clickAt(c + Vec2{4, 0});
+        sketchTool_.finish(scene_, camera_, undo_, false);
+        auto outerArea = [&] {
+            for (const Feature& f : scene_.find(box)->features)
+                if (f.kind == FeatureKind::Sketch) {
+                    Real most = 0;
+                    for (const SketchProfile& r : sketchProfiles(f.sketch))
+                        most = std::max(most, std::fabs(r.outer.signedArea));
+                    return most;
+                }
+            return Real(0);
+        };
+        const Real before = outerArea();
+        std::vector<Feature> chain = scene_.find(box)->features;
+        chain.front().primitive.box.width = 32;
+        std::string why;
+        const bool widened = scene_.setFeatures(box, chain, &why);
+        const Real after = outerArea();
+        const bool agrees = projected && widened && std::fabs(before - 400.0) < 1e-6 && std::fabs(after - 640.0) < 1e-6;
+        std::fprintf(stderr, "[project-demo] 1: face outline %.2f mm2, after widening %.2f, arithmetic says 400 "
+                     "then 640, agrees=%d%s%s\n",
+                     static_cast<double>(before), static_cast<double>(after), agrees ? 1 : 0,
+                     why.empty() ? "" : "  ", why.c_str());
+        scene_.selectSketch(sketchTool_.lastKept());
+        camera_.snapToGoal();
+    }
+
+    if (planeDemo_ > 0) {
+        // The plane picker with a box to pick from: three points, two down.
+        scene_.clear();
+        camera_.yaw = 0.7f;
+        camera_.pitch = 0.6f;
+        camera_.distance = 120.0f;
+        camera_.target = {0, 0, 10};
+        camera_.snapToGoal();
+        PrimitiveSpec spec;
+        spec.kind = PrimitiveKind::Box;
+        spec.box = {20, 20, 20};
+        scene_.addPrimitive(PrimitiveKind::Box, spec, {0, 0, 0});
+        sketchTool_.start();
+        sketchTool_.planePicker().setMethod(PlaneMethod::ThreePoints);
+        std::fprintf(stderr, "[plane-demo] 1: the plane picker, asking for three points\n");
+    }
+
+    if (revolveDemo_ > 0 || sweepDemo_ > 0 || loftDemo_ > 0) {
+        // Revolve, sweep and loft, the whole way through the tool that builds
+        // them: what they run through drawn first and kept, or a body put
+        // down, then the profile picked -- a sketch region handed over by the
+        // sketch tool, or a face clicked -- and the rest clicked. The result is
+        // checked against arithmetic, and so is the tidying: a sketch picked
+        // from is moved into the part, not left standing beside it.
         scene_.clear();
         camera_.yaw = 0.7f;
         camera_.pitch = 0.5f;
-        camera_.distance = 180.0f;
-        camera_.target = {0, 0, 0};
+        camera_.distance = 160.0f;
+        camera_.target = {0, 0, 10};
         camera_.snapToGoal();
+        const ProfileBuild build = revolveDemo_ > 0 ? ProfileBuild::Revolve
+                                 : sweepDemo_ > 0   ? ProfileBuild::Sweep
+                                                    : ProfileBuild::Loft;
+        const int asked = revolveDemo_ > 0 ? revolveDemo_ : sweepDemo_ > 0 ? sweepDemo_ : loftDemo_;
+        // The last step of each is the one before it, left at the picking.
+        const int last = build == ProfileBuild::Revolve ? 5 : 4;
+        const bool picking = asked == last;
+        const int step = picking ? last - 1 : asked;
+        const bool fromBody = step == last - 1;
+        const std::string tag = std::string("[") +
+                                (build == ProfileBuild::Revolve ? "revolve" : build == ProfileBuild::Sweep ? "sweep" : "loft") +
+                                "-demo]";
 
-        const bool cutting = revolveDemo_ == 3;
-        if (cutting) {
-            // Something to cut the groove into: a cylinder standing on the axis.
+        // A sketch drawn and kept on its own: its object and its uid.
+        auto keep = [&](PlaneChoice plane, Real offset, const std::function<void()>& draw) {
+            sketchTool_.start();
+            sketchTool_.choosePlane(plane, camera_);
+            if (offset != 0.0) sketchTool_.setPlaneOffset(offset);
+            draw();
+            sketchTool_.finish(scene_, camera_, undo_, false);
+            const SceneObject* o = scene_.objects().empty() ? nullptr : scene_.objects().back().get();
+            return std::pair<ObjectId, ElementId>{o ? o->id : kNoObject, o ? o->features.back().uid : 0};
+        };
+        // A profile drawn and finished, then the tool opened with it
+        // selected: what a person does, finishing the sketch and clicking
+        // Revolve, Sweep or Loft on its action bar.
+        auto handOver = [&](const std::function<void()>& draw) {
+            sketchTool_.start();
+            sketchTool_.choosePlane(build == ProfileBuild::Revolve ? PlaneChoice::XZ : PlaneChoice::XY, camera_);
+            draw();
+            if (sketchTool_.finish(scene_, camera_, undo_, false)) profileTool_.start(build, scene_);
+        };
+        auto rect = [&](Vec2 lo, Vec2 hi) {
+            sketchTool_.setMode(SketchMode::Rectangle);
+            sketchTool_.clickAt(lo);
+            sketchTool_.clickAt(hi);
+        };
+        auto circle = [&](Vec2 c, Real r) {
+            sketchTool_.setMode(SketchMode::Circle);
+            sketchTool_.clickAt(c);
+            sketchTool_.clickAt({c.x + r, c.y});
+        };
+        auto firstEntity = [&](std::pair<ObjectId, ElementId> s) {
+            const SceneObject* o = scene_.find(s.first);
+            return o && !o->features.back().sketch.entities.empty() ? o->features.back().sketch.entities.front().id
+                                                                    : kNoSketchId;
+        };
+        auto firstRegion = [&](std::pair<ObjectId, ElementId> s) {
+            const SceneObject* o = scene_.find(s.first);
+            const std::vector<SketchProfile> rs = o ? sketchProfiles(o->features.back().sketch)
+                                                    : std::vector<SketchProfile>{};
+            return rs.empty() ? kNoSketchId : rs.front().key;
+        };
+        // A 10 mm box, and its face that points along `n`.
+        ObjectId box = kNoObject;
+        auto boxFace = [&](Vec3 n) {
+            const SceneObject* o = scene_.find(box);
+            std::vector<FaceId> fs;
+            if (o) o->body.allFaces(fs);
+            for (FaceId f : fs)
+                if (dot(normalize(o->body.faceNormal(f)), n) > 0.999) return f;
+            return kNoFace;
+        };
+        if (fromBody) {
             PrimitiveSpec spec;
-            spec.kind = PrimitiveKind::Cylinder;
-            spec.cylinder = {20.0, 40.0, 64};
-            scene_.addPrimitive(PrimitiveKind::Cylinder, spec, {0, 0, 0});
+            spec.kind = PrimitiveKind::Box;
+            spec.box = {10, 10, 10};
+            box = scene_.addPrimitive(PrimitiveKind::Box, spec, {0, 0, 0});
         }
+        const AABB bb = box != kNoObject ? scene_.find(box)->worldBounds() : AABB{};
 
-        sketchTool_.start();
-        sketchTool_.choosePlane(PlaneChoice::XZ, camera_);
-        sketchTool_.setMode(SketchMode::Rectangle);
-        // Standing off the axis: 10 x 20 at twenty out for a ring, 4 x 4 at
-        // eighteen for a groove that bites into the cylinder's wall.
-        const Vec2 lo = cutting ? Vec2{18, 10} : Vec2{20, -10};
-        const Vec2 hi = cutting ? Vec2{22, 14} : Vec2{30, 10};
-        sketchTool_.clickAt(lo);
-        sketchTool_.clickAt(hi);
-
-        if (!sketchTool_.beginExtrude(&camera_)) {
-            std::fprintf(stderr, "[revolve-demo] nothing closed to turn\n");
-        } else if (!sketchTool_.beginTurn()) {
-            std::fprintf(stderr, "[revolve-demo] %s\n", sketchTool_.takeError().c_str());
-        } else {
-            sketchTool_.setTurnAxis({0, 0}, {0, 1});
-            const Real turn = revolveDemo_ == 2 ? kPi * 0.5 : 2.0 * kPi;
-            sketchTool_.setTurnAngle(turn);
-            sketchTool_.setOp(cutting ? ExtrudeOp::Cut : ExtrudeOp::NewBody);
-            sketchTool_.refreshReach(scene_, true);
-            const bool ok = sketchTool_.finish(scene_, camera_, undo_, true);
-            const std::string why = sketchTool_.takeError();
-            // What the turn should make. For the groove, only the part of the
-            // square inside the cylinder's wall takes anything away -- it is
-            // drawn across the surface on purpose, so the cut is not a
-            // coincident face -- so the ring measured is the one from 18 to
-            // the wall at 20.
+        Real expected = 0.0;
+        ExtrudeOp op = ExtrudeOp::NewBody;
+        if (build == ProfileBuild::Revolve && !fromBody) {
+            // Standing off the axis: 10 x 20 at twenty out for a ring, 4 x 4 at
+            // eighteen for a groove that bites into a cylinder's wall.
+            const bool cutting = step == 3;
+            if (cutting) {
+                PrimitiveSpec spec;
+                spec.kind = PrimitiveKind::Cylinder;
+                spec.cylinder = {20.0, 40.0, 64};
+                scene_.addPrimitive(PrimitiveKind::Cylinder, spec, {0, 0, 0});
+            }
+            const Vec2 lo = cutting ? Vec2{18, 10} : Vec2{20, -10};
+            const Vec2 hi = cutting ? Vec2{22, 14} : Vec2{30, 10};
+            handOver([&] { rect(lo, hi); });
+            profileTool_.setWorldAxis(2);
+            const Real turn = step == 2 ? kPi * 0.5 : 2.0 * kPi;
+            profileTool_.setAngle(turn);
+            // Pappus for the ring; the cylinder less the part of the ring
+            // inside its wall for the groove.
             const Real outer = cutting ? std::min(hi.x, Real(20)) : hi.x;
-            const Real area = (outer - lo.x) * (hi.y - lo.y);
-            const Real radius = (outer + lo.x) * 0.5;
-            const Real wants = turn * radius * area;
-            const SceneObject* o = scene_.objects().empty() ? nullptr
-                                                            : scene_.objects().back().get();
-            const Real got = o ? o->body.health(false).volume : 0.0;
-            // What arithmetic says it should be: Pappus for the ring, and the
-            // cylinder less that ring for the groove.
-            const Real expected = cutting ? kPi * 400.0 * 40.0 - wants : wants;
-            const bool agrees = ok && std::fabs(got - expected) < std::fabs(expected) * 0.005;
-            std::fprintf(stderr,
-                         "[revolve-demo] %s %.0f deg about the axis: %s, %zu features, "
-                         "%d faces, %.1f mm3, arithmetic says %.1f, agrees=%d%s%s\n",
-                         cutting ? "groove" : "ring", static_cast<double>(turn * kRad2Deg),
-                         ok ? "built" : "refused", o ? o->features.size() : 0,
-                         o ? o->body.faceCount() : 0, static_cast<double>(got),
-                         static_cast<double>(expected), agrees ? 1 : 0,
-                         why.empty() ? "" : "  ", why.c_str());
+            const Real ring = turn * (outer + lo.x) * 0.5 * (outer - lo.x) * (hi.y - lo.y);
+            expected = cutting ? kPi * 400.0 * 40.0 - ring : ring;
+            op = cutting ? ExtrudeOp::Cut : ExtrudeOp::NewBody;
+        } else if (build == ProfileBuild::Revolve) {
+            // The box's side face, turned a quarter round its own upright edge,
+            // outward: the box and a quarter cylinder of its width.
+            scene_.clearSelection();
+            profileTool_.start(ProfileBuild::Revolve, scene_);
+            profileTool_.pickFace(scene_, box, boxFace({1, 0, 0}));
+            const SceneObject* o = scene_.find(box);
+            std::vector<EdgeId> es;
+            o->body.allEdges(es);
+            for (EdgeId e : es) {
+                Vec3 a, b;
+                o->body.edgePositions(e, a, b);
+                const Vec3 wa = transformPoint(o->modelMatrix(), a), wb = transformPoint(o->modelMatrix(), b);
+                if (std::fabs(wa.x - bb.max.x) < 1e-6 && std::fabs(wb.x - bb.max.x) < 1e-6 &&
+                    std::fabs(wa.y - bb.min.y) < 1e-6 && std::fabs(wb.y - bb.min.y) < 1e-6) {
+                    profileTool_.pickEdge(scene_, box, e);
+                    // Turning about +Z swings the face into the box; the other
+                    // way takes it out.
+                    profileTool_.setReverse(wb.z > wa.z);
+                }
+            }
+            profileTool_.setAngle(kPi * 0.5);
+            expected = 1000.0 + kPi * 100.0 * 10.0 / 4.0;
+            op = ExtrudeOp::Join;
+        } else if (build == ProfileBuild::Sweep && !fromBody) {
+            const auto path = keep(PlaneChoice::XZ, 0.0, [&] {
+                if (step == 1) {
+                    // Twenty up, then fifteen across: an L with a mitred corner.
+                    sketchTool_.setMode(SketchMode::Line);
+                    sketchTool_.clickAt({0, 0});
+                    sketchTool_.clickAt({0, 20});
+                    sketchTool_.clickAt({15, 20});
+                    sketchTool_.clearPending();
+                } else {
+                    // A quarter circle of radius 20, up from the profile.
+                    sketchTool_.setMode(SketchMode::Arc);
+                    sketchTool_.clickAt({0, 0});
+                    sketchTool_.clickAt({20, 0});
+                    sketchTool_.clickAt({0, 20});
+                }
+            });
+            handOver([&] {
+                if (step == 2) circle({20, 0}, 2);
+                else           rect({-2, -2}, {2, 2});
+            });
+            profileTool_.pickCurve(scene_, path.first, path.second, firstEntity(path));
+            expected = step == 1 ? 16.0 * 35.0 : kPi * 4.0 * (20.0 * kPi / 2.0);
+        } else if (build == ProfileBuild::Sweep) {
+            // The box's top face carried up and across a bent path drawn from
+            // its middle: the box, and the face's area times the path.
+            const Real cx = (bb.min.x + bb.max.x) * 0.5, top = bb.max.z;
+            const auto path = keep(PlaneChoice::XZ, 0.0, [&] {
+                sketchTool_.setMode(SketchMode::Line);
+                sketchTool_.clickAt({cx, top});
+                sketchTool_.clickAt({cx, top + 20});
+                sketchTool_.clickAt({cx + 15, top + 20});
+                sketchTool_.clearPending();
+            });
+            scene_.clearSelection();
+            profileTool_.start(ProfileBuild::Sweep, scene_);
+            profileTool_.pickFace(scene_, box, boxFace({0, 0, 1}));
+            profileTool_.pickCurve(scene_, path.first, path.second, firstEntity(path));
+            expected = 1000.0 + 100.0 * 35.0;
+            op = ExtrudeOp::Join;
+        } else if (!fromBody) {
+            // The top outline first, lifted: a square, or a circle.
+            const auto upper = keep(PlaneChoice::XY, step == 1 ? 20.0 : 30.0, [&] {
+                if (step == 1) rect({-5, -5}, {5, 5});
+                else           circle({0, 0}, 5);
+            });
+            handOver([&] {
+                if (step == 1) rect({-10, -10}, {10, 10});
+                else           circle({0, 0}, 10);
+            });
+            profileTool_.pickRegion(scene_, upper.first, upper.second, firstRegion(upper));
+            profileTool_.setRuled(step == 1);
+            expected = step == 1 ? 20.0 / 3.0 * (400.0 + 100.0 + 200.0) : kPi * 30.0 / 3.0 * (100.0 + 50.0 + 25.0);
+        } else {
+            // The box's top face lofted straight to a 5 mm square ten above it.
+            const Vec2 c{(bb.min.x + bb.max.x) * 0.5, (bb.min.y + bb.max.y) * 0.5};
+            const auto upper = keep(PlaneChoice::XY, bb.max.z + 10.0, [&] {
+                rect({c.x - 2.5, c.y - 2.5}, {c.x + 2.5, c.y + 2.5});
+            });
+            scene_.clearSelection();
+            profileTool_.start(ProfileBuild::Loft, scene_);
+            profileTool_.pickFace(scene_, box, boxFace({0, 0, 1}));
+            profileTool_.pickRegion(scene_, upper.first, upper.second, firstRegion(upper));
+            profileTool_.setRuled(true);
+            expected = 1000.0 + 10.0 / 3.0 * (100.0 + 25.0 + 50.0);
+            op = ExtrudeOp::Join;
         }
+
+        if (!profileTool_.active()) {
+            std::fprintf(stderr, "%s %d: the tool did not open: %s\n", tag.c_str(), step,
+                         sketchTool_.takeError().c_str());
+        } else if (picking) {
+            profileTool_.setOp(op);
+            std::string e = profileTool_.takeError();
+            std::fprintf(stderr, "%s %d left at the picking: builds=%d%s%s\n", tag.c_str(), step,
+                         profileTool_.buildable() ? 1 : 0, e.empty() ? "" : "  ", e.c_str());
+        } else {
+            profileTool_.setOp(op);
+            const bool ok = profileTool_.finish(scene_, undo_);
+            const std::string why = ok ? std::string() : profileTool_.takeError();
+            if (!ok) profileTool_.cancel();
+            const SceneObject* o = scene_.objects().empty() ? nullptr : scene_.objects().back().get();
+            const Real got = o ? o->body.health(false).volume : 0.0;
+            const bool agrees = ok && std::fabs(got - expected) < std::fabs(expected) * 0.002;
+            const bool tidy = scene_.objectCount() == 1;
+            std::fprintf(stderr,
+                         "%s %d: %s, %zu objects, %zu features, %d faces, %.2f mm3, arithmetic says "
+                         "%.2f, agrees=%d tidy=%d%s%s\n",
+                         tag.c_str(), step, ok ? "built" : "refused", scene_.objectCount(),
+                         o ? o->features.size() : 0, o ? o->body.faceCount() : 0, static_cast<double>(got),
+                         static_cast<double>(expected), agrees ? 1 : 0, tidy ? 1 : 0, why.empty() ? "" : "  ",
+                         why.c_str());
+        }
+        camera_.snapToGoal();
     }
 
     if (threadDemo_ > 0) {
@@ -1457,7 +1741,8 @@ bool Application::editToolActive() const {
            draftTool_.pending ||
            // Open with nothing applied, waiting for a number that works.
            insetTool_.pending || shellTool_.pending || splitTool_.pending ||
-           holeTool_.pending || offsetTool_.pending || threadTool_.pending;
+           holeTool_.pending || offsetTool_.pending || threadTool_.pending ||
+           profileTool_.active();
 }
 
 bool Application::refuseMeshEdit(const SceneObject& obj, const char* what) {
@@ -1531,6 +1816,23 @@ void Application::handleViewportMouse() {
     stepPrintDemo();
     stepPreviewCheck();
     stepCoplanarDemo();
+
+    // Revolve, sweep, loft: every click in the view is a pick; the right
+    // button leaves, as it does everywhere else.
+    if (profileTool_.active()) {
+        if (io.MouseWheel != 0.0f && overViewport && !uiPointer)
+            camera_.dolly(io.MouseWheel);
+        if (!uiPointer) profileTool_.update(scene_, camera_, mouseInViewport());
+        if (!uiClicks && overViewport) {
+            if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                profileTool_.handleMouseDown(scene_);
+            } else if (ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+                profileTool_.cancel();
+                justFinishedModal_ = true;
+            }
+        }
+        return;
+    }
 
     // Sketching. The same arrangement as the create tool below: the wheel still
     // zooms, and the pointer on the dialog leaves the drawing alone.
@@ -1677,6 +1979,17 @@ void Application::handleViewportMouse() {
     if (io.MouseWheel != 0.0f && !uiPointer) camera_.dolly(io.MouseWheel);
     if (uiClicks) return;
 
+    // The sketch under the pointer, lit; a double-click on one opens it.
+    hoverSketch_ = sketchAt(mouseInViewport(), false);
+    if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && !measure_.active()) {
+        const Scene::SketchRef sk = sketchAt(mouseInViewport(), true);
+        if (sk.valid()) {
+            beginEditSketch(sk.object, sk.uid);
+            justFinishedModal_ = true;
+            return;
+        }
+    }
+
     // A click that ends a drag is ignored, so an orbit or a future box-select
     // gesture does not also fire a pick. Finalizing a modal action does not deselect.
     if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
@@ -1707,6 +2020,17 @@ void Application::handleViewportClick(bool shift, bool ctrl) {
                                                   cursor);
         measure_.pick(hit.ref);
         return;
+    }
+
+    // A sketch's drawing is in front of what it is drawn on, and is what the
+    // pointer is on when it is near a curve of it: the sketch is selected, as
+    // a thing of its own, with its actions on the bar over the view.
+    if (!ctrl && !shift) {
+        const Scene::SketchRef sk = sketchAt(cursor, true);
+        if (sk.valid()) {
+            scene_.selectSketch(sk);
+            return;
+        }
     }
 
     if (ctrl) {
@@ -2418,6 +2742,23 @@ void Application::handleShortcuts() {
         return;
     }
 
+    if (profileTool_.active()) {
+        auto send = [&](int key) { return profileTool_.handleKey(key, scene_, undo_); };
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) { send(27); return; }
+        if (ImGui::IsKeyPressed(ImGuiKey_Enter, false) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false)) {
+            send(13);
+            if (!profileTool_.active()) justFinishedModal_ = true;
+            return;
+        }
+        for (const auto& [imKey, ch] : {
+                 std::pair{ImGuiKey_Backspace, static_cast<char>(8)}, std::pair{ImGuiKey_X, 'X'},
+                 std::pair{ImGuiKey_Y, 'Y'}, std::pair{ImGuiKey_Z, 'Z'}, std::pair{ImGuiKey_J, 'J'},
+                 std::pair{ImGuiKey_D, 'D'}, std::pair{ImGuiKey_I, 'I'}, std::pair{ImGuiKey_N, 'N'}}) {
+            if (ImGui::IsKeyPressed(imKey, false)) { send(ch); return; }
+        }
+        return;
+    }
+
     if (sketchTool_.active()) {
         auto send = [&](int key) {
             return sketchTool_.handleKey(key, io.KeyShift, io.KeyCtrl, scene_, camera_, undo_);
@@ -2548,7 +2889,7 @@ void Application::handleShortcuts() {
     else if (!shift && !ctrl && !alt && ImGui::IsKeyPressed(ImGuiKey_A, false)) scene_.selectAll();
 
     if (ImGui::IsKeyPressed(ImGuiKey_X, false) || ImGui::IsKeyPressed(ImGuiKey_Delete, false))
-        ui_.actions.deleteSelected = true;
+        (scene_.selectedSketch().valid() ? ui_.actions.deleteSketch : ui_.actions.deleteSelected) = true;
     if (shift && ImGui::IsKeyPressed(ImGuiKey_D, false))
         ui_.actions.duplicateSelected = true;
     if (ImGui::IsKeyPressed(ImGuiKey_Z, false) && !ctrl && !shift)
@@ -2567,7 +2908,9 @@ void Application::handleShortcuts() {
 
     // Mesh edits act on the selected faces. Shift+E starts with Cut picked.
     if (!ctrl && !alt && ImGui::IsKeyPressed(ImGuiKey_E, false)) {
-        ui_.actions.extrude = true;
+        // A selected sketch extrudes its regions; otherwise the faces go.
+        if (scene_.selectedSketch().valid() && !shift) ui_.actions.extrudeSketch = true;
+        else ui_.actions.extrude = true;
         ui_.actions.extrudeCut = shift;
     }
     if (!ctrl && !alt && ImGui::IsKeyPressed(ImGuiKey_K, false)) ui_.actions.divide = true;
@@ -6711,19 +7054,154 @@ void Application::drawSceneSketches() {
             if (f.kind != FeatureKind::Sketch || !f.sketchShown || !f.enabled) continue;
             if (sketchTool_.editing() && sketchTool_.editingUid() == f.uid) continue;
 
-            const Vec4 col = selected ? toVec4(palette::kBrand, 0.95f)
-                                      : Vec4{0.55f, 0.62f, 0.72f, 0.75f};
+            // The selected sketch in the brand colour and heavier; the one under
+            // the pointer lit, so it is plain what a click would take.
+            const Scene::SketchRef ref{obj->id, f.uid};
+            const bool picked = scene_.selectedSketch() == ref;
+            const bool lit = !picked && hoverSketch_ == ref && !profileTool_.active();
+            const Vec4 col = picked || selected ? toVec4(palette::kBrand, 0.95f)
+                           : lit                ? Vec4{1.0f, 0.82f, 0.35f, 0.95f}
+                                                : Vec4{0.55f, 0.62f, 0.72f, 0.75f};
+            const Real width = picked ? 2.8 : lit ? 2.4 : 1.8;
             for (const SketchEntity& e : f.sketch.entities) {
                 const std::vector<Vec2> pts = sketchEntityPoints(f.sketch, e);
                 for (size_t i = 0; i + 1 < pts.size(); ++i) {
                     const Vec3 a = transformPoint(model, f.sketch.plane.toWorld(pts[i]));
                     const Vec3 b = transformPoint(model, f.sketch.plane.toWorld(pts[i + 1]));
                     if (e.construction) renderer_.addFrontDashes(camera_, a, b, col, 1.2);
-                    else                renderer_.addFrontLine(camera_, a, b, col, 1.8);
+                    else                renderer_.addFrontLine(camera_, a, b, col, width);
                 }
             }
         }
     }
+}
+
+void Application::beginExtrudeSketch() {
+    dismissSettled();
+    if (tool_.active() || createTool_.active() || sketchTool_.active() || editToolActive()) {
+        setNotice("Finish the current operation first");
+        return;
+    }
+    const Scene::SketchRef sk = scene_.selectedSketch();
+    if (!sk.valid()) {
+        setNotice("Select a sketch first: click it in the view or in the outliner");
+        return;
+    }
+    if (!brep::available()) {
+        setNotice("Extruding a sketch needs the exact kernel, which this build does not have");
+        return;
+    }
+    measure_.end();
+    if (!sketchTool_.startExtrude(scene_, sk.object, sk.uid)) setNotice(sketchTool_.takeError());
+}
+
+void Application::deleteSelectedSketch() {
+    const Scene::SketchRef sk = scene_.selectedSketch();
+    SceneObject* obj = scene_.find(sk.object);
+    if (!sk.valid() || !obj) return;
+    // Something built from it would lose what it was built from: said, rather
+    // than done and left failing.
+    const size_t uses = std::count_if(obj->features.begin(), obj->features.end(), [&](const Feature& f) {
+        return f.uid != sk.uid &&
+               (f.sketchUid == sk.uid || f.pathSketchUid == sk.uid ||
+                std::find(f.loftSketchUids.begin(), f.loftSketchUids.end(), sk.uid) != f.loftSketchUids.end());
+    });
+    if (uses > 0) {
+        char msg[160];
+        std::snprintf(msg, sizeof msg, "%zu step%s built from this sketch: delete %s first, or hide the sketch",
+                      uses, uses == 1 ? " is" : "s are", uses == 1 ? "it" : "them");
+        setNotice(msg);
+        return;
+    }
+    scene_.clearSketchSelection();
+    const bool onlyThis = obj->body.empty() && obj->features.size() == 1;
+    if (onlyThis) {
+        renderer_.forget(obj->id);
+        undo_.push(ExistenceCommand::forDelete(scene_, {obj->id}));
+        return;
+    }
+    const std::vector<Feature> before = obj->features;
+    std::vector<Feature> chain = before;
+    chain.erase(std::remove_if(chain.begin(), chain.end(), [&](const Feature& f) { return f.uid == sk.uid; }),
+                chain.end());
+    std::string why;
+    if (!scene_.setFeatures(obj->id, chain, &why)) {
+        setNotice("The sketch was not deleted: " + why);
+        return;
+    }
+    undo_.push(std::make_unique<FeatureCommand>(obj->id, before, scene_.find(obj->id)->features, "Delete Sketch"));
+}
+
+// The sketch whose drawing is under the pointer: a curve within a few pixels,
+// or -- when `inside` is set, for a click -- a closed region the pointer is
+// in, if no body is in front of it. Hidden sketches are not in the view to be
+// pointed at; the outliner reaches those.
+Scene::SketchRef Application::sketchAt(Vec2 cursor, bool inside) const {
+    Scene::SketchRef best;
+    Real bestPx = 8.0;
+    const Ray ray = camera_.rayThroughPixel(cursor.x, cursor.y);
+    Real bestT = 1e300;
+    const RayHit body = scene_.raycast(ray);
+    const Real bodyT = body.hit() ? static_cast<Real>(body.t) : 1e300;
+    Scene::SketchRef inRegion;
+    for (const auto& o : scene_.objects()) {
+        if (!o->visible) continue;
+        const Mat4 model = o->modelMatrix();
+        for (const Feature& f : o->features) {
+            if (f.kind != FeatureKind::Sketch || !f.sketchShown || !f.enabled) continue;
+            if (sketchTool_.editing() && sketchTool_.editingUid() == f.uid) continue;
+            for (const SketchEntity& e : f.sketch.entities) {
+                Vec2 prev{};
+                bool have = false;
+                for (Vec2 q : sketchEntityPoints(f.sketch, e, 16)) {
+                    Vec2 px{};
+                    const bool on = camera_.projectToPixel(transformPoint(model, f.sketch.plane.toWorld(q)), px);
+                    if (on && have) {
+                        const Vec2 ab = px - prev;
+                        const Real len = lengthSq(ab);
+                        const Real t = len > 1e-18 ? std::clamp(dot(cursor - prev, ab) / len, Real(0), Real(1)) : 0;
+                        const Real d = length(cursor - (prev + ab * t));
+                        if (d < bestPx) { bestPx = d; best = {o->id, f.uid}; }
+                    }
+                    prev = px;
+                    have = on;
+                }
+            }
+            if (!inside || best.valid()) continue;
+            // Inside one of its regions, in front of any body.
+            const Vec3 origin = transformPoint(model, f.sketch.plane.origin);
+            const Vec3 xa = transformVector(model, f.sketch.plane.xAxis);
+            const Vec3 ya = transformVector(model, f.sketch.plane.yAxis);
+            const Vec3 n = normalize(cross(xa, ya));
+            const Real denom = dot(n, ray.dir);
+            if (std::fabs(denom) < 1e-9) continue;
+            const Real t = dot(origin - ray.origin, n) / denom;
+            if (t < 0.0 || t >= bestT || t > bodyT + 1e-3) continue;
+            const Vec3 d = ray.origin + ray.dir * t - origin;
+            const Vec2 uv{dot(d, xa) / lengthSq(xa), dot(d, ya) / lengthSq(ya)};
+            for (const SketchProfile& r : sketchProfiles(f.sketch))
+                if (sketchProfileContains(f.sketch, r, uv)) {
+                    bestT = t;
+                    inRegion = {o->id, f.uid};
+                    break;
+                }
+        }
+    }
+    return best.valid() ? best : inRegion;
+}
+
+void Application::beginProfileBuild(ProfileBuild build) {
+    dismissSettled();
+    if (tool_.active() || createTool_.active() || sketchTool_.active() || editToolActive()) {
+        setNotice("Finish the current operation first");
+        return;
+    }
+    if (!brep::available()) {
+        setNotice(std::string(profileBuildName(build)) + " needs the exact kernel, which this build does not have");
+        return;
+    }
+    measure_.end();
+    profileTool_.start(build, scene_);
 }
 
 void Application::beginSketch() {
@@ -7870,7 +8348,7 @@ void Application::applyActions() {
     // Anything that changes the model, or what the model is, is the start of
     // the next thing. The gestures put their own panel away in begin*; this
     // catches the commands that are not gestures.
-    if (a.addRequested || a.sketch || a.editSketchObject != kNoObject ||
+    if (a.addRequested || a.sketch || a.editSketchObject != kNoObject || a.extrudeSketch || a.deleteSketch ||
         a.deleteSelected || a.duplicateSelected || a.mergeFaces || a.deleteFace ||
         a.booleanRequested || a.split || a.shell || a.inset || a.hole || a.draft ||
         a.offset || a.thread ||
@@ -7908,6 +8386,8 @@ void Application::applyActions() {
     }
     if (a.sketch) beginSketch();
     if (a.editSketchObject != kNoObject) beginEditSketch(a.editSketchObject, a.editSketchUid);
+    if (a.extrudeSketch) beginExtrudeSketch();
+    if (a.deleteSketch) deleteSelectedSketch();
 
     if (a.duplicateSelected) {
         const std::vector<ObjectId> sel = scene_.selection();
@@ -7990,6 +8470,9 @@ void Application::applyActions() {
     if (a.draft)   beginDraft();
     if (a.offset)  beginOffset();
     if (a.thread)  beginThread();
+    if (a.revolve) beginProfileBuild(ProfileBuild::Revolve);
+    if (a.sweep)   beginProfileBuild(ProfileBuild::Sweep);
+    if (a.loft)    beginProfileBuild(ProfileBuild::Loft);
     if (a.booleanRequested) beginCombine(a.booleanOp);
 
     if (a.rebuildObject != kNoObject) {
@@ -8154,6 +8637,9 @@ void Application::buildUi() {
     drawInspector(ui_);
 
     drawViewportOverlays(ui_, viewRect_.x, viewRect_.y, viewRect_.w, viewRect_.h);
+    ui_.toolBusy = tool_.active() || createTool_.active() || sketchTool_.active() || sketchTool_.applied() ||
+                   createTool_.applied() || editToolActive() || measure_.active();
+    drawSketchBar(ui_, viewRect_.x, viewRect_.y, viewRect_.w);
 
     // The cube carries the view's name and its projection: it is where the
     // eye already goes to find out which way it is looking.
@@ -8188,6 +8674,18 @@ void Application::buildUi() {
         bool finished = false;
         createTool_.drawHud(scene_, camera_, undo_, finished);
         if (finished) justFinishedModal_ = true;
+    }
+    if (profileTool_.active()) {
+        bool finished = false;
+        profileTool_.drawHud(scene_, undo_, finished);
+        if (finished) justFinishedModal_ = true;
+        // What the next click is for, beside the pointer, while it is over
+        // the view and not the panel.
+        const ImVec2 m = ImGui::GetMousePos();
+        const bool overView = m.x >= viewRect_.x && m.y >= viewRect_.y && m.x < viewRect_.x + viewRect_.w &&
+                              m.y < viewRect_.y + viewRect_.h;
+        if (profileTool_.active() && overView && !ImGui::GetIO().WantCaptureMouse)
+            profileTool_.drawPointerPrompt({m.x, m.y});
     }
     drawCombinePanel();
     syncToolSettled();
@@ -8467,6 +8965,8 @@ int Application::run() {
             char buf[128];
             std::snprintf(buf, sizeof(buf), "Fillet  %.2f mm", filletTool_.currentRadius);
             ui_.toolStatus = buf;
+        } else if (profileTool_.active()) {
+            ui_.toolStatus = std::string(profileBuildName(profileTool_.build())) + ": " + profileTool_.prompt();
         } else if (sketchTool_.active()) {
             switch (sketchTool_.stage()) {
             case SketchStage::SelectPlane:
@@ -8476,10 +8976,7 @@ int Application::run() {
                 ui_.toolStatus = std::string("Sketch: ") + sketchModeName(sketchTool_.mode());
                 break;
             case SketchStage::Regions:
-                ui_.toolStatus = "Pick the regions to build from";
-                break;
-            case SketchStage::Turn:
-                ui_.toolStatus = std::string("Revolve  ") + extrudeOpName(sketchTool_.op());
+                ui_.toolStatus = "Extrude: pick the regions";
                 break;
             case SketchStage::Depth:
                 ui_.toolStatus = std::string("Extrude  ") + extrudeOpName(sketchTool_.op()) +
@@ -8579,6 +9076,7 @@ int Application::run() {
         drawHoleOverlay();
         gProbe.begin();
         drawSceneSketches();
+        profileTool_.drawOverlay(scene_, camera_, renderer_);
         gProbe.end("sketches");
         if (sketchTool_.active()) {
             const auto t0 = std::chrono::steady_clock::now();

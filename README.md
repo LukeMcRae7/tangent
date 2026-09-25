@@ -159,13 +159,51 @@ wall keeps the size it was drawn where it crosses the plane you name -- the
 bottom, the top or half way -- and the panel says how far the far end has come
 in, in millimetres, because that is the number that decides whether it prints.
 
-**A sketch extrudes or revolves.** Having picked the regions, Extrude pushes
-them along the plane's normal and Revolve turns them about an axis lying in it
--- one of the sketch's own, or any line of the drawing, clicked. A turn takes
-an angle up to the whole way round, joins, cuts or stands as a new part like an
-extrusion does, and stays a step in the history with its angle and its axis: a
-handle turned from its half-section, or a groove run round a shaft. A profile
-that crosses its axis is refused rather than turned through itself.
+**A sketch is drawn, finished, and then built from.** Sketch (Shift+S) asks for
+a plane the way a new shape does -- a face of a body, an origin plane, a plane
+through three corners, or one square to an edge at its nearer end -- and both
+the sketch and the shape tool then let the plane stand off by a distance and
+lean about its own horizontal. Lines, rectangles, circles and arcs are drawn
+with the constraints the drawing implies; the pen (B) draws curves -- click for
+a corner, press and drag for a smooth point, whose handles stay mirrored after,
+and click the first point to close the shape. Project (P) brings an edge of a
+body, or a face's whole outline, onto the plane, fixed where it is; projected
+from the part the sketch is in, it follows that edge when the part changes.
+Enter, or Finish, keeps the sketch -- it builds nothing -- and leaves it
+selected.
+
+A sketch is then a thing of its own: click one in the view or its row in the
+outliner and a bar of what can be done with it opens over the view, and the
+inspector says what it is. Edit opens it again (so does a double-click);
+Extrude asks for its regions and a depth; Revolve, Sweep and Loft start with
+its regions as their profile; Hide and Delete do what they say, and Delete
+refuses while something is built from it.
+
+**Revolve, sweep and loft, from sketches or from the part itself.** Each has a
+button beside Sketch on the bar and an entry in the Create menu, and opens a
+panel with a short list of things to point at, filled in order: Revolve takes a
+profile and an axis, Sweep a profile and a path, Loft two or more outlines in
+the order the solid runs through them. The row the next click fills is lit, the
+pointer carries a line saying what it is for, and the solid it will make is
+shown see-through as soon as there is enough to make it -- so a wrong axis or a
+path running the wrong way is seen before Finish, not after.
+
+A profile or an outline is a region of a sketch or a flat face of a body. An
+axis is a line of a sketch, a straight edge, or X, Y or Z, with Reverse for
+which way a part turn goes. A path is sketch curves -- one click takes the whole
+run it is joined to -- or edges of a body, clicked one by one, and need not lie
+in a plane: a bar bent round the rim of a can is the rim's edge. A sweep is held
+square to its path and mitred at corners, and starts from whichever end is
+nearer its profile; a loft's walls are smooth or straight. Faces and edges
+selected before the command starts are taken as what they can be.
+
+Whatever it was built from, it is one step in the part's history. Faces and
+edges are named there, so they are found again when the steps before them
+change; sketches are brought in before the step -- one that stood on its own in
+the outliner moved, one in another part copied. With a sketch selected, the
+panel opens with its regions picked. A sketch's plane can stand off the plane
+or face it was put on by any distance, which is how the next outline of a loft
+is drawn above the first.
 
 ### The interface
 

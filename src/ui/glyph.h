@@ -24,7 +24,7 @@ enum class Glyph {
     // Transforms and combining
     Move, Rotate, Scale, Boolean, Union, Difference, Intersect, Overlap, NewBody,
     // Modelling
-    Extrude, PushPull, Revolve, Fillet, Chamfer, Shell, Inset, Divide, Merge,
+    Extrude, PushPull, Revolve, Sweep, Loft, Fillet, Chamfer, Shell, Inset, Divide, Merge,
     Hole, Counterbore, Countersink, Draft, DeleteFace, Offset, Thread,
     Pattern, PatternRow, PatternRing, Mirror, Split, Convert, Reduce, RotateFace, ScaleFace,
     // Inspecting
@@ -36,7 +36,7 @@ enum class Glyph {
     // Outliner
     Body, Mesh,
     // Sketching
-    Select, Line, Rect, Circle, Arc, Dimension,
+    Select, Line, Rect, Circle, Arc, Dimension, Bezier, Project, ThreePoints, AlongEdge, Edit,
     Count
 };
 

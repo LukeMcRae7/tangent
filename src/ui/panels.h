@@ -92,6 +92,11 @@ struct UiActions {
     bool deleteFace = false;
     bool offset = false;
     bool thread = false;
+    // Revolve, sweep and loft: a solid from an outline and an axis, a path, or
+    // more outlines, picked in the view.
+    bool revolve = false;
+    bool sweep = false;
+    bool loft = false;
 
     // The modal transforms, from the bar or a menu.
     bool moveObject = false;
@@ -105,6 +110,13 @@ struct UiActions {
     bool      sketch = false;
     ObjectId  editSketchObject = kNoObject;
     ElementId editSketchUid = 0;
+
+    // The selected sketch's own actions, from its bar or the inspector:
+    // extruded (the sketch tool at choosing its regions) or deleted. Edit is
+    // editSketchObject above; revolve, sweep and loft are the flags above,
+    // which take the selected sketch as their profile.
+    bool extrudeSketch = false;
+    bool deleteSketch = false;
 
     bool      booleanRequested = false;
     BooleanOp booleanOp = BooleanOp::Difference;
@@ -167,6 +179,8 @@ struct UiContext {
     UiStats      stats;
     UiActions    actions;
     FrameState   frame;
+    // Some operation has the view: the selected sketch's bar stands aside.
+    bool         toolBusy = false;
 };
 
 // The logo, from assets. Without it the bar shows the wordmark in text.
@@ -185,6 +199,11 @@ void drawInspector(UiContext& ctx);
 void drawViewportOverlays(UiContext& ctx, float x, float y, float w, float h);
 
 void drawMeasurePanel(UiContext& ctx);
+
+// The selected sketch's actions, floating at the top of the viewport: edit
+// it, or build from it -- extrude, revolve, sweep, loft -- or hide or delete
+// it. Nothing when no sketch is selected or an operation is running.
+void drawSketchBar(UiContext& ctx, float x, float y, float w);
 
 // Body of the add-object menu, shared by the bar and the Shift+A popup.
 void drawAddMenuItems(UiContext& ctx);

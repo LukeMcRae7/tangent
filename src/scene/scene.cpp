@@ -584,9 +584,28 @@ bool Scene::isSelected(ObjectId id) const {
     return std::find(selection_.begin(), selection_.end(), id) != selection_.end();
 }
 
-void Scene::clearSelection() { selection_.clear(); }
+void Scene::clearSelection() { selection_.clear(); sketch_ = SketchRef{}; }
+
+void Scene::selectSketch(SketchRef ref) {
+    selection_.clear();
+    elements_.clear();
+    sketch_ = sketchFeature(ref) ? ref : SketchRef{};
+}
+
+const Feature* Scene::sketchFeature(SketchRef ref) const {
+    const SceneObject* o = find(ref.object);
+    if (!o) return nullptr;
+    for (const Feature& f : o->features)
+        if (f.kind == FeatureKind::Sketch && f.uid == ref.uid) return &f;
+    return nullptr;
+}
+
+Scene::SketchRef Scene::selectedSketch() const {
+    return sketchFeature(sketch_) ? sketch_ : SketchRef{};
+}
 
 void Scene::select(ObjectId id, bool additive) {
+    sketch_ = SketchRef{};
     if (!additive) selection_.clear();
     if (id == kNoObject) return;
     if (!isSelected(id)) selection_.push_back(id);
@@ -599,6 +618,7 @@ void Scene::select(ObjectId id, bool additive) {
 }
 
 void Scene::toggleSelect(ObjectId id) {
+    sketch_ = SketchRef{};
     if (id == kNoObject) return;
     if (isSelected(id))
         selection_.erase(std::remove(selection_.begin(), selection_.end(), id), selection_.end());
@@ -607,6 +627,7 @@ void Scene::toggleSelect(ObjectId id) {
 }
 
 void Scene::selectAll() {
+    sketch_ = SketchRef{};
     selection_.clear();
     for (const auto& o : objects_) if (o->visible) selection_.push_back(o->id);
 }
@@ -830,6 +851,7 @@ std::vector<ElementRef> Scene::faceGroup(const ElementRef& e) const {
 }
 
 void Scene::selectElement(const ElementRef& e, bool additive) {
+    sketch_ = SketchRef{};
     if (!additive) elements_.clear();
     if (!e.valid()) return;
     for (const ElementRef& r : faceGroup(e))
@@ -837,6 +859,7 @@ void Scene::selectElement(const ElementRef& e, bool additive) {
 }
 
 void Scene::toggleElement(const ElementRef& e) {
+    sketch_ = SketchRef{};
     if (!e.valid()) return;
     // The group goes in and out together, or a shift-click would peel one
     // invisible piece off a face and leave the rest selected.
