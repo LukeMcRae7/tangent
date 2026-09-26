@@ -340,7 +340,7 @@ The icons are [Tabler Icons](https://tabler.io/icons), bundled as
 |-------|--------|
 | MMB drag | Orbit |
 | Shift + MMB | Pan |
-| Wheel | Zoom toward the pointer |
+| Wheel | Zoom straight in and out of the part in hand; with nothing selected, toward the pointer |
 | Click | Select the edge, face or vertex under the cursor — what a click would take is lit as the pointer passes over it |
 | Ctrl + click | Select the whole object (as clicking its outliner row) |
 | Shift + click | Extend either selection |

@@ -971,6 +971,8 @@ private:
     // Whether a modal editing operation is running -- one that owns the model
     // until it is confirmed or cancelled.
     bool editToolActive() const;
+    // The wheel: toward the part in hand, or else toward the pointer.
+    void zoomView(float steps);
 
     // True, with a notice saying how to get past it, when `obj` is a mesh: an
     // edit to part of a shape needs the exact kernel, and a mesh has to be

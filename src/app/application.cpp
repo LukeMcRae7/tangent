@@ -2005,6 +2005,21 @@ Vec2 Application::mouseInViewport() const {
     return {m.x - viewRect_.x, m.y - viewRect_.y};
 }
 
+void Application::zoomView(float steps) {
+    // Straight in and out of the part being worked on, wherever the pointer
+    // is: its middle stays where it is on the screen. With nothing in hand,
+    // toward whatever is under the pointer.
+    AABB box = scene_.selectionBounds();
+    if (!box.valid())
+        if (const SceneObject* o = scene_.find(scene_.contextObject()); o && o->visible) box = o->worldBounds();
+    Vec2 px{};
+    if (box.valid() && camera_.projectToPixel(box.center(), px)) {
+        camera_.dollyAbout(steps, box.center());
+        return;
+    }
+    camera_.dollyAt(steps, mouseInViewport());
+}
+
 bool Application::editToolActive() const {
     return filletTool_.active || faceTool_.active || divideTool_.active || patternTool_.active ||
            reduceTool_.active || combineTool_.active || holeTool_.placing ||
@@ -2123,7 +2138,7 @@ void Application::handleViewportMouse() {
     // adjusts it.
     if (jointTool_.picking()) {
         if (io.MouseWheel != 0.0f && overViewport && !uiPointer)
-            camera_.dollyAt(io.MouseWheel, mouseInViewport());
+            zoomView(io.MouseWheel);
         if (!uiPointer) jointTool_.update(scene_, camera_, mouseInViewport());
         if (!uiClicks && overViewport) {
             if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
@@ -2141,7 +2156,7 @@ void Application::handleViewportMouse() {
     // button leaves, as it does everywhere else.
     if (profileTool_.active()) {
         if (io.MouseWheel != 0.0f && overViewport && !uiPointer)
-            camera_.dollyAt(io.MouseWheel, mouseInViewport());
+            zoomView(io.MouseWheel);
         if (!uiPointer) profileTool_.update(scene_, camera_, mouseInViewport());
         if (!uiClicks && overViewport) {
             if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
@@ -2158,7 +2173,7 @@ void Application::handleViewportMouse() {
     // zooms, and the pointer on the dialog leaves the drawing alone.
     if (sketchTool_.active()) {
         if (io.MouseWheel != 0.0f && overViewport && !uiPointer)
-            camera_.dollyAt(io.MouseWheel, mouseInViewport());
+            zoomView(io.MouseWheel);
         if (!uiPointer) {
             const auto t0 = std::chrono::steady_clock::now();
             sketchTool_.update(scene_, camera_, mouseInViewport(), !io.KeyCtrl);
@@ -2191,7 +2206,7 @@ void Application::handleViewportMouse() {
         // this branch never reaches -- so zooming in to place a point on a
         // small feature meant cancelling the tool and starting again.
         if (io.MouseWheel != 0.0f && overViewport && !uiPointer)
-            camera_.dollyAt(io.MouseWheel, mouseInViewport());
+            zoomView(io.MouseWheel);
 
         // Held still while the pointer is on one of the dialog's controls, for
         // the same reason the fillet is: the profile must not be changed by
@@ -2296,7 +2311,7 @@ void Application::handleViewportMouse() {
     }
 
     if (!overViewport) return;
-    if (io.MouseWheel != 0.0f && !uiPointer) camera_.dollyAt(io.MouseWheel, mouseInViewport());
+    if (io.MouseWheel != 0.0f && !uiPointer) zoomView(io.MouseWheel);
     if (uiClicks) return;
 
     // The sketch under the pointer, lit; a double-click on one opens it.

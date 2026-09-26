@@ -67,6 +67,9 @@ public:
     // it stays under the pointer while everything else closes in on it, the
     // way every CAD tool zooms.
     void dollyAt(float steps, Vec2 px);
+    // Toward a point in the world, which stays where it is on the screen --
+    // in either projection, whatever its depth.
+    void dollyAbout(float steps, Vec3 point);
     void setStandardView(StandardView v);
 
     // Look at the model from `dir`, which points from the target out to where

@@ -157,6 +157,12 @@ int main() {
         cam.dollyAt(-5.0f, before);
         cam.projectToPixel(p, after);
         check(length(after - before) < 0.5f, "zoom out keeps it too");
+        // About a point off the target plane: it stays put as well.
+        const Vec3 q{-9, 14, 25};
+        cam.projectToPixel(q, before);
+        cam.dollyAbout(4.0f, q);
+        cam.projectToPixel(q, after);
+        check(length(after - before) < 0.5f, "zoom about a part keeps its middle where it is");
     }
 
     // ---- Picking under a section view --------------------------------------

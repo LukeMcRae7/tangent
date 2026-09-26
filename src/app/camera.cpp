@@ -94,6 +94,18 @@ void Camera::dollyAt(float steps, Vec2 px) {
     syncGoal();
 }
 
+void Camera::dollyAbout(float steps, Vec3 point) {
+    // The eye slides along the line from the point, the distance and the
+    // target's offset from the point shrinking together: the point is seen
+    // along the same direction as before, and so at the same place.
+    const float before = distance;
+    dolly(steps);
+    if (before <= 0.0f) return;
+    const Real k = static_cast<Real>(distance) / static_cast<Real>(before);
+    target = point + (target - point) * k;
+    syncGoal();
+}
+
 void Camera::setStandardView(StandardView v) {
     syncGoal();
     animating_ = true;
