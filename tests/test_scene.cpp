@@ -97,6 +97,50 @@ int main() {
         check(hit.object == near_, "the nearer of two boxes wins");
     }
 
+    // ---- Picking under a section view --------------------------------------
+    // What the section takes away is not there to click; the cut face is, and
+    // stops the ray; and a ray that crosses the plane in air goes on to what
+    // it meets, however many walls are behind that.
+    {
+        Scene s;
+        const ObjectId a = s.addPrimitive(PrimitiveKind::Box, {}, Vec3{0, 0, 0});     // x -10..10
+        const ObjectId d = s.addPrimitive(PrimitiveKind::Box, {}, Vec3{-30, 0, 0});   // x -40..-20
+        SectionCut cut;
+        cut.on = true;
+        cut.normal = {1, 0, 0};
+        cut.offset = 0.0;                   // everything past x = 0 is taken away
+        s.setSection(cut);
+
+        RayHit hit = s.raycast(Ray{{0.0, 0, 100}, {0, 0, -1}});
+        check(hit.hit() && hit.object == a && std::fabs(hit.point.z - 10.0f) < 1e-3f,
+              "section: the kept half of the top is hit");
+        hit = s.raycast(Ray{{5.0, 0, 100}, {0, 0, -1}});
+        check(!hit.hit(), "section: the half taken away is not hit");
+
+        bool capped = false;
+        hit = s.raycast(Ray{{100, 0, 0}, {-1, 0, 0}}, &capped);
+        check(!hit.hit() && capped, "section: a ray into the cut stops at the cut face");
+        capped = true;
+        hit = s.raycast(Ray{{-100, 0, 0}, {1, 0, 0}}, &capped);
+        check(hit.hit() && hit.object == d && std::fabs(hit.point.x + 40.0f) < 1e-3f && !capped,
+              "section: from the kept side, the outside is hit as ever");
+
+        // Past the first box: the plane crossed in air, then a whole box.
+        cut.offset = -15.0;
+        s.setSection(cut);
+        hit = s.raycast(Ray{{100, 0, 0}, {-1, 0, 0}}, &capped);
+        check(hit.hit() && hit.object == d && std::fabs(hit.point.x + 20.0f) < 1e-3f && !capped,
+              "section: across the plane in air, the next wall is hit, not capped over");
+        check(s.raycastCoincident(Ray{{100, 0, 0}, {-1, 0, 0}}).size() == 1,
+              "section: the coincident pick agrees");
+
+        s.setSection(SectionCut{});
+        hit = s.raycast(Ray{{100, 0, 0}, {-1, 0, 0}});
+        check(hit.hit() && hit.object == a && std::fabs(hit.point.x - 10.0f) < 1e-3f,
+              "section off: the whole model is back");
+        std::printf("[section] picking honours the cut\n");
+    }
+
     // ---- Selection --------------------------------------------------------
     {
         Scene s;

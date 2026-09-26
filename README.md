@@ -220,10 +220,73 @@ what went wrong, and its Fix rolls back to just before it: select the faces or
 edges it should act on, click Use the selected faces, and it and everything
 after it run again.
 
+### Assemblies
+
+**Groups.** Ctrl+G puts the selection in a group, and Ctrl+Shift+G takes it
+apart. Groups nest, and the outliner shows them as a tree above the loose
+bodies: click a group's row to select everything in it, drag any row onto a
+group to put it in, or onto the space below the lists to take it out. A group
+places nothing -- every body keeps its place in its own history -- but it is
+what a joint moves.
+
+**Joints.** J, then point at a face, an edge or a corner of the part that
+moves, then at the part it goes on. Each pick's frame is drawn under the
+pointer before it is clicked -- a flat face's outward normal, a round face's
+or a circular edge's axis, a straight edge's own line -- and while the second
+is chosen the moving part is shown see-through where it would land. Faces go
+face to face, a pin's rim goes on a hole's rim, and two straight edges make a
+hinge that comes out closed rather than inside the box or upside down on it.
+The panel then offers Rigid, Revolute, Slider and Planar; Flip and a quarter
+turn; an offset and an angle; and the motion itself as a bar to drag, with
+limits and Play to swing it through them. A joint names the geometry it stands
+on, so when the hole moves or the socket gets taller the pin follows.
+
+The part picked first moves, with everything in its group; a part joined to a
+part follows it wherever it goes, and a joint that would close a loop is
+refused with the reason. A part a joint places is moved by its joint, not by G
+or the inspector, which say so. Deleting a joint, or the part it hangs from,
+leaves the part where it was, as a move in its own history.
+
+**Clearance.** The question for printed parts is not whether two solids
+intersect but whether there is enough between them everywhere to come off the
+printer apart. Clearance measures the nearest two surfaces come, pair by pair,
+triangle to triangle on meshes finer than a tenth of the gap asked for, and
+paints where the gap is too small in amber and where parts run into each other
+in red; parts that only touch are listed as touching and not painted. The gap
+asked for is 0.2 mm to start, with 0.1 to 0.5 a click away. Through a joint's
+motion it measures the whole swing -- a lid against the wall behind it -- and
+shows the moving part where it came closest. It runs on a worker and keeps
+measuring while parts move, so a hinge dragged in its own panel shows as it goes
+whether it clears.
+
+**Exploded view.** The parts pulled apart for instructions: along their joints
+-- a pin straight out of its hole, a lid up off its box, and what is joined to
+it further again -- and the rest out from the middle, with dashed trails back
+to where each goes. It is a view: nothing about the parts changes, and anything
+that edits or exports them puts them back first.
+
+Groups and joints are saved with the project.
+
+### Section view
+
+The model cut by a plane you slide, to see inside a part or how one part sits in
+another -- Section on the Inspect group, or V. The plane is Top, Front or Right
+through the origin, or a flat face of the model clicked in the view; the side
+nearer the eye goes first, and Flip keeps the other. Slide it by dragging the
+arrow in the view, dragging or typing into the panel's bar. The cut is filled and
+hatched the way a drawing hatches a section, each part the opposite way to the
+next, so where parts meet in the cut you can tell which is which.
+
+It is a view: nothing about any part changes, and nothing is saved. It stays on
+while you work -- measure a wall, pick an edge inside -- and clicks do not reach
+what it has taken away. Its panel steps aside for any other operation and comes
+back after; Done puts the panel away and leaves the model cut, Remove puts it
+back whole.
+
 ### The interface
 
 One dark surface with the model lit in the middle of it. Along the top, the
-tools in four groups -- File, Create, Modify, Inspect -- each a row of pictures
+tools in five groups -- File, Create, Modify, Assemble, Inspect -- each a row of pictures
 with its name under it; the name opens the group's full menu, a list of
 commands and their keys, each explaining itself on hover. The outliner down the
 left lists the bodies, sketches and meshes there are, with an eye to hide each;
@@ -287,7 +350,11 @@ The icons are [Tabler Icons](https://tabler.io/icons), bundled as
 | H | Hole — point at the face it goes into and click; the size is chosen in the dialog |
 | Ctrl + B | Bevel all edges of the active object |
 | Ctrl + Shift + U / D / I | Combine, set to join / cut / intersect: the first selected body is the target, the rest are tools |
+| J | Joint — point at the part that moves, then the part it goes on |
+| F | *(adjusting a joint)* flip it over on its axis |
+| Ctrl + G / Ctrl + Shift + G | Group the selection / take it out of its group |
 | D | Measure — one entity for its own size, two for the distance between |
+| V | Section view — cut the model with a plane you slide; again for its panel, or to put the model back whole |
 | Numpad 1 / 3 / 7 | Front / Right / Top (Ctrl for opposite) |
 | Numpad 4 / 6 / 8 / 2 | Orbit in 15° steps |
 | Numpad 5 | Perspective / orthographic |

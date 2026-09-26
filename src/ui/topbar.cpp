@@ -1,6 +1,7 @@
 // Tangent - the bar along the top.
 //
-// The logo, then the tools in four groups -- File, Create, Modify, Inspect --
+// The logo, then the tools in five groups -- File, Create, Modify, Assemble,
+// Inspect --
 // each a row of pictures with its name under it. The name is a menu: it opens
 // the group's full list, with every command the pictures stand for and the
 // ones there was no room for, each with its key. So the bar is the short way
@@ -201,6 +202,8 @@ void inspectMenu(UiContext& ctx) {
     using namespace ui;
     if (menuEntry(Glyph::Measure, "Measure", "D", true, ctx.measuring)) ctx.actions.toggleMeasure = true;
     menuNote("Click one thing for its own size, two for the distance between them.");
+    if (menuEntry(Glyph::Section, "Section View...", "V", true, ctx.sectionOn)) ctx.actions.section = true;
+    menuNote("The model cut by a plane you slide, to see inside it. Nothing about the parts changes.");
     menuGap();
     menuToggle(Glyph::Alert, "Print Problems", &ctx.view->showPrintIssues);
     menuNote("Draws the walls thinner than the nozzle can lay in red, on the part itself.");
@@ -221,6 +224,28 @@ void inspectMenu(UiContext& ctx) {
     std::snprintf(timing, sizeof timing, "%.1f fps   %.2f ms",
                   ctx.stats.frameMs > 0.0f ? 1000.0f / ctx.stats.frameMs : 0.0f, ctx.stats.frameMs);
     menuStat(timing);
+}
+
+void assembleMenu(UiContext& ctx) {
+    using namespace ui;
+    Scene& scene = *ctx.scene;
+    const size_t sel = scene.selection().size();
+    const bool bodies = std::count_if(scene.objects().begin(), scene.objects().end(),
+                                      [](const auto& o) { return !o->body.empty(); }) >= 2;
+    if (menuEntry(Glyph::Joint, "Joint...", "J", bodies)) ctx.actions.joint = true;
+    menuNote("Point at a face, edge or corner of the part that moves, then of the part it goes on.");
+    menuGap();
+    if (menuEntry(Glyph::Group, "Group", "Ctrl+G", sel > 0)) ctx.actions.groupSelected = true;
+    bool inGroup = false;
+    for (ObjectId id : scene.selection())
+        if (const SceneObject* o = scene.find(id); o && o->group != kNoGroup) inGroup = true;
+    if (menuEntry(Glyph::Group, "Ungroup", "Ctrl+Shift+G", inGroup)) ctx.actions.ungroupSelected = true;
+    menuNote("A group moves as one when a joint moves any part of it.");
+    menuGap();
+    if (menuEntry(Glyph::Clearance, "Clearance...", nullptr, bodies, ctx.clearanceOpen)) ctx.actions.clearance = true;
+    menuNote("Where two parts come closer than a printer can keep apart, drawn on both.");
+    if (menuEntry(Glyph::Explode, "Exploded View...", nullptr, bodies, ctx.explodeOpen)) ctx.actions.explode = true;
+    menuNote("The parts pulled apart along their joints, for instructions.");
 }
 
 // The caption under a group, which is also the handle of its menu.
@@ -345,9 +370,10 @@ float drawTopBar(UiContext& ctx) {
 
     // ---- the groups -------------------------------------------------------
     struct Group { const char* name; const char* popup; void (*menu)(UiContext&); float x0, x1; };
-    Group groups[4] = {{"FILE", "##m_file", fileMenu, 0, 0},
+    Group groups[5] = {{"FILE", "##m_file", fileMenu, 0, 0},
                        {"CREATE", "##m_create", createMenu, 0, 0},
                        {"MODIFY", "##m_modify", modifyMenu, 0, 0},
+                       {"ASSEMBLE", "##m_assemble", assembleMenu, 0, 0},
                        {"INSPECT", "##m_inspect", inspectMenu, 0, 0}};
 
     float x = std::max(ImGui::GetCursorPosX() + 20.0f, 150.0f);
@@ -362,15 +388,44 @@ float drawTopBar(UiContext& ctx) {
         x = groups[i].x1 - ImGui::GetWindowPos().x + kGroupGap;
     };
 
+    // How many of each group's pictures there is room for. Every command a
+    // picture stands for is also in the menu under the group's name, so in a
+    // narrow window -- a tiling desktop's half of the screen -- the fullest
+    // groups give up their last pictures first, and every group keeps its
+    // name, and so its menu, on the bar.
+    int shown[5] = {4, 7, 8, 4, 2};
+    {
+        const float btnW = kIconPx + st.FramePadding.x * 2.0f + 2.0f;
+        const float right = (ctx.frame.customFrame ? 44.0f * 3.0f + 10.0f : 12.0f) +
+                            2.0f * (kIconPx + st.FramePadding.x * 2.0f) + 14.0f + 12.0f;
+        const float avail = barMax.x - (ImGui::GetWindowPos().x + x) - right;
+        auto need = [&] {
+            float w = kGroupGap * 4.0f;
+            for (int g = 0; g < 5; ++g) w += std::max(static_cast<float>(shown[g]) * btnW, 64.0f);
+            return w;
+        };
+        while (need() > avail) {
+            int most = -1;
+            for (int g = 0; g < 5; ++g)
+                if (shown[g] > 1 && (most < 0 || shown[g] >= shown[most])) most = g;
+            if (most < 0) break;
+            --shown[most];
+        }
+    }
+    int drawn[5] = {};
+    auto room = [&](int g) {
+        if (drawn[g] >= shown[g]) return false;
+        if (drawn[g] > 0) ImGui::SameLine();
+        ++drawn[g];
+        return true;
+    };
+
     // File
     beginGroup(0);
-    if (barButton(ctx, "new", Glyph::New, "New project  (Ctrl+N)")) ctx.actions.newProject = true;
-    ImGui::SameLine();
-    if (barButton(ctx, "open", Glyph::Open, "Open...  (Ctrl+O)")) ctx.actions.openProject = true;
-    ImGui::SameLine();
-    if (barButton(ctx, "save", Glyph::Save, "Save  (Ctrl+S)")) ctx.actions.saveProject = true;
-    ImGui::SameLine();
-    if (barButton(ctx, "settings", Glyph::Settings, "View and display settings"))
+    if (room(0) && barButton(ctx, "new", Glyph::New, "New project  (Ctrl+N)")) ctx.actions.newProject = true;
+    if (room(0) && barButton(ctx, "open", Glyph::Open, "Open...  (Ctrl+O)")) ctx.actions.openProject = true;
+    if (room(0) && barButton(ctx, "save", Glyph::Save, "Save  (Ctrl+S)")) ctx.actions.saveProject = true;
+    if (room(0) && barButton(ctx, "settings", Glyph::Settings, "View and display settings"))
         ImGui::OpenPopup("##m_settings");
     ImGui::SetNextWindowPos(ImVec2(ImGui::GetItemRectMin().x, ImGui::GetItemRectMax().y + 4.0f));
     if (ui::beginMenuPopup("##m_settings")) {
@@ -392,9 +447,11 @@ float drawTopBar(UiContext& ctx) {
             {Icon::Torus,    Glyph::Torus,    PrimitiveKind::Torus,    "Torus"},
         };
         static int lastShape = 0;
-        if (barButton(ctx, "shape", kShapes[lastShape].glyph, "Create a shape  (Shift+A)"))
-            ImGui::OpenPopup("##createobject");
-        dropMark();
+        if (room(1)) {
+            if (barButton(ctx, "shape", kShapes[lastShape].glyph, "Create a shape  (Shift+A)"))
+                ImGui::OpenPopup("##createobject");
+            dropMark();
+        }
         ImGui::SetNextWindowPos(ImVec2(ImGui::GetItemRectMin().x, ImGui::GetItemRectMax().y + 4.0f));
         if (ui::beginMenuPopup("##createobject")) {
             ctx.frame.popupOpen = true;
@@ -418,36 +475,30 @@ float drawTopBar(UiContext& ctx) {
             ImGui::EndPopup();
         }
     }
-    ImGui::SameLine();
-    if (barButton(ctx, "sketch", Glyph::Sketch,
+    if (room(1) && barButton(ctx, "sketch", Glyph::Sketch,
                   brep::available() ? "Sketch  (Shift+S): lines, circles and arcs on a plane, then extrude or revolve"
                                     : "Sketching needs the exact kernel, which this build does not have",
                   brep::available()))
         ctx.actions.sketch = true;
     // The three that build from an outline, beside the sketch they usually
     // start from -- and able to start from a face as well.
-    ImGui::SameLine();
-    if (barButton(ctx, "revolve", Glyph::Revolve,
+    if (room(1) && barButton(ctx, "revolve", Glyph::Revolve,
                   "Revolve: turn a sketch region or a flat face about a line, an edge or an axis",
                   brep::available()))
         ctx.actions.revolve = true;
-    ImGui::SameLine();
-    if (barButton(ctx, "sweep", Glyph::Sweep,
+    if (room(1) && barButton(ctx, "sweep", Glyph::Sweep,
                   "Sweep: carry a sketch region or a flat face along sketch curves or edges",
                   brep::available()))
         ctx.actions.sweep = true;
-    ImGui::SameLine();
-    if (barButton(ctx, "loft", Glyph::Loft,
+    if (room(1) && barButton(ctx, "loft", Glyph::Loft,
                   "Loft: a solid through two or more outlines -- sketch regions or flat faces",
                   brep::available()))
         ctx.actions.loft = true;
-    ImGui::SameLine();
-    if (barButton(ctx, "plane", Glyph::Plane, "A flat plate to start from")) {
+    if (room(1) && barButton(ctx, "plane", Glyph::Plane, "A flat plate to start from")) {
         ctx.actions.addRequested = true;
         ctx.actions.addKind = PrimitiveKind::Plane;
     }
-    ImGui::SameLine();
-    if (barButton(ctx, "import", Glyph::Import, "Import a STEP file, a mesh or an SVG drawing"))
+    if (room(1) && barButton(ctx, "import", Glyph::Import, "Import a STEP file, a mesh or an SVG drawing"))
         ImGui::OpenPopup("##m_import");
     ImGui::SetNextWindowPos(ImVec2(ImGui::GetItemRectMin().x, ImGui::GetItemRectMax().y + 4.0f));
     if (ui::beginMenuPopup("##m_import")) {
@@ -464,13 +515,12 @@ float drawTopBar(UiContext& ctx) {
 
     // Modify
     beginGroup(2);
-    if (barButton(ctx, "move", Glyph::Move,
+    if (room(2) && barButton(ctx, "move", Glyph::Move,
                   faces ? "Push / pull the face  (G)" : hasSel ? "Move  (G)" : "Move - select something first",
                   hasSel || faces)) {
         if (faces) ctx.actions.pushPull = true;
         else       ctx.actions.moveObject = true;
     }
-    ImGui::SameLine();
     {
         // Not a menu: a dialog, like every other operation -- the target, the
         // tools, which way they combine, and whether the tools stay.
@@ -483,56 +533,79 @@ float drawTopBar(UiContext& ctx) {
         } else {
             std::snprintf(tip, sizeof tip, "Combine bodies: join, cut or intersect  (Ctrl+Shift+U)");
         }
-        if (barButton(ctx, "boolean", Glyph::Boolean, tip)) {
+        if (room(2) && barButton(ctx, "boolean", Glyph::Boolean, tip)) {
             ctx.actions.booleanRequested = true;
             ctx.actions.booleanOp = BooleanOp::Union;
         }
     }
-    ImGui::SameLine();
-    if (barButton(ctx, "extrude", Glyph::Extrude,
+    if (room(2) && barButton(ctx, "extrude", Glyph::Extrude,
                   faces ? "Extrude the face: a boss with its own outline  (E)"
                         : "Extrude - select a face first", faces > 0))
         ctx.actions.extrude = true;
-    ImGui::SameLine();
-    if (barButton(ctx, "fillet", Glyph::Fillet,
+    if (room(2) && barButton(ctx, "fillet", Glyph::Fillet,
                   edges || faces ? "Fillet or chamfer the selected edges  (F)"
                                  : "Fillet - select an edge or a face first", edges > 0 || faces > 0))
         ctx.actions.fillet = true;
-    ImGui::SameLine();
-    if (barButton(ctx, "shell", Glyph::Shell,
+    if (room(2) && barButton(ctx, "shell", Glyph::Shell,
                   hasObject ? "Shell: hollow the body, selected faces left open"
                             : "Shell - select a body first", hasObject))
         ctx.actions.shell = true;
-    ImGui::SameLine();
-    if (barButton(ctx, "pattern", Glyph::Pattern,
+    if (room(2) && barButton(ctx, "pattern", Glyph::Pattern,
                   hasObject ? "Pattern: repeat in a row or around an axis  (P)"
                             : "Pattern - select a body first", hasObject))
         ctx.actions.pattern = true;
-    ImGui::SameLine();
-    if (barButton(ctx, "mirror", Glyph::Mirror,
+    if (room(2) && barButton(ctx, "mirror", Glyph::Mirror,
                   hasObject ? "Mirror across a plane  (M)" : "Mirror - select a body first", hasObject))
         ctx.actions.mirror = true;
-    ImGui::SameLine();
-    if (barButton(ctx, "merge", Glyph::Merge,
+    if (room(2) && barButton(ctx, "merge", Glyph::Merge,
                   hasObject ? "Merge faces: drop every division that does not define the shape"
                             : "Merge faces - select a body first", hasObject))
         ctx.actions.mergeFaces = true;
     endGroup(2);
 
-    // Inspect
+    // Assemble
     beginGroup(3);
-    if (barButton(ctx, "measure", Glyph::Measure, "Measure  (D)", true, false,
+    {
+        const bool twoBodies = std::count_if(scene.objects().begin(), scene.objects().end(),
+                                             [](const auto& o) { return !o->body.empty(); }) >= 2;
+        if (room(3) && barButton(ctx, "joint", Glyph::Joint,
+                      twoBodies ? "Joint: put one part on another by a face, an edge or a corner  (J)"
+                                : "Joint - there need to be two parts", twoBodies))
+            ctx.actions.joint = true;
+        if (room(3) && barButton(ctx, "group", Glyph::Group,
+                      hasSel ? "Group the selection  (Ctrl+G)" : "Group - select something first", hasSel))
+            ctx.actions.groupSelected = true;
+        if (room(3) && barButton(ctx, "clearance", Glyph::Clearance,
+                      twoBodies ? "Clearance: where parts come too close to print apart"
+                                : "Clearance - there need to be two parts",
+                      twoBodies, false, ctx.clearanceOpen ? u32(palette::kBrand) : 0))
+            ctx.actions.clearance = true;
+        if (room(3) && barButton(ctx, "explode", Glyph::Explode,
+                      twoBodies ? "Exploded view: pull the parts apart along their joints"
+                                : "Exploded view - there need to be two parts",
+                      twoBodies, false, ctx.explodeOpen ? u32(palette::kBrand) : 0))
+            ctx.actions.explode = true;
+    }
+    endGroup(3);
+
+    // Inspect
+    beginGroup(4);
+    if (room(4) && barButton(ctx, "measure", Glyph::Measure, "Measure  (D)", true, false,
                   ctx.measuring ? u32(palette::kBrand) : 0))
         ctx.actions.toggleMeasure = true;
-    ImGui::SameLine();
+    if (room(4) && barButton(ctx, "section", Glyph::Section,
+                  ctx.sectionOn ? "Section view: the model is cut. Click for its panel, or to put it back whole  (V)"
+                                : "Section view: cut the model with a plane you slide, to see inside  (V)",
+                  true, false, ctx.sectionOn ? u32(palette::kBrand) : 0))
+        ctx.actions.section = true;
     // A standing toggle rather than a command, so it shows its state quietly:
     // the picture takes the brand colour while it is on.
-    if (barButton(ctx, "print", Glyph::Alert,
+    if (room(4) && barButton(ctx, "print", Glyph::Alert,
                   ctx.view->showPrintIssues ? "Print problems are drawn on the model. Click to hide them."
                                             : "Print problems are hidden. Click to draw them on the model.",
                   true, false, ctx.view->showPrintIssues ? u32(palette::kBrand) : 0))
         ctx.view->showPrintIssues = !ctx.view->showPrintIssues;
-    endGroup(3);
+    endGroup(4);
 
     // The captions, on the line under the pictures.
     for (Group& g : groups) {

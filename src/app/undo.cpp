@@ -47,20 +47,26 @@ std::unique_ptr<ExistenceCommand> ExistenceCommand::forDelete(
     auto cmd = std::make_unique<ExistenceCommand>();
     cmd->created_ = false;
     cmd->ids_ = ids;
-    for (ObjectId id : ids)
-        if (auto obj = scene.takeObject(id)) cmd->objects_.push_back(std::move(obj));
+    cmd->remove(scene);
     return cmd;
 }
 
 void ExistenceCommand::add(Scene& scene) {
     for (auto& o : objects_) scene.insertObject(std::move(o));
     objects_.clear();
+    // The joints to them, the groups they were in, and the histories of what
+    // those joints placed, as they were before they went.
+    if (haveAssembly_) restoreAssembly(scene, assemblyBefore_);
 }
 
 void ExistenceCommand::remove(Scene& scene) {
     objects_.clear();
+    assemblyBefore_ = assemblyState(scene, placedFrom(scene, ids_));
+    haveAssembly_ = true;
+    forgetObjects(scene, ids_);
     for (ObjectId id : ids_)
         if (auto obj = scene.takeObject(id)) objects_.push_back(std::move(obj));
+    pruneEmptyGroups(scene);
 }
 
 void ExistenceCommand::undo(Scene& scene) {
@@ -71,6 +77,14 @@ void ExistenceCommand::undo(Scene& scene) {
 void ExistenceCommand::redo(Scene& scene) {
     if (created_) add(scene);
     else          remove(scene);
+}
+
+// ---------------------------------------------------------------------------
+bool AssemblyCommand::mergeWith(const Command& other) {
+    const auto* rhs = dynamic_cast<const AssemblyCommand*>(&other);
+    if (!rhs || mergeKey_.empty() || rhs->mergeKey_ != mergeKey_) return false;
+    after_ = rhs->after_;
+    return true;
 }
 
 // ---------------------------------------------------------------------------

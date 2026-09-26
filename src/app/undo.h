@@ -68,6 +68,34 @@ private:
     std::vector<std::unique_ptr<SceneObject>> objects_;
     std::vector<ObjectId> ids_;
     bool created_ = false;
+    // Groups and joints as they stood before the objects went: a joint to a
+    // deleted part goes with it, and comes back with it.
+    AssemblyState assemblyBefore_;
+    bool haveAssembly_ = false;
+};
+
+// A change to how parts relate -- grouping, a joint made, adjusted or taken
+// away -- as the whole of that state either side. It is small: names, ids and
+// a few frames, and the histories of any part a joint's removal wrote steps
+// into. Commands with the same non-empty `mergeKey` fold together, so dragging
+// a joint's value is one step, and so is making a joint and then adjusting it
+// in its panel.
+class AssemblyCommand : public Command {
+public:
+    AssemblyCommand(AssemblyState before, AssemblyState after, std::string what,
+                    std::string mergeKey = {})
+        : before_(std::move(before)), after_(std::move(after)), what_(std::move(what)),
+          mergeKey_(std::move(mergeKey)) {}
+
+    void undo(Scene& scene) override { restoreAssembly(scene, before_); }
+    void redo(Scene& scene) override { restoreAssembly(scene, after_); }
+    std::string label() const override { return what_; }
+    bool mergeWith(const Command& other) override;
+
+private:
+    AssemblyState before_, after_;
+    std::string what_;
+    std::string mergeKey_;
 };
 
 // Changing a primitive's parameters, re-evaluating the mesh either way.

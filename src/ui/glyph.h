@@ -35,6 +35,9 @@ enum class Glyph {
     Undo, Redo, Plus, Duplicate, SelectAll, Dot, Clock, Lock, Trash,
     // Outliner
     Body, Mesh,
+    // Assemblies
+    Group, Joint, JointRevolute, JointSlider, Clearance, Explode,
+    Section,
     // Sketching
     Select, Line, Rect, Circle, Arc, Dimension, Bezier, Project, ThreePoints, AlongEdge, Edit,
     Count

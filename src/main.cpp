@@ -126,6 +126,10 @@ int main(int argc, char** argv) {
             app.setDeleteFaceDemo(std::atoi(argv[++i]));
         } else if (std::strcmp(argv[i], "--offset-demo") == 0 && i + 1 < argc) {
             app.setOffsetDemo(static_cast<float>(std::atof(argv[++i])));
+        } else if (std::strcmp(argv[i], "--assembly-demo") == 0 && i + 1 < argc) {
+            app.setAssemblyDemo(std::atoi(argv[++i]));
+        } else if (std::strcmp(argv[i], "--section-demo") == 0 && i + 1 < argc) {
+            app.setSectionDemo(std::atoi(argv[++i]));
         } else if (std::strcmp(argv[i], "--thread-demo") == 0 && i + 1 < argc) {
             app.setThreadDemo(std::atoi(argv[++i]));
         } else if (std::strcmp(argv[i], "--snap-demo") == 0 && i + 1 < argc) {

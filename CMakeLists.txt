@@ -177,6 +177,10 @@ add_executable(tangent
   src/app/create_tool.cpp src/app/extrude_ops.cpp
   src/app/sketch_tool.cpp
   src/app/profile_tool.cpp
+  src/app/joint_tool.cpp
+  src/app/app_assembly.cpp
+  src/app/app_section.cpp
+  src/app/clearance.cpp
   src/app/plane_pick.cpp
   src/app/measure.cpp
   src/app/snap.cpp
@@ -192,7 +196,7 @@ add_executable(tangent
   ${TANGENT_GEOM}
   src/mesh/health.cpp
   src/mesh/export_stl.cpp src/mesh/export_3mf.cpp src/mesh/zip_writer.cpp
-  src/scene/scene.cpp
+  src/scene/scene.cpp src/scene/assembly.cpp
   src/scene/feature.cpp
   src/scene/serialize.cpp
   src/scene/trials.cpp
@@ -218,7 +222,7 @@ target_include_directories(tangent PRIVATE src)
 # when TANGENT_ISOLATION=worker asks for it. It has to sit beside whatever runs
 # it, so everything that guards work depends on it being built.
 add_executable(tangent_trial src/scene/trial_worker.cpp src/scene/trials.cpp
-  src/scene/serialize.cpp src/scene/scene.cpp src/scene/feature.cpp
+  src/scene/serialize.cpp src/scene/scene.cpp src/scene/assembly.cpp src/scene/feature.cpp
   src/mesh/health.cpp ${TANGENT_GEOM} src/mesh/halfedge.cpp src/mesh/primitives.cpp)
 target_include_directories(tangent_trial PRIVATE src)
 target_compile_options(tangent_trial PRIVATE ${TANGENT_WARNINGS})
@@ -254,7 +258,7 @@ target_compile_options(test_mesh PRIVATE ${TANGENT_WARNINGS})
 add_test(NAME mesh COMMAND test_mesh)
 
 add_executable(test_scene tests/test_scene.cpp
-  src/scene/scene.cpp src/scene/serialize.cpp src/scene/feature.cpp src/mesh/health.cpp ${TANGENT_GEOM}
+  src/scene/scene.cpp src/scene/assembly.cpp src/scene/serialize.cpp src/scene/feature.cpp src/mesh/health.cpp ${TANGENT_GEOM}
   src/mesh/halfedge.cpp src/mesh/primitives.cpp src/app/camera.cpp)
 target_include_directories(test_scene PRIVATE src)
 target_compile_options(test_scene PRIVATE ${TANGENT_WARNINGS})
@@ -264,7 +268,7 @@ add_test(NAME scene COMMAND test_scene)
 # test never creates a GL context or issues a draw.
 add_executable(test_transform tests/test_transform.cpp
   src/app/transform_tool.cpp src/app/undo.cpp src/app/camera.cpp
-  src/scene/scene.cpp src/scene/serialize.cpp src/scene/feature.cpp src/mesh/health.cpp ${TANGENT_GEOM}
+  src/scene/scene.cpp src/scene/assembly.cpp src/scene/serialize.cpp src/scene/feature.cpp src/mesh/health.cpp ${TANGENT_GEOM}
   src/mesh/halfedge.cpp src/mesh/primitives.cpp
   src/render/renderer.cpp src/render/shader.cpp src/render/gpu_mesh.cpp)
 target_include_directories(test_transform PRIVATE src)
@@ -279,7 +283,7 @@ target_compile_options(test_names PRIVATE ${TANGENT_WARNINGS})
 add_test(NAME names COMMAND test_names)
 
 add_executable(test_features tests/test_features.cpp
-  src/scene/scene.cpp src/scene/serialize.cpp src/scene/feature.cpp src/mesh/health.cpp
+  src/scene/scene.cpp src/scene/assembly.cpp src/scene/serialize.cpp src/scene/feature.cpp src/mesh/health.cpp
   ${TANGENT_GEOM} src/mesh/halfedge.cpp src/mesh/primitives.cpp)
 target_include_directories(test_features PRIVATE src)
 target_compile_options(test_features PRIVATE ${TANGENT_WARNINGS})
@@ -294,7 +298,7 @@ add_test(NAME health COMMAND test_health)
 # Links the renderer only because MeasureTool::drawOverlay references it; no GL
 # context is created.
 add_executable(test_measure tests/test_measure.cpp
-  src/app/measure.cpp src/app/camera.cpp src/scene/scene.cpp src/scene/serialize.cpp src/scene/feature.cpp
+  src/app/measure.cpp src/app/camera.cpp src/scene/scene.cpp src/scene/assembly.cpp src/scene/serialize.cpp src/scene/feature.cpp
   src/mesh/health.cpp ${TANGENT_GEOM} src/mesh/halfedge.cpp src/mesh/primitives.cpp
   src/render/renderer.cpp src/render/shader.cpp src/render/gpu_mesh.cpp)
 target_include_directories(test_measure PRIVATE src)
@@ -302,9 +306,18 @@ target_link_libraries(test_measure PRIVATE tangent_epoxy)
 target_compile_options(test_measure PRIVATE ${TANGENT_WARNINGS_LOOSE})
 add_test(NAME measure COMMAND test_measure)
 
+# Groups and joints: what a group moves, where a joint puts a part, and both
+# through undo and a file.
+add_executable(test_assembly tests/test_assembly.cpp src/app/undo.cpp src/app/clearance.cpp
+  src/scene/scene.cpp src/scene/assembly.cpp src/scene/serialize.cpp src/scene/feature.cpp
+  src/mesh/health.cpp ${TANGENT_GEOM} src/mesh/halfedge.cpp src/mesh/primitives.cpp)
+target_include_directories(test_assembly PRIVATE src)
+target_compile_options(test_assembly PRIVATE ${TANGENT_WARNINGS})
+add_test(NAME assembly COMMAND test_assembly)
+
 add_executable(test_io tests/test_io.cpp
   src/mesh/export_stl.cpp src/mesh/export_3mf.cpp src/mesh/zip_writer.cpp src/scene/serialize.cpp
-  src/scene/scene.cpp src/scene/feature.cpp
+  src/scene/scene.cpp src/scene/assembly.cpp src/scene/feature.cpp
   src/mesh/health.cpp ${TANGENT_GEOM} src/mesh/halfedge.cpp src/mesh/primitives.cpp)
 target_include_directories(test_io PRIVATE src)
 target_link_libraries(test_io PRIVATE ZLIB::ZLIB)
@@ -315,7 +328,7 @@ add_executable(test_create_tool tests/test_create_tool.cpp
   src/app/create_tool.cpp src/app/extrude_ops.cpp src/app/camera.cpp src/app/undo.cpp src/app/snap.cpp
   src/app/plane_snap.cpp src/app/snap_overlay.cpp src/app/overlay_shapes.cpp src/app/plane_pick.cpp
   src/ui/icons.cpp src/ui/command_panel.cpp src/ui/widgets.cpp src/ui/glyph.cpp src/ui/theme.cpp
-  src/scene/scene.cpp src/scene/serialize.cpp src/scene/feature.cpp
+  src/scene/scene.cpp src/scene/assembly.cpp src/scene/serialize.cpp src/scene/feature.cpp
   src/mesh/health.cpp ${TANGENT_GEOM} src/mesh/halfedge.cpp src/mesh/primitives.cpp
   src/render/renderer.cpp src/render/shader.cpp src/render/gpu_mesh.cpp)
 target_include_directories(test_create_tool PRIVATE src ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/backends)
@@ -328,7 +341,7 @@ add_executable(test_sketch_tool tests/test_sketch_tool.cpp
   src/app/plane_pick.cpp
   src/app/snap.cpp src/app/plane_snap.cpp src/app/snap_overlay.cpp src/app/overlay_shapes.cpp
   src/ui/icons.cpp src/ui/command_panel.cpp src/ui/widgets.cpp src/ui/glyph.cpp src/ui/theme.cpp
-  src/scene/scene.cpp src/scene/serialize.cpp src/scene/feature.cpp
+  src/scene/scene.cpp src/scene/assembly.cpp src/scene/serialize.cpp src/scene/feature.cpp
   src/mesh/health.cpp ${TANGENT_GEOM} src/mesh/halfedge.cpp src/mesh/primitives.cpp
   src/render/renderer.cpp src/render/shader.cpp src/render/gpu_mesh.cpp)
 target_include_directories(test_sketch_tool PRIVATE src ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/backends)
@@ -337,7 +350,7 @@ target_compile_options(test_sketch_tool PRIVATE ${TANGENT_WARNINGS})
 add_test(NAME sketch_tool COMMAND test_sketch_tool)
 
 add_executable(test_guard tests/test_guard.cpp
-  src/scene/scene.cpp src/scene/feature.cpp src/scene/serialize.cpp src/scene/trials.cpp
+  src/scene/scene.cpp src/scene/assembly.cpp src/scene/feature.cpp src/scene/serialize.cpp src/scene/trials.cpp
   src/mesh/health.cpp ${TANGENT_GEOM} src/mesh/halfedge.cpp src/mesh/primitives.cpp
   src/app/camera.cpp)
 target_include_directories(test_guard PRIVATE src)
@@ -352,7 +365,7 @@ set_tests_properties(guard_worker PROPERTIES ENVIRONMENT "TANGENT_ISOLATION=work
 add_executable(test_drag tests/test_drag.cpp
   src/app/drag_axis.cpp src/app/camera.cpp
   src/render/renderer.cpp src/render/shader.cpp src/render/gpu_mesh.cpp
-  src/scene/scene.cpp src/scene/serialize.cpp src/scene/feature.cpp src/mesh/health.cpp
+  src/scene/scene.cpp src/scene/assembly.cpp src/scene/serialize.cpp src/scene/feature.cpp src/mesh/health.cpp
   ${TANGENT_GEOM} src/mesh/halfedge.cpp src/mesh/primitives.cpp)
 target_include_directories(test_drag PRIVATE src)
 target_link_libraries(test_drag PRIVATE tangent_epoxy)
@@ -368,7 +381,7 @@ target_compile_options(test_printability PRIVATE ${TANGENT_WARNINGS})
 add_test(NAME printability COMMAND test_printability)
 
 add_executable(test_chain tests/test_chain.cpp
-  src/scene/scene.cpp src/scene/feature.cpp src/scene/serialize.cpp
+  src/scene/scene.cpp src/scene/assembly.cpp src/scene/feature.cpp src/scene/serialize.cpp
   src/mesh/health.cpp ${TANGENT_GEOM}
   src/mesh/halfedge.cpp src/mesh/primitives.cpp)
 target_include_directories(test_chain PRIVATE src)
@@ -403,7 +416,7 @@ add_test(NAME planegcs COMMAND test_planegcs)
 
 # The sketch built on it: solving, profiles, and a sketch in the history.
 add_executable(test_sketch tests/test_sketch.cpp
-  src/scene/scene.cpp src/scene/feature.cpp src/scene/serialize.cpp
+  src/scene/scene.cpp src/scene/assembly.cpp src/scene/feature.cpp src/scene/serialize.cpp
   src/mesh/health.cpp ${TANGENT_GEOM}
   src/mesh/halfedge.cpp src/mesh/primitives.cpp)
 target_include_directories(test_sketch PRIVATE src)
@@ -426,7 +439,7 @@ add_test(NAME bvh COMMAND test_bvh)
 add_executable(test_import tests/test_import.cpp src/mesh/import_mesh.cpp
   ${TANGENT_GEOM} src/mesh/health.cpp
   src/mesh/halfedge.cpp src/mesh/primitives.cpp src/mesh/export_stl.cpp
-  src/scene/scene.cpp src/scene/serialize.cpp src/scene/feature.cpp src/app/camera.cpp)
+  src/scene/scene.cpp src/scene/assembly.cpp src/scene/serialize.cpp src/scene/feature.cpp src/app/camera.cpp)
 target_include_directories(test_import PRIVATE src)
 target_compile_options(test_import PRIVATE ${TANGENT_WARNINGS})
 add_test(NAME import COMMAND test_import)
@@ -439,7 +452,7 @@ target_compile_options(test_step PRIVATE ${TANGENT_WARNINGS})
 add_test(NAME step COMMAND test_step)
 
 add_executable(test_pattern tests/test_pattern.cpp
-  src/scene/scene.cpp src/scene/feature.cpp src/scene/serialize.cpp
+  src/scene/scene.cpp src/scene/assembly.cpp src/scene/feature.cpp src/scene/serialize.cpp
   src/mesh/health.cpp ${TANGENT_GEOM}
   src/mesh/halfedge.cpp src/mesh/primitives.cpp src/app/camera.cpp)
 target_include_directories(test_pattern PRIVATE src)
@@ -477,7 +490,7 @@ add_executable(test_view_cube tests/test_view_cube.cpp
   src/ui/view_cube.cpp src/ui/panels.cpp src/ui/theme.cpp src/ui/icons.cpp src/ui/command_panel.cpp
   src/ui/topbar.cpp src/ui/widgets.cpp src/ui/glyph.cpp src/ui/png.cpp
   src/app/camera.cpp src/app/measure.cpp
-  src/scene/scene.cpp src/scene/serialize.cpp src/scene/feature.cpp src/mesh/health.cpp
+  src/scene/scene.cpp src/scene/assembly.cpp src/scene/serialize.cpp src/scene/feature.cpp src/mesh/health.cpp
   ${TANGENT_GEOM} src/mesh/halfedge.cpp src/mesh/primitives.cpp
   src/render/renderer.cpp src/render/shader.cpp src/render/gpu_mesh.cpp)
 target_include_directories(test_view_cube PRIVATE src ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/backends)
@@ -487,7 +500,7 @@ add_test(NAME view_cube COMMAND test_view_cube)
 
 add_executable(test_snap tests/test_snap.cpp
   src/app/snap.cpp src/app/plane_snap.cpp src/app/camera.cpp
-  src/scene/scene.cpp src/scene/serialize.cpp src/scene/feature.cpp src/mesh/health.cpp
+  src/scene/scene.cpp src/scene/assembly.cpp src/scene/serialize.cpp src/scene/feature.cpp src/mesh/health.cpp
   ${TANGENT_GEOM} src/mesh/halfedge.cpp src/mesh/primitives.cpp)
 target_include_directories(test_snap PRIVATE src)
 target_link_libraries(test_snap PRIVATE tangent_epoxy)
@@ -496,7 +509,7 @@ add_test(NAME snap COMMAND test_snap)
 
 add_executable(test_lod tests/test_lod.cpp
   src/render/lod.cpp src/app/camera.cpp
-  src/scene/scene.cpp src/scene/serialize.cpp src/scene/feature.cpp src/mesh/health.cpp
+  src/scene/scene.cpp src/scene/assembly.cpp src/scene/serialize.cpp src/scene/feature.cpp src/mesh/health.cpp
   ${TANGENT_GEOM} src/mesh/halfedge.cpp src/mesh/primitives.cpp)
 target_include_directories(test_lod PRIVATE src)
 target_link_libraries(test_lod PRIVATE tangent_epoxy)
@@ -523,6 +536,18 @@ add_executable(bake_icons EXCLUDE_FROM_ALL tools/bake_icons.cpp tools/icon_raste
 target_include_directories(bake_icons PRIVATE src tools)
 target_compile_options(bake_icons PRIVATE ${TANGENT_WARNINGS})
 
+# Not a test: the part on the website, built by the kernel. Run it by hand when
+# the part changes, and commit what it produces.
+# The website is kept out of the repository until it is ready, so the tool may
+# not be there.
+if(EXISTS ${CMAKE_SOURCE_DIR}/tools/site_model.cpp)
+  add_executable(site_model EXCLUDE_FROM_ALL tools/site_model.cpp
+    src/mesh/health.cpp ${TANGENT_GEOM}
+    src/mesh/halfedge.cpp src/mesh/primitives.cpp)
+  target_include_directories(site_model PRIVATE src)
+  target_compile_options(site_model PRIVATE ${TANGENT_WARNINGS})
+endif()
+
 # Not a test: what an SVG becomes and whether it extrudes, and where not.
 # Run it on a drawing that will not extrude.
 add_executable(svg_check EXCLUDE_FROM_ALL tools/svg_check.cpp
@@ -533,7 +558,7 @@ target_compile_options(svg_check PRIVATE ${TANGENT_WARNINGS})
 
 # Not a test: a stopwatch for the heavy paths. Run it by hand.
 add_executable(bench EXCLUDE_FROM_ALL tests/bench.cpp
-  src/scene/scene.cpp src/scene/serialize.cpp src/scene/feature.cpp src/mesh/health.cpp
+  src/scene/scene.cpp src/scene/assembly.cpp src/scene/serialize.cpp src/scene/feature.cpp src/mesh/health.cpp
  ${TANGENT_GEOM} src/mesh/halfedge.cpp src/mesh/primitives.cpp
   src/render/lod.cpp src/app/camera.cpp)
 target_include_directories(bench PRIVATE src)

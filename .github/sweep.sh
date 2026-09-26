@@ -28,6 +28,9 @@ modes=(
   "--thread-demo 1" "--thread-demo 2" "--thread-demo 3"
   "--split-demo 4" "--split-demo 5"
   "--perf-scene 1 --perf-size 6" "--perf-scene 2 --perf-size 6" "--perf-scene 3 --perf-size 6"
+  "--assembly-demo 1" "--assembly-demo 2" "--assembly-demo 3" "--assembly-demo 4"
+  "--assembly-demo 5" "--assembly-demo 6" "--assembly-demo 7" "--assembly-demo 8"
+  "--section-demo 1" "--section-demo 2" "--section-demo 3"
 )
 
 fail=0
@@ -176,6 +179,44 @@ for m in 1 2 3; do
     fail=1
   else
     printf '  ok    --thread-demo %s\n' "$m"
+  fi
+done
+
+# Assemblies. A joint has to put a part where arithmetic says -- a hinged lid
+# shut on its box and opened seventy degrees about the hinge line, a pin down
+# through a drilled plate on the hole's axis, forty plates stacked to 118.5 --
+# the clearance has to find the tenth of a millimetre a 4.8 pin has in a 5 mm
+# hole and the post a lid's swing first runs into at 61 degrees, and an
+# exploded view has to take a pin straight out of its hole.
+for m in 2 4 5 6 7 8; do
+  out=$(timeout 300 ./build/tangent --assembly-demo $m --smoke-test 5 2>&1)
+  line=$(echo "$out" | grep "\[assembly-demo\] $m:.*agrees=" | head -1)
+  if ! echo "$line" | grep -q "agrees=1"; then
+    printf '  FAIL  assembly-demo %s: %s\n' "$m" "$line"
+    fail=1
+  else
+    printf '  ok    --assembly-demo %s\n' "$m"
+  fi
+done
+out=$(timeout 200 ./build/tangent --assembly-demo 1 --smoke-test 10 2>&1)
+if echo "$out" | grep -q "shows where the lid goes=1"; then
+  printf '  ok    --assembly-demo 1\n'
+else
+  printf '  FAIL  assembly-demo 1: the joint tool did not reach its second pick\n'
+  fail=1
+fi
+
+# A section view has to cut where it says: a ray down a hole the cut went past
+# reaches the far wall, one into solid stops at the cut face, and the arrow in
+# the view, pulled back 22 mm, puts the plane 22 mm in from the face.
+for m in 1 2; do
+  out=$(timeout 200 ./build/tangent --section-demo $m --smoke-test 10 2>&1)
+  line=$(echo "$out" | grep "\[section-demo\] $m:.*agrees=" | head -1)
+  if ! echo "$line" | grep -q "agrees=1"; then
+    printf '  FAIL  section-demo %s: %s\n' "$m" "$line"
+    fail=1
+  else
+    printf '  ok    --section-demo %s\n' "$m"
   fi
 done
 

@@ -454,7 +454,11 @@ bool Scene::removeObject(ObjectId id) {
     auto it = std::find_if(objects_.begin(), objects_.end(),
                            [&](const auto& o) { return o->id == id; });
     if (it == objects_.end()) return false;
+    // A joint cannot hang from nothing, nor a group hold nothing.
+    forgetObjects(*this, {id});
+    it = std::find_if(objects_.begin(), objects_.end(), [&](const auto& o) { return o->id == id; });
     objects_.erase(it);
+    pruneEmptyGroups(*this);
     selection_.erase(std::remove(selection_.begin(), selection_.end(), id), selection_.end());
     elements_.erase(std::remove_if(elements_.begin(), elements_.end(),
         [id](const ElementRef& e) { return e.object == id; }), elements_.end());
@@ -476,6 +480,7 @@ ObjectId Scene::duplicateObject(ObjectId id) {
     obj->render      = src->render;
     obj->localBounds = src->localBounds;
     obj->visible     = src->visible;
+    obj->group       = src->group;       // beside the original, in its group
     obj->id          = nextId_++;
     // Strip any existing .NNN suffix so copies of Box.001 become Box.002.
     std::string base = src->name;
@@ -523,6 +528,7 @@ const SceneObject* Scene::find(ObjectId id) const {
 
 void Scene::clear() {
     objects_.clear();
+    assembly_.clear();
     selection_.clear();
     elements_.clear();
     nextId_ = 1;
@@ -799,7 +805,7 @@ float distToSegment(Vec2 p, Vec2 a, Vec2 b) {
 // at; picking runs on a click and not per frame, so this is not a frame cost.
 float distToEdgePx(const Body& body, const Mat4& model, EdgeId e,
                    const Mat4& viewProj, int w, int h, Vec2 cursorPx,
-                   std::vector<Vec3>& scratch) {
+                   std::vector<Vec3>& scratch, const SectionCut& cut) {
     body.edgePolyline(e, body.edgeLength(e) * 0.0005, scratch);
 
     float best = -1.0f;
@@ -807,7 +813,9 @@ float distToEdgePx(const Body& body, const Mat4& model, EdgeId e,
     bool havePrev = false;
     for (const Vec3& local : scratch) {
         Vec2 px;
-        if (!projectPx(viewProj, w, h, transformPoint(model, local), px)) {
+        const Vec3 world = transformPoint(model, local);
+        // What a section takes away is not drawn, so not there to click.
+        if (cut.removes(world) || !projectPx(viewProj, w, h, world, px)) {
             havePrev = false;
             continue;
         }
@@ -862,6 +870,7 @@ std::vector<ElementHit> Scene::pickElements(const Ray& ray, const Mat4& viewProj
             body.faceVertices(surface.face, fv);
             for (VertexId v : fv) {
                 Vec2 p;
+                if (section_.removes(transformPoint(model, body.vertexPosition(v)))) continue;
                 if (!atPixel(body.vertexPosition(v), p)) continue;
                 const float d = length(cursorPx - p);
                 if (d < bestVert) { bestVert = d; vertPick = v; }
@@ -876,7 +885,7 @@ std::vector<ElementHit> Scene::pickElements(const Ray& ray, const Mat4& viewProj
                 // would select a line the user cannot see.
                 if (body.isBridgeEdge(e)) continue;
                 const float d = distToEdgePx(body, model, e, viewProj, viewportW,
-                                             viewportH, cursorPx, edgePts);
+                                             viewportH, cursorPx, edgePts, section_);
                 if (d >= 0.0f && d < bestEdge) { bestEdge = d; edgePick = e; }
             }
 
@@ -889,6 +898,14 @@ std::vector<ElementHit> Scene::pickElements(const Ray& ray, const Mat4& viewProj
     }
     if (!found.empty()) return found;
     ElementHit out;
+
+    // A click on a section's cut face is a click on something solid, not on
+    // the empty space around the part: nothing behind it is reached for.
+    if (section_.on) {
+        bool capped = false;
+        raycast(ray, &capped);
+        if (capped) return found;
+    }
 
     // If raycast missed or didn't hit a surface, check nearby vertices and edges
     // of visible objects on screen (off-silhouette generous picking).
@@ -917,6 +934,7 @@ std::vector<ElementHit> Scene::pickElements(const Ray& ray, const Mat4& viewProj
         body.allVertices(verts);
         for (VertexId v : verts) {
             Vec2 p;
+            if (section_.removes(transformPoint(model, body.vertexPosition(v)))) continue;
             if (!atPixel(body.vertexPosition(v), p)) continue;
             const float d = length(cursorPx - p);
             if (d < bestVert) { bestVert = d; vertPick = v; vertObj = obj->id; }
@@ -926,7 +944,7 @@ std::vector<ElementHit> Scene::pickElements(const Ray& ray, const Mat4& viewProj
         for (EdgeId e : edges) {
             if (body.isBridgeEdge(e)) continue;
             const float d = distToEdgePx(body, model, e, viewProj, viewportW,
-                                         viewportH, cursorPx, edgePts);
+                                         viewportH, cursorPx, edgePts, section_);
             if (d >= 0.0f && d < bestEdge) { bestEdge = d; edgePick = e; edgeObj = obj->id; }
         }
     }
@@ -1029,9 +1047,25 @@ void Scene::pruneElementSelection() {
         }), elements_.end());
 }
 
-RayHit Scene::raycast(const Ray& ray) const {
+namespace {
+
+// Under a section, a ray whose nearest surface is the inside of a wall -- a
+// triangle facing away from it -- came in through the cut and was inside the
+// part when it crossed the plane: it has hit the cut face, which is drawn
+// there. Whether this triangle is the inside of a wall.
+bool sectionInside(const SectionCut& cut, const Ray& ray, const Mat4& model, Vec3 a, Vec3 b, Vec3 c) {
+    if (!cut.on) return false;
+    const Vec3 wa = transformPoint(model, a);
+    const Vec3 n = cross(transformPoint(model, b) - wa, transformPoint(model, c) - wa);
+    return dot(n, ray.dir) > 0.0;
+}
+
+} // namespace
+
+RayHit Scene::raycast(const Ray& ray, bool* capped) const {
     RayHit best;
     float bestT = std::numeric_limits<float>::max();
+    bool bestIsCap = false;
 
     for (const auto& o : objects_) {
         if (!o->visible || o->render.triangles.empty()) continue;
@@ -1054,14 +1088,18 @@ RayHit Scene::raycast(const Ray& ray) const {
         const RenderMesh& rm = o->render;
         for (size_t i = 0; i + 2 < rm.triangles.size(); i += 3) {
             Real t = 0.0;
-            if (!rayTriangle(local, rm.positions[rm.triangles[i + 0]],
-                                    rm.positions[rm.triangles[i + 1]],
-                                    rm.positions[rm.triangles[i + 2]], t)) continue;
+            const Vec3& a = rm.positions[rm.triangles[i + 0]];
+            const Vec3& b = rm.positions[rm.triangles[i + 1]];
+            const Vec3& c = rm.positions[rm.triangles[i + 2]];
+            if (!rayTriangle(local, a, b, c, t)) continue;
 
             const float worldT = t / dirScale;
             if (worldT >= bestT) continue;
-
+            if (section_.removes(ray.at(worldT))) continue;
             bestT = worldT;
+            bestIsCap = sectionInside(section_, ray, model, a, b, c);
+            if (bestIsCap) continue;
+
             best.object = o->id;
             best.face   = rm.triangleFace[i / 3];
             best.t      = worldT;
@@ -1070,7 +1108,8 @@ RayHit Scene::raycast(const Ray& ray) const {
                                                     o->body.faceNormal(best.face)));
         }
     }
-    return best;
+    if (capped) *capped = bestIsCap;
+    return bestIsCap ? RayHit{} : best;
 }
 
 std::vector<RayHit> Scene::raycastCoincident(const Ray& ray) const {
@@ -1105,6 +1144,10 @@ std::vector<RayHit> Scene::raycastCoincident(const Ray& ray) const {
                                     rm.positions[rm.triangles[i + 2]], t)) continue;
             const float worldT = t / dirScale;
             if (worldT > mineT) continue;
+            if (section_.removes(ray.at(worldT))) continue;
+            if (sectionInside(section_, ray, model, rm.positions[rm.triangles[i + 0]],
+                              rm.positions[rm.triangles[i + 1]], rm.positions[rm.triangles[i + 2]]))
+                continue;
             mineT = worldT;
             mine.object = o->id;
             mine.face   = rm.triangleFace[i / 3];

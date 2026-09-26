@@ -9,6 +9,8 @@
 #include "app/create_tool.h"
 #include "app/extrude_ops.h"
 #include "app/profile_tool.h"
+#include "app/joint_tool.h"
+#include "app/clearance.h"
 #include "app/sketch_tool.h"
 #include "app/file_dialog.h"
 #include "app/printability.h"
@@ -195,6 +197,20 @@ public:
     // picked, 3 extruded 3 mm, 4 cut 3 mm into a plate under it, 5 with the
     // busiest face of the result selected -- what the highlight costs to draw.
     void setSvgDemo(const std::string& path, int step) { svgDemo_ = path; svgDemoStep_ = step; }
+    // Assemblies, driven the way the tools drive them: 1 the joint tool with
+    // the lid picked, pointing at the box's top -- the lid shown where it
+    // would go; 2 a lid hinged on the box by two edges, opened 70 degrees in
+    // its panel; 3 groups in the outliner, one selected; 4 a pin put through
+    // a drilled plate by the rims; 5 the clearance of a pin in its hole and a
+    // bracket run into the plate; 6 a hinged lid's clearance through its whole
+    // swing, against a post it hits; 7 the exploded view; 8 forty parts,
+    // each joined to the one below, for --frame-probe -- every joint solved
+    // every frame, and the stack's clearance measured.
+    void setAssemblyDemo(int step) { assemblyDemo_ = step; }
+    // 1 a drilled plate and its pin cut down the middle, the panel open; 2 the
+    // plane put on a face of a box and slid into it, from the demo's own
+    // pointer; 3 forty parts cut, timed.
+    void setSectionDemo(int step) { sectionDemo_ = step; }
     // Print where each frame went, every `frames` frames. For finding a stall,
     // and for showing one is gone.
     void setFrameProbe(int frames);
@@ -1234,6 +1250,136 @@ private:
 
     CreateTool createTool_;
     SketchTool sketchTool_;
+    // Joining parts; see app/joint_tool.h and app/app_assembly.cpp.
+    JointTool jointTool_;
+    void applyAssemblyActions();
+    void beginJoint();
+    int  assemblyDemo_ = 0;
+    int  assemblyDemoFrame_ = 0;
+    void setupAssemblyDemo();
+    void stepAssemblyDemo();
+
+    // ---- Clearance ------------------------------------------------------------
+    //
+    // How close the parts come, measured on a worker whenever what is measured
+    // changes -- a part moved, a joint turned, the gap asked for -- and drawn
+    // on the parts until the panel is closed. See app/clearance.h. It keeps
+    // measuring while another operation has the panel's corner, and says the
+    // tightest gap in a line at the foot of the view instead: a hinge dragged
+    // in its own panel shows whether it clears as it goes.
+    struct ClearanceToolState {
+        bool open = false;
+        Real required = 0.2;
+        bool selectedOnly = false;
+        uint32_t sweepJoint = 0;        // through this joint's motion, or 0
+        int focus = -1;                 // the pair picked in the list
+        bool typing = false;
+        std::string typed;
+
+        std::future<ClearanceResult> job;
+        std::shared_ptr<std::atomic<bool>> cancel;
+        bool running = false;
+        uint64_t jobKey = 0;
+        std::unordered_map<ObjectId, uint32_t> jobVersions;
+        std::vector<std::future<ClearanceResult>> retired;
+
+        ClearanceResult shown;
+        uint64_t shownKey = 0;
+        uint64_t uploaded = 0;          // which result's marks the renderer holds
+        uint64_t wantKey = 0;
+        float stableFor = 0.0f;
+
+        // Each body's fine mesh, kept while its geometry stays the same: moving
+        // a part or turning a joint re-measures without re-meshing.
+        struct CachedMesh {
+            uint32_t version = 0;
+            Real deviation = 0.0;
+            std::shared_ptr<const RenderMesh> mesh;
+        };
+        std::unordered_map<ObjectId, CachedMesh> meshes;
+    };
+    ClearanceToolState clearance_;
+
+    // ---- Exploded view ----------------------------------------------------------
+    //
+    // A view, not an edit: the parts drawn pulled apart -- along their joints'
+    // axes, a pin out of its hole and a lid up off its box, and a part joined
+    // to a part joined to another further again -- and nothing about them
+    // changed. It closes when anything else starts, so no step is ever made
+    // against where a part only appears to be.
+    struct ExplodeState {
+        bool open = false;
+        Real amount = 0.6;          // how far, as a share of each part's own size
+        Real shown = 0.0;           // how far it is drawn now, easing to `amount`
+        bool trails = true;         // dashed lines back to where each part sits
+        bool typing = false;
+        std::string typed;
+        struct Trail { Vec3 from, to; };
+        std::vector<Trail> trailLines;
+    };
+    ExplodeState explode_;
+    void toggleExplode();
+    // Puts every part back where it goes at once, not over the next frames:
+    // for anything about to read where the parts are -- an export, an edit.
+    void endExplode();
+    void stepExplode();
+    void drawExplodePanel();
+    void drawExplodeOverlay();
+
+    // ---- Section view -----------------------------------------------------------
+    //
+    // The model drawn cut by a plane, the near side taken away and the cut
+    // faces filled and hatched, to see inside a part or how parts sit in one
+    // another. A view, like the exploded one, but one that stays: work goes on
+    // with the model cut -- measuring a wall, filleting an edge inside -- and
+    // clicks do not reach what the cut has taken away. Its panel steps aside
+    // for any other operation's and comes back after.
+    struct SectionState {
+        bool on = false;            // the model is drawn cut
+        bool panel = false;         // its panel is wanted
+        int  plane = 1;             // 0 Top (XY), 1 Front (XZ), 2 Right (YZ), 3 a face
+        Vec3 faceNormal{0.0, 0.0, 1.0};  // for a face: outwards, in the world
+        Real sign = 1.0;            // which side goes: +1 the side the plane's normal points to
+        Real offset = 0.0;          // along the plane's normal (unsigned), from the origin
+        Real faceAt = 0.0;          // for a face: where the face itself is, the same way
+        bool pickingFace = false;   // the next click in the view picks the face
+        bool typing = false;
+        std::string typed;
+        // The arrow in the view that slides the plane.
+        bool hoverHandle = false;
+        bool dragging = false;
+        Real dragFrom = 0.0;
+        Vec2 dragStartPx{};
+        // The flat face under the pointer while picking one, and its plane.
+        bool hoverFace = false;
+        Vec3 hoverNormal{};
+        Real hoverOffset = 0.0;
+    };
+    SectionState section_;
+    void toggleSection();
+    void sectionPlane(int plane);               // choose one of the three, or a face (3)
+    Vec3 sectionAxis() const;                   // the chosen plane's normal, unsigned
+    bool sectionPanelShown() const;
+    // How far the visible model reaches along `axis`; false when there is none.
+    bool sectionRange(Vec3 axis, Real& lo, Real& hi) const;
+    void stepSection();
+    // The drag and the face pick in the view. True when it used the event.
+    bool sectionMouse(bool uiPointer, bool uiClicks, bool overViewport);
+    void drawSectionPanel();
+    void drawSectionOverlay();
+    int  sectionDemo_ = 0;
+    int  sectionDemoFrame_ = 0;
+    void setupSectionDemo();
+    void stepSectionDemo();
+    void toggleClearance();
+    void stepClearance();
+    void drawClearancePanel();
+    void drawClearanceOverlay();
+    std::vector<ObjectId> clearanceBodies() const;
+    uint64_t clearanceKey() const;
+    void startClearanceJob(uint64_t key);
+    // Some other operation has the panel's corner.
+    bool commandCornerTaken() const;
     // Revolve, sweep and loft, from sketches or from faces and edges.
     ProfileTool profileTool_;
     void beginProfileBuild(ProfileBuild build);

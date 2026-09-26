@@ -200,7 +200,87 @@ public:
         return lengthSq(p - (a + ab * v + ac * w));
     }
 
+    // Every pair of triangles, one from here and one from `other`, whose
+    // bounding boxes come within `maxDist` of each other: `visit(mine, theirs)`
+    // is called for each, and returning false stops the walk. Two trees walked
+    // together, so a pair of parts far apart costs one box test and a pair that
+    // nearly touch costs the triangles near where they do.
+    template <class Visit>
+    void pairsWithin(const TriangleBvh& other, Real maxDist, Visit&& visit) const {
+        if (nodes_.empty() || other.nodes_.empty()) return;
+        const Real limit2 = maxDist * maxDist;
+        std::vector<std::pair<uint32_t, uint32_t>> stack;
+        stack.reserve(128);
+        stack.emplace_back(0, 0);
+        while (!stack.empty()) {
+            const auto [a, b] = stack.back();
+            stack.pop_back();
+            const Node& na = nodes_[a];
+            const Node& nb = other.nodes_[b];
+            if (boxBoxDistance2(na.min, na.max, nb.min, nb.max) > limit2) continue;
+            const bool leafA = na.count > 0, leafB = nb.count > 0;
+            if (leafA && leafB) {
+                for (uint32_t i = 0; i < na.count; ++i)
+                    for (uint32_t k = 0; k < nb.count; ++k)
+                        if (!visit(order_[na.first + i], other.order_[nb.first + k])) return;
+                continue;
+            }
+            // Open the bigger box, so the two sides stay about the same size.
+            const Real sa = lengthSq(na.max - na.min), sb = lengthSq(nb.max - nb.min);
+            if (!leafA && (leafB || sa >= sb)) {
+                stack.emplace_back(a + 1, b);
+                stack.emplace_back(na.first, b);
+            } else {
+                stack.emplace_back(a, b + 1);
+                stack.emplace_back(a, nb.first);
+            }
+        }
+    }
+
+    // How many triangles the ray from `origin` along `dir` passes through. Odd
+    // means the point is inside a closed surface -- how one part sitting
+    // wholly inside another is told from two parts clear of each other, since
+    // neither has a surface crossing the other's.
+    int countHits(Vec3 origin, Vec3 dir) const {
+        if (nodes_.empty()) return 0;
+        const Vec3 inv{Real(1) / dir.x, Real(1) / dir.y, Real(1) / dir.z};
+        int hits = 0;
+        uint32_t stack[64];
+        int top = 0;
+        stack[top++] = 0;
+        while (top > 0) {
+            const uint32_t at = stack[--top];
+            const Node& n = nodes_[at];
+            if (!hitsBox(n.min, n.max, origin, inv, 0.0, 1e30)) continue;
+            if (n.count > 0) {
+                for (uint32_t i = 0; i < n.count; ++i) {
+                    const uint32_t t = order_[n.first + i];
+                    Real hit = 0;
+                    if (rayTri((*pos_)[(*tris_)[t * 3 + 0]], (*pos_)[(*tris_)[t * 3 + 1]],
+                               (*pos_)[(*tris_)[t * 3 + 2]], origin, dir, hit) && hit > 1e-9)
+                        ++hits;
+                }
+            } else {
+                stack[top++] = at + 1;
+                stack[top++] = n.first;
+            }
+        }
+        return hits;
+    }
+
 private:
+    static Real boxBoxDistance2(Vec3 alo, Vec3 ahi, Vec3 blo, Vec3 bhi) {
+        Real d = 0;
+        auto axis = [&](Real al, Real ah, Real bl, Real bh) {
+            if (ah < bl) d += (bl - ah) * (bl - ah);
+            else if (bh < al) d += (al - bh) * (al - bh);
+        };
+        axis(alo.x, ahi.x, blo.x, bhi.x);
+        axis(alo.y, ahi.y, blo.y, bhi.y);
+        axis(alo.z, ahi.z, blo.z, bhi.z);
+        return d;
+    }
+
     static Real boxDistance2(Vec3 lo, Vec3 hi, Vec3 p) {
         Real d = 0;
         auto axis = [&](Real v, Real l, Real h) {

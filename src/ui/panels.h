@@ -136,6 +136,31 @@ struct UiActions {
 
     ObjectId             featuresEdited = kNoObject;
     std::vector<Feature> featuresBefore;
+
+    // ---- Assemblies ------------------------------------------------------------
+    // A group's row: every body in it selected, the way a body's row selects
+    // the body. Shift or Ctrl adds.
+    GroupId pickGroup = kNoGroup;
+    bool    pickGroupAdditive = false;
+    // Ctrl+G and Ctrl+Shift+G, and the menu: the selection into a new group,
+    // or out of the one it is in.
+    bool groupSelected = false;
+    bool ungroupSelected = false;
+    // A row dragged onto a group's row, or onto the empty space below the
+    // lists to take it out of every group.
+    bool         moveNodeRequested = false;
+    OutlinerNode moveNode;
+    GroupId      moveInto = kNoGroup;
+    // Joining parts: a new joint, one opened from its row, or one taken away.
+    bool     joint = false;
+    uint32_t editJoint = 0;
+    uint32_t deleteJoint = 0;
+    // Inspecting an assembly: the gaps between parts, and the parts pulled
+    // apart along their joints.
+    bool clearance = false;
+    bool explode = false;
+    // The section view: on, its panel back, or off -- see Application::toggleSection.
+    bool section = false;
 };
 
 struct UiStats {
@@ -196,6 +221,13 @@ struct UiContext {
     // shape of it rather than on every frame the inspector is drawn. -1: not
     // known, and the inspector works it out itself.
     int          sketchRegions = -1;
+    // The joint whose panel is open, lit in the outliner; 0 when none is.
+    uint32_t     activeJoint = 0;
+    // Clearance and exploded view are open: the bar's buttons show it.
+    bool         clearanceOpen = false;
+    bool         explodeOpen = false;
+    // The model is drawn cut: the bar's button shows it.
+    bool         sectionOn = false;
 };
 
 // The logo, from assets. Without it the bar shows the wordmark in text.

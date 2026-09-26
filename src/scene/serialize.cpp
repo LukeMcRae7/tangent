@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstring>
 #include <fstream>
+#include <unordered_map>
 #include <vector>
 
 namespace tg {
@@ -645,7 +646,48 @@ ProjectResult saveProject(const Scene& scene, const std::string& path) {
         // v23: the steps after the rollback marker, which wait there.
         w.u32(static_cast<uint32_t>(obj->ahead.size()));
         for (const Feature& f : obj->ahead) writeFeature(w, f);
+        // v24: the group it is in.
+        w.u32(obj->group);
         ++res.objects;
+    }
+
+    // v24: the groups, and the joints between parts. Objects are named by the
+    // ids written above, which the reader maps to the ids it hands out.
+    const Assembly& as = scene.assembly();
+    w.u32(as.nextGroup);
+    w.u32(static_cast<uint32_t>(as.groups.size()));
+    for (const Group& g : as.groups) {
+        w.u32(g.id);
+        w.text(g.name);
+        w.u32(g.parent);
+        w.u8(g.expanded ? 1 : 0);
+    }
+    w.u32(as.nextJoint);
+    w.u32(static_cast<uint32_t>(as.joints.size()));
+    for (const Joint& j : as.joints) {
+        w.u32(j.id);
+        w.text(j.name);
+        w.u32(static_cast<uint32_t>(j.kind));
+        for (const JointSide* side : {&j.moving, &j.fixed}) {
+            w.u32(side->object);
+            w.u32(static_cast<uint32_t>(side->at));
+            w.u64(side->element);
+            w.u64(side->onFace);
+            w.vec3(side->frame.origin);
+            w.vec3(side->frame.x);
+            w.vec3(side->frame.z);
+        }
+        w.u8(j.flip ? 1 : 0);
+        w.f64(j.offset);
+        w.f64(j.angle);
+        w.f64(j.turn);
+        w.f64(j.travel);
+        w.f64(j.slideX);
+        w.f64(j.slideY);
+        w.u32(static_cast<uint32_t>(j.slideAxis));
+        w.u8(j.limited ? 1 : 0);
+        w.f64(j.lo);
+        w.f64(j.hi);
     }
 
     std::ofstream out(path, std::ios::binary | std::ios::trunc);
@@ -699,9 +741,12 @@ ProjectResult loadProject(Scene& scene, const std::string& path) {
     const uint32_t count = r.u32();
     if (r.bad) { res.error = "truncated header"; return res; }
 
+    // Ids are handed out afresh; the joints written after the objects name
+    // them by the ids in the file, so the two are paired here.
+    std::unordered_map<uint32_t, ObjectId> idFromFile;
+    std::vector<std::pair<ObjectId, GroupId>> groupOf;
     for (uint32_t i = 0; i < count; ++i) {
-        const uint32_t id = r.u32();
-        (void)id;   // ids are reassigned; nothing outside a file references them
+        const uint32_t fileId = r.u32();
         const std::string name = r.text();
 
         Transform t;
@@ -734,6 +779,7 @@ ProjectResult loadProject(Scene& scene, const std::string& path) {
                 ahead.push_back(std::move(f));
             }
         }
+        const GroupId inGroup = version >= 24 ? r.u32() : kNoGroup;
         if (r.bad) { res.error = "truncated file"; return res; }
 
         // Before version 13 a sketch could not be shown or hidden, because a
@@ -795,7 +841,73 @@ ProjectResult loadProject(Scene& scene, const std::string& path) {
         // Re-runs the recipe. A chain that no longer evaluates leaves the
         // object as its base primitive rather than failing the whole load.
         loaded.reevaluate(newId);
+        idFromFile[fileId] = newId;
+        if (inGroup != kNoGroup) groupOf.emplace_back(newId, inGroup);
         ++res.objects;
+    }
+
+    if (version >= 24) {
+        Assembly& as = loaded.assembly();
+        as.nextGroup = std::max<GroupId>(1, r.u32());
+        const uint32_t groups = r.u32();
+        if (r.bad || groups > 100000u) { res.error = "bad group count"; return res; }
+        for (uint32_t k = 0; k < groups && !r.bad; ++k) {
+            Group g;
+            g.id = r.u32();
+            g.name = r.text();
+            g.parent = r.u32();
+            g.expanded = r.u8() != 0;
+            if (g.id == kNoGroup) { res.error = "bad group"; return res; }
+            as.nextGroup = std::max(as.nextGroup, g.id + 1);
+            as.groups.push_back(std::move(g));
+        }
+        as.nextJoint = std::max<uint32_t>(1, r.u32());
+        const uint32_t joints = r.u32();
+        if (r.bad || joints > 100000u) { res.error = "bad joint count"; return res; }
+        for (uint32_t k = 0; k < joints && !r.bad; ++k) {
+            Joint j;
+            j.id = r.u32();
+            j.name = r.text();
+            const uint32_t kind = r.u32();
+            if (kind > static_cast<uint32_t>(kLastJointKind)) { res.error = "bad joint"; return res; }
+            j.kind = static_cast<JointKind>(kind);
+            bool known = true;
+            for (JointSide* side : {&j.moving, &j.fixed}) {
+                const uint32_t fileObject = r.u32();
+                const uint32_t at = r.u32();
+                if (at > static_cast<uint32_t>(JointAt::Vertex)) { res.error = "bad joint"; return res; }
+                side->at = static_cast<JointAt>(at);
+                side->element = r.u64();
+                side->onFace = r.u64();
+                side->frame.origin = r.vec3();
+                side->frame.x = r.vec3();
+                side->frame.z = r.vec3();
+                auto it = idFromFile.find(fileObject);
+                known = known && it != idFromFile.end();
+                side->object = it == idFromFile.end() ? kNoObject : it->second;
+            }
+            j.flip = r.u8() != 0;
+            j.offset = r.f64();
+            j.angle = r.f64();
+            j.turn = r.f64();
+            j.travel = r.f64();
+            j.slideX = r.f64();
+            j.slideY = r.f64();
+            const uint32_t axis = r.u32();
+            j.slideAxis = axis <= static_cast<uint32_t>(SlideAxis::Y) ? static_cast<SlideAxis>(axis) : SlideAxis::Z;
+            j.limited = r.u8() != 0;
+            j.lo = r.f64();
+            j.hi = r.f64();
+            as.nextJoint = std::max(as.nextJoint, j.id + 1);
+            // A joint to a part the file does not have is dropped rather than
+            // left pointing at whatever gets that number next.
+            if (known) as.joints.push_back(std::move(j));
+        }
+        if (r.bad) { res.error = "truncated file"; return res; }
+        for (const auto& [id, g] : groupOf)
+            if (SceneObject* o = loaded.find(id); o && as.group(g)) o->group = g;
+        pruneEmptyGroups(loaded);
+        solveAssembly(loaded);
     }
 
     scene = std::move(loaded);

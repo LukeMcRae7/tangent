@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 
 namespace tg {
 namespace {
@@ -178,15 +179,45 @@ bool sectionHeader(const char* name, size_t count) {
     return open;
 }
 
-void objectRow(UiContext& ctx, Scene& scene, SceneObject& obj, Glyph glyph) {
+// What a row carries when it is dragged: an object or a group, to drop on a
+// group's row or below the lists.
+constexpr const char* kNodePayload = "TG_OUTLINER_NODE";
+
+void dragSource(const OutlinerNode& node, const char* name, Glyph glyph) {
+    if (!ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceNoDisableHover)) return;
+    ImGui::SetDragDropPayload(kNodePayload, &node, sizeof node);
+    glyphItem(glyph, 15.0f, u32(palette::kBrand));
+    ImGui::SameLine(0.0f, 6.0f);
+    ImGui::TextUnformatted(name);
+    ImGui::EndDragDropSource();
+}
+
+// A drop of a dragged row onto the item just laid out: it goes into `into`.
+void dropTarget(UiContext& ctx, GroupId into) {
+    if (!ImGui::BeginDragDropTarget()) return;
+    if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload(kNodePayload)) {
+        if (p->DataSize == sizeof(OutlinerNode)) {
+            ctx.actions.moveNodeRequested = true;
+            std::memcpy(&ctx.actions.moveNode, p->Data, sizeof(OutlinerNode));
+            ctx.actions.moveInto = into;
+        }
+    }
+    ImGui::EndDragDropTarget();
+}
+
+void objectRow(UiContext& ctx, Scene& scene, SceneObject& obj, Glyph glyph, float indent = 0.0f) {
     ImGui::PushID(static_cast<int>(obj.id));
     const float h = 26.0f;
     const float eyeW = 22.0f;
     const float w = ImGui::GetContentRegionAvail().x;
-    const ImVec2 at = ImGui::GetCursorScreenPos();
+    const ImVec2 at0 = ImGui::GetCursorScreenPos();
+    // Everything drawn in the row is shifted by the indent; the highlight and
+    // the eye keep to the panel's full width, so rows at every depth line up.
+    const ImVec2 at(at0.x + indent, at0.y);
 
     const bool clicked = ImGui::InvisibleButton("##row", ImVec2(std::max(10.0f, w - eyeW - 4.0f), h));
     const bool hovered = ImGui::IsItemHovered();
+    dragSource({false, obj.id, kNoGroup}, obj.name.c_str(), glyph);
     // An object that is only a sketch is that sketch: its row selects it, and
     // a double-click opens it, the way the sketch rows under a part do.
     const Feature* onlySketch = glyph == Glyph::Sketch && !obj.features.empty() ? &obj.features.front() : nullptr;
@@ -212,7 +243,7 @@ void objectRow(UiContext& ctx, Scene& scene, SceneObject& obj, Glyph glyph) {
 
     const bool selected = scene.isSelected(obj.id) || (onlySketch && scene.selectedSketch().object == obj.id);
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    const ImVec2 lo(at.x, at.y), hi(at.x + w, at.y + h);
+    const ImVec2 lo(at0.x, at0.y), hi(at0.x + w, at0.y + h);
     if (selected) {
         dl->AddRectFilled(lo, hi, u32(palette::kRaised), 5.0f);
         dl->AddRectFilled(ImVec2(lo.x, lo.y + 5.0f), ImVec2(lo.x + 2.5f, hi.y - 5.0f), u32(palette::kBrand), 2.0f);
@@ -239,17 +270,18 @@ void objectRow(UiContext& ctx, Scene& scene, SceneObject& obj, Glyph glyph) {
         for (Feature& f : obj.features) {
             if (f.kind != FeatureKind::Sketch) continue;
             ImGui::PushID(static_cast<int>(f.uid));
-            const ImVec2 sat = ImGui::GetCursorScreenPos();
+            const ImVec2 sat0 = ImGui::GetCursorScreenPos();
+            const ImVec2 sat(sat0.x + indent, sat0.y);
             const float sh = 22.0f;
             const bool sclicked = ImGui::InvisibleButton("##sk", ImVec2(std::max(10.0f, w - eyeW - 4.0f), sh));
             const bool shover = ImGui::IsItemHovered();
             const bool ssel = scene.selectedSketch() == Scene::SketchRef{obj.id, f.uid};
             if (ssel) {
-                dl->AddRectFilled(ImVec2(sat.x, sat.y), ImVec2(sat.x + w, sat.y + sh), u32(palette::kRaised), 5.0f);
+                dl->AddRectFilled(ImVec2(sat0.x, sat0.y), ImVec2(sat0.x + w, sat0.y + sh), u32(palette::kRaised), 5.0f);
                 dl->AddRectFilled(ImVec2(sat.x + 24.0f, sat.y + 4.0f), ImVec2(sat.x + 26.5f, sat.y + sh - 4.0f),
                                   u32(palette::kBrand), 2.0f);
             } else if (shover) {
-                dl->AddRectFilled(ImVec2(sat.x, sat.y), ImVec2(sat.x + w, sat.y + sh),
+                dl->AddRectFilled(ImVec2(sat0.x, sat0.y), ImVec2(sat0.x + w, sat0.y + sh),
                                   u32(palette::kHover, 0.5f), 5.0f);
             }
             // One click selects it -- its actions are then on the bar over the
@@ -280,6 +312,166 @@ void objectRow(UiContext& ctx, Scene& scene, SceneObject& obj, Glyph glyph) {
             if (ui::eyeToggle("shown", shown, 13.0f)) f.sketchShown = shown;
             ImGui::PopID();
         }
+    }
+    ImGui::PopID();
+}
+
+// A group's row, and under it -- when it is open -- the groups and bodies it
+// holds, one step further in. Clicking it selects everything in it; the
+// chevron opens and closes it; the eye shows or hides all of it; a row dragged
+// onto it goes in.
+void groupRow(UiContext& ctx, Scene& scene, Group& group, float indent) {
+    ImGui::PushID(static_cast<int>(group.id) + 0x40000000);
+    const std::vector<ObjectId> members = groupMembers(scene, group.id);
+    const float h = 26.0f;
+    const float eyeW = 22.0f;
+    const float w = ImGui::GetContentRegionAvail().x;
+    const ImVec2 at0 = ImGui::GetCursorScreenPos();
+    const ImVec2 at(at0.x + indent, at0.y);
+
+    const bool clicked = ImGui::InvisibleButton("##grp", ImVec2(std::max(10.0f, w - eyeW - 4.0f), h));
+    const bool hovered = ImGui::IsItemHovered();
+    dragSource({true, 0, group.id}, group.name.c_str(), Glyph::Group);
+    dropTarget(ctx, group.id);
+    const ImVec2 mouse = ImGui::GetIO().MousePos;
+    const bool onChevron = mouse.x < at.x + 16.0f;
+    if (clicked) {
+        if (onChevron) {
+            group.expanded = !group.expanded;
+        } else {
+            ctx.actions.pickGroup = group.id;
+            ctx.actions.pickGroupAdditive = ImGui::GetIO().KeyShift || ImGui::GetIO().KeyCtrl;
+        }
+    }
+    if (hovered && !onChevron && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) ctx.actions.frameSelected = true;
+    if (hovered && !ImGui::IsMouseDragging(ImGuiMouseButton_Left))
+        ImGui::SetTooltip("Click to select everything in it; drag a row onto it to put it in");
+
+    const bool selected = !members.empty() && std::all_of(members.begin(), members.end(),
+                                                          [&](ObjectId id) { return scene.isSelected(id); });
+    bool anyShown = false;
+    for (ObjectId id : members)
+        if (const SceneObject* o = scene.find(id); o && o->visible) anyShown = true;
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 lo(at0.x, at0.y), hi(at0.x + w, at0.y + h);
+    if (selected) {
+        dl->AddRectFilled(lo, hi, u32(palette::kRaised), 5.0f);
+        dl->AddRectFilled(ImVec2(at.x, lo.y + 5.0f), ImVec2(at.x + 2.5f, hi.y - 5.0f), u32(palette::kBrand), 2.0f);
+    } else if (hovered) {
+        dl->AddRectFilled(lo, hi, u32(palette::kHover, 0.5f), 5.0f);
+    }
+    const float alpha = anyShown ? 1.0f : 0.45f;
+    drawGlyph(dl, group.expanded ? Glyph::ChevronDown : Glyph::ChevronRight, ImVec2(at.x + 8.0f, at.y + h * 0.5f),
+              13.0f, u32(hovered && onChevron ? palette::kText : palette::kTextDim));
+    drawGlyph(dl, Glyph::Group, ImVec2(at.x + 26.0f, at.y + h * 0.5f), 16.0f, u32(palette::kBrand, alpha));
+    pushFont(selected ? FontWeight::SemiBold : FontWeight::Medium);
+    const float textY = at.y + (h - ImGui::GetTextLineHeight()) * 0.5f;
+    dl->AddText(ImVec2(at.x + 40.0f, textY), u32(palette::kText, alpha), group.name.c_str());
+    const float nameW = ImGui::CalcTextSize(group.name.c_str()).x;
+    ImGui::PopFont();
+    char n[24];
+    std::snprintf(n, sizeof n, "%zu", members.size());
+    pushFont(FontWeight::Regular, uiFonts().size * 0.82f);
+    dl->AddText(ImVec2(at.x + 40.0f + nameW + 7.0f, textY + 1.0f), u32(palette::kTextFaint), n);
+    ImGui::PopFont();
+
+    ImGui::SameLine(w - eyeW + 2.0f);
+    ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (h - (15.0f + 6.0f)) * 0.5f);
+    bool shown = anyShown;
+    // Display only, like a body's eye: every body in it, shown or hidden.
+    if (ui::eyeToggle("vis", shown, 15.0f))
+        for (ObjectId id : members)
+            if (SceneObject* o = scene.find(id)) o->visible = shown;
+
+    if (group.expanded) {
+        // Groups first, then bodies: the shape of the assembly, then its parts.
+        for (Group& child : scene.assembly().groups)
+            if (child.parent == group.id) groupRow(ctx, scene, child, indent + 14.0f);
+        for (const auto& o : scene.objects())
+            if (o->group == group.id) objectRow(ctx, scene, *o, glyphFor(kindOf(*o)), indent + 14.0f);
+    }
+    ImGui::PopID();
+}
+
+Glyph jointGlyph(JointKind k) {
+    switch (k) {
+        case JointKind::Rigid:    return Glyph::Lock;
+        case JointKind::Revolute: return Glyph::JointRevolute;
+        case JointKind::Slider:   return Glyph::JointSlider;
+        case JointKind::Planar:   return Glyph::Move;
+    }
+    return Glyph::Joint;
+}
+
+// A joint's row: what kind, what it is called, and what it joins. Clicking it
+// opens its panel.
+void jointRow(UiContext& ctx, Scene& scene, Joint& j) {
+    ImGui::PushID(static_cast<int>(j.id) + 0x50000000);
+    const float h = 26.0f;
+    const float w = ImGui::GetContentRegionAvail().x;
+    const ImVec2 at = ImGui::GetCursorScreenPos();
+
+    // Named where it is listed, the way a step in the history is: a
+    // double-click turns the name into a field, Enter or a click away keeps it.
+    static uint32_t renaming = 0;
+    static char nameBuf[96];
+    if (renaming == j.id) {
+        ImGui::SetCursorScreenPos(ImVec2(at.x + 30.0f, at.y + (h - ImGui::GetFrameHeight()) * 0.5f));
+        ImGui::SetNextItemWidth(w - 34.0f);
+        ImGui::SetKeyboardFocusHere();
+        const bool done = ImGui::InputText("##jrename", nameBuf, sizeof nameBuf,
+                                           ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll);
+        if (done || (!ImGui::IsItemActive() && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !ImGui::IsItemHovered())) {
+            if (nameBuf[0]) j.name = nameBuf;
+            renaming = 0;
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape)) renaming = 0;
+        ImGui::SetCursorScreenPos(ImVec2(at.x, at.y + h));
+        ImGui::Dummy(ImVec2(0, 0));
+        ImGui::PopID();
+        return;
+    }
+
+    const bool clicked = ImGui::InvisibleButton("##jnt", ImVec2(std::max(10.0f, w), h));
+    const bool hovered = ImGui::IsItemHovered();
+    if (clicked) ctx.actions.editJoint = j.id;
+    if (hovered && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+        renaming = j.id;
+        std::snprintf(nameBuf, sizeof nameBuf, "%s", j.name.c_str());
+    }
+
+    const SceneObject* m = scene.find(j.moving.object);
+    const SceneObject* f = scene.find(j.fixed.object);
+    const bool selected = ctx.activeJoint == j.id;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 lo(at.x, at.y), hi(at.x + w, at.y + h);
+    if (selected) {
+        dl->AddRectFilled(lo, hi, u32(palette::kRaised), 5.0f);
+        dl->AddRectFilled(ImVec2(lo.x, lo.y + 5.0f), ImVec2(lo.x + 2.5f, hi.y - 5.0f), u32(palette::kBrand), 2.0f);
+    } else if (hovered) {
+        dl->AddRectFilled(lo, hi, u32(palette::kHover, 0.5f), 5.0f);
+    }
+    const bool troubled = !j.problem.empty();
+    drawGlyph(dl, troubled ? Glyph::Alert : jointGlyph(j.kind), ImVec2(at.x + 18.0f, at.y + h * 0.5f), 16.0f,
+              troubled ? IM_COL32(240, 90, 70, 255) : u32(palette::kBrand));
+    pushFont(selected ? FontWeight::Medium : FontWeight::Regular);
+    const float textY = at.y + (h - ImGui::GetTextLineHeight()) * 0.5f;
+    dl->AddText(ImVec2(at.x + 34.0f, textY), u32(palette::kText), j.name.c_str());
+    const float nameW = ImGui::CalcTextSize(j.name.c_str()).x;
+    ImGui::PopFont();
+    // What it joins, faint, clipped to the row.
+    char what[160];
+    std::snprintf(what, sizeof what, "%s \xE2\x86\x92 %s", m ? m->name.c_str() : "?", f ? f->name.c_str() : "?");
+    pushFont(FontWeight::Regular, uiFonts().size * 0.82f);
+    dl->PushClipRect(ImVec2(at.x + 40.0f + nameW, lo.y), ImVec2(hi.x - 4.0f, hi.y), true);
+    dl->AddText(ImVec2(at.x + 34.0f + nameW + 8.0f, textY + 1.0f), u32(palette::kTextFaint), what);
+    dl->PopClipRect();
+    ImGui::PopFont();
+    if (hovered) {
+        if (troubled) ImGui::SetTooltip("%s\n%s", j.problem.c_str(), "Click to open it, double-click to name it");
+        else          ImGui::SetTooltip("%s joint: %s moves on %s. Click to open it, double-click to name it",
+                                        jointKindName(j.kind), m ? m->name.c_str() : "?", f ? f->name.c_str() : "?");
     }
     ImGui::PopID();
 }
@@ -1147,6 +1339,18 @@ void drawOutliner(UiContext& ctx) {
         ImGui::PopFont();
     }
 
+    // Groups first: an assembly reads from the top down, and what is in a
+    // group is listed under it rather than again with its kind.
+    {
+        size_t top = 0;
+        for (const Group& g : scene.assembly().groups) if (g.parent == kNoGroup) ++top;
+        if (top > 0 && sectionHeader("Groups", top)) {
+            for (Group& g : scene.assembly().groups)
+                if (g.parent == kNoGroup) groupRow(ctx, scene, g, 0.0f);
+            ImGui::Dummy(ImVec2(0, 6));
+        }
+    }
+
     struct Section { const char* name; ObjectKind kind; };
     static const Section kSections[3] = {
         {"Bodies", ObjectKind::Body}, {"Sketches", ObjectKind::Sketch}, {"Meshes", ObjectKind::Mesh}};
@@ -1154,17 +1358,127 @@ void drawOutliner(UiContext& ctx) {
         if (scene.objectCount() == 0) break;
         std::vector<SceneObject*> members;
         for (const auto& obj : scene.objects())
-            if (kindOf(*obj) == s.kind) members.push_back(obj.get());
+            if (kindOf(*obj) == s.kind && obj->group == kNoGroup) members.push_back(obj.get());
         // A heading over nothing is a promise of something that is not there.
         // The section appears when the first one of its kind does.
         if (members.empty()) continue;
-        if (!sectionHeader(s.name, members.size())) continue;
+        const bool open = sectionHeader(s.name, members.size());
+        // A row dropped on a heading comes out of its group.
+        dropTarget(ctx, kNoGroup);
+        if (!open) continue;
         for (SceneObject* obj : members) objectRow(ctx, scene, *obj, glyphFor(s.kind));
         ImGui::Dummy(ImVec2(0, 6));
     }
 
+    if (!scene.assembly().joints.empty() && sectionHeader("Joints", scene.assembly().joints.size())) {
+        for (Joint& j : scene.assembly().joints) jointRow(ctx, scene, j);
+        ImGui::Dummy(ImVec2(0, 6));
+    }
+
+    // The rest of the panel takes a row out of every group, and says so while
+    // one is being dragged.
+    if (!scene.assembly().groups.empty()) {
+        const ImVec2 avail = ImGui::GetContentRegionAvail();
+        const ImVec2 at = ImGui::GetCursorScreenPos();
+        ImGui::Dummy(ImVec2(std::max(1.0f, avail.x), std::max(24.0f, avail.y)));
+        const ImGuiPayload* dragging = ImGui::GetDragDropPayload();
+        if (dragging && dragging->IsDataType(kNodePayload)) {
+            pushFont(FontWeight::Regular, uiFonts().size * 0.85f);
+            ImGui::GetWindowDrawList()->AddText(ImVec2(at.x + 8.0f, at.y + 4.0f), u32(palette::kTextDim),
+                                                "Drop here to take it out of its group");
+            ImGui::PopFont();
+        }
+        dropTarget(ctx, kNoGroup);
+    }
+
     ImGui::PopStyleVar();
     ImGui::End();
+}
+
+// A group, when the whole of it is what is selected: its name, what is in it,
+// the joints that hold it, and taking it apart.
+void groupInspector(UiContext& ctx, Group& group) {
+    Scene& scene = *ctx.scene;
+    {
+        const float box = ImGui::GetFrameHeight();
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        const ImVec2 at = ImGui::GetCursorScreenPos();
+        dl->AddRectFilled(at, ImVec2(at.x + box, at.y + box), u32(palette::kBrand), 6.0f);
+        drawGlyph(dl, Glyph::Group, ImVec2(at.x + box * 0.5f, at.y + box * 0.5f), box * 0.7f,
+                  IM_COL32(255, 255, 255, 255));
+        ImGui::Dummy(ImVec2(box, box));
+        ImGui::SameLine(0.0f, 8.0f);
+        char nameBuf[128];
+        std::snprintf(nameBuf, sizeof nameBuf, "%s", group.name.c_str());
+        ImGui::SetNextItemWidth(-1.0f);
+        pushFont(FontWeight::SemiBold);
+        ImGui::PushStyleColor(ImGuiCol_FrameBg, im(palette::kField));
+        if (ImGui::InputText("##gname", nameBuf, sizeof nameBuf) && nameBuf[0]) group.name = nameBuf;
+        ImGui::PopStyleColor();
+        ImGui::PopFont();
+    }
+    ImGui::Dummy(ImVec2(0, 6));
+    const std::vector<ObjectId> members = groupMembers(scene, group.id);
+    size_t inner = 0;
+    for (const Group& g : scene.assembly().groups) if (g.id != group.id && groupWithin(scene, g.id, group.id)) ++inner;
+    const ImVec4 dim = im(palette::kTextDim);
+    auto row = [&](const char* label, const std::string& value) {
+        ImGui::TextColored(dim, "%s", label);
+        ImGui::SameLine(ui::labelColumn());
+        ImGui::TextUnformatted(value.c_str());
+    };
+    row("Holds", std::to_string(members.size()) + (members.size() == 1 ? " part" : " parts") +
+                     (inner ? ", in " + std::to_string(inner) + (inner == 1 ? " group" : " groups") : std::string()));
+    AABB box;
+    for (ObjectId id : members)
+        if (const SceneObject* o = scene.find(id)) box.expand(o->worldBounds());
+    if (box.valid()) {
+        char b[96];
+        const Vec3 sz = box.size();
+        std::snprintf(b, sizeof b, "%.1f x %.1f x %.1f mm", sz.x, sz.y, sz.z);
+        row("Size", b);
+    }
+    const GroupId parent = group.parent;
+    const Group* up = scene.assembly().group(parent);
+    row("In", up ? up->name : std::string("the top level"));
+
+    // The joints that reach into it, each a way into its panel.
+    std::vector<const Joint*> holding;
+    for (const Joint& j : scene.assembly().joints) {
+        const bool m = std::find(members.begin(), members.end(), j.moving.object) != members.end();
+        const bool f = std::find(members.begin(), members.end(), j.fixed.object) != members.end();
+        if (m || f) holding.push_back(&j);
+    }
+    if (!holding.empty()) {
+        ui::sectionTitle("Joints");
+        for (const Joint* j : holding) {
+            ImGui::PushID(static_cast<int>(j->id));
+            glyphItem(jointGlyph(j->kind), 15.0f, u32(palette::kBrand));
+            ImGui::SameLine(0.0f, 6.0f);
+            if (ui::quietButton(j->name.c_str())) ctx.actions.editJoint = j->id;
+            ui::hoverTip("Open this joint");
+            ImGui::PopID();
+        }
+    }
+
+    ImGui::Dummy(ImVec2(0, 10));
+    pushFont(FontWeight::SemiBold, uiFonts().size);
+    ImGui::TextColored(im(palette::kText), "Actions");
+    ImGui::PopFont();
+    ImGui::Dummy(ImVec2(0, 2));
+    if (ui::quietButton("Ungroup")) ctx.actions.ungroupSelected = true;
+    ui::hoverTip("Take it apart: what it holds moves up a level  (Ctrl+Shift+G)");
+    ImGui::SameLine();
+    if (ui::quietButton("Joint...")) ctx.actions.joint = true;
+    ui::hoverTip("Join a part of it to another part  (J)");
+    ImGui::Dummy(ImVec2(0, 8));
+    pushFont(FontWeight::Regular, uiFonts().size * 0.88f);
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::TextColored(im(palette::kTextFaint),
+                       "A group moves as one when a joint moves any part of it. Drag rows onto it in the "
+                       "outliner to put them in, or below the lists to take them out.");
+    ImGui::PopTextWrapPos();
+    ImGui::PopFont();
 }
 
 // -----------------------------------------------------------------------------
@@ -1184,6 +1498,14 @@ void drawInspector(UiContext& ctx) {
         sketchInspector(ctx, sk);
         ImGui::End();
         return;
+    }
+    // A whole group selected is the group, not the last body clicked in it.
+    if (const std::vector<OutlinerNode> nodes = selectionNodes(scene); nodes.size() == 1 && nodes[0].isGroup) {
+        if (Group* g = scene.assembly().group(nodes[0].group)) {
+            groupInspector(ctx, *g);
+            ImGui::End();
+            return;
+        }
     }
     SceneObject* obj = scene.find(scene.contextObject());
     if (!obj) {
@@ -1246,15 +1568,30 @@ void drawInspector(UiContext& ctx) {
         ui::hoverTip("Back to the origin, unturned, at full size");
         ImGui::Dummy(ImVec2(0, 1));
     }
+    // A part a joint places is where the joint says: its place is read here
+    // and changed there. The fields stay, dimmed, so the numbers are still
+    // there to be read and nothing moves about.
+    const uint32_t placedBy = placingJoint(scene, obj->id);
+    if (placedBy) {
+        const Joint* j = scene.assembly().joint(placedBy);
+        pushFont(FontWeight::Regular, uiFonts().size * 0.86f);
+        glyphItem(Glyph::Joint, 14.0f, u32(palette::kBrand));
+        ImGui::SameLine(0.0f, 5.0f);
+        ImGui::TextColored(im(palette::kTextDim), "Placed by");
+        ImGui::SameLine(0.0f, 4.0f);
+        ImGui::PopFont();
+        if (ui::quietButton(j ? j->name.c_str() : "a joint")) ctx.actions.editJoint = placedBy;
+        ui::hoverTip("Its place comes from the joint: open it to move it, or delete the joint to move it freely");
+    }
     ui::fieldHeader("Position", "mm");
-    ui::axisFields("pos", obj->transform.position, 0.1f, "%.1f");
+    ui::axisFields("pos", obj->transform.position, 0.1f, "%.1f", placedBy != 0);
 
     // Euler angles are a display convention only; the transform stores a
     // quaternion, so the conversion round-trips through it on every edit.
     ui::fieldHeader("Rotation", kDegree);
     Vec3 euler = toEuler(obj->transform.rotation);
     euler = {degrees(euler.x), degrees(euler.y), degrees(euler.z)};
-    if (ui::axisFields("rot", euler, 0.5f, "%.1f")) {
+    if (ui::axisFields("rot", euler, 0.5f, "%.1f", placedBy != 0)) {
         obj->transform.rotation = normalize(Quat::fromEuler(
             {radians(euler.x), radians(euler.y), radians(euler.z)}));
     }

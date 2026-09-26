@@ -1262,6 +1262,9 @@ bool Application::init() {
         camera_.snapToGoal();
     }
 
+    if (assemblyDemo_ > 0) setupAssemblyDemo();
+    if (sectionDemo_ > 0) setupSectionDemo();
+
     if (threadDemo_ > 0) {
         // A thread cut the way the panel cuts one: a hole is drilled, its wall
         // selected, and the thread taken out of it. What comes away is the
@@ -2004,7 +2007,7 @@ bool Application::editToolActive() const {
            // Open with nothing applied, waiting for a number that works.
            insetTool_.pending || shellTool_.pending || splitTool_.pending ||
            holeTool_.pending || offsetTool_.pending || threadTool_.pending ||
-           profileTool_.active();
+           profileTool_.active() || jointTool_.picking();
 }
 
 bool Application::refuseMeshEdit(const SceneObject& obj, const char* what) {
@@ -2022,6 +2025,7 @@ void Application::beginTransform(TransformMode mode) {
     // but the menu's Move, Rotate and Scale reached here regardless and started
     // a transform on top of it.
     if (editToolActive()) { setNotice("Finish the current operation first"); return; }
+    endExplode();
     dismissSettled();
     measure_.end();
 
@@ -2029,6 +2033,27 @@ void Application::beginTransform(TransformMode mode) {
         preEditSolid_ = o->healthVersion == o->geometryVersion && o->health.solid();
     else
         preEditSolid_ = false;
+
+    // A part a joint places is moved by what it is joined to, or by the
+    // joint's own motion; a step of its own would be overruled on the next
+    // frame. It is left out of the gesture, and said so.
+    if (scene_.elementSelection().empty() && !scene_.selection().empty()) {
+        std::vector<ObjectId> placed;
+        for (ObjectId id : scene_.selection())
+            if (placingJoint(scene_, id)) placed.push_back(id);
+        if (!placed.empty()) {
+            const SceneObject* o = scene_.find(placed.front());
+            const Joint* j = scene_.assembly().joint(placingJoint(scene_, placed.front()));
+            const std::string who = (o ? o->name : std::string("That part")) + " is placed by " +
+                                    (j ? j->name : std::string("a joint"));
+            if (placed.size() == scene_.selection().size()) {
+                setNotice(who + ": move it in the joint's panel, or delete the joint to move it freely");
+                return;
+            }
+            setNotice(who + " and follows what it is joined to");
+            tool_.skipObjects(placed);
+        }
+    }
 
     // begin() declines when nothing is selected; there is simply no transform
     // to start, so this is not an error worth reporting.
@@ -2078,6 +2103,31 @@ void Application::handleViewportMouse() {
     stepPrintDemo();
     stepPreviewCheck();
     stepCoplanarDemo();
+    stepAssemblyDemo();
+    stepSectionDemo();
+
+    // The section view's arrow, and the face its plane goes on. Only while its
+    // panel is out, which is only while nothing else is running.
+    if (sectionMouse(uiPointer, uiClicks, overViewport)) return;
+
+    // Joining: while the two picks are being made, every click in the view is
+    // one of them. Once it is made, the view is the view again and the panel
+    // adjusts it.
+    if (jointTool_.picking()) {
+        if (io.MouseWheel != 0.0f && overViewport && !uiPointer)
+            camera_.dolly(io.MouseWheel);
+        if (!uiPointer) jointTool_.update(scene_, camera_, mouseInViewport());
+        if (!uiClicks && overViewport) {
+            if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                jointTool_.handleMouseDown(scene_, undo_);
+                if (!jointTool_.picking()) justFinishedModal_ = true;
+            } else if (ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+                jointTool_.cancel();
+                justFinishedModal_ = true;
+            }
+        }
+        return;
+    }
 
     // Revolve, sweep, loft: every click in the view is a pick; the right
     // button leaves, as it does everywhere else.
@@ -3007,6 +3057,96 @@ void Application::handleShortcuts() {
         return;
     }
 
+    // Where the section's plane is, being typed.
+    if (sectionPanelShown() && section_.typing) {
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) { section_.typing = false; return; }
+        if (ImGui::IsKeyPressed(ImGuiKey_Enter, false) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false)) {
+            char* end = nullptr;
+            const double v = std::strtod(section_.typed.c_str(), &end);
+            if (end && end != section_.typed.c_str()) {
+                Real lo = 0.0, hi = 0.0;
+                sectionRange(sectionAxis(), lo, hi);
+                const Real at = section_.plane == 3 ? section_.faceAt - v : v;
+                section_.offset = std::clamp(at, lo, hi);
+            }
+            section_.typing = false;
+            return;
+        }
+        typedInto(section_.typed, [] {});
+        return;
+    }
+    // Picking the face a section goes on: Escape stops picking.
+    if (section_.pickingFace && ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+        section_.pickingFace = false;
+        return;
+    }
+
+    // How far apart, in the exploded view, being typed.
+    if (explode_.open && explode_.typing) {
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) { explode_.typing = false; return; }
+        if (ImGui::IsKeyPressed(ImGuiKey_Enter, false) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false)) {
+            char* end = nullptr;
+            const double v = std::strtod(explode_.typed.c_str(), &end);
+            if (end && end != explode_.typed.c_str() && v >= 0.0) explode_.amount = v / 100.0;
+            explode_.typing = false;
+            return;
+        }
+        typedInto(explode_.typed, [] {});
+        return;
+    }
+
+    // The gap asked for in the clearance panel, being typed.
+    if (clearance_.open && clearance_.typing) {
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) { clearance_.typing = false; return; }
+        if (ImGui::IsKeyPressed(ImGuiKey_Enter, false) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false)) {
+            char* end = nullptr;
+            const double v = std::strtod(clearance_.typed.c_str(), &end);
+            if (end && end != clearance_.typed.c_str() && v >= 0.0) clearance_.required = v;
+            clearance_.typing = false;
+            return;
+        }
+        typedInto(clearance_.typed, [] {});
+        return;
+    }
+
+    if (jointTool_.active()) {
+        auto send = [&](int key) { return jointTool_.handleKey(key, scene_, undo_); };
+        // A number being typed into one of the panel's bars has the keyboard.
+        if (jointTool_.typing()) {
+            if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) { send(27); return; }
+            if (ImGui::IsKeyPressed(ImGuiKey_Enter, false) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false)) {
+                send(13);
+                return;
+            }
+            for (int d = 0; d <= 9; ++d)
+                if (ImGui::IsKeyPressed(static_cast<ImGuiKey>(ImGuiKey_0 + d), false) ||
+                    ImGui::IsKeyPressed(static_cast<ImGuiKey>(ImGuiKey_Keypad0 + d), false))
+                    send('0' + d);
+            if (ImGui::IsKeyPressed(ImGuiKey_Period, false) || ImGui::IsKeyPressed(ImGuiKey_KeypadDecimal, false))
+                send('.');
+            if (ImGui::IsKeyPressed(ImGuiKey_Minus, false) || ImGui::IsKeyPressed(ImGuiKey_KeypadSubtract, false))
+                send('-');
+            if (ImGui::IsKeyPressed(ImGuiKey_Backspace, false)) send(8);
+            return;
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+            send(27);
+            justFinishedModal_ = true;
+            return;
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_Enter, false) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false)) {
+            send(13);
+            return;
+        }
+        if (jointTool_.picking()) {
+            if (ImGui::IsKeyPressed(ImGuiKey_Backspace, false)) send(8);
+            return;
+        }
+        // Adjusting: F flips it, and every other key is the view's as usual --
+        // which puts the panel away if it starts something else.
+        if (ImGui::IsKeyPressed(ImGuiKey_F, false) && !io.KeyCtrl && !io.KeyShift) { send('F'); return; }
+    }
+
     if (profileTool_.active()) {
         auto send = [&](int key) { return profileTool_.handleKey(key, scene_, undo_); };
         if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) { send(27); return; }
@@ -3112,6 +3252,11 @@ void Application::handleShortcuts() {
 
     if (ctrl && ImGui::IsKeyPressed(ImGuiKey_Q, false)) ui_.actions.quit = true;
 
+    if (ctrl && ImGui::IsKeyPressed(ImGuiKey_G, false)) {
+        if (shift) ui_.actions.ungroupSelected = true;
+        else       ui_.actions.groupSelected = true;
+    }
+    if (!ctrl && !alt && !shift && ImGui::IsKeyPressed(ImGuiKey_J, false)) ui_.actions.joint = true;
     if (ctrl && !shift) {
         if (ImGui::IsKeyPressed(ImGuiKey_N, false)) ui_.actions.newProject = true;
         if (ImGui::IsKeyPressed(ImGuiKey_O, false)) ui_.actions.openProject = true;
@@ -3159,6 +3304,9 @@ void Application::handleShortcuts() {
         ui_.actions.duplicateSelected = true;
     if (ImGui::IsKeyPressed(ImGuiKey_Z, false) && !ctrl && !shift)
         view_.showWireframe = !view_.showWireframe;
+
+    // Section view. V for view: the model cut, and the plane to slide.
+    if (!ctrl && !alt && !shift && ImGui::IsKeyPressed(ImGuiKey_V, false)) ui_.actions.section = true;
 
     // Measure. D for distance, and reachable without moving the left hand.
     if (!ctrl && !alt && !shift && ImGui::IsKeyPressed(ImGuiKey_D, false)) {
@@ -3296,6 +3444,12 @@ void Application::bakePendingScale() {
 void Application::resetObjectTransform(ObjectId id) {
     SceneObject* o = scene_.find(id);
     if (!o) return;
+    if (const uint32_t j = placingJoint(scene_, id)) {
+        const Joint* joint = scene_.assembly().joint(j);
+        setNotice(o->name + " is placed by " + (joint ? joint->name : std::string("a joint")) +
+                  ": delete the joint to move it freely");
+        return;
+    }
     if (pendingScale_ == id) { pendingScale_ = kNoObject; o->transform.scale = {1, 1, 1}; }
     std::vector<Feature> chainBefore = o->features;
     const Transform t = o->transform;
@@ -4931,6 +5085,8 @@ void Application::syncToolSettled() {
 void Application::dismissSettled() {
     createTool_.dismissApplied();
     sketchTool_.dismissApplied();
+    // A joint's panel is the same kind of thing: applied, and adjusting.
+    if (jointTool_.adjusting()) jointTool_.finish(undo_);
     if (settled_ == Settled::None) return;
     if (settled_ == Settled::Combine) combineTool_.reset();
     settled_ = Settled::None;
@@ -8409,6 +8565,7 @@ void Application::drawUnsavedPrompt() {
 }
 
 void Application::newProject() {
+    section_ = SectionState{};
     scene_.clear();
     undo_.clear();
     projectPath_.clear();
@@ -8559,6 +8716,7 @@ void Application::runFileOperation(FileMode mode, const std::string& path) {
         const ProjectResult r = loadProject(scene_, path);
         if (r.ok) {
             projectPath_ = path;
+            section_ = SectionState{};
             // History from the previous project cannot apply to this one.
             undo_.clear();
             savedRevision_ = undo_.revision();
@@ -8838,7 +8996,23 @@ void Application::applyActions() {
         a.featuresEdited != kNoObject)
         dismissSettled();
 
+    // The exploded view is a picture: anything that edits the parts or writes
+    // them out puts them back first, at once, so it reads where they are.
+    if (a.addRequested || a.sketch || a.editSketchObject != kNoObject || a.extrudeSketch || a.deleteSketch ||
+        a.deleteSelected || a.duplicateSelected || a.mergeFaces || a.deleteFace || a.booleanRequested ||
+        a.split || a.shell || a.inset || a.hole || a.draft || a.offset || a.thread || a.undo || a.redo ||
+        a.importStep || a.importMesh || a.importSvg || a.convertToSolid || a.reduceMesh || a.newProject ||
+        a.openProject || a.saveProject || a.saveProjectAs || a.exportStl || a.export3mf || a.exportStep ||
+        a.rebuildObject != kNoObject || a.transformEdited != kNoObject || a.resetTransform != kNoObject ||
+        a.featuresEdited != kNoObject || a.pushPull || a.extrude || a.extrudeCut || a.rotateFace ||
+        a.scaleFace || a.divide || a.pattern || a.mirror || a.bevel || a.fillet || a.revolve || a.sweep ||
+        a.loft || a.moveObject || a.rotateObject || a.scaleObject || a.toggleMeasure || a.joint ||
+        a.editJoint || a.groupSelected || a.ungroupSelected || a.moveNodeRequested || a.clearance ||
+        a.historyEdit != UiActions::HistoryEdit::None)
+        endExplode();
+
     if (a.quit && confirmDiscard(PendingAction::Quit)) running_ = false;
+    if (a.section) toggleSection();
 
     if (a.newProject && confirmDiscard(PendingAction::New))   newProject();
     if (a.openProject && confirmDiscard(PendingAction::Open)) beginFilePrompt(FileMode::Open);
@@ -8859,6 +9033,8 @@ void Application::applyActions() {
 
     if (a.undo) { dismissSettled(); undo_.undo(scene_); }
     if (a.redo) { dismissSettled(); undo_.redo(scene_); }
+
+    applyAssemblyActions();
 
     if (a.addRequested) {
         beginAddPrimitivePrompt(a.addKind);
@@ -9109,7 +9285,7 @@ void Application::buildUi() {
         const bool tracking = createTool_.active() || sketchTool_.active() || tool_.active() ||
                               holeTool_.placing || faceTool_.active || filletTool_.active ||
                               patternTool_.active || divideTool_.active || combineTool_.active ||
-                              measure_.active();
+                              measure_.active() || jointTool_.picking();
         ui::setCommandRecede(gesture, tracking);
     }
 
@@ -9119,6 +9295,7 @@ void Application::buildUi() {
 
     drawViewportOverlays(ui_, viewRect_.x, viewRect_.y, viewRect_.w, viewRect_.h);
     ui_.toolBusy = tool_.active() || createTool_.active() || sketchTool_.active() || sketchTool_.applied() ||
+                   jointTool_.picking() ||
                    createTool_.applied() || editToolActive() || measure_.active();
     drawSketchBar(ui_, viewRect_.x, viewRect_.y, viewRect_.w);
 
@@ -9168,6 +9345,20 @@ void Application::buildUi() {
         if (profileTool_.active() && overView && !ImGui::GetIO().WantCaptureMouse)
             profileTool_.drawPointerPrompt({m.x, m.y});
     }
+    if (jointTool_.active()) {
+        bool finished = false;
+        jointTool_.drawHud(scene_, undo_, finished);
+        if (finished) justFinishedModal_ = jointTool_.picking() || justFinishedModal_;
+        const ImVec2 m = ImGui::GetMousePos();
+        const bool overView = m.x >= viewRect_.x && m.y >= viewRect_.y && m.x < viewRect_.x + viewRect_.w &&
+                              m.y < viewRect_.y + viewRect_.h;
+        if (jointTool_.picking() && overView && !ImGui::GetIO().WantCaptureMouse)
+            jointTool_.drawPointerPrompt({m.x, m.y});
+    }
+    ui_.activeJoint = jointTool_.jointId();
+    drawClearancePanel();
+    drawExplodePanel();
+    drawSectionPanel();
     drawCombinePanel();
     syncToolSettled();
     if (createTool_.applied() && createTool_.takeAdjusted()) recommitSettled();
@@ -9446,6 +9637,8 @@ int Application::run() {
             char buf[128];
             std::snprintf(buf, sizeof(buf), "Fillet  %.2f mm", filletTool_.currentRadius);
             ui_.toolStatus = buf;
+        } else if (jointTool_.picking()) {
+            ui_.toolStatus = "Joint: " + jointTool_.prompt();
         } else if (profileTool_.active()) {
             ui_.toolStatus = std::string(profileBuildName(profileTool_.build())) + ": " + profileTool_.prompt();
         } else if (sketchTool_.active()) {
@@ -9503,6 +9696,18 @@ int Application::run() {
                 ui_.toolStatus = "Rolled back: " + std::to_string(o->ahead.size()) +
                                  (o->ahead.size() == 1 ? " step waits" : " steps wait") +
                                  " after the marker. New steps go in here.";
+            // A model drawn cut, with its panel put away, is said so: it is
+            // not what the parts are.
+            if (ui_.toolStatus.empty() && section_.on && !sectionPanelShown()) {
+                char buf[96];
+                if (section_.plane == 3)
+                    std::snprintf(buf, sizeof buf, "Section view: %.2f mm in from a face   (V to adjust)",
+                                  section_.faceAt - section_.offset);
+                else
+                    std::snprintf(buf, sizeof buf, "Section view: %s at %.2f mm   (V to adjust)",
+                                  section_.plane == 0 ? "Z" : section_.plane == 1 ? "Y" : "X", section_.offset);
+                ui_.toolStatus = buf;
+            }
         }
 
         // What a printer would make of the part, when nothing else is being
@@ -9569,6 +9774,21 @@ int Application::run() {
         // toggle, an undo -- and none of them should have to remember to say so.
         if (std::string chainErr = scene_.takeChainNotice(); !chainErr.empty())
             setNotice(chainErr);
+        if (std::string jointErr = jointTool_.takeError(); !jointErr.empty() && !jointTool_.picking())
+            setNotice(jointErr);
+
+        // Every jointed part laid onto what it is joined to, from where each
+        // part's history puts it. A few multiplications a joint, and it writes
+        // nothing when nothing moved -- so it runs every frame, which is what
+        // lets a part follow the one it is on while that one is dragged.
+        gProbe.begin();
+        solveAssembly(scene_);
+        gProbe.end("joints");
+        gProbe.begin();
+        stepExplode();
+        stepClearance();
+        stepSection();
+        gProbe.end("clearance");
 
         // Queued before the frame is drawn; the renderer flushes overlay lines
         // at the end of its pass.
@@ -9585,6 +9805,10 @@ int Application::run() {
         gProbe.begin();
         drawSceneSketches();
         profileTool_.drawOverlay(scene_, camera_, renderer_);
+        jointTool_.drawOverlay(scene_, camera_, renderer_);
+        drawClearanceOverlay();
+        drawExplodeOverlay();
+        drawSectionOverlay();
         gProbe.end("sketches");
         if (sketchTool_.active()) {
             const auto t0 = std::chrono::steady_clock::now();

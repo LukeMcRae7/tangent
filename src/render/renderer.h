@@ -49,6 +49,11 @@ struct ViewOptions {
     // Signed: out makes the body bigger, in smaller. Two tenths is a printed
     // clearance, which is what an offset is usually for.
     Real  offsetAmount  = 0.2;
+
+    // Under a section view (Scene::section), the mm between the hatch lines
+    // on the cut face: set from the size of the model, so the hatch is to the
+    // model's scale the way a drawing's is, and stays put while the view zooms.
+    Real  sectionHatch  = 2.0;
 };
 
 // Sub-rectangle of the framebuffer to draw into, in physical pixels and in
@@ -108,7 +113,26 @@ public:
     void addFrontDashes(const Camera& camera, Vec3 a, Vec3 b, Vec4 color,
                         Real widthPx = 1.6, Real dashPx = 6.0, Real gapPx = 5.0);
 
+    // Translucent triangles kept on the GPU between frames, for an overlay
+    // that is large and changes seldom: the regions a clearance check marks
+    // can be tens of thousands of triangles, and building and uploading them
+    // every frame was most of the frame. Uploaded when `version` changes and
+    // drawn, tinting without occluding, on each frame showStatic is called.
+    // A slot is one colour; an empty list clears it.
+    void setStatic(int slot, uint64_t version, const std::vector<Vec3>& triangles, Vec4 colour);
+    void showStatic(int slot) { if (slot >= 0 && slot < kStaticSlots) statics_[slot].show = true; }
+
 private:
+    static constexpr int kStaticSlots = 4;
+    struct StaticBatch {
+        uint32_t vao = 0, vbo = 0;
+        int      count = 0;
+        uint64_t version = 0;
+        bool     show = false;
+    };
+    StaticBatch statics_[kStaticSlots];
+    void flushStatics(const Camera& camera);
+
     struct CacheEntry {
         GpuMesh  gpu;
         uint32_t version = 0;
@@ -137,7 +161,16 @@ private:
     void flushLines(const Camera& camera);
     void flushTriangles(const Camera& camera);
 
-    Shader surfaceShader_, lineShader_, gridShader_, overlayShader_;
+    Shader surfaceShader_, lineShader_, gridShader_, overlayShader_, capShader_;
+
+    // A section view's plane as the shaders take it, (normal, offset); a plane
+    // nothing is beyond when there is no section. `slack` moves it outwards,
+    // for overlays drawn in the plane itself.
+    static Vec4 clipPlane(const SectionCut& cut, Real slack = 0.0);
+    // For the translucent overlays this frame: tints on the model are cut
+    // with it, lines -- gizmos, guides -- are not.
+    Vec4 overlayClip_{0.0, 0.0, 0.0, 1.0};
+    bool clipOverlays_ = false;
     uint32_t emptyVao_ = 0;                 // for attribute-less fullscreen draws
     uint32_t lineVao_ = 0, lineVbo_ = 0;
     std::vector<LineVert> lineVerts_;

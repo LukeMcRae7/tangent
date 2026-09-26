@@ -1,6 +1,7 @@
 #include "app/transform_tool.h"
 #include "core/palette.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 
@@ -134,8 +135,11 @@ bool TransformTool::begin(TransformMode mode, Scene& scene, const Camera& camera
     } else {
         if (scene.selection().empty()) return false;
         target_ = TransformTarget::Objects;
-        for (ObjectId id : scene.selection())
+        for (ObjectId id : scene.selection()) {
+            if (std::find(skip_.begin(), skip_.end(), id) != skip_.end()) continue;
             if (const SceneObject* o = scene.find(id)) entries_.push_back({id, o->transform, {}});
+        }
+        skip_.clear();
         if (entries_.empty()) return false;
         pivot = scene.selectionCenter();
         for (Entry& e : entries_)

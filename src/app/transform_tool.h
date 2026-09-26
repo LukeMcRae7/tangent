@@ -41,6 +41,11 @@ public:
     // Returns false if there is nothing selected to transform.
     bool begin(TransformMode mode, Scene& scene, const Camera& camera, Vec2 mousePx);
 
+    // Objects the next begin() leaves where they are although they are
+    // selected: parts a joint places, which follow what they are joined to
+    // rather than taking a step of their own. Cleared by begin().
+    void skipObjects(std::vector<ObjectId> ids) { skip_ = std::move(ids); }
+
     // Pressing the axis already in force clears it, matching Blender.
     void setConstraint(Constraint c);
 
@@ -79,6 +84,7 @@ public:
     void drawOverlay(Renderer& renderer, const Camera& camera) const;
 
 private:
+    std::vector<ObjectId> skip_;
     struct Entry {
         ObjectId  id;
         Transform before;

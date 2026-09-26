@@ -100,6 +100,13 @@ ImWchar glyphCodepoint(Glyph g) {
     case Glyph::RotateFace:    return 0xec15;   // rotate-rectangle
     case Glyph::ScaleFace:     return 0xea28;   // arrows-maximize
     case Glyph::Mesh:          return 0x10201;  // mesh
+    case Glyph::Group:         return 0xee17;   // box-multiple: bodies kept together
+    case Glyph::Joint:         return 0xeade;   // link
+    case Glyph::JointRevolute: return 0xeb16;   // rotate: turns about its axis
+    case Glyph::JointSlider:   return 0xf22d;   // arrows-move-horizontal: slides along one line
+    case Glyph::Clearance:     return 0xef54;   // spacing-horizontal: the gap between two walls
+    case Glyph::Explode:       return 0xea26;   // arrows-diagonal-2: pulled apart
+    case Glyph::Section:       return 0xebdb;   // slice: the knife through the part
 
     // ---- inspecting -----------------------------------------------------
     case Glyph::Measure:       return 0xf291;   // ruler-measure

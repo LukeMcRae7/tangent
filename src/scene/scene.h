@@ -8,6 +8,7 @@
 
 #include "app/printability.h"
 #include "mesh/health.h"
+#include "scene/assembly.h"
 #include "scene/feature.h"
 
 #include <memory>
@@ -40,6 +41,10 @@ Vec3 scaleOf(const std::vector<Feature>& features);
 struct SceneObject {
     ObjectId      id = kNoObject;
     std::string   name;
+
+    // The group it is in, in the outliner, or kNoGroup. See scene/assembly.h:
+    // a group places nothing, but it is the unit a joint moves.
+    GroupId       group = kNoGroup;
 
     // Where the object is. Derived, not set: `base` is where it was made --
     // the point a box was drawn at, the plane a part was drawn on -- and the
@@ -166,6 +171,23 @@ struct ElementHit {
     float      t = 0.0f;
     Vec3       point;
     bool hit() const { return ref.valid(); }
+};
+
+// A section view: the model drawn cut by a plane, with everything on the side
+// the normal points to taken away -- for looking inside a part without changing
+// it. A view, not an edit: nothing about any body is touched. It lives on the
+// scene only because picking has to honour it too: a click on what is not
+// drawn must not select it, and a click on the cut face must not reach through
+// the cut to the wall behind it.
+struct SectionCut {
+    bool on = false;
+    Vec3 normal{0.0, 0.0, 1.0};     // unit; points into the side taken away
+    Real offset = 0.0;              // the plane is dot(normal, p) == offset
+
+    // Whether `p` is on the side taken away. A hair of tolerance keeps what
+    // lies in the plane itself -- a face the plane was put on -- drawn and
+    // pickable.
+    bool removes(Vec3 p) const { return on && dot(normal, p) > offset + 1e-6 * (1.0 + std::fabs(offset)); }
 };
 
 struct RayHit {
@@ -326,6 +348,15 @@ public:
     // every frame of a slider drag.
     std::string takeChainNotice() { std::string s; s.swap(chainNotice_); return s; }
 
+    // ---- Groups and joints ----------------------------------------------------
+    // See scene/assembly.h, which holds the operations on them.
+    const Assembly& assembly() const { return assembly_; }
+    Assembly&       assembly()       { return assembly_; }
+
+    // ---- Section view ---------------------------------------------------------
+    const SectionCut& section() const { return section_; }
+    void setSection(const SectionCut& cut) { section_ = cut; }
+
     // ---- Selection -------------------------------------------------------
     const std::vector<ObjectId>& selection() const { return selection_; }
     bool isSelected(ObjectId id) const;
@@ -368,8 +399,12 @@ public:
     AABB selectionBounds() const;
     Vec3 selectionCenter() const;
 
-    // Nearest surface hit along the ray, in world space.
-    RayHit raycast(const Ray& ray) const;
+    // Nearest surface hit along the ray, in world space. Under a section view,
+    // what the section takes away is not hit, and the cut face is: a ray whose
+    // nearest surface is the inside of a wall crossed the plane inside the
+    // part, so it meets the cut face first -- it misses, and `capped`, when
+    // given, says so.
+    RayHit raycast(const Ray& ray, bool* capped = nullptr) const;
 
     // Every surface the ray meets at the nearest depth, one hit per body.
     //
@@ -423,6 +458,8 @@ private:
     std::string uniqueName(const std::string& base) const;
 
     std::vector<std::unique_ptr<SceneObject>> objects_;
+    Assembly assembly_;
+    SectionCut section_;
     std::vector<ObjectId> selection_;
     std::vector<ElementRef> elements_;
     SketchRef sketch_;
