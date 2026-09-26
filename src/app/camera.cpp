@@ -76,6 +76,24 @@ void Camera::dolly(float steps) {
     syncGoal();
 }
 
+void Camera::dollyAt(float steps, Vec2 px) {
+    if (viewportW <= 0 || viewportH <= 0) { dolly(steps); return; }
+    // Where the pointer is on the plane through the target, square to the
+    // view. Scaling the target's offset from it by the same factor as the
+    // distance keeps it at the same place on the screen, in either projection.
+    const Ray r = rayThroughPixel(static_cast<float>(px.x), static_cast<float>(px.y));
+    const Vec3 f = forward();
+    const Real denom = dot(r.dir, f);
+    const float before = distance;
+    dolly(steps);
+    if (std::fabs(denom) < 1e-9 || before <= 0.0f) return;
+    const Real t = dot(target - r.origin, f) / denom;
+    const Vec3 p = r.origin + r.dir * t;
+    const Real k = static_cast<Real>(distance) / static_cast<Real>(before);
+    target = p + (target - p) * k;
+    syncGoal();
+}
+
 void Camera::setStandardView(StandardView v) {
     syncGoal();
     animating_ = true;

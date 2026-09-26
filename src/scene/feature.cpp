@@ -90,7 +90,11 @@ std::string Feature::summary() const {
             std::snprintf(buf, sizeof(buf), "%s", primitiveName(primitive.kind));
             break;
         case FeatureKind::BaseMesh:
-            std::snprintf(buf, sizeof(buf), "Mesh  (%d faces)", bakedBody.faceCount());
+            // Only a mesh is called one: the pieces of a split, a body made
+            // from another's faces, a STEP import all start from an exact
+            // solid that has no steps behind it.
+            std::snprintf(buf, sizeof(buf), "%s  (%d faces)", bakedBody.isMesh() ? "Mesh" : "Solid",
+                          bakedBody.faceCount());
             break;
         case FeatureKind::Boolean:
             if (!toolName.empty())

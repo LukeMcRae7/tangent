@@ -1003,12 +1003,27 @@ std::vector<ElementRef> Scene::faceGroup(const ElementRef& e) const {
     return out;
 }
 
+void Scene::rememberName(const ElementRef& e) {
+    const SceneObject* o = find(e.object);
+    if (!o) return;
+    ElementId name = 0;
+    switch (e.kind) {
+        case ElementKind::Face:   if (o->body.hasFace(e.index))   name = o->body.faceName(e.index); break;
+        case ElementKind::Edge:   if (o->body.hasEdge(e.index))   name = o->body.edgeName(e.index); break;
+        case ElementKind::Vertex: if (o->body.hasVertex(e.index)) name = o->body.vertexName(e.index); break;
+        case ElementKind::None:   break;
+    }
+    for (NamedRef& n : elementNames_)
+        if (n.ref == e) { n.name = name; return; }
+    elementNames_.push_back({e, name});
+}
+
 void Scene::selectElement(const ElementRef& e, bool additive) {
     sketch_ = SketchRef{};
     if (!additive) elements_.clear();
     if (!e.valid()) return;
     for (const ElementRef& r : faceGroup(e))
-        if (!isElementSelected(r)) elements_.push_back(r);
+        if (!isElementSelected(r)) { elements_.push_back(r); rememberName(r); }
 }
 
 void Scene::toggleElement(const ElementRef& e) {
@@ -1026,7 +1041,7 @@ void Scene::toggleElement(const ElementRef& e) {
         return;
     }
     for (const ElementRef& r : group)
-        if (!isElementSelected(r)) elements_.push_back(r);
+        if (!isElementSelected(r)) { elements_.push_back(r); rememberName(r); }
 }
 
 std::vector<Index> Scene::selectedFaces(ObjectId id) const {
@@ -1052,6 +1067,33 @@ std::vector<EdgeId> Scene::selectedEdges(ObjectId id) const {
 }
 
 void Scene::pruneElementSelection() {
+    // Found again by name first: the numbers may now belong to other faces.
+    std::vector<NamedRef> names;
+    std::vector<ElementRef> kept;
+    for (const ElementRef& e : elements_) {
+        const SceneObject* o = find(e.object);
+        if (!o) continue;
+        ElementId name = 0;
+        for (const NamedRef& n : elementNames_) if (n.ref == e) name = n.name;
+        ElementRef now = e;
+        if (name != 0) {
+            Index at = kInvalid;
+            switch (e.kind) {
+                case ElementKind::Face:   at = o->body.findFace(name); break;
+                case ElementKind::Edge:   at = o->body.findEdge(name); break;
+                case ElementKind::Vertex: at = o->body.findVertex(name); break;
+                case ElementKind::None:   break;
+            }
+            if (at == kInvalid) continue;          // it is gone
+            now.index = at;
+        }
+        if (std::find(kept.begin(), kept.end(), now) != kept.end()) continue;
+        kept.push_back(now);
+        names.push_back({now, name});
+    }
+    elements_ = std::move(kept);
+    elementNames_ = std::move(names);
+
     elements_.erase(std::remove_if(elements_.begin(), elements_.end(),
         [this](const ElementRef& e) {
             const SceneObject* o = find(e.object);

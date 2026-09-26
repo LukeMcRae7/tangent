@@ -516,7 +516,8 @@ void JointTool::drawPointerPrompt(Vec2 mouseScreen) const {
     const bool warn = !error_.empty() || (hover_.object != kNoObject && !hover_.ok);
     ImDrawList* dl = ImGui::GetForegroundDrawList();
     const ImVec2 size = ImGui::CalcTextSize(text.c_str());
-    const ImVec2 at(static_cast<float>(mouseScreen.x) + 18.0f, static_cast<float>(mouseScreen.y) + 16.0f);
+    const ImVec2 at(std::floor(static_cast<float>(mouseScreen.x)) + 18.0f,
+                    std::floor(static_cast<float>(mouseScreen.y)) + 16.0f);
     dl->AddRectFilled(ImVec2(at.x - 6, at.y - 4), ImVec2(at.x + size.x + 6, at.y + size.y + 4),
                       IM_COL32(24, 24, 28, 225), 4.0f);
     dl->AddRect(ImVec2(at.x - 6, at.y - 4), ImVec2(at.x + size.x + 6, at.y + size.y + 4),

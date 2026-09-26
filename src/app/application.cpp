@@ -2123,7 +2123,7 @@ void Application::handleViewportMouse() {
     // adjusts it.
     if (jointTool_.picking()) {
         if (io.MouseWheel != 0.0f && overViewport && !uiPointer)
-            camera_.dolly(io.MouseWheel);
+            camera_.dollyAt(io.MouseWheel, mouseInViewport());
         if (!uiPointer) jointTool_.update(scene_, camera_, mouseInViewport());
         if (!uiClicks && overViewport) {
             if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
@@ -2141,7 +2141,7 @@ void Application::handleViewportMouse() {
     // button leaves, as it does everywhere else.
     if (profileTool_.active()) {
         if (io.MouseWheel != 0.0f && overViewport && !uiPointer)
-            camera_.dolly(io.MouseWheel);
+            camera_.dollyAt(io.MouseWheel, mouseInViewport());
         if (!uiPointer) profileTool_.update(scene_, camera_, mouseInViewport());
         if (!uiClicks && overViewport) {
             if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
@@ -2158,7 +2158,7 @@ void Application::handleViewportMouse() {
     // zooms, and the pointer on the dialog leaves the drawing alone.
     if (sketchTool_.active()) {
         if (io.MouseWheel != 0.0f && overViewport && !uiPointer)
-            camera_.dolly(io.MouseWheel);
+            camera_.dollyAt(io.MouseWheel, mouseInViewport());
         if (!uiPointer) {
             const auto t0 = std::chrono::steady_clock::now();
             sketchTool_.update(scene_, camera_, mouseInViewport(), !io.KeyCtrl);
@@ -2191,7 +2191,7 @@ void Application::handleViewportMouse() {
         // this branch never reaches -- so zooming in to place a point on a
         // small feature meant cancelling the tool and starting again.
         if (io.MouseWheel != 0.0f && overViewport && !uiPointer)
-            camera_.dolly(io.MouseWheel);
+            camera_.dollyAt(io.MouseWheel, mouseInViewport());
 
         // Held still while the pointer is on one of the dialog's controls, for
         // the same reason the fillet is: the profile must not be changed by
@@ -2296,7 +2296,7 @@ void Application::handleViewportMouse() {
     }
 
     if (!overViewport) return;
-    if (io.MouseWheel != 0.0f && !uiPointer) camera_.dolly(io.MouseWheel);
+    if (io.MouseWheel != 0.0f && !uiPointer) camera_.dollyAt(io.MouseWheel, mouseInViewport());
     if (uiClicks) return;
 
     // The sketch under the pointer, lit; a double-click on one opens it.
@@ -2436,6 +2436,10 @@ void Application::pickWholeObject(ObjectId id, bool additive) {
 void Application::drawReadout(const std::string& text, float px, float py,
                               bool emphasise) {
     if (text.empty()) return;
+    // On whole pixels: text drawn between them shimmers as it follows the
+    // pointer or the model.
+    px = std::floor(px + 0.5f);
+    py = std::floor(py + 0.5f);
 
     auto u8 = [](Real v) { return static_cast<int>(clampf(v, 0.0, 1.0) * 255.0 + 0.5); };
     const Rgb& bg = palette::kCommand;
@@ -9371,6 +9375,13 @@ void Application::buildUi() {
                      vp->WorkSize.x, vp->WorkSize.y - ui_.frame.barHeight};
     }
     ui::setCommandAnchor(viewRect_.x, viewRect_.y, viewRect_.w, viewRect_.h);
+    // The camera takes the view's size now, not when the frame is drawn:
+    // the pointer is read against it before then, and in the frame a panel
+    // was resized every click and hover was measured against the old size.
+    if (viewRect_.w > 0.0f && viewRect_.h > 0.0f) {
+        camera_.viewportW = static_cast<int>(viewRect_.w);
+        camera_.viewportH = static_cast<int>(viewRect_.h);
+    }
     {
         // What the view is doing with the pointer, so an operation's panel
         // knows when to stand back: an orbit or a drag that began in the view,

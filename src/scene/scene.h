@@ -469,6 +469,14 @@ private:
     SectionCut section_;
     std::vector<ObjectId> selection_;
     std::vector<ElementRef> elements_;
+    // The persistent name of each selected element, taken when it was
+    // selected. Indices are renumbered by any edit; the name is what finds the
+    // same face, edge or point again afterwards, so a selection kept across a
+    // change stays on what was picked instead of landing on whatever now has
+    // its number.
+    struct NamedRef { ElementRef ref; ElementId name = 0; };
+    std::vector<NamedRef> elementNames_;
+    void rememberName(const ElementRef& e);
     SketchRef sketch_;
     ObjectId nextId_ = 1;
 

@@ -67,7 +67,7 @@ Glyph glyphFor(const Feature& f) {
                  : f.booleanOp == BooleanOp::Intersection ? Glyph::Intersect
                                                           : Glyph::Difference;
         case FeatureKind::Sketch:         return Glyph::Sketch;
-        case FeatureKind::BaseMesh:       return Glyph::Mesh;
+        case FeatureKind::BaseMesh:       return f.bakedBody.isMesh() ? Glyph::Mesh : Glyph::Body;
         case FeatureKind::Reduce:         return Glyph::Reduce;
         case FeatureKind::VertexEdit:     return Glyph::Move;
         case FeatureKind::Move:           return Glyph::Move;
@@ -835,8 +835,13 @@ void featureDetails(UiContext& ctx, SceneObject& obj, Feature& f, bool& changed)
         break;
     }
     case FeatureKind::BaseMesh:
-        ImGui::TextColored(dim, "Imported geometry, %d faces", f.bakedBody.faceCount());
-        ImGui::TextColored(dim, "Not parametric: convert it to a solid to edit it");
+        if (f.bakedBody.isMesh()) {
+            ImGui::TextColored(dim, "Imported mesh, %d faces", f.bakedBody.faceCount());
+            ImGui::TextColored(dim, "Not parametric: convert it to a solid to edit it");
+        } else {
+            ImGui::TextColored(dim, "A solid of %d faces, with no steps behind it", f.bakedBody.faceCount());
+            ImGui::TextColored(dim, "The steps after it edit its faces");
+        }
         break;
     case FeatureKind::VertexEdit:
         ImGui::TextColored(dim, "Free-form edit of %zu vertices", f.verts.size());

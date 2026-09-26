@@ -63,6 +63,10 @@ public:
     void orbit(float dxPixels, float dyPixels);
     void pan(float dxPixels, float dyPixels);
     void dolly(float steps);                 // wheel notches; positive = closer
+    // The same, toward the point under the pointer at `px` (viewport pixels):
+    // it stays under the pointer while everything else closes in on it, the
+    // way every CAD tool zooms.
+    void dollyAt(float steps, Vec2 px);
     void setStandardView(StandardView v);
 
     // Look at the model from `dir`, which points from the target out to where

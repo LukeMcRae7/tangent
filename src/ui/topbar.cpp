@@ -393,7 +393,7 @@ float drawTopBar(UiContext& ctx) {
     // narrow window -- a tiling desktop's half of the screen -- the fullest
     // groups give up their last pictures first, and every group keeps its
     // name, and so its menu, on the bar.
-    int shown[5] = {4, 7, 8, 4, 2};
+    int shown[5] = {3, 7, 8, 4, 3};
     {
         const float btnW = kIconPx + st.FramePadding.x * 2.0f + 2.0f;
         const float right = (ctx.frame.customFrame ? 44.0f * 3.0f + 10.0f : 12.0f) +
@@ -425,14 +425,8 @@ float drawTopBar(UiContext& ctx) {
     if (room(0) && barButton(ctx, "new", Glyph::New, "New project  (Ctrl+N)")) ctx.actions.newProject = true;
     if (room(0) && barButton(ctx, "open", Glyph::Open, "Open...  (Ctrl+O)")) ctx.actions.openProject = true;
     if (room(0) && barButton(ctx, "save", Glyph::Save, "Save  (Ctrl+S)")) ctx.actions.saveProject = true;
-    if (room(0) && barButton(ctx, "settings", Glyph::Settings, "View and display settings"))
-        ImGui::OpenPopup("##m_settings");
-    ImGui::SetNextWindowPos(ImVec2(ImGui::GetItemRectMin().x, ImGui::GetItemRectMax().y + 4.0f));
-    if (ui::beginMenuPopup("##m_settings")) {
-        ctx.frame.popupOpen = true;
-        inspectMenu(ctx);
-        ImGui::EndPopup();
-    }
+    // No settings button here: it opened the Inspect menu, which the INSPECT
+    // caption already opens.
     endGroup(0);
 
     // Create

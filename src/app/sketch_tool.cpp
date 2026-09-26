@@ -2832,8 +2832,9 @@ void SketchTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& fi
             if (!camera.projectToPixel(plane_.toWorld(anchor), px)) continue;
             const bool active = activeDim_ == k.id;
             const ImVec2 size = ImGui::CalcTextSize(text);
-            const ImVec2 at(static_cast<float>(px.x) + viewX_ - size.x * 0.5f,
-                            static_cast<float>(px.y) + viewY_ - size.y - 6.0f);
+            // On whole pixels, or the label shimmers as the view turns.
+            const ImVec2 at(std::floor(static_cast<float>(px.x) + viewX_ - size.x * 0.5f + 0.5f),
+                            std::floor(static_cast<float>(px.y) + viewY_ - size.y - 6.0f + 0.5f));
             dl->AddRectFilled(ImVec2(at.x - 4, at.y - 2), ImVec2(at.x + size.x + 4, at.y + size.y + 2),
                               IM_COL32(28, 28, 32, 220), 3.0f);
             if (active)

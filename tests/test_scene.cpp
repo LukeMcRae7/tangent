@@ -3,6 +3,7 @@
 #include "scene/scene.h"
 #include "app/camera.h"
 #include "mesh/primitives.h"
+#include "geom/brep.h"
 
 #include <cmath>
 #include <cstdio>
@@ -95,6 +96,67 @@ int main() {
         (void)far_;
         const RayHit hit = s.raycast(Ray{{0, 0, 200}, {0, 0, -1}});
         check(hit.object == near_, "the nearer of two boxes wins");
+    }
+
+    // ---- A selection stays on what was picked across an edit ----------------
+    // A hole drilled through the top renumbers the faces; the selected top
+    // face is found again by its name, not left on whatever has its number.
+    if (brep::available()) {
+        Scene s;
+        const ObjectId box = s.addPrimitive(PrimitiveKind::Box);   // 20 mm, centred
+        const SceneObject* o = s.find(box);
+        std::vector<FaceId> faces;
+        o->body.allFaces(faces);
+        FaceId top = kNoFace, side = kNoFace;
+        for (FaceId f : faces) {
+            const Vec3 n = o->body.faceNormal(f);
+            if (n.z > 0.9) top = f;
+            if (n.x > 0.9) side = f;
+        }
+        s.selectElement({box, ElementKind::Face, top});
+        s.selectElement({box, ElementKind::Face, side}, true);
+        Feature hole;
+        hole.kind = FeatureKind::Hole;
+        hole.uid = s.takeFeatureUid();
+        hole.axisPoint = {0, 0, 10};
+        hole.axisDir = {0, 0, -1};
+        hole.hole.diameter = 6.0;
+        hole.hole.through = true;
+        s.addFeature(box, hole, nullptr);
+        o = s.find(box);
+        bool topKept = false, sideKept = false;
+        for (const ElementRef& e : s.elementSelection()) {
+            const Vec3 n = o->body.faceNormal(e.index);
+            topKept = topKept || n.z > 0.9;
+            sideKept = sideKept || n.x > 0.9;
+        }
+        std::printf("[select] top %d side %d before; after:", top, side);
+        for (const ElementRef& e : s.elementSelection()) std::printf(" %d", e.index);
+        std::printf("\n");
+        check(s.elementSelection().size() == 2 && topKept && sideKept,
+              "selected faces are still the top and the side after a hole renumbers them");
+    }
+
+    // ---- Zooming toward the pointer ---------------------------------------
+    // What is under the pointer stays under it, in either projection.
+    for (int ortho = 0; ortho < 2; ++ortho) {
+        Camera cam;
+        cam.viewportW = 800;
+        cam.viewportH = 600;
+        cam.orthographic = ortho == 1;
+        cam.target = {0, 0, 0};
+        cam.distance = 100.0f;
+        const Vec3 p{12, -7, 0};
+        Vec2 before{}, after{};
+        cam.projectToPixel(p, before);
+        cam.dollyAt(3.0f, before);
+        cam.projectToPixel(p, after);
+        check(length(after - before) < 0.5f && cam.distance < 100.0f,
+              ortho ? "zoom in keeps the point under the pointer (ortho)"
+                    : "zoom in keeps the point under the pointer (perspective)");
+        cam.dollyAt(-5.0f, before);
+        cam.projectToPixel(p, after);
+        check(length(after - before) < 0.5f, "zoom out keeps it too");
     }
 
     // ---- Picking under a section view --------------------------------------
