@@ -351,7 +351,9 @@ std::string ProfileTool::prompt() const {
             return profile_.empty() ? "Profile: click a region of a sketch, or a flat face"
                                     : "Profile: click to change it, or another region to add";
         case ProfileSlot::Axis:
-            return "Axis: click a sketch line or a straight edge, or pick X, Y or Z";
+            return axis_.kind == AxisPick::Kind::None
+                       ? "Axis: click a sketch line or a straight edge, or pick X, Y or Z"
+                       : "Axis: click another line or edge to change it";
         case ProfileSlot::Path:
             return path_.empty()        ? "Path: click a sketch curve, or edges of the part"
                  : path_.fromSketch()   ? "Path: click another curve or edge to change it"
@@ -833,6 +835,7 @@ bool ProfileTool::finish(Scene& scene, UndoStack& undo) {
     }
     takeAwayBrought(parts);
     pushUndo(parts);
+    if (firstSolid) scene.nameAsPart(homeId);
     if (scene.find(homeId)) scene.select(homeId);
     *this = ProfileTool{};
     return true;
@@ -1137,6 +1140,12 @@ void ProfileTool::drawOverlay(const Scene& scene, const Camera& camera, Renderer
 
 void ProfileTool::drawPointerPrompt(Vec2 mouseScreen) const {
     if (!active_) return;
+    // Beside the pointer only while there is something to click for, or
+    // something went wrong: once every pick is made, the panel is where the
+    // work is, and the same words at the top of the view already say it.
+    bool complete = true;
+    for (ProfileSlot s : slotsOf(build_)) complete = complete && slotFilled(s);
+    if (complete && error_.empty()) return;
     std::string text = prompt();
     if (!error_.empty()) text = error_;
     ImDrawList* dl = ImGui::GetForegroundDrawList();

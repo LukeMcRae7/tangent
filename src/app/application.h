@@ -373,6 +373,18 @@ private:
     std::vector<Highlight> highlights_;
     uint64_t highlightKey_ = 0;
     void refreshHighlights();
+    Highlight buildHighlight(const ElementRef& e, Real pixel) const;
+    void drawHighlight(const Highlight& h, Vec4 faceTint, Vec4 edgeCol);
+
+    // What a click would take, lit under the pointer before it is clicked:
+    // the same pick the click makes, so what is lit is what gets selected.
+    // Worked out again only when the pointer, the view or the scene moves.
+    ElementRef hoverRef_;
+    Highlight  hoverHighlight_;
+    uint64_t   hoverKey_ = 0;
+    bool       hoverLive_ = false;   // worked out this frame: nothing else has the pointer
+    void updateHover(bool ctrl);
+    void clearHover() { hoverRef_ = ElementRef{}; hoverHighlight_ = Highlight{}; hoverKey_ = 0; }
 
     // Drawing a body finer, off the frame thread, for the same reason. Meshing
     // a body of a few thousand faces is hundreds of milliseconds: done on the

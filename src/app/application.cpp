@@ -29,6 +29,7 @@
 #include <unordered_set>
 #include <thread>
 #include <cstdio>
+#include <cstring>
 #include <algorithm>
 #include <cstdlib>
 #include <vector>
@@ -137,7 +138,11 @@ bool Application::init() {
     io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     io.ConfigWindowsMoveFromTitleBarOnly = true;
-    io.IniFilename = "tangent.ini";
+    // A run with no one at it -- a smoke test, a demo, a screenshot -- keeps
+    // its hands off the layout a person saved: the CI sweep runs in the
+    // checkout, and every run of it was writing its window over theirs.
+    const bool unattended = smokeFrames_ > 0 || !screenshotPath_.empty() || probeActive_;
+    io.IniFilename = unattended ? nullptr : "tangent.ini";
 
     loadFonts(resolveAssetDir(), 14.0f);
     loadGlyphFont(resolveAssetDir() + "/fonts");
@@ -2064,10 +2069,13 @@ void Application::beginTransform(TransformMode mode) {
 // dragging a slider never also orbits the camera.
 void Application::handleViewportMouse() {
     ImGuiIO& io = ImGui::GetIO();
+    hoverLive_ = false;
 
+    // A demo's pointer is over the view wherever it is put.
     const bool overViewport =
-        io.MousePos.x >= viewRect_.x && io.MousePos.x < viewRect_.x + viewRect_.w &&
-        io.MousePos.y >= viewRect_.y && io.MousePos.y < viewRect_.y + viewRect_.h;
+        mouseOverride_.x >= 0.0 ||
+        (io.MousePos.x >= viewRect_.x && io.MousePos.x < viewRect_.x + viewRect_.w &&
+         io.MousePos.y >= viewRect_.y && io.MousePos.y < viewRect_.y + viewRect_.h);
 
     // An operation's panel is a layer behind the pointer, not in front of it:
     // over its empty parts the view still hears the pointer move and the wheel
@@ -2293,6 +2301,12 @@ void Application::handleViewportMouse() {
 
     // The sketch under the pointer, lit; a double-click on one opens it.
     hoverSketch_ = sketchAt(mouseInViewport(), false);
+    // And otherwise the face, edge or point a click would take -- not while
+    // the view is being turned, when nothing is about to be clicked.
+    if (!navigating_ && !ImGui::IsMouseDragging(ImGuiMouseButton_Left, 4.0f)) {
+        updateHover(io.KeyCtrl);
+        hoverLive_ = true;
+    }
     if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && !measure_.active()) {
         const Scene::SketchRef sk = sketchAt(mouseInViewport(), true);
         if (sk.valid()) {
@@ -2714,6 +2728,72 @@ void Application::drawPrintIssues() {
 // The kernel is asked for a polyline along each edge and the body's triangles
 // are searched for each face's own, which on a face with a couple of thousand
 // edges is seconds of work: far too much to repeat while nothing has changed.
+// The lines and triangles that mark one face, edge or point: its triangles and
+// its outline, its curve, or a cross. In the body's own space. `pixel` is how
+// big a pixel is out there, which is how finely curves are followed.
+Application::Highlight Application::buildHighlight(const ElementRef& e, Real pixel) const {
+    Highlight h;
+    const SceneObject* o = scene_.find(e.object);
+    if (!o) return h;
+    h.object = e.object;
+
+    // An edge is drawn along its curve, not across it. A rim's two ends are
+    // the same point, or nearly, so the chord between them runs through the
+    // hole instead of around it -- and a fillet or a bore reads as a
+    // polygon. Sampled to half a pixel, which is the tolerance the
+    // wireframe underneath it already uses.
+    std::vector<Vec3> pts;
+    auto outlineEdge = [&](EdgeId edge) {
+        o->body.edgePolyline(edge, pixel * 0.5, pts);
+        for (size_t k = 1; k < pts.size(); ++k) {
+            h.lines.push_back(pts[k - 1]);
+            h.lines.push_back(pts[k]);
+        }
+    };
+
+    switch (e.kind) {
+    case ElementKind::Face: {
+        if (!o->body.hasFace(e.index)) break;
+        const RenderMesh& rm = o->render;
+        for (size_t i = 0; i < rm.triangleFace.size(); ++i) {
+            if (rm.triangleFace[i] != e.index) continue;
+            for (int k = 0; k < 3; ++k) h.tris.push_back(rm.positions[rm.triangles[i * 3 + k]]);
+        }
+        // Outline it too, so a face on a busy mesh still reads clearly.
+        std::vector<EdgeId> fe;
+        o->body.faceEdges(e.index, fe);
+        for (EdgeId edge : fe) {
+            // A bridge edge is not an edge of the part: it exists only
+            // because a mesh face cannot hold a hole, so it runs from the
+            // outline across to the rim. Outlining it draws a line over
+            // the opening. A B-rep body has none and answers false.
+            if (o->body.isBridgeEdge(edge)) continue;
+            outlineEdge(edge);
+        }
+        break;
+    }
+    case ElementKind::Edge:
+        if (o->body.hasEdge(e.index)) outlineEdge(e.index);
+        break;
+    case ElementKind::Vertex: {
+        if (!o->body.hasVertex(e.index)) break;
+        // A cross, sized here in world units at the zoom it was gathered.
+        const Vec3 p = o->body.vertexPosition(e.index);
+        const Real s = pixel * 4.0;
+        for (int axis = 0; axis < 3; ++axis) {
+            Vec3 d{};
+            d[axis] = s;
+            h.lines.push_back(p - d);
+            h.lines.push_back(p + d);
+        }
+        break;
+    }
+    case ElementKind::None:
+        break;
+    }
+    return h;
+}
+
 void Application::refreshHighlights() {
     // Everything the shape of the highlight depends on: what is selected, the
     // geometry it is on, and how fine the edge polylines need to be, which
@@ -2733,65 +2813,7 @@ void Application::refreshHighlights() {
     highlights_.clear();
 
     for (const ElementRef& e : scene_.elementSelection()) {
-        const SceneObject* o = scene_.find(e.object);
-        if (!o) continue;
-        Highlight h;
-        h.object = e.object;
-
-        // An edge is drawn along its curve, not across it. A rim's two ends are
-        // the same point, or nearly, so the chord between them runs through the
-        // hole instead of around it -- and a fillet or a bore reads as a
-        // polygon. Sampled to half a pixel, which is the tolerance the
-        // wireframe underneath it already uses.
-        std::vector<Vec3> pts;
-        auto outlineEdge = [&](EdgeId edge) {
-            o->body.edgePolyline(edge, pixel * 0.5, pts);
-            for (size_t k = 1; k < pts.size(); ++k) {
-                h.lines.push_back(pts[k - 1]);
-                h.lines.push_back(pts[k]);
-            }
-        };
-
-        switch (e.kind) {
-        case ElementKind::Face: {
-            if (!o->body.hasFace(e.index)) break;
-            const RenderMesh& rm = o->render;
-            for (size_t i = 0; i < rm.triangleFace.size(); ++i) {
-                if (rm.triangleFace[i] != e.index) continue;
-                for (int k = 0; k < 3; ++k) h.tris.push_back(rm.positions[rm.triangles[i * 3 + k]]);
-            }
-            // Outline it too, so a face on a busy mesh still reads clearly.
-            std::vector<EdgeId> fe;
-            o->body.faceEdges(e.index, fe);
-            for (EdgeId edge : fe) {
-                // A bridge edge is not an edge of the part: it exists only
-                // because a mesh face cannot hold a hole, so it runs from the
-                // outline across to the rim. Outlining it draws a line over
-                // the opening. A B-rep body has none and answers false.
-                if (o->body.isBridgeEdge(edge)) continue;
-                outlineEdge(edge);
-            }
-            break;
-        }
-        case ElementKind::Edge:
-            if (o->body.hasEdge(e.index)) outlineEdge(e.index);
-            break;
-        case ElementKind::Vertex: {
-            if (!o->body.hasVertex(e.index)) break;
-            // A cross, sized here in world units at the zoom it was gathered.
-            const Vec3 p = o->body.vertexPosition(e.index);
-            const Real s = pixel * 4.0;
-            for (int axis = 0; axis < 3; ++axis) {
-                Vec3 d{};
-                d[axis] = s;
-                h.lines.push_back(p - d);
-                h.lines.push_back(p + d);
-            }
-            break;
-        }
-        case ElementKind::None:
-            break;
-        }
+        Highlight h = buildHighlight(e, pixel);
         if (!h.lines.empty() || !h.tris.empty()) highlights_.push_back(std::move(h));
     }
 }
@@ -2807,10 +2829,60 @@ void Application::drawSelectionHighlights() {
 
     const Vec4 faceTint = toVec4(palette::kBrand, 0.30f);
     const Vec4 edgeCol  = toVec4(palette::kBrand, 1.0f);
+    for (const Highlight& h : highlights_) drawHighlight(h, faceTint, edgeCol);
 
-    for (const Highlight& h : highlights_) {
+    // Under the pointer: fainter than a selection, and not over one.
+    if (hoverLive_ && hoverRef_.valid() && !scene_.isElementSelected(hoverRef_))
+        drawHighlight(hoverHighlight_, toVec4(palette::kBrand, 0.13f), toVec4(palette::kBrand, 0.6f));
+}
+
+void Application::updateHover(bool ctrl) {
+    // Only what a plain click takes: a Ctrl+click takes the whole body, and
+    // a sketch under the pointer is lit by the sketch's own hover.
+    const Vec2 m = mouseInViewport();
+    if (ctrl || hoverSketch_.valid() || m.x < 0.0 || m.y < 0.0 || m.x >= viewRect_.w || m.y >= viewRect_.h) {
+        clearHover();
+        return;
+    }
+    uint64_t key = 1469598103934665603ull;
+    auto mix = [&key](uint64_t v) { key = (key ^ v) * 1099511628211ull; };
+    mix(static_cast<uint64_t>(std::lround(m.x * 2.0)));
+    mix(static_cast<uint64_t>(std::lround(m.y * 2.0)));
+    const Mat4 vp = camera_.viewProjection();
+    for (int c = 0; c < 4; ++c)
+        for (int r = 0; r < 4; ++r) {
+            float f = static_cast<float>(vp.col[c][r]);
+            uint32_t bits;
+            std::memcpy(&bits, &f, sizeof bits);
+            mix(bits);
+        }
+    for (const auto& o : scene_.objects()) { mix(o->id); mix(o->geometryVersion); mix(o->meshVersion); mix(o->visible); }
+    for (const ElementRef& e : scene_.elementSelection()) { mix(e.object); mix(e.index); mix(static_cast<uint64_t>(e.kind)); }
+    mix(measure_.active());
+    if (key == hoverKey_) return;
+    hoverKey_ = key;
+
+    const Ray ray = camera_.rayThroughPixel(static_cast<float>(m.x), static_cast<float>(m.y));
+    const std::vector<ElementHit> picks =
+        scene_.pickElements(ray, vp, camera_.viewportW, camera_.viewportH, m);
+    ElementRef ref;
+    if (!picks.empty()) {
+        // Measuring takes the first; selecting steps past what is selected.
+        const size_t at = measure_.active() ? 0 : nextInCycle(picks.size(), false, [&](size_t i) {
+            return scene_.isElementSelected(picks[i].ref);
+        });
+        ref = picks[at].ref;
+    }
+    if (ref == hoverRef_ && ref.valid()) return;
+    hoverRef_ = ref;
+    hoverHighlight_ = ref.valid() ? buildHighlight(ref, std::max<Real>(camera_.pixelWorldSize(camera_.target), 1e-9))
+                                  : Highlight{};
+}
+
+void Application::drawHighlight(const Highlight& h, Vec4 faceTint, Vec4 edgeCol) {
+    {
         const SceneObject* o = scene_.find(h.object);
-        if (!o) continue;
+        if (!o) return;
         const Mat4 model = o->modelMatrix();
 
         // Nudge toward the eye by a fixed number of pixels' worth of world
@@ -2822,12 +2894,24 @@ void Application::drawSelectionHighlights() {
         AABB box;
         for (const Vec3& p : h.tris) box.expand(p);
         for (const Vec3& p : h.lines) box.expand(p);
-        if (!box.valid()) continue;
+        if (!box.valid()) return;
         const Vec3 mid = transformPoint(model, box.center());
         const Vec3 nudge = -camera_.forward() * static_cast<Real>(camera_.pixelWorldSize(mid) * 2.0f);
         auto lift = [&](Vec3 p) { return transformPoint(model, p) + nudge; };
-        for (size_t i = 0; i + 1 < h.lines.size(); i += 2)
-            renderer_.addLine(lift(h.lines[i]), lift(h.lines[i + 1]), edgeCol);
+        // Cut where a section cuts the model: overlay lines are not clipped
+        // by the renderer, and an outline running on through what the
+        // section took away draws an edge that is not there.
+        const SectionCut& cut = scene_.section();
+        for (size_t i = 0; i + 1 < h.lines.size(); i += 2) {
+            Vec3 a = transformPoint(model, h.lines[i]), b = transformPoint(model, h.lines[i + 1]);
+            if (cut.on) {
+                const Real da = dot(cut.normal, a) - cut.offset, db = dot(cut.normal, b) - cut.offset;
+                if (da > 0.0 && db > 0.0) continue;
+                if (da > 0.0) a = a + (b - a) * (da / (da - db));
+                else if (db > 0.0) b = b + (a - b) * (db / (db - da));
+            }
+            renderer_.addLine(a + nudge, b + nudge, edgeCol);
+        }
         for (size_t i = 0; i + 2 < h.tris.size(); i += 3)
             renderer_.addTriangle(lift(h.tris[i]), lift(h.tris[i + 1]), lift(h.tris[i + 2]), faceTint);
     }
@@ -9262,6 +9346,20 @@ void Application::buildUi() {
         ImGui::DockBuilderFinish(dockId);
     }
     firstLayout_ = false;
+
+    // The side panels as a share of the window, whatever was saved. A layout
+    // saved in a wide window keeps its panels' widths in pixels, so opened
+    // narrower -- a window tiled into half a screen -- the panels stayed as
+    // wide and the model was left a strip between them.
+    {
+        const float limit = std::max(200.0f, vp->WorkSize.x * 0.25f);
+        for (const char* name : {"Outliner##v2", "Inspector##v2"}) {
+            const ImGuiWindow* w = ImGui::FindWindowByName(name);
+            ImGuiDockNode* n = w ? w->DockNode : nullptr;
+            if (n && !n->IsCentralNode() && n->Size.x > limit + 0.5f)
+                ImGui::DockBuilderSetNodeSize(n->ID, ImVec2(limit, n->Size.y));
+        }
+    }
     ImGui::End();
 
     // The central node is the 3D viewport's rectangle.

@@ -931,6 +931,25 @@ std::vector<ElementHit> Scene::pickElements(const Ray& ray, const Mat4& viewProj
                              transformPoint(model, local), px);
         };
 
+        // A body whose box on the screen is nowhere near the pointer has
+        // nothing near it either: this runs as the pointer moves, over empty
+        // space, and walking every edge of every part there was most of it.
+        {
+            const AABB b = obj->worldBounds();
+            float x0 = 1e30f, y0 = 1e30f, x1 = -1e30f, y1 = -1e30f;
+            bool all = b.valid();
+            for (int c = 0; c < 8 && all; ++c) {
+                Vec2 px;
+                const Vec3 p{(c & 1) ? b.max.x : b.min.x, (c & 2) ? b.max.y : b.min.y, (c & 4) ? b.max.z : b.min.z};
+                if (!projectPx(viewProj, viewportW, viewportH, p, px)) { all = false; break; }
+                x0 = std::min(x0, static_cast<float>(px.x)); x1 = std::max(x1, static_cast<float>(px.x));
+                y0 = std::min(y0, static_cast<float>(px.y)); y1 = std::max(y1, static_cast<float>(px.y));
+            }
+            const float tol = std::max(vertexTolPx, edgeTolPx);
+            if (all && (cursorPx.x < x0 - tol || cursorPx.x > x1 + tol || cursorPx.y < y0 - tol || cursorPx.y > y1 + tol))
+                continue;
+        }
+
         body.allVertices(verts);
         for (VertexId v : verts) {
             Vec2 p;

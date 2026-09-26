@@ -4,6 +4,7 @@
 #include "ui/command_panel.h"
 #include "ui/glyph.h"
 #include "ui/theme.h"
+#include "ui/view_cube.h"
 #include "ui/widgets.h"
 
 #include "core/palette.h"
@@ -1167,7 +1168,9 @@ bool actionButton(const char* id, Glyph glyph, const char* label, const char* ti
     ImGui::PushID(id);
     pushFont(FontWeight::Medium, uiFonts().size * 0.92f);
     const float h = 30.0f;
-    const float w = ImGui::CalcTextSize(label).x + 36.0f;
+    // No label: the picture alone, for a bar too narrow for the words.
+    const bool bare = !label || !*label;
+    const float w = bare ? 32.0f : ImGui::CalcTextSize(label).x + 36.0f;
     const ImVec2 at = ImGui::GetCursorScreenPos();
     const bool clicked = ImGui::InvisibleButton("##b", ImVec2(w, h)) && enabled;
     const bool hovered = ImGui::IsItemHovered();
@@ -1175,17 +1178,19 @@ bool actionButton(const char* id, Glyph glyph, const char* label, const char* ti
     if (hovered && enabled) dl->AddRectFilled(at, ImVec2(at.x + w, at.y + h), u32(palette::kHover), 6.0f);
     const float alpha = enabled ? 1.0f : 0.4f;
     drawGlyph(dl, glyph, ImVec2(at.x + 16.0f, at.y + h * 0.5f), 16.0f, u32(palette::kBrand, alpha));
-    dl->AddText(ImVec2(at.x + 28.0f, at.y + (h - ImGui::GetTextLineHeight()) * 0.5f), u32(palette::kText, alpha),
-                label);
+    if (!bare)
+        dl->AddText(ImVec2(at.x + 28.0f, at.y + (h - ImGui::GetTextLineHeight()) * 0.5f),
+                    u32(palette::kText, alpha), label);
     ImGui::PopFont();
     if (hovered && tip) ui::hoverTip(tip);
     ImGui::PopID();
     return clicked;
 }
 
-// What can be done with the sketch `ref`. `across` lays them out in a row, for
-// the bar over the view; otherwise they wrap to the width they are given.
-void sketchActions(UiContext& ctx, Scene::SketchRef ref, bool across) {
+// What can be done with the sketch `ref`, in a row, for the bar over the view.
+// `bare` leaves the words off, for a view too narrow for them; the tips still
+// say what each is.
+void sketchActions(UiContext& ctx, Scene::SketchRef ref, bool bare) {
     Scene& scene = *ctx.scene;
     Feature* f = nullptr;
     if (SceneObject* o = scene.find(ref.object))
@@ -1193,19 +1198,13 @@ void sketchActions(UiContext& ctx, Scene::SketchRef ref, bool across) {
             if (g.kind == FeatureKind::Sketch && g.uid == ref.uid) f = &g;
     if (!f) return;
     const bool exact = brep::available();
-    const float right = ImGui::GetContentRegionAvail().x + ImGui::GetCursorScreenPos().x;
     bool first = true;
-    auto next = [&](float w) {
-        if (first) { first = false; return; }
-        ImGui::SameLine(0.0f, 2.0f);
-        if (!across && ImGui::GetCursorScreenPos().x + w > right) ImGui::NewLine();
-    };
     auto button = [&](const char* id, Glyph g, const char* label, const char* tip, bool enabled = true) {
-        pushFont(FontWeight::Medium, uiFonts().size * 0.92f);
-        const float w = ImGui::CalcTextSize(label).x + 36.0f;
-        ImGui::PopFont();
-        next(w);
-        return actionButton(id, g, label, tip, enabled);
+        if (!first) ImGui::SameLine(0.0f, 2.0f);
+        first = false;
+        if (!bare) return actionButton(id, g, label, tip, enabled);
+        const std::string named = std::string(label) + ": " + tip;
+        return actionButton(id, g, "", named.c_str(), enabled);
     };
     if (button("edit", Glyph::Edit, "Edit", "Open the sketch to draw in it  (double-click)")) {
         ctx.actions.editSketchObject = ref.object;
@@ -1270,18 +1269,15 @@ void sketchInspector(UiContext& ctx, Scene::SketchRef ref) {
     });
     row("Built from", built == 0 ? std::string("nothing yet") : std::to_string(built) + (built == 1 ? " step" : " steps"));
 
+    // What can be done with it is on the bar over the view, where the eye
+    // already is; listing the same buttons again here was the same thing
+    // twice.
     ImGui::Dummy(ImVec2(0, 10));
-    pushFont(FontWeight::SemiBold, uiFonts().size);
-    ImGui::TextColored(im(palette::kText), "Actions");
-    ImGui::PopFont();
-    ImGui::Dummy(ImVec2(0, 2));
-    sketchActions(ctx, ref, false);
-    ImGui::Dummy(ImVec2(0, 8));
     pushFont(FontWeight::Regular, uiFonts().size * 0.88f);
     ImGui::PushTextWrapPos(0.0f);
     ImGui::TextColored(im(palette::kTextFaint),
-                       "Double-click it in the view or in the outliner to draw in it. Extrude, revolve, "
-                       "sweep and loft start with its regions picked.");
+                       "Its actions are on the bar over the view. Double-click it in the view or in the "
+                       "outliner to draw in it; extrude, revolve, sweep and loft start with its regions picked.");
     ImGui::PopTextWrapPos();
     ImGui::PopFont();
 }
@@ -1690,19 +1686,34 @@ void drawViewportOverlays(UiContext& ctx, float x, float y, float w, float h) {
     float nextY = y0 + 14.0f;
 
     // What the tool is doing, at the top left, where the eye starts.
+    //
+    // One line, always the same height, and room kept for it whether or not
+    // there is anything to say: an operation's panel sits under it, and a
+    // line that came and went -- a snap named, then not -- or wrapped onto a
+    // second line as its numbers grew, moved the panel up and down under the
+    // pointer. Too long for the line, it ends in an ellipsis.
+    pushFont(FontWeight::Medium, uiFonts().size * 0.9f);
+    const float lineH = ImGui::GetTextLineHeight() + 12.0f;
     if (!ctx.toolStatus.empty()) {
-        pushFont(FontWeight::Medium, uiFonts().size * 0.9f);
-        const float maxW = std::max(200.0f, w * 0.6f);
-        const ImVec2 ts = ImGui::CalcTextSize(ctx.toolStatus.c_str(), nullptr, false, maxW);
+        const float maxW = std::max(160.0f, w - 28.0f - 24.0f);
+        std::string text = ctx.toolStatus;
+        if (ImGui::CalcTextSize(text.c_str()).x > maxW) {
+            const float ell = ImGui::CalcTextSize("\xE2\x80\xA6").x;
+            while (!text.empty() && ImGui::CalcTextSize(text.c_str()).x + ell > maxW) {
+                // Back to the start of a UTF-8 character.
+                do text.pop_back(); while (!text.empty() && (static_cast<unsigned char>(text.back()) & 0xC0) == 0x80);
+            }
+            text += "\xE2\x80\xA6";
+        }
+        const ImVec2 ts = ImGui::CalcTextSize(text.c_str());
         const ImVec2 lo(x0 + 14.0f, nextY);
-        const ImVec2 hi(lo.x + ts.x + 24.0f, lo.y + ts.y + 12.0f);
+        const ImVec2 hi(lo.x + ts.x + 24.0f, lo.y + lineH);
         dl->AddRectFilled(lo, hi, u32(palette::kCommand, 0.92f), 6.0f);
         dl->AddRectFilled(ImVec2(lo.x, lo.y + 6.0f), ImVec2(lo.x + 3.0f, hi.y - 6.0f), u32(palette::kBrand), 2.0f);
-        dl->AddText(nullptr, 0.0f, ImVec2(lo.x + 14.0f, lo.y + 6.0f), u32(palette::kText),
-                    ctx.toolStatus.c_str(), nullptr, maxW);
-        ImGui::PopFont();
-        nextY = hi.y + 8.0f;
+        dl->AddText(ImVec2(lo.x + 14.0f, lo.y + 6.0f), u32(palette::kText), text.c_str());
     }
+    ImGui::PopFont();
+    nextY += lineH + 8.0f;
     // An operation's panel goes under it, on the same left edge.
     ui::setCommandTopInset(nextY - y0);
 
@@ -1828,7 +1839,10 @@ void drawSketchBar(UiContext& ctx, float x, float y, float w) {
     if (!sk.valid() || ctx.toolBusy) return;
     const SceneObject* obj = scene.find(sk.object);
     if (!obj) return;
-    // Centred along the top of the view, clear of the view cube.
+    // Centred along the top of the view, in the part of it left of the view
+    // cube, so the two never overlap.
+    const ViewCubeStyle cube;
+    w = std::max(120.0f, w - (cube.sizePx + cube.marginPx));
     ImGui::SetNextWindowPos(ImVec2(x + w * 0.5f, y + 12.0f), ImGuiCond_Always, ImVec2(0.5f, 0.0f));
     ImGui::SetNextWindowBgAlpha(0.96f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8.0f, 6.0f));
@@ -1845,12 +1859,30 @@ void drawSketchBar(UiContext& ctx, float x, float y, float w) {
         const std::string title = obj->body.empty() ? obj->name : "Sketch in " + obj->name;
         pushFont(FontWeight::SemiBold, uiFonts().size * 0.92f);
         const float tw = ImGui::CalcTextSize(title.c_str()).x;
-        dl->AddText(ImVec2(at.x + 24.0f, at.y + (30.0f - ImGui::GetTextLineHeight()) * 0.5f), u32(palette::kText),
-                    title.c_str());
         ImGui::PopFont();
-        ImGui::Dummy(ImVec2(24.0f + tw, 30.0f));
+        // Inside the view, whatever its width: the title goes first, then the
+        // words, leaving the pictures. Running on past the view, the bar
+        // covered the inspector's own heading.
+        pushFont(FontWeight::Medium, uiFonts().size * 0.92f);
+        float words = 0.0f;
+        for (const char* l : {"Edit", "Extrude", "Revolve", "Sweep", "Loft", "Hide", "Delete"})
+            words += ImGui::CalcTextSize(l).x + 36.0f + 2.0f;
+        ImGui::PopFont();
+        const float room = w - 24.0f - 16.0f;
+        const bool withTitle = 24.0f + tw + 12.0f + words <= room;
+        const bool bare = words > room;
+        if (withTitle) {
+            pushFont(FontWeight::SemiBold, uiFonts().size * 0.92f);
+            dl->AddText(ImVec2(at.x + 24.0f, at.y + (30.0f - ImGui::GetTextLineHeight()) * 0.5f),
+                        u32(palette::kText), title.c_str());
+            ImGui::PopFont();
+            ImGui::Dummy(ImVec2(24.0f + tw, 30.0f));
+        } else {
+            ImGui::Dummy(ImVec2(20.0f, 30.0f));
+            if (ImGui::IsItemHovered()) ui::hoverTip(title.c_str());
+        }
         ImGui::SameLine(0.0f, 12.0f);
-        sketchActions(ctx, sk, true);
+        sketchActions(ctx, sk, bare);
     }
     ImGui::End();
     ImGui::PopStyleVar(2);

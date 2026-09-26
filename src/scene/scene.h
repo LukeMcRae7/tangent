@@ -216,6 +216,13 @@ public:
     ObjectId addPrimitive(PrimitiveKind kind, const PrimitiveSpec& spec = {},
                           Vec3 position = {});
 
+    // A sketch standing on its own that has just been built into its first
+    // solid is a part now, and is called one -- unless it was named by hand.
+    void nameAsPart(ObjectId id) {
+        SceneObject* o = find(id);
+        if (o && !o->body.empty() && o->name.rfind("Sketch", 0) == 0) o->name = uniqueName("Part");
+    }
+
     // Which kernel new bodies are built with. Exact where the build has it,
     // and a mesh otherwise, so the same code path serves both -- and so a build
     // without OpenCASCADE behaves exactly as it did before the backend existed.
@@ -424,14 +431,14 @@ public:
     // scene layer stays independent of the application layer.
     ElementHit pickElement(const Ray& ray, const Mat4& viewProj,
                            int viewportW, int viewportH, Vec2 cursorPx,
-                           float vertexTolPx = 16.0f, float edgeTolPx = 12.0f) const;
+                           float vertexTolPx = 10.0f, float edgeTolPx = 7.0f) const;
 
     // Everything a click could mean there: what pickElement would choose on
     // each body raycastCoincident finds, each once. The first is what
     // pickElement returns.
     std::vector<ElementHit> pickElements(const Ray& ray, const Mat4& viewProj,
                                          int viewportW, int viewportH, Vec2 cursorPx,
-                                         float vertexTolPx = 16.0f, float edgeTolPx = 12.0f) const;
+                                         float vertexTolPx = 10.0f, float edgeTolPx = 7.0f) const;
 
     // ---- Sub-object selection --------------------------------------------
     const std::vector<ElementRef>& elementSelection() const { return elements_; }

@@ -1519,6 +1519,7 @@ bool SketchTool::commitExtrusion(Scene& scene, UndoStack& undo) {
     }
     if (parts.size() == 1) undo.push(std::move(parts.front()));
     else                   undo.push(std::make_unique<CompositeCommand>(std::move(parts), label));
+    if (firstSolid) scene.nameAsPart(home);
     if (scene.find(home)) scene.select(home);
     return true;
 }
