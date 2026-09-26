@@ -340,8 +340,8 @@ The icons are [Tabler Icons](https://tabler.io/icons), bundled as
 |-------|--------|
 | MMB drag | Orbit |
 | Shift + MMB | Pan |
-| Wheel | Zoom |
-| Click | Select the edge, face or vertex under the cursor |
+| Wheel | Zoom toward the pointer |
+| Click | Select the edge, face or vertex under the cursor — what a click would take is lit as the pointer passes over it |
 | Ctrl + click | Select the whole object (as clicking its outliner row) |
 | Shift + click | Extend either selection |
 | E | Extrude selected faces, then drag to set the height (Shift + E starts it as a cut) |
