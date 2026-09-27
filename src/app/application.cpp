@@ -1278,6 +1278,7 @@ bool Application::init() {
     if (assemblyDemo_ > 0) setupAssemblyDemo();
     if (sectionDemo_ > 0) setupSectionDemo();
     if (paletteDemoOn_) ui::openCommandPalette(paletteDemo_.c_str());
+    checkRecovery();
 
     if (threadDemo_ > 0) {
         // A thread cut the way the panel cuts one: a hole is drilled, its wall
@@ -8856,6 +8857,7 @@ void Application::runFileOperation(FileMode mode, const std::string& path) {
             savedRevision_ = undo_.revision();
             rememberRecent(prefs_, path);
             savePrefs();
+            clearRecovery();
             setNotice("Saved " + path);
         }
         else      setNotice("Save failed: " + r.error);
@@ -9559,6 +9561,7 @@ void Application::buildUi() {
     drawSectionPanel();
     drawCombinePanel();
     drawPreferences();
+    drawRecoveryPrompt();
     drawPickFilterBar();
     drawBoxSelect();
     ui::drawCommandPalette(ui_);
@@ -9979,6 +9982,7 @@ int Application::run() {
 
         gProbe.begin();
         applyActions();
+        stepAutosave();
         gProbe.end("actions");
 
         // A feature that dropped out of the chain during any of the above.
@@ -10140,6 +10144,8 @@ int Application::run() {
             running_ = false;
         }
     }
+    // A clean exit: whatever was kept aside against a crash is not needed.
+    clearRecovery();
     return 0;
 }
 

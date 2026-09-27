@@ -135,6 +135,8 @@ int main(int argc, char** argv) {
             app.setPaletteDemo(argv[++i]);
         } else if (std::strcmp(argv[i], "--select-demo") == 0 && i + 1 < argc) {
             app.setSelectDemo(std::atoi(argv[++i]));
+        } else if (std::strcmp(argv[i], "--offer-recovery") == 0) {
+            app.setOfferRecovery();
         } else if (std::strcmp(argv[i], "--light") == 0) {
             app.setLightTheme();
         } else if (std::strcmp(argv[i], "--units") == 0 && i + 1 < argc) {

@@ -48,6 +48,9 @@ public:
     void setSmokeTest(int frames) { smokeFrames_ = frames; }
     // For screenshots of the other look and the other units.
     void setLightTheme() { prefs_.lightTheme = true; }
+    // For a screenshot of the offer to recover: shown although unattended.
+    void setOfferRecovery() { offerRecoveryDemo_ = true; }
+    bool offerRecoveryDemo_ = false;
     void setUnits(units::Length u) { prefs_.units = u; }
 
     // Keeps the operating system's own title bar and borders instead of the
@@ -1009,6 +1012,18 @@ private:
     void drawPreferences();
     PrintProfile printProfile() const;
     bool snapNow() const;
+
+    // Autosave and recovery: changed work written aside every few minutes,
+    // offered back after a crash, and put away on a clean exit or a save.
+    size_t autosavedRevision_ = static_cast<size_t>(-1);
+    float  autosaveClock_ = 0.0f;
+    bool   recoveryOffered_ = false;
+    std::string recoveryFrom_;        // the project the recovered work was, or empty
+    std::string recoveryWhen_;
+    void stepAutosave();
+    void clearRecovery();
+    void checkRecovery();
+    void drawRecoveryPrompt();
     std::string windowTitle_;
     ObjectId colourDragged_ = kNoObject;    // the part whose colour a picker drag is changing
     // The wheel: toward the part in hand, or else toward the pointer.

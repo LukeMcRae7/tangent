@@ -8,6 +8,7 @@
 
 #include "core/palette.h"
 #include "core/units.h"
+#include "scene/serialize.h"
 #include "ui/theme.h"
 #include "ui/widgets.h"
 
@@ -15,6 +16,8 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <filesystem>
+#include <ctime>
 
 namespace tg {
 
@@ -51,6 +54,113 @@ bool Application::snapNow() const {
     // Snapping is the default and Ctrl lets go of it -- or, with it turned
     // off in the preferences, the other way about.
     return prefs_.snap != ImGui::GetIO().KeyCtrl;
+}
+
+// ---------------------------------------------------------------------------
+// Autosave and recovery
+// ---------------------------------------------------------------------------
+
+namespace {
+std::string recoveryPath() {
+    const std::string dir = configDirectory();
+    return dir.empty() ? std::string() : dir + "/recovery.tangent";
+}
+std::string recoveryNote() {
+    const std::string dir = configDirectory();
+    return dir.empty() ? std::string() : dir + "/recovery.note";
+}
+} // namespace
+
+void Application::stepAutosave() {
+    if (unattended_ || prefs_.autosaveMinutes <= 0) return;
+    if (!dirty() || undo_.revision() == autosavedRevision_) {
+        autosaveClock_ = 0.0f;
+        return;
+    }
+    autosaveClock_ += lastDt_;
+    if (autosaveClock_ < static_cast<float>(prefs_.autosaveMinutes) * 60.0f) return;
+    // At a quiet moment: not in the middle of a drag or an operation, when
+    // what is on screen is not yet what the project holds.
+    if (ImGui::IsMouseDown(ImGuiMouseButton_Left) || commandCornerTaken()) return;
+    const std::string path = recoveryPath();
+    if (path.empty()) return;
+    const ProjectResult r = saveProject(scene_, path);
+    autosaveClock_ = 0.0f;
+    if (!r.ok) return;
+    autosavedRevision_ = undo_.revision();
+    // What it was, and when, for the offer to recover it.
+    if (FILE* f = std::fopen(recoveryNote().c_str(), "w")) {
+        const std::time_t now = std::time(nullptr);
+        char when[64];
+        std::strftime(when, sizeof when, "%H:%M on %e %b", std::localtime(&now));
+        std::fprintf(f, "%s\n%s\n", projectPath_.c_str(), when);
+        std::fclose(f);
+    }
+}
+
+void Application::clearRecovery() {
+    if (unattended_) return;
+    std::error_code ec;
+    std::filesystem::remove(recoveryPath(), ec);
+    std::filesystem::remove(recoveryNote(), ec);
+    autosavedRevision_ = static_cast<size_t>(-1);
+}
+
+void Application::checkRecovery() {
+    if (unattended_ && !offerRecoveryDemo_) return;
+    std::error_code ec;
+    if (!std::filesystem::exists(recoveryPath(), ec)) return;
+    recoveryOffered_ = true;
+    if (FILE* f = std::fopen(recoveryNote().c_str(), "r")) {
+        char line[1024];
+        if (std::fgets(line, sizeof line, f)) {
+            recoveryFrom_ = line;
+            while (!recoveryFrom_.empty() && (recoveryFrom_.back() == '\n' || recoveryFrom_.back() == '\r')) recoveryFrom_.pop_back();
+        }
+        if (std::fgets(line, sizeof line, f)) {
+            recoveryWhen_ = line;
+            while (!recoveryWhen_.empty() && (recoveryWhen_.back() == '\n' || recoveryWhen_.back() == '\r')) recoveryWhen_.pop_back();
+        }
+        std::fclose(f);
+    }
+}
+
+void Application::drawRecoveryPrompt() {
+    if (!recoveryOffered_) return;
+    ImGui::OpenPopup("##recover");
+    if (!ui::beginCard("##recover", "Recover unsaved work?", 420.0f)) return;
+    const std::string name = recoveryFrom_.empty() ? std::string("An unsaved project")
+                                                   : std::filesystem::path(recoveryFrom_).filename().string();
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 384.0f);
+    ImGui::TextColored(ui::im(palette::kTextDim),
+                       "Tangent closed with changes that were not saved. %s was kept aside%s%s.", name.c_str(),
+                       recoveryWhen_.empty() ? "" : " at ", recoveryWhen_.c_str());
+    ImGui::PopTextWrapPos();
+    ImGui::Dummy(ImVec2(0, 10));
+    if (ui::primaryButton("Recover", ImVec2(110, 0))) {
+        // Replaces the scene only if it reads; the file is kept until the
+        // work is saved or the next clean exit.
+        const ProjectResult r = loadProject(scene_, recoveryPath());
+        if (r.ok) {
+            undo_.clear();
+            projectPath_ = recoveryFrom_;
+            // Not saved: it is work to keep, and saying it is saved would lose it.
+            savedRevision_ = undo_.revision() + 1;
+            camera_.frame(scene_.bounds());
+            setNotice("Recovered: save it to keep it");
+        } else {
+            setNotice("The kept work could not be read: " + r.error);
+        }
+        recoveryOffered_ = false;
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::SameLine();
+    if (ui::quietButton("Discard", ImVec2(110, 0))) {
+        clearRecovery();
+        recoveryOffered_ = false;
+        ImGui::CloseCurrentPopup();
+    }
+    ui::endCard();
 }
 
 void Application::drawPreferences() {
