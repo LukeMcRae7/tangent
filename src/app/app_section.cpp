@@ -425,7 +425,12 @@ void Application::setupSectionDemo() {
         const ObjectId plate = box({60, 40, 12}, {0, 0, 6}, "Plate");
         drill(plate, {-15, 0, 12}, 8.0);
         drill(plate, {15, 0, 12}, 5.0);
-        cylinder(2.4, 26, {15, 0, 9}, "Pin");
+        const ObjectId pin = cylinder(2.4, 26, {15, 0, 9}, "Pin");
+        // Coloured, as an assembly would be: the two read apart in the cut.
+        scene_.find(plate)->coloured = true;
+        scene_.find(plate)->colour = {0x5B / 255.0, 0x8D / 255.0, 0xDB / 255.0};
+        scene_.find(pin)->coloured = true;
+        scene_.find(pin)->colour = {0xE8 / 255.0, 0x96 / 255.0, 0x4A / 255.0};
         if (step == 1) {
             toggleSection();                    // the Front plane, through the middle
             stepSection();

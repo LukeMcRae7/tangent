@@ -1010,6 +1010,7 @@ private:
     PrintProfile printProfile() const;
     bool snapNow() const;
     std::string windowTitle_;
+    ObjectId colourDragged_ = kNoObject;    // the part whose colour a picker drag is changing
     // The wheel: toward the part in hand, or else toward the pointer.
     void zoomView(float steps);
 

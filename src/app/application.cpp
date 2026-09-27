@@ -9174,6 +9174,17 @@ void Application::applyActions() {
 
     if (a.quit && confirmDiscard(PendingAction::Quit)) running_ = false;
     if (a.openPreferences) prefsOpen_ = true;
+    if (a.colourObject != kNoObject) {
+        if (SceneObject* o = scene_.find(a.colourObject);
+            o && (o->coloured != a.colourOn || (a.colourOn && length(o->colour - a.colourValue) > 1e-6))) {
+            auto cmd = std::make_unique<ColourCommand>(o->id, o->coloured, o->colour, a.colourOn,
+                                                       a.colourOn ? a.colourValue : o->colour);
+            cmd->redo(scene_);
+            // A drag across the picker is one step; a swatch clicked is one each.
+            undo_.push(std::move(cmd), a.colourDragging && colourDragged_ == o->id);
+            colourDragged_ = a.colourDragging ? o->id : kNoObject;
+        }
+    }
     if (!a.openRecent.empty()) {
         pendingPath_ = a.openRecent;
         if (confirmDiscard(PendingAction::OpenRecent)) runFileOperation(FileMode::Open, pendingPath_);

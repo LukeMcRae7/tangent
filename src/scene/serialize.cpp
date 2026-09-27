@@ -648,6 +648,9 @@ ProjectResult saveProject(const Scene& scene, const std::string& path) {
         for (const Feature& f : obj->ahead) writeFeature(w, f);
         // v24: the group it is in.
         w.u32(obj->group);
+        // v25: its colour, if one was chosen.
+        w.u8(obj->coloured ? 1 : 0);
+        w.vec3(obj->colour);
         ++res.objects;
     }
 
@@ -780,6 +783,12 @@ ProjectResult loadProject(Scene& scene, const std::string& path) {
             }
         }
         const GroupId inGroup = version >= 24 ? r.u32() : kNoGroup;
+        bool coloured = false;
+        Vec3 colour{0.74, 0.74, 0.75};
+        if (version >= 25) {
+            coloured = r.u8() != 0;
+            colour = r.vec3();
+        }
         if (r.bad) { res.error = "truncated file"; return res; }
 
         // Before version 13 a sketch could not be shown or hidden, because a
@@ -835,6 +844,8 @@ ProjectResult loadProject(Scene& scene, const std::string& path) {
         SceneObject* o = loaded.find(newId);
         o->name = name;
         o->visible = visible;
+        o->coloured = coloured;
+        o->colour = colour;
         o->features = std::move(chain);
         o->ahead = std::move(ahead);
         loaded.setBasePlacement(newId, t);

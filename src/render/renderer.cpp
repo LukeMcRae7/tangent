@@ -3,12 +3,21 @@
 #include <cstddef>
 
 #include <algorithm>
+#include <cmath>
 
 #include <epoxy/gl.h>
 
 #include <cstdio>
 
 namespace tg {
+
+namespace {
+// A chosen colour is a screen colour, and the shaders light in linear terms
+// and encode at the end: taken as it is, a mid blue came out pastel.
+Vec3 linearOf(Vec3 c) {
+    return {std::pow(c.x, 2.2), std::pow(c.y, 2.2), std::pow(c.z, 2.2)};
+}
+} // namespace
 
 bool Renderer::init(const std::string& dir) {
     const bool ok =
@@ -405,6 +414,8 @@ void Renderer::render(const Scene& scene, const Camera& camera, const ViewOption
         surfaceShader_.set("uModel", model);
         surfaceShader_.set("uNormalMat", normalMatrix(model));
         surfaceShader_.set("uSelected", selected ? 1.0f : 0.0f);
+        // Its own colour when it has one; the theme's grey when not.
+        surfaceShader_.set("uBaseColor", obj->coloured ? linearOf(obj->colour) : opts.objectColor);
         gpu.drawTriangles();
     }
 
@@ -468,6 +479,7 @@ void Renderer::render(const Scene& scene, const Camera& camera, const ViewOption
             capShader_.set("uModel", model);
             capShader_.set("uNormalMat", normalMatrix(model));
             capShader_.set("uSelected", scene.isSelected(obj->id) ? 1.0f : 0.0f);
+            capShader_.set("uBaseColor", obj->coloured ? linearOf(obj->colour) : opts.objectColor);
             // Neighbours lean opposite ways, as on a drawing.
             capShader_.set("uHatchSign", (cutIndex++ & 1) ? Real(-1.0) : Real(1.0));
             gpu.drawTriangles();

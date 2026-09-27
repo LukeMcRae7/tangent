@@ -165,6 +165,12 @@ struct UiActions {
     bool        openPreferences = false;
     std::string openRecent;             // a path from the recent files
     bool        clearRecent = false;
+    // A part's colour chosen (colourOn) or taken off; `colourDragging` while
+    // the picker is being dragged, so the drag is one step to undo.
+    ObjectId    colourObject = kNoObject;
+    bool        colourOn = false;
+    Vec3        colourValue{};
+    bool        colourDragging = false;
 };
 
 struct UiStats {

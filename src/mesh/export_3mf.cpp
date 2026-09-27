@@ -144,6 +144,30 @@ ThreeMfResult export3mf(const Scene& scene, const std::string& path,
              " <metadata name=\"Application\">Tangent</metadata>\n"
              " <resources>\n";
 
+    // The colours chosen for parts, as the core spec's base materials: one
+    // entry each, and an object without one is left without, for the slicer
+    // to colour as it likes.
+    std::vector<const SceneObject*> coloured;
+    for (const SceneObject* obj : objects) if (obj->coloured) coloured.push_back(obj);
+    const uint32_t materialsId = 100000;
+    if (!coloured.empty()) {
+        model += "  <basematerials id=\"";
+        appendInt(model, materialsId);
+        model += "\">\n";
+        for (const SceneObject* obj : coloured) {
+            auto byte = [](Real v) { return static_cast<int>(std::clamp(v, Real(0), Real(1)) * 255.0 + 0.5); };
+            char hexColour[16];
+            std::snprintf(hexColour, sizeof hexColour, "#%02X%02X%02X", byte(obj->colour.x), byte(obj->colour.y),
+                          byte(obj->colour.z));
+            model += "   <base name=\"";
+            appendEscaped(model, obj->name);
+            model += "\" displaycolor=\"";
+            model += hexColour;
+            model += "\"/>\n";
+        }
+        model += "  </basematerials>\n";
+    }
+
     std::vector<uint32_t> ids;
     ExportMesh mesh;
     for (const SceneObject* obj : objects) {
@@ -162,7 +186,16 @@ ThreeMfResult export3mf(const Scene& scene, const std::string& path,
         appendInt(model, id);
         model += "\" type=\"model\" name=\"";
         appendEscaped(model, obj->name);
-        model += "\">\n   <mesh>\n    <vertices>\n";
+        model += "\"";
+        if (obj->coloured) {
+            const auto at = std::find(coloured.begin(), coloured.end(), obj) - coloured.begin();
+            model += " pid=\"";
+            appendInt(model, materialsId);
+            model += "\" pindex=\"";
+            appendInt(model, static_cast<uint32_t>(at));
+            model += "\"";
+        }
+        model += ">\n   <mesh>\n    <vertices>\n";
         for (const Vec3& v : mesh.vertices) {
             model += "     <vertex x=\"";
             appendNumber(model, v.x);

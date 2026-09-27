@@ -99,6 +99,32 @@ private:
 };
 
 // Changing a primitive's parameters, re-evaluating the mesh either way.
+// A part's colour chosen, changed or taken off. A drag across the picker is
+// one step: it merges with the next change to the same part.
+class ColourCommand : public Command {
+public:
+    ColourCommand(ObjectId id, bool beforeOn, Vec3 before, bool afterOn, Vec3 after)
+        : id_(id), beforeOn_(beforeOn), afterOn_(afterOn), before_(before), after_(after) {}
+    void undo(Scene& scene) override { set(scene, beforeOn_, before_); }
+    void redo(Scene& scene) override { set(scene, afterOn_, after_); }
+    std::string label() const override { return "Colour"; }
+    bool mergeWith(const Command& other) override {
+        const auto* o = dynamic_cast<const ColourCommand*>(&other);
+        if (!o || o->id_ != id_) return false;
+        afterOn_ = o->afterOn_;
+        after_ = o->after_;
+        return true;
+    }
+
+private:
+    void set(Scene& scene, bool on, Vec3 c) {
+        if (SceneObject* o = scene.find(id_)) { o->coloured = on; o->colour = c; }
+    }
+    ObjectId id_;
+    bool beforeOn_, afterOn_;
+    Vec3 before_, after_;
+};
+
 class ParameterCommand : public Command {
 public:
     ParameterCommand(ObjectId id, PrimitiveSpec before, PrimitiveSpec after)

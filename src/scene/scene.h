@@ -46,6 +46,12 @@ struct SceneObject {
     // a group places nothing, but it is the unit a joint moves.
     GroupId       group = kNoGroup;
 
+    // Its colour, when one has been chosen; until then it is drawn in the
+    // theme's grey, like every other part. Saved, and written into a 3MF so
+    // a slicer shows the parts apart.
+    bool          coloured = false;
+    Vec3          colour{0.74, 0.74, 0.75};
+
     // Where the object is. Derived, not set: `base` is where it was made --
     // the point a box was drawn at, the plane a part was drawn on -- and the
     // Move and Rotate steps in its history take it on from there. Scene keeps

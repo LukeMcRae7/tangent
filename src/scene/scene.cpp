@@ -481,6 +481,8 @@ ObjectId Scene::duplicateObject(ObjectId id) {
     obj->localBounds = src->localBounds;
     obj->visible     = src->visible;
     obj->group       = src->group;       // beside the original, in its group
+    obj->coloured    = src->coloured;
+    obj->colour      = src->colour;
     obj->id          = nextId_++;
     // Strip any existing .NNN suffix so copies of Box.001 become Box.002.
     std::string base = src->name;

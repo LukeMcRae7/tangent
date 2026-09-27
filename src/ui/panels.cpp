@@ -254,7 +254,13 @@ void objectRow(UiContext& ctx, Scene& scene, SceneObject& obj, Glyph glyph, floa
     }
 
     const float alpha = obj.visible ? 1.0f : 0.45f;
-    drawGlyph(dl, glyph, ImVec2(at.x + 18.0f, at.y + h * 0.5f), 16.0f, u32(palette::kBrand, alpha));
+    // In its own colour, when it has one: the outliner then reads as a key to
+    // the assembly.
+    const ImU32 tint = obj.coloured
+        ? IM_COL32(static_cast<int>(obj.colour.x * 255.0), static_cast<int>(obj.colour.y * 255.0),
+                   static_cast<int>(obj.colour.z * 255.0), static_cast<int>(alpha * 255.0f))
+        : u32(palette::kBrand, alpha);
+    drawGlyph(dl, glyph, ImVec2(at.x + 18.0f, at.y + h * 0.5f), 16.0f, tint);
     pushFont(selected ? FontWeight::Medium : FontWeight::Regular);
     dl->AddText(ImVec2(at.x + 34.0f, at.y + (h - ImGui::GetTextLineHeight()) * 0.5f),
                 u32(palette::kText, alpha), obj.name.c_str());
@@ -1647,6 +1653,83 @@ void drawInspector(UiContext& ctx) {
     const float footerH = 46.0f;
     ImGui::BeginChild("##inspectorbody", ImVec2(0.0f, -footerH), ImGuiChildFlags_None,
                       ImGuiWindowFlags_NoBackground);
+
+    // ---- colour ----------------------------------------------------------------
+    // Grey until one is chosen. One line -- the colour it is, as a chip -- that
+    // opens a set of muted colours that sit together in an assembly, and a
+    // picker for any other.
+    {
+        static const uint32_t kSwatches[] = {0xD9594C, 0xE8964A, 0xE4C458, 0x6FB36B, 0x4FA8A0, 0x5B8DDB,
+                                             0x7A6FD1, 0xB06CC4, 0xDD7FA6, 0x9C7A5B, 0x5C6168, 0xE6E6E3};
+        auto colU32 = [](Vec3 c) {
+            return IM_COL32(static_cast<int>(c.x * 255.0 + 0.5), static_cast<int>(c.y * 255.0 + 0.5),
+                            static_cast<int>(c.z * 255.0 + 0.5), 255);
+        };
+        auto choose = [&](bool on, Vec3 c, bool dragging) {
+            ctx.actions.colourObject = obj->id;
+            ctx.actions.colourOn = on;
+            ctx.actions.colourValue = on ? c : obj->colour;
+            ctx.actions.colourDragging = dragging;
+        };
+        ImGui::Dummy(ImVec2(0, 2));
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextColored(im(palette::kTextDim), "Colour");
+        ImGui::SameLine(ui::labelColumn());
+        {
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            const ImVec2 at = ImGui::GetCursorScreenPos();
+            const float w = ImGui::GetContentRegionAvail().x, h = ImGui::GetFrameHeight();
+            if (ImGui::InvisibleButton("##colour", ImVec2(w, h))) ImGui::OpenPopup("##colours");
+            const bool hot = ImGui::IsItemHovered();
+            dl->AddRectFilled(at, ImVec2(at.x + w, at.y + h), u32(hot ? palette::kHover : palette::kField), 5.0f);
+            const ImVec2 mid(at.x + 12.0f, at.y + h * 0.5f);
+            dl->AddCircleFilled(mid, 6.5f, obj->coloured ? colU32(obj->colour) : u32(palette::kSurface));
+            char name[16];
+            if (obj->coloured)
+                std::snprintf(name, sizeof name, "#%02X%02X%02X", static_cast<int>(obj->colour.x * 255.0 + 0.5),
+                              static_cast<int>(obj->colour.y * 255.0 + 0.5), static_cast<int>(obj->colour.z * 255.0 + 0.5));
+            dl->AddText(ImVec2(at.x + 26.0f, at.y + (h - ImGui::GetTextLineHeight()) * 0.5f),
+                        u32(obj->coloured ? palette::kText : palette::kTextDim), obj->coloured ? name : "None");
+            drawGlyph(dl, Glyph::ChevronDown, ImVec2(at.x + w - 12.0f, at.y + h * 0.5f), 12.0f, u32(palette::kTextDim));
+        }
+        if (ImGui::BeginPopup("##colours")) {
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            const float d = 20.0f;
+            auto swatch = [&](int i, bool on, Vec3 c, bool none) {
+                ImGui::PushID(i);
+                if (i % 7 != 0) ImGui::SameLine(0.0f, 4.0f);
+                const ImVec2 at = ImGui::GetCursorScreenPos();
+                const ImVec2 mid(at.x + d * 0.5f, at.y + d * 0.5f);
+                const bool clicked = ImGui::InvisibleButton("##sw", ImVec2(d, d));
+                const bool hot = ImGui::IsItemHovered();
+                dl->AddCircleFilled(mid, d * 0.5f - 1.5f, none ? u32(palette::kSurface) : colU32(c));
+                if (none)
+                    dl->AddLine(ImVec2(mid.x - 5, mid.y + 5), ImVec2(mid.x + 5, mid.y - 5), u32(palette::kTextFaint), 1.5f);
+                if (on || hot)
+                    dl->AddCircle(mid, d * 0.5f + 1.0f, on ? u32(palette::kText) : u32(palette::kTextDim), 0, 1.5f);
+                if (hot && none) ui::hoverTip("No colour: the theme's grey");
+                ImGui::PopID();
+                return clicked;
+            };
+            if (swatch(0, !obj->coloured, {}, true)) { choose(false, {}, false); ImGui::CloseCurrentPopup(); }
+            for (int i = 0; i < static_cast<int>(sizeof kSwatches / sizeof kSwatches[0]); ++i) {
+                const Rgb rgb = hex(kSwatches[i]);
+                const Vec3 c{rgb.r, rgb.g, rgb.b};
+                if (swatch(i + 1, obj->coloured && length(obj->colour - c) < 1e-3, c, false)) {
+                    choose(true, c, false);
+                    ImGui::CloseCurrentPopup();
+                }
+            }
+            ImGui::Dummy(ImVec2(0, 4));
+            float c[3] = {static_cast<float>(obj->colour.x), static_cast<float>(obj->colour.y),
+                          static_cast<float>(obj->colour.z)};
+            ImGui::SetNextItemWidth(7 * d + 6 * 4.0f);
+            if (ImGui::ColorPicker3("##picker", c, ImGuiColorEditFlags_NoSidePreview | ImGuiColorEditFlags_NoSmallPreview |
+                                                   ImGuiColorEditFlags_NoInputs))
+                choose(true, {c[0], c[1], c[2]}, true);
+            ImGui::EndPopup();
+        }
+    }
 
     // ---- transform -----------------------------------------------------------
     {
