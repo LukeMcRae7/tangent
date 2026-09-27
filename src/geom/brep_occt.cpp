@@ -890,6 +890,24 @@ std::string kernelReason(const Standard_Failure& e, const char* said) {
     return said;
 }
 
+// acceptable(), for a result made from `before`: only what changed is checked.
+bool acceptableAfter(const TopoDS_Shape& shape, const TopoDS_Shape& before, std::string* reason) {
+    if (shape.IsNull()) {
+        if (reason) *reason = "no shape came out of it";
+        return false;
+    }
+    try {
+        if (!shapeIsValidAfter(shape, before)) {
+            if (reason) *reason = "the result is not a valid solid";
+            return false;
+        }
+    } catch (const Standard_Failure& e) {
+        if (reason) *reason = kernelReason(e, "the body could not be checked");
+        return false;
+    }
+    return true;
+}
+
 bool acceptable(const TopoDS_Shape& shape, std::string* reason) {
     if (shape.IsNull()) {
         if (reason) *reason = "no shape came out of it";
@@ -1254,6 +1272,35 @@ bool shapeIsValid(const TopoDS_Shape& shape, size_t prunedAbove) {
     return edgeUsesConsistent(shape);
 }
 
+bool shapeIsValidAfter(const TopoDS_Shape& result, const TopoDS_Shape& before) {
+    if (result.IsNull()) return false;
+    TopTools_IndexedMapOfShape old, faces;
+    TopExp::MapShapes(before, TopAbs_FACE, old);
+    TopExp::MapShapes(result, TopAbs_FACE, faces);
+    TopoDS_Compound changed;
+    BRep_Builder builder;
+    builder.MakeCompound(changed);
+    int count = 0;
+    for (int i = 1; i <= faces.Extent(); ++i) {
+        const TopoDS_Face& f = TopoDS::Face(faces(i));
+        if (old.Contains(f)) continue;
+        // A changed face with many loops -- a top drilled forty times -- is
+        // checked in pieces, which is the same check without comparing loops
+        // whose boxes cannot meet.
+        if (heavy(weigh(f), 32)) {
+            if (!heavyFaceValid(f)) return false;
+        } else {
+            builder.Add(changed, f);
+            ++count;
+        }
+    }
+    if (count > 0 && !BRepCheck_Analyzer(changed, Standard_True, !inIsolatedChild()).IsValid()) return false;
+    // Every edge once each way is the ordinary closed solid, and settles it.
+    // A shape that is not that -- an edge left inside, a band that meets
+    // itself -- may still be one the analyzer accepts: it is asked, whole.
+    return edgeUsesConsistent(result) || fullAnalyzerValid(result);
+}
+
 bool closedShell(const BrepShape& s) {
     if (s.shape.IsNull() || s.faces.Extent() == 0) return false;
     for (int i = 1; i <= s.edgeFaces.Extent(); ++i) {
@@ -1371,7 +1418,16 @@ BrepRef booleanOp(const BrepShape& a, const BrepShape& b, BooleanOp op,
             return {};
         }
         const TopoDS_Shape result = algo->Shape();
-        if (!acceptable(result, reason)) return {};
+        // Faces of the body the boolean did not touch come through as they
+        // were, and were valid; the rest -- the tool's, and any it cut -- are
+        // checked. A result with no faces at all is still refused.
+        TopTools_IndexedMapOfShape resultFaces;
+        TopExp::MapShapes(result, TopAbs_FACE, resultFaces);
+        if (resultFaces.Extent() == 0) {
+            if (reason) *reason = "the result has no faces";
+            return {};
+        }
+        if (!acceptableAfter(result, a.shape, reason)) return {};
         return makeBrep(result, propagateNames(*algo, {{&a}, {&b}}, result, salt));
     } catch (const Standard_Failure& e) {
         if (reason) *reason = kernelReason(e, "the two bodies could not be combined");
@@ -1518,7 +1574,9 @@ BrepRef unifyFlush(const BrepRef& made, const BrepRef& before, ElementId salt) {
     } catch (const Standard_Failure&) {
         return made;                 // more faces than it needs is only a blemish
     }
-    if (merged.IsNull() || history.IsNull() || !acceptable(merged, nullptr)) return made;
+    // Checked where it changed: the faces the merge left alone were checked a
+    // moment ago, as part of what it merged.
+    if (merged.IsNull() || history.IsNull() || !acceptableAfter(merged, made->shape, nullptr)) return made;
 
     TopTools_IndexedMapOfShape out;
     TopExp::MapShapes(merged, TopAbs_FACE, out);
@@ -3032,9 +3090,6 @@ BrepRef drillHole(const BrepRef& s, Vec3 at, Vec3 into, const HoleCut& cut, Elem
             return {};
         }
 
-        GProp_GProps was;
-        BRepGProp::VolumeProperties(s->shape, was);
-
         BrepRef toolShape = makeBrep(tool, nameHoleTool(tool, at, dir, cut, salt));
         if (!toolShape) {
             if (reason) *reason = "the hole could not be made";
@@ -3043,9 +3098,18 @@ BrepRef drillHole(const BrepRef& s, Vec3 at, Vec3 into, const HoleCut& cut, Elem
         BrepRef out = booleanOp(*s, *toolShape, BooleanOp::Difference, salt, reason);
         if (!out) return out;
 
-        GProp_GProps now;
-        BRepGProp::VolumeProperties(out->shape, now);
-        if (now.Mass() > was.Mass() * 0.999999) {
+        // A hole that gave the body faces it did not have took something
+        // away: its wall is one of them. Only when the count did not grow --
+        // a hole widening one already there, or one in the air -- are the two
+        // volumes worth working out, which is most of a hole's time otherwise.
+        bool missed = false;
+        if (out->faces.Extent() <= s->faces.Extent()) {
+            GProp_GProps was, now;
+            BRepGProp::VolumeProperties(s->shape, was);
+            BRepGProp::VolumeProperties(out->shape, now);
+            missed = now.Mass() > was.Mass() * 0.999999;
+        }
+        if (missed) {
             // A hole that takes nothing away is a hole in the air. OCCT does
             // not call that an error, and a step in the history claiming to
             // have drilled something is worse than being told.

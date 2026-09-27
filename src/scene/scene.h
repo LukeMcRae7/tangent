@@ -349,6 +349,12 @@ public:
     // needs when restoring a whole chain.
     // Re-runs from the first step that differs from what the cache was built
     // from -- nothing, if nothing does.
+    // Several parts at once: their histories are independent, so each runs on
+    // a thread of its own, and what they made is put in place afterwards on
+    // this one. A part whose history holds a body baked into it -- an import,
+    // a combine's tool -- may share that shape with another part, and runs
+    // here, in order, rather than beside something that might touch it.
+    void reevaluateMany(const std::vector<ObjectId>& ids);
     bool reevaluate(ObjectId id);
     // Every step, from the root, whatever the cache holds.
     bool reevaluateAll(ObjectId id) { return reevaluateFrom(id, 0); }

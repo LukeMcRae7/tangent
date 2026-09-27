@@ -28,6 +28,7 @@ modes=(
   "--thread-demo 1" "--thread-demo 2" "--thread-demo 3"
   "--split-demo 4" "--split-demo 5"
   "--perf-scene 1 --perf-size 6" "--perf-scene 2 --perf-size 6" "--perf-scene 3 --perf-size 6"
+  "--perf-scene 4 --perf-size 2"
   "--assembly-demo 1" "--assembly-demo 2" "--assembly-demo 3" "--assembly-demo 4"
   "--assembly-demo 5" "--assembly-demo 6" "--assembly-demo 7" "--assembly-demo 8"
   "--section-demo 1" "--section-demo 2" "--section-demo 3"
@@ -235,10 +236,22 @@ for m in 1 2; do
   fi
 done
 
+# Long histories have to build, save, open and re-run without a step lost:
+# two parts of a hundred steps each, opened as a project is.
+out=$(timeout 300 ./build/tangent --perf-scene 4 --perf-size 2 --smoke-test 3 2>&1)
+line=$(echo "$out" | grep "\[perf\] 2 parts")
+if echo "$line" | grep -q " 0 failed" && echo "$line" | grep -q "ok=1, 2 objects" && echo "$line" | grep -q "(0 failed)"; then
+  printf '  ok    long histories\n'
+else
+  printf '  FAIL  long histories: %s\n' "$line"
+  fail=1
+fi
+
 # A crash has to leave something behind: a report that says what and where,
 # and the unsaved work saved aside for the next start to offer back.
 cfg=$(mktemp -d)
-XDG_CONFIG_HOME=$cfg timeout 60 ./build/tangent --crash-test --smoke-test 30 >/dev/null 2>&1
+# In a subshell, so the shell does not announce the crash it was asked for.
+( XDG_CONFIG_HOME=$cfg timeout 60 ./build/tangent --crash-test --smoke-test 30 >/dev/null 2>&1 ) 2>/dev/null
 report=$(ls $cfg/tangent/crashes/crash-*.txt 2>/dev/null | head -1)
 if [ -n "$report" ] && grep -q "SIGSEGV" "$report" && grep -q "crashing on purpose" "$report" \
    && grep -q "saved aside" "$report" && [ -s $cfg/tangent/recovery.tangent ] && [ -f $cfg/tangent/crashes/pending ]; then

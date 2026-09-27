@@ -1,6 +1,8 @@
 #include "scene/scene.h"
 
 #include <algorithm>
+#include <thread>
+#include <atomic>
 #include <limits>
 
 namespace tg {
@@ -609,6 +611,62 @@ bool Scene::reevaluateFrom(ObjectId id, size_t fromFeature) {
     // Face numbering does not survive a re-evaluation.
     pruneElementSelection();
     return true;
+}
+
+void Scene::reevaluateMany(const std::vector<ObjectId>& ids) {
+    struct Job {
+        SceneObject* obj = nullptr;
+        std::vector<ElementId> wasBroken;
+        size_t from = 0, start = 0;
+        Body next;
+        bool ok = false;
+        bool alone = false;       // holds a baked body: run on this thread
+    };
+    std::vector<Job> jobs;
+    for (ObjectId id : ids) {
+        SceneObject* obj = find(id);
+        if (!obj) continue;
+        Job j;
+        j.obj = obj;
+        for (const Feature& f : obj->features) {
+            if (f.errored) j.wasBroken.push_back(f.uid);
+            if (!f.bakedBody.empty()) j.alone = true;
+        }
+        j.from = builtPrefix(*obj, obj->features);
+        j.start = j.from > 0 && (obj->featureCache.size() < j.from || j.from > obj->features.size()) ? 0 : j.from;
+        jobs.push_back(std::move(j));
+    }
+    auto run = [](Job& j) { j.ok = evaluateFrom(j.obj->features, j.from, j.obj->featureCache, j.next); };
+
+    std::vector<size_t> parallel;
+    for (size_t i = 0; i < jobs.size(); ++i) {
+        if (jobs[i].alone) run(jobs[i]);
+        else parallel.push_back(i);
+    }
+    const unsigned threads = std::min<unsigned>(std::max(1u, std::thread::hardware_concurrency()),
+                                                static_cast<unsigned>(parallel.size()));
+    if (threads <= 1) {
+        for (size_t i : parallel) run(jobs[i]);
+    } else {
+        std::atomic<size_t> next{0};
+        std::vector<std::thread> pool;
+        for (unsigned t = 0; t < threads; ++t)
+            pool.emplace_back([&] {
+                for (size_t k; (k = next.fetch_add(1)) < parallel.size();) run(jobs[parallel[k]]);
+            });
+        for (std::thread& t : pool) t.join();
+    }
+
+    for (Job& j : jobs) {
+        SceneObject* obj = j.obj;
+        syncKeys(*obj, j.start);
+        noteNewFailures(*obj, j.wasBroken);
+        place(*obj);
+        if (!j.ok) continue;
+        obj->body = std::move(j.next);
+        obj->refreshDerived();
+    }
+    pruneElementSelection();
 }
 
 bool Scene::addFeature(ObjectId id, Feature feature, std::string* error) {

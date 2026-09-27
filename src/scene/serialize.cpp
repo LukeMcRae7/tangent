@@ -761,6 +761,7 @@ ProjectResult loadProject(Scene& scene, const std::string& path) {
     // Ids are handed out afresh; the joints written after the objects name
     // them by the ids in the file, so the two are paired here.
     std::unordered_map<uint32_t, ObjectId> idFromFile;
+    std::vector<ObjectId> toEvaluate;
     std::vector<std::pair<ObjectId, GroupId>> groupOf;
     for (uint32_t i = 0; i < count; ++i) {
         const uint32_t fileId = r.u32();
@@ -863,13 +864,18 @@ ProjectResult loadProject(Scene& scene, const std::string& path) {
         o->features = std::move(chain);
         o->ahead = std::move(ahead);
         loaded.setBasePlacement(newId, t);
-        // Re-runs the recipe. A chain that no longer evaluates leaves the
-        // object as its base primitive rather than failing the whole load.
-        loaded.reevaluate(newId);
+        // Its recipe is re-run below, with every other part's at once. A chain
+        // that no longer evaluates leaves the object as its base primitive
+        // rather than failing the whole load.
+        toEvaluate.push_back(newId);
         idFromFile[fileId] = newId;
         if (inGroup != kNoGroup) groupOf.emplace_back(newId, inGroup);
         ++res.objects;
     }
+
+    // Every part's history, run side by side: parts do not depend on each
+    // other, and on a project of many long histories this is most of opening.
+    loaded.reevaluateMany(toEvaluate);
 
     if (version >= 24) {
         Assembly& as = loaded.assembly();

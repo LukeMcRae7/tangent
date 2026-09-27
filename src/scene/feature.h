@@ -397,6 +397,15 @@ struct Feature {
 // only if nothing at all could be produced.
 bool evaluateFeatures(std::vector<Feature>& features, Body& out);
 
+// Where evaluation time goes, by kind of step: accumulated as steps run, for
+// the performance scenes to read and reset.
+struct ChainProfile {
+    double ms[64] = {};
+    int    count[64] = {};
+    void reset() { *this = ChainProfile{}; }
+};
+ChainProfile& chainProfile();
+
 // Whether a step places the object rather than shaping it.
 inline bool isPlacement(FeatureKind k) { return k == FeatureKind::Move || k == FeatureKind::Rotate; }
 

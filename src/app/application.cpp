@@ -897,6 +897,158 @@ bool Application::init() {
                              why.empty() ? "" : "  ", why.c_str());
             }
             scene_.selectElement({id, ElementKind::Face, facingFaceOf(*scene_.find(id), {0, 0, 1})});
+        } else if (perfScene_ == 4) {
+            // An assembly's worth of real parts: n parts (twenty by default),
+            // each a 40 mm block with a hundred steps -- forty holes drilled
+            // through it, forty push/pulls on its sides, sixteen small moves
+            // and turns, and its four upright edges rounded half way along.
+            // Every stage a person would wait on is timed.
+            auto rss = [] {
+                long kb = 0;
+                if (FILE* f = std::fopen("/proc/self/status", "r")) {
+                    char line[256];
+                    while (std::fgets(line, sizeof line, f))
+                        if (std::sscanf(line, "VmRSS: %ld kB", &kb) == 1) break;
+                    std::fclose(f);
+                }
+                return kb / 1024.0;
+            };
+            const double rssBefore = rss();
+            const int parts = n;
+            std::vector<ObjectId> ids;
+            auto t = Clock::now();
+            double slowestStep = 0.0;
+            for (int p = 0; p < parts; ++p) {
+                PrimitiveSpec spec;
+                spec.kind = PrimitiveKind::Box;
+                spec.box = {40, 40, 20};
+                const Vec3 at{(p % 5) * 60.0 - 120.0, (p / 5) * 60.0 - 90.0, 10.0};
+                const ObjectId id = scene_.addPrimitive(PrimitiveKind::Box, spec, at);
+                ids.push_back(id);
+                int holes = 0;
+                for (int k = 0; k < 100; ++k) {
+                    SceneObject* o = scene_.find(id);
+                    Feature f;
+                    f.uid = scene_.takeFeatureUid();
+                    const int kind = k % 5;
+                    if (k == 50) {
+                        // The four upright edges, rounded.
+                        std::vector<EdgeId> es, upright;
+                        o->body.allEdges(es);
+                        for (EdgeId e : es) {
+                            Vec3 ea, eb;
+                            o->body.edgePositions(e, ea, eb);
+                            const Vec3 d = eb - ea;
+                            if (o->body.edgeKind(e) == CurveKind::Line && std::fabs(d.z) > 15.0 &&
+                                std::fabs(d.x) < 1e-6 && std::fabs(d.y) < 1e-6 &&
+                                std::fabs(std::fabs(ea.x) - 20.0) < 1.5 && std::fabs(std::fabs(ea.y) - 20.0) < 1.5)
+                                upright.push_back(e);
+                        }
+                        if (upright.empty()) continue;
+                        f.kind = FeatureKind::Bevel;
+                        f.edges = nameEdges(o->body, upright);
+                        f.radii.assign(upright.size(), 2.0);
+                        f.width = 2.0;
+                        f.segments = 4;
+                    } else if (kind == 0 || kind == 3) {
+                        // A 2 mm hole on a grid across the top.
+                        const int hi = holes++;
+                        f.kind = FeatureKind::Hole;
+                        f.axisPoint = {-14.0 + (hi % 8) * 4.0, -14.0 + (hi / 8) * 4.0, 20.0};
+                        f.axisDir = {0, 0, -1};
+                        f.hole.diameter = 2.0;
+                        f.hole.through = true;
+                    } else if (kind == 1 || kind == 4) {
+                        // A side pushed out a little and back most of the way.
+                        static const Vec3 sides[4] = {{1, 0, 0}, {0, 1, 0}, {-1, 0, 0}, {0, -1, 0}};
+                        const FaceId face = facingFaceOf(*o, sides[(k / 5) % 4]);
+                        if (face == kNoFace) continue;
+                        f.kind = FeatureKind::Extrude;
+                        f.distance = kind == 1 ? 0.4 : -0.3;
+                        f.mergeFlush = true;
+                        f.faces = nameFaces(o->body, {face});
+                    } else {
+                        // Placement: a small move or a small turn.
+                        if ((k / 5) % 2 == 0) {
+                            f.kind = FeatureKind::Move;
+                            f.moveBy = {0.1, 0.0, 0.0};
+                        } else {
+                            f.kind = FeatureKind::Rotate;
+                            f.turnBy = Quat::fromAxisAngle({0, 0, 1}, 0.001);
+                            f.turnAbout = o->transform.position;
+                        }
+                    }
+                    const auto s0 = Clock::now();
+                    scene_.addFeature(id, f, nullptr);
+                    slowestStep = std::max(slowestStep, since(s0));
+                }
+            }
+            const double buildMs = since(t);
+            size_t steps = 0, failed = 0, faces = 0;
+            for (ObjectId id : ids) {
+                const SceneObject* o = scene_.find(id);
+                steps += o->features.size();
+                faces += static_cast<size_t>(o->body.faceCount());
+                for (const Feature& f : o->features) failed += f.errored ? 1 : 0;
+            }
+            // The whole scene evaluated again from nothing, as a load does.
+            t = Clock::now();
+            for (ObjectId id : ids) scene_.reevaluate(id);
+            const double rerunMs = since(t);
+            // Saved and opened again.
+            const std::string path = (std::filesystem::temp_directory_path() / "tangent_perf4.tangent").string();
+            t = Clock::now();
+            const ProjectResult saved = saveProject(scene_, path);
+            const double saveMs = since(t);
+            std::error_code ec;
+            const auto bytes = std::filesystem::file_size(path, ec);
+            Scene reopened;
+            t = Clock::now();
+            const ProjectResult read = loadProject(reopened, path);
+            const double loadMs = since(t);
+            std::filesystem::remove(path, ec);
+            // The first step of one part changed -- the block made taller --
+            // and everything after it run again; then taken back.
+            SceneObject* first = scene_.find(ids.front());
+            const PrimitiveSpec before = first->spec;
+            first->spec.box.height = 24.0;
+            chainProfile().reset();
+            t = Clock::now();
+            scene_.rebuild(ids.front());
+            const double editMs = since(t);
+            {
+                // Where the change's time went, by kind of step.
+                const ChainProfile p = chainProfile();
+                double inChain = 0.0;
+                std::string by;
+                for (int k = 0; k < 64; ++k) {
+                    if (!p.count[k]) continue;
+                    inChain += p.ms[k];
+                    char b[96];
+                    std::snprintf(b, sizeof b, " %s %d x %.1f ms,", featureKindName(static_cast<FeatureKind>(k)),
+                                  p.count[k], p.ms[k] / p.count[k]);
+                    by += b;
+                }
+                std::fprintf(stderr, "[perf] the change: %.0f ms in the steps (%s ) and %.0f ms around them\n",
+                             inChain, by.c_str(), editMs - inChain);
+            }
+            first = scene_.find(ids.front());
+            first->spec = before;
+            t = Clock::now();
+            scene_.rebuild(ids.front());
+            const double undoMs = since(t);
+            size_t failedAfter = 0;
+            for (const Feature& f : scene_.find(ids.front())->features) failedAfter += f.errored ? 1 : 0;
+            std::fprintf(stderr,
+                         "[perf] %d parts, %zu steps, %zu faces, %zu failed: built in %.0f ms (slowest step %.0f ms); "
+                         "whole scene re-run %.0f ms; saved %.0f ms (%.1f MB), opened %.0f ms (ok=%d, %zu objects); "
+                         "first step of one part changed %.0f ms, back %.0f ms (%zu failed); memory %.0f MB\n",
+                         parts, steps, faces, failed, buildMs, slowestStep, rerunMs, saveMs, bytes / 1e6, loadMs,
+                         read.ok ? 1 : 0, reopened.objectCount(), editMs, undoMs, failedAfter, rss() - rssBefore);
+            (void)saved;
+            camera_.animateTo({0, -30, 10}, 420.0f, 0.7f, 0.6f);
+            camera_.snapToGoal();
+            fixedCamera_ = true;
         } else if (perfScene_ == 2) {
             // A 40 mm cube pushed and pulled on alternate faces, n times each way.
             PrimitiveSpec spec;

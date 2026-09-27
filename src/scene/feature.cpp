@@ -1,5 +1,8 @@
 #include "scene/feature.h"
 
+#include <chrono>
+#include <mutex>
+
 #include "mesh/decimate.h"
 
 #include "geom/operations.h"
@@ -498,6 +501,20 @@ bool evaluateFrom(std::vector<Feature>& features, size_t from,
         f.errored = false;
         f.error.clear();
         if (!f.enabled) continue;
+        const auto stepStarted = std::chrono::steady_clock::now();
+        struct Timed {
+            FeatureKind kind;
+            std::chrono::steady_clock::time_point t0;
+            ~Timed() {
+                // Several parts can evaluate at once.
+                static std::mutex lock;
+                std::lock_guard<std::mutex> hold(lock);
+                ChainProfile& p = chainProfile();
+                const size_t k = std::min(static_cast<size_t>(kind), size_t(63));
+                p.ms[k] += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+                ++p.count[k];
+            }
+        } timed{f.kind, stepStarted};
 
         auto fail = [&](const char* why) { f.errored = true; f.error = why; };
 
@@ -1009,6 +1026,11 @@ bool evaluateFrom(std::vector<Feature>& features, size_t from,
     if (!any || body.empty()) return false;
     out = std::move(body);
     return true;
+}
+
+ChainProfile& chainProfile() {
+    static ChainProfile p;
+    return p;
 }
 
 bool evaluateFeatures(std::vector<Feature>& features, Body& out) {
