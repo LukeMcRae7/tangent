@@ -531,6 +531,7 @@ const SceneObject* Scene::find(ObjectId id) const {
 void Scene::clear() {
     objects_.clear();
     assembly_.clear();
+    measures_.clear();
     selection_.clear();
     elements_.clear();
     nextId_ = 1;

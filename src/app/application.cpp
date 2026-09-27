@@ -9176,6 +9176,14 @@ void Application::applyActions() {
 
     if (a.quit && confirmDiscard(PendingAction::Quit)) running_ = false;
     if (a.openPreferences) prefsOpen_ = true;
+    if (a.keepMeasure) keepMeasurement();
+    if (a.deleteMeasure) {
+        const std::vector<KeptMeasure> before = scene_.measures();
+        auto& ms = scene_.measures();
+        ms.erase(std::remove_if(ms.begin(), ms.end(), [&](const KeptMeasure& m) { return m.id == a.deleteMeasure; }),
+                 ms.end());
+        undo_.push(std::make_unique<MeasuresCommand>(before, ms, "Delete Measurement"));
+    }
     if (a.colourObject != kNoObject) {
         if (SceneObject* o = scene_.find(a.colourObject);
             o && (o->coloured != a.colourOn || (a.colourOn && length(o->colour - a.colourValue) > 1e-6))) {
@@ -10047,6 +10055,8 @@ int Application::run() {
             }
         }
         measureResult_ = measure_.active() ? measure_.compute(scene_) : MeasureResult{};
+        stepKeptMeasures();
+        drawKeptMeasures();
         measure_.drawOverlay(renderer_, camera_, measureResult_);
         tool_.drawOverlay(renderer_, camera_);
 

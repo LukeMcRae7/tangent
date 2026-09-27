@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 
 namespace tg {
 
@@ -230,7 +231,139 @@ void Application::finishBoxSelect(bool additive) {
     setNotice(msg);
 }
 
+// ---------------------------------------------------------------------------
+// Kept measurements
+// ---------------------------------------------------------------------------
+
+void Application::keepMeasurement() {
+    const std::vector<ElementRef>& picks = measure_.picks();
+    if (picks.empty()) return;
+    KeptMeasure m;
+    m.id = scene_.takeMeasureId();
+    for (const ElementRef& e : picks) {
+        if (m.count >= 2) break;
+        const SceneObject* o = scene_.find(e.object);
+        if (!o) return;
+        KeptMeasure::End end;
+        end.object = e.object;
+        end.kind = e.kind;
+        end.name = e.kind == ElementKind::Face   ? o->body.faceName(e.index)
+                 : e.kind == ElementKind::Edge   ? o->body.edgeName(e.index)
+                 : e.kind == ElementKind::Vertex ? o->body.vertexName(e.index) : 0;
+        if (end.name == 0) { setNotice("That cannot be kept: what it measures has no name to follow"); return; }
+        m.ends[m.count++] = end;
+    }
+    const std::vector<KeptMeasure> before = scene_.measures();
+    scene_.measures().push_back(m);
+    undo_.push(std::make_unique<MeasuresCommand>(before, scene_.measures(), "Keep Measurement"));
+    measure_.clearPicks();
+    setNotice("Kept on the model: it follows the part as it changes");
+}
+
+void Application::stepKeptMeasures() {
+    ui_.measureLabels.clear();
+    for (const KeptMeasure& m : scene_.measures()) {
+        // What the reading depends on: the geometry and the place of each part.
+        uint64_t key = 1469598103934665603ull;
+        auto mix = [&key](uint64_t v) { key = (key ^ v) * 1099511628211ull; };
+        bool ok = true;
+        ElementRef refs[2];
+        for (int i = 0; i < m.count; ++i) {
+            refs[i] = scene_.resolve(m.ends[i]);
+            const SceneObject* o = scene_.find(m.ends[i].object);
+            if (!refs[i].valid() || !o) { ok = false; break; }
+            mix(o->id); mix(o->geometryVersion);
+            const Vec3 p = o->transform.position;
+            const Quat q = o->transform.rotation;
+            for (Real v : {p.x, p.y, p.z, q.x, q.y, q.z, q.w}) { uint64_t b; std::memcpy(&b, &v, sizeof b); mix(b); }
+        }
+        if (!ok) { keptReadings_.erase(m.id); continue; }
+        KeptReading& r = keptReadings_[m.id];
+        if (r.key != key) {
+            MeasureTool t;
+            t.begin();
+            for (int i = 0; i < m.count; ++i) t.pick(refs[i]);
+            r.result = t.compute(scene_);
+            r.key = key;
+        }
+        if (r.result.valid) ui_.measureLabels.push_back({m.id, r.result.summary});
+    }
+}
+
+void Application::drawKeptMeasures() {
+    const ImGuiViewport* vp = ImGui::GetMainViewport();
+    ImDrawList* dl = ImGui::GetBackgroundDrawList();
+    const Vec4 col = toVec4(palette::kInfo, 0.95f);
+    for (const KeptMeasure& m : scene_.measures()) {
+        if (!m.visible) continue;
+        auto it = keptReadings_.find(m.id);
+        if (it == keptReadings_.end() || !it->second.result.valid) continue;
+        const MeasureResult& r = it->second.result;
+        // The line and its end ticks, in the model, in their own colour so a
+        // kept reading is not taken for the one being made.
+        const Real tick = camera_.pixelWorldSize(r.from) * 4.0;
+        if (lengthSq(r.to - r.from) > 1e-18) {
+            renderer_.addLine(r.from, r.to, col);
+            const Vec3 axis = normalize(r.to - r.from);
+            const Vec3 side = perpendicular(axis);
+            for (const Vec3& p : {r.from, r.to}) renderer_.addLine(p - side * tick, p + side * tick, col);
+        } else {
+            for (int k = 0; k < 3; ++k) {
+                Vec3 d{};
+                d[k] = tick;
+                renderer_.addLine(r.from - d, r.from + d, col);
+            }
+        }
+        // Its reading, at the middle.
+        Vec2 px{};
+        if (!camera_.projectToPixel((r.from + r.to) * 0.5, px)) continue;
+        pushFont(FontWeight::Medium, uiFonts().size * 0.85f);
+        const ImVec2 ts = ImGui::CalcTextSize(r.summary.c_str());
+        const ImVec2 at(std::floor(vp->Pos.x + viewRect_.x + static_cast<float>(px.x) - ts.x * 0.5f),
+                        std::floor(vp->Pos.y + viewRect_.y + static_cast<float>(px.y) - ts.y - 8.0f));
+        dl->AddRectFilled(ImVec2(at.x - 6, at.y - 3), ImVec2(at.x + ts.x + 6, at.y + ts.y + 3),
+                          ui::u32(palette::kCommand, 0.9f), 4.0f);
+        dl->AddRectFilled(ImVec2(at.x - 6, at.y - 3), ImVec2(at.x - 3, at.y + ts.y + 3), ui::u32(palette::kInfo), 2.0f);
+        dl->AddText(at, ui::u32(palette::kText), r.summary.c_str());
+        ImGui::PopFont();
+    }
+}
+
 void Application::runSelectDemo() {
+    if (selectDemo_ == 2) {
+        // Two 20 mm boxes 20 mm apart; the gap between their facing faces
+        // kept; the first box made 30 wide about its middle, so the gap closes
+        // by 5 to 15 -- and the kept reading has to say so.
+        Scene& s = scene_;
+        s.clear();
+        const ObjectId a = s.addPrimitive(PrimitiveKind::Box, {}, Vec3{0, 0, 10});
+        const ObjectId b = s.addPrimitive(PrimitiveKind::Box, {}, Vec3{40, 0, 10});
+        auto faceFacing = [&](ObjectId id, Vec3 n) {
+            const SceneObject* o = s.find(id);
+            std::vector<FaceId> fs;
+            o->body.allFaces(fs);
+            for (FaceId f : fs) if (dot(normalize(o->body.faceNormal(f)), n) > 0.999) return f;
+            return kNoFace;
+        };
+        measure_.begin();
+        measure_.pick({a, ElementKind::Face, faceFacing(a, {1, 0, 0})});
+        measure_.pick({b, ElementKind::Face, faceFacing(b, {-1, 0, 0})});
+        keepMeasurement();
+        measure_.end();
+        stepKeptMeasures();
+        const Real before = keptReadings_.empty() ? -1.0 : keptReadings_.begin()->second.result.distance;
+        SceneObject* o = s.find(a);
+        o->spec.box.width = 30.0;
+        s.rebuild(a);
+        stepKeptMeasures();
+        const Real after = keptReadings_.empty() ? -1.0 : keptReadings_.begin()->second.result.distance;
+        std::fprintf(stderr, "[select-demo] 2: kept gap %.3f, after widening %.3f (expected 20, 15)  agrees=%d\n",
+                     before, after, std::fabs(before - 20.0) < 1e-6 && std::fabs(after - 15.0) < 1e-6 ? 1 : 0);
+        camera_.animateTo({20, 0, 10}, 150.0f, 0.7f, 0.5f);
+        camera_.snapToGoal();
+        fixedCamera_ = true;
+        return;
+    }
     // Three 20 mm boxes in a row, seen from the top: a window round the first
     // two takes those two; a crossing box that only clips the third takes it;
     // edges in a window round the first box are its twelve.

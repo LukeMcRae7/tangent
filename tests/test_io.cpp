@@ -667,6 +667,14 @@ int main() {
 
         s.find(id)->coloured = true;
         s.find(id)->colour = {0.25, 0.5, 0.75};
+        {
+            // A measurement kept on its first face.
+            KeptMeasure km;
+            km.id = s.takeMeasureId();
+            km.count = 1;
+            km.ends[0] = {id, ElementKind::Face, s.find(id)->body.faceName(0)};
+            s.measures().push_back(km);
+        }
         const std::string path = tmp("project.tangent");
         const ProjectResult saved = saveProject(s, path);
         check(saved.ok, "save succeeds: " + saved.error);
@@ -679,6 +687,8 @@ int main() {
         const SceneObject* o = loaded.objects().front().get();
         check(o->name == "Bracket", "name survived");
         check(o->coloured && near(o->colour.x, 0.25) && near(o->colour.z, 0.75), "its colour survived");
+        check(loaded.measures().size() == 1 && loaded.resolve(loaded.measures()[0].ends[0]).valid(),
+              "the kept measurement survived, and still finds its face");
         check(near(o->transform.position.x, 5.0) && near(o->transform.position.z, 7.0),
               "transform survived");
         check(o->features.size() == chainBefore, "the whole chain survived");

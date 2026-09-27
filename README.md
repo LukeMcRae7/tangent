@@ -355,7 +355,7 @@ The icons are [Tabler Icons](https://tabler.io/icons), bundled as
 | J | Joint — point at the part that moves, then the part it goes on |
 | F | *(adjusting a joint)* flip it over on its axis |
 | Ctrl + G / Ctrl + Shift + G | Group the selection / take it out of its group |
-| D | Measure — one entity for its own size, two for the distance between |
+| D | Measure — one entity for its own size, two for the distance between; Keep leaves it on the model, reading the part as it changes |
 | Ctrl + K | Find any command by name, with its key |
 | Ctrl + , | Preferences: units, theme, orbit, snapping, printer, autosave |
 | V | Section view — cut the model with a plane you slide; again for its panel, or to put the model back whole |

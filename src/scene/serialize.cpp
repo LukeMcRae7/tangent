@@ -693,6 +693,20 @@ ProjectResult saveProject(const Scene& scene, const std::string& path) {
         w.f64(j.hi);
     }
 
+    // v26: the measurements kept on the model, by the names of what they are
+    // taken between.
+    w.u32(static_cast<uint32_t>(scene.measures().size()));
+    for (const KeptMeasure& m : scene.measures()) {
+        w.u32(m.id);
+        w.u8(m.visible ? 1 : 0);
+        w.u32(static_cast<uint32_t>(m.count));
+        for (const KeptMeasure::End& e : m.ends) {
+            w.u32(e.object);
+            w.u32(static_cast<uint32_t>(e.kind));
+            w.u64(e.name);
+        }
+    }
+
     std::ofstream out(path, std::ios::binary | std::ios::trunc);
     if (!out) { res.error = "cannot open " + path; return res; }
     out.write(reinterpret_cast<const char*>(w.buf.data()),
@@ -919,6 +933,30 @@ ProjectResult loadProject(Scene& scene, const std::string& path) {
             if (SceneObject* o = loaded.find(id); o && as.group(g)) o->group = g;
         pruneEmptyGroups(loaded);
         solveAssembly(loaded);
+    }
+
+    if (version >= 26) {
+        const uint32_t n = r.u32();
+        if (r.bad || n > 100000u) { res.error = "bad measurement count"; return res; }
+        for (uint32_t k = 0; k < n && !r.bad; ++k) {
+            KeptMeasure m;
+            m.id = loaded.takeMeasureId();
+            (void)r.u32();                 // the id it had; a new one is handed out
+            m.visible = r.u8() != 0;
+            m.count = static_cast<int>(std::min<uint32_t>(r.u32(), 2u));
+            bool known = true;
+            for (KeptMeasure::End& e : m.ends) {
+                const uint32_t fileObject = r.u32();
+                e.kind = static_cast<ElementKind>(std::min<uint32_t>(r.u32(), 3u));
+                e.name = r.u64();
+                if (e.kind == ElementKind::None) continue;
+                auto it = idFromFile.find(fileObject);
+                known = known && it != idFromFile.end();
+                e.object = it == idFromFile.end() ? kNoObject : it->second;
+            }
+            if (known && m.count > 0) loaded.measures().push_back(m);
+        }
+        if (r.bad) { res.error = "truncated file"; return res; }
     }
 
     scene = std::move(loaded);

@@ -196,6 +196,21 @@ struct SectionCut {
     bool removes(Vec3 p) const { return on && dot(normal, p) > offset + 1e-6 * (1.0 + std::fabs(offset)); }
 };
 
+// A measurement kept on the model: what it was taken between, by the names
+// the geometry keeps through edits, so it reads the part as it is now and not
+// as it was when it was taken. Drawn in the view and listed in the outliner.
+struct KeptMeasure {
+    struct End {
+        ObjectId    object = kNoObject;
+        ElementKind kind = ElementKind::None;
+        ElementId   name = 0;
+    };
+    uint32_t id = 0;
+    End      ends[2];
+    int      count = 0;          // one end or two
+    bool     visible = true;
+};
+
 struct RayHit {
     ObjectId object = kNoObject;
     Index    face   = kInvalid;
@@ -366,6 +381,25 @@ public:
     const Assembly& assembly() const { return assembly_; }
     Assembly&       assembly()       { return assembly_; }
 
+    // ---- Kept measurements -------------------------------------------------------
+    std::vector<KeptMeasure>&       measures()       { return measures_; }
+    const std::vector<KeptMeasure>& measures() const { return measures_; }
+    uint32_t takeMeasureId() { return nextMeasure_++; }
+    // Where an end is now: its face, edge or corner found again by name. An
+    // invalid ref when that is gone.
+    ElementRef resolve(const KeptMeasure::End& e) const {
+        const SceneObject* o = find(e.object);
+        if (!o || e.name == 0) return {};
+        Index at = kInvalid;
+        switch (e.kind) {
+            case ElementKind::Face:   at = o->body.findFace(e.name); break;
+            case ElementKind::Edge:   at = o->body.findEdge(e.name); break;
+            case ElementKind::Vertex: at = o->body.findVertex(e.name); break;
+            case ElementKind::None:   break;
+        }
+        return at == kInvalid ? ElementRef{} : ElementRef{e.object, e.kind, at};
+    }
+
     // ---- Section view ---------------------------------------------------------
     const SectionCut& section() const { return section_; }
     void setSection(const SectionCut& cut) { section_ = cut; }
@@ -473,6 +507,8 @@ private:
     std::vector<std::unique_ptr<SceneObject>> objects_;
     Assembly assembly_;
     SectionCut section_;
+    std::vector<KeptMeasure> measures_;
+    uint32_t nextMeasure_ = 1;
     std::vector<ObjectId> selection_;
     std::vector<ElementRef> elements_;
     // The persistent name of each selected element, taken when it was

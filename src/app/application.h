@@ -1024,6 +1024,14 @@ private:
     void clearRecovery();
     void checkRecovery();
     void drawRecoveryPrompt();
+
+    // Kept measurements (app_select.cpp): each worked out again only when a
+    // part it measures changes, and drawn with what it reads.
+    struct KeptReading { uint64_t key = 0; MeasureResult result; };
+    std::unordered_map<uint32_t, KeptReading> keptReadings_;
+    void keepMeasurement();
+    void stepKeptMeasures();
+    void drawKeptMeasures();
     std::string windowTitle_;
     ObjectId colourDragged_ = kNoObject;    // the part whose colour a picker drag is changing
     // The wheel: toward the part in hand, or else toward the pointer.

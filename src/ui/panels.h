@@ -167,6 +167,9 @@ struct UiActions {
     bool        clearRecent = false;
     // A part's colour chosen (colourOn) or taken off; `colourDragging` while
     // the picker is being dragged, so the drag is one step to undo.
+    // A measurement kept, or one taken off the model.
+    bool        keepMeasure = false;
+    uint32_t    deleteMeasure = 0;
     ObjectId    colourObject = kNoObject;
     bool        colourOn = false;
     Vec3        colourValue{};
@@ -212,6 +215,8 @@ struct UiContext {
     std::string  projectName;
     std::string  projectPath;      // empty until saved
     std::vector<std::string> recentFiles;   // most recent first
+    // What each kept measurement reads now, by its id, for the outliner.
+    std::vector<std::pair<uint32_t, std::string>> measureLabels;
     bool         dirty = false;
 
     // Live measurement, shown while the measure tool is active.

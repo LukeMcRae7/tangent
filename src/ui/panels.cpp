@@ -1479,6 +1479,34 @@ void drawOutliner(UiContext& ctx) {
         ImGui::Dummy(ImVec2(0, 6));
     }
 
+    if (!scene.measures().empty() && sectionHeader("Measurements", scene.measures().size())) {
+        for (KeptMeasure& m : scene.measures()) {
+            ImGui::PushID(static_cast<int>(m.id));
+            std::string label = "lost: what it measured is gone";
+            for (const auto& [id, text] : ctx.measureLabels) if (id == m.id) label = text;
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            const ImVec2 at = ImGui::GetCursorScreenPos();
+            const float w = ImGui::GetContentRegionAvail().x, h = ImGui::GetFrameHeight();
+            ImGui::InvisibleButton("##m", ImVec2(std::max(1.0f, w - 44.0f), h));
+            const bool hot = ImGui::IsItemHovered();
+            if (hot) dl->AddRectFilled(at, ImVec2(at.x + w, at.y + h), u32(palette::kHover), 5.0f);
+            drawGlyph(dl, Glyph::Measure, ImVec2(at.x + 18.0f, at.y + h * 0.5f), 15.0f,
+                      u32(palette::kInfo, m.visible ? 1.0f : 0.4f));
+            dl->PushClipRect(at, ImVec2(at.x + w - 46.0f, at.y + h), true);
+            dl->AddText(ImVec2(at.x + 34.0f, at.y + (h - ImGui::GetTextLineHeight()) * 0.5f),
+                        u32(m.visible ? palette::kText : palette::kTextDim), label.c_str());
+            dl->PopClipRect();
+            if (hot) ui::hoverTip(label.c_str());
+            ImGui::SameLine(w - 40.0f);
+            bool shown = m.visible;
+            if (ui::eyeToggle("##eye", shown)) m.visible = shown;
+            ImGui::SameLine(0.0f, 4.0f);
+            if (ui::closeButton("##x")) ctx.actions.deleteMeasure = m.id;
+            ImGui::PopID();
+        }
+        ImGui::Dummy(ImVec2(0, 6));
+    }
+
     if (!scene.assembly().joints.empty() && sectionHeader("Joints", scene.assembly().joints.size())) {
         for (Joint& j : scene.assembly().joints) jointRow(ctx, scene, j);
         ImGui::Dummy(ImVec2(0, 6));
@@ -2027,7 +2055,10 @@ void drawMeasurePanel(UiContext& ctx) {
         if (m.hasAngle) value("Angle", "%.3f\xC2\xB0", m.angleDeg, true);
         ui::commandHint("Esc clears the picks. D leaves the tool.");
     }
-    if (ui::commandFooter(nullptr, true, "Done") < 0) ctx.actions.toggleMeasure = true;
+    // Keep: it stays on the model, and reads the part as it changes.
+    const int footer = ui::commandFooter("Keep", m.valid, "Done");
+    if (footer > 0) ctx.actions.keepMeasure = true;
+    if (footer < 0) ctx.actions.toggleMeasure = true;
     ui::endCommand();
 }
 

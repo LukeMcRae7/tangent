@@ -125,6 +125,20 @@ private:
     Vec3 before_, after_;
 };
 
+// Measurements kept on the model, added or taken away: the list either side.
+class MeasuresCommand : public Command {
+public:
+    MeasuresCommand(std::vector<KeptMeasure> before, std::vector<KeptMeasure> after, std::string what)
+        : before_(std::move(before)), after_(std::move(after)), what_(std::move(what)) {}
+    void undo(Scene& scene) override { scene.measures() = before_; }
+    void redo(Scene& scene) override { scene.measures() = after_; }
+    std::string label() const override { return what_; }
+
+private:
+    std::vector<KeptMeasure> before_, after_;
+    std::string what_;
+};
+
 class ParameterCommand : public Command {
 public:
     ParameterCommand(ObjectId id, PrimitiveSpec before, PrimitiveSpec after)
