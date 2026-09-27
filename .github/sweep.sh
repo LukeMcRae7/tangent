@@ -251,7 +251,7 @@ fi
 # and the unsaved work saved aside for the next start to offer back.
 cfg=$(mktemp -d)
 # In a subshell, so the shell does not announce the crash it was asked for.
-( XDG_CONFIG_HOME=$cfg timeout 60 ./build/tangent --crash-test --smoke-test 30 >/dev/null 2>&1 ) 2>/dev/null
+( XDG_CONFIG_HOME=$cfg timeout 60 ./build/tangent --crash-test --smoke-test 30 >/dev/null 2>&1; true ) 2>/dev/null
 report=$(ls $cfg/tangent/crashes/crash-*.txt 2>/dev/null | head -1)
 if [ -n "$report" ] && grep -q "SIGSEGV" "$report" && grep -q "crashing on purpose" "$report" \
    && grep -q "saved aside" "$report" && [ -s $cfg/tangent/recovery.tangent ] && [ -f $cfg/tangent/crashes/pending ]; then
