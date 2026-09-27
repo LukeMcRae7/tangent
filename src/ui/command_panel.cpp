@@ -1,4 +1,5 @@
 #include "ui/command_panel.h"
+#include "core/units.h"
 
 #include "core/palette.h"
 #include "ui/theme.h"
@@ -256,9 +257,31 @@ void commandValue(const char* label, const char* value) {
     ImGui::TextUnformatted(value);
 }
 
+namespace {
+NumberEdit commandNumberShown(const char* label, double value, const char* unit,
+                              bool fixed, bool editing, const char* buffer,
+                              double lo, double hi, bool signedRange, int places);
+}
+
 NumberEdit commandNumber(const char* label, double value, const char* unit,
                          bool fixed, bool editing, const char* buffer,
                          double lo, double hi, bool signedRange) {
+    // A length is kept in millimetres and shown in the unit chosen: the bar,
+    // its ends and what it hands back are converted here, once, for every
+    // operation's panel.
+    if (unit && std::strcmp(unit, "mm") == 0) {
+        NumberEdit e = commandNumberShown(label, units::toShown(value), units::suffix(), fixed, editing, buffer,
+                                          units::toShown(lo), units::toShown(hi), signedRange, units::decimals());
+        e.value = units::fromShown(e.value);
+        return e;
+    }
+    return commandNumberShown(label, value, unit, fixed, editing, buffer, lo, hi, signedRange, 2);
+}
+
+namespace {
+NumberEdit commandNumberShown(const char* label, double value, const char* unit,
+                              bool fixed, bool editing, const char* buffer,
+                              double lo, double hi, bool signedRange, int places) {
     NumberEdit out;
     out.value = value;
     ImGui::PushID(label);
@@ -266,7 +289,7 @@ NumberEdit commandNumber(const char* label, double value, const char* unit,
 
     char text[64];
     if (editing) std::snprintf(text, sizeof text, "%s_", buffer ? buffer : "");
-    else         std::snprintf(text, sizeof text, "%.2f %s", value, unit ? unit : "");
+    else         std::snprintf(text, sizeof text, "%.*f %s", places, value, unit ? unit : "");
 
     // A bar the width of the rest of the row, so the numbers line up down the
     // panel however long their labels are.
@@ -349,6 +372,7 @@ NumberEdit commandNumber(const char* label, double value, const char* unit,
     ImGui::PopID();
     return out;
 }
+} // namespace
 
 int commandChoices(const char* label, const Choice* choices, int count, int active, bool compact) {
     if (count <= 0) return -1;

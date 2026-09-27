@@ -1,4 +1,5 @@
 #include "app/application.h"
+#include "core/units.h"
 
 #include "mesh/export_3mf.h"
 #include "mesh/import_mesh.h"
@@ -143,10 +144,16 @@ bool Application::init() {
     // checkout, and every run of it was writing its window over theirs.
     const bool unattended = smokeFrames_ > 0 || !screenshotPath_.empty() || probeActive_;
     io.IniFilename = unattended ? nullptr : "tangent.ini";
+    unattended_ = unattended;
+    // Preferences likewise: a demo runs the same on every machine.
+    if (!unattended_) {
+        loadPreferences(prefs_);
+        camera_.setOrthographic(prefs_.orthographic);
+    }
 
     loadFonts(resolveAssetDir(), 14.0f);
     loadGlyphFont(resolveAssetDir() + "/fonts");
-    applyDarkTheme();
+    applyPreferences();
 
     if (!ImGui_ImplSDL3_InitForOpenGL(window_, glCtx_)) {
         std::fprintf(stderr, "[app] ImGui SDL3 backend failed\n");
@@ -2176,7 +2183,7 @@ void Application::handleViewportMouse() {
             zoomView(io.MouseWheel);
         if (!uiPointer) {
             const auto t0 = std::chrono::steady_clock::now();
-            sketchTool_.update(scene_, camera_, mouseInViewport(), !io.KeyCtrl);
+            sketchTool_.update(scene_, camera_, mouseInViewport(), snapNow());
             if (!svgDemo_.empty())
                 svgDemoUpdateMs_ = std::max(svgDemoUpdateMs_, std::chrono::duration<double, std::milli>(
                                                                   std::chrono::steady_clock::now() - t0).count());
@@ -2212,7 +2219,7 @@ void Application::handleViewportMouse() {
         // the same reason the fillet is: the profile must not be changed by
         // reaching for a button. Over the dialog's empty parts it follows.
         if (!uiPointer)
-            createTool_.update(scene_, camera_, mouseInViewport(), !io.KeyCtrl);
+            createTool_.update(scene_, camera_, mouseInViewport(), snapNow());
         if (!uiClicks) {
             if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
                 createTool_.handleMouseDown(mouseInViewport(), scene_, camera_, undo_);
@@ -2245,7 +2252,7 @@ void Application::handleViewportMouse() {
 
     // Modal face move, and the divide that makes a face to move.
     if (faceTool_.active) {
-        updateFaceMove(!io.KeyCtrl, /*follow=*/!uiPointer);
+        updateFaceMove(snapNow(), /*follow=*/!uiPointer);
         if (!uiClicks) {
             if (ImGui::IsMouseClicked(ImGuiMouseButton_Left))       commitFaceMove();
             else if (ImGui::IsMouseClicked(ImGuiMouseButton_Right))  abortFaceMove();
@@ -2255,7 +2262,7 @@ void Application::handleViewportMouse() {
     // Placing a hole: it follows the pointer over the body, and the click
     // drills it.
     if (holeTool_.placing) {
-        updateHole(!io.KeyCtrl);
+        updateHole(snapNow());
         if (!uiClicks && overViewport) {
             if (ImGui::IsMouseClicked(ImGuiMouseButton_Left))       commitHole();
             else if (ImGui::IsMouseClicked(ImGuiMouseButton_Right))  abortHole();
@@ -2270,7 +2277,7 @@ void Application::handleViewportMouse() {
         return;
     }
     if (patternTool_.active) {
-        updatePattern(!io.KeyCtrl, /*follow=*/!uiPointer);
+        updatePattern(snapNow(), /*follow=*/!uiPointer);
         if (!uiClicks) {
             if (ImGui::IsMouseClicked(ImGuiMouseButton_Left))       commitPattern();
             else if (ImGui::IsMouseClicked(ImGuiMouseButton_Right))  abortPattern();
@@ -2278,7 +2285,7 @@ void Application::handleViewportMouse() {
         return;
     }
     if (divideTool_.active) {
-        updateDivide(!io.KeyCtrl, /*follow=*/!uiPointer);
+        updateDivide(snapNow(), /*follow=*/!uiPointer);
         if (!uiClicks) {
             if (ImGui::IsMouseClicked(ImGuiMouseButton_Left))       commitDivide();
             else if (ImGui::IsMouseClicked(ImGuiMouseButton_Right))  abortDivide();
@@ -2288,7 +2295,7 @@ void Application::handleViewportMouse() {
 
     // Modal Fillet tool:
     if (filletTool_.active) {
-        updateFillet(!io.KeyCtrl, /*follow=*/!uiPointer);
+        updateFillet(snapNow(), /*follow=*/!uiPointer);
         if (!uiClicks) {
             if (ImGui::IsMouseClicked(ImGuiMouseButton_Left))      commitFillet();
             else if (ImGui::IsMouseClicked(ImGuiMouseButton_Right)) abortFillet();
@@ -2302,7 +2309,7 @@ void Application::handleViewportMouse() {
         // Snapping is the default, not the modifier. A CAD part is designed in
         // round numbers; free positioning is the exception, so Ctrl releases
         // the snap rather than engaging it.
-        tool_.update(scene_, camera_, mouseInViewport(), !io.KeyCtrl);
+        tool_.update(scene_, camera_, mouseInViewport(), snapNow());
         if (!uiClicks) {
             if (ImGui::IsMouseClicked(ImGuiMouseButton_Left))       commitTransform();
             else if (ImGui::IsMouseClicked(ImGuiMouseButton_Right))  abortTransform();
@@ -2549,6 +2556,11 @@ void Application::stepHealthCheck() {
     }
 
     SceneObject* o = scene_.find(scene_.contextObject());
+    // With nothing in hand, the project's summary adds up every part's
+    // volume: each is checked in turn, one job at a time.
+    if (!o && healthJobs_.empty())
+        for (const auto& c : scene_.objects())
+            if (c->visible && !c->body.empty() && c->healthVersion != c->geometryVersion) { o = c.get(); break; }
     if (!o || o->healthVersion == o->geometryVersion || healthJobs_.count(o->id)) return;
     // Only once the geometry has settled: during a drag it changes faster
     // than the check could keep up with, and the answer mid-drag is not
@@ -2724,8 +2736,8 @@ void Application::drawPrintIssues() {
                 // second on a heavy body, and the frame it was made in was a
                 // frame the view stuttered.
                 job.result = std::async(std::launch::async,
-                                        [live = o->body, rm = o->render]() {
-                                            return runPrintCheck(live.detached(), rm, PrintProfile{});
+                                        [live = o->body, rm = o->render, profile = printProfile()]() {
+                                            return runPrintCheck(live.detached(), rm, profile);
                                         });
                 printJobs_.emplace(o->id, std::move(job));
             }
@@ -3054,7 +3066,7 @@ void Application::handleShortcuts() {
             ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false)) { commitReduce(); return; }
         typedInto(reduceTool_.typedValue, [&] {
             try {
-                const Real v = std::stod(reduceTool_.typedValue);
+                const Real v = units::fromShown(std::stod(reduceTool_.typedValue));
                 if (v > 0 && v != reduceTool_.tolerance) {
                     reduceTool_.tolerance = v;
                     requestReducePreview();
@@ -3115,7 +3127,7 @@ void Application::handleShortcuts() {
         if (amount)
             typedInto(amount->typedValue, [&] {
                 try {
-                    const Real v = std::stod(amount->typedValue);
+                    const Real v = units::fromShown(std::stod(amount->typedValue));
                     if (v > 0.0) amount->amount = v;
                 } catch (...) {
                 }
@@ -3169,7 +3181,8 @@ void Application::handleShortcuts() {
             if (end && end != section_.typed.c_str()) {
                 Real lo = 0.0, hi = 0.0;
                 sectionRange(sectionAxis(), lo, hi);
-                const Real at = section_.plane == 3 ? section_.faceAt - v : v;
+                const Real mm = units::fromShown(v);
+                const Real at = section_.plane == 3 ? section_.faceAt - mm : mm;
                 section_.offset = std::clamp(at, lo, hi);
             }
             section_.typing = false;
@@ -3204,7 +3217,7 @@ void Application::handleShortcuts() {
         if (ImGui::IsKeyPressed(ImGuiKey_Enter, false) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false)) {
             char* end = nullptr;
             const double v = std::strtod(clearance_.typed.c_str(), &end);
-            if (end && end != clearance_.typed.c_str() && v >= 0.0) clearance_.required = v;
+            if (end && end != clearance_.typed.c_str() && v >= 0.0) clearance_.required = units::fromShown(v);
             clearance_.typing = false;
             return;
         }
@@ -3365,6 +3378,7 @@ void Application::handleShortcuts() {
         if (ImGui::IsKeyPressed(ImGuiKey_O, false)) ui_.actions.openProject = true;
         if (ImGui::IsKeyPressed(ImGuiKey_S, false)) ui_.actions.saveProject = true;
         if (ImGui::IsKeyPressed(ImGuiKey_E, false)) ui_.actions.exportStl = true;
+        if (ImGui::IsKeyPressed(ImGuiKey_Comma, false)) ui_.actions.openPreferences = true;
     }
 
     if (ctrl && ImGui::IsKeyPressed(ImGuiKey_Z, false)) {
@@ -3770,9 +3784,9 @@ void Application::commitReduce() {
                                                 "Reduce Mesh"));
 
     char buf[200];
-    std::snprintf(buf, sizeof buf, "Reduced %zu triangles to %zu, within %.3g mm (measured %.3g)",
-                  r.trianglesBefore, r.trianglesAfter, static_cast<double>(reduceTool_.tolerance),
-                  static_cast<double>(r.deviationMm));
+    std::snprintf(buf, sizeof buf, "Reduced %zu triangles to %zu, within %s (measured %s)",
+                  r.trianglesBefore, r.trianglesAfter, units::length(reduceTool_.tolerance, 3).c_str(),
+                  units::length(r.deviationMm, 3).c_str());
     setNotice(buf);
     justFinishedModal_ = true;
     reduceTool_.active = false;
@@ -4766,7 +4780,12 @@ void Application::updateFaceMove(bool snap, bool follow) {
 
     Real want = faceTool_.value;
     if (!faceTool_.typedValue.empty()) {
-        try { want = std::stod(faceTool_.typedValue); } catch (...) {}
+        try {
+            want = std::stod(faceTool_.typedValue);
+            // A distance is typed in the unit shown; a turn in degrees and a
+            // scale as a factor are not lengths.
+            if (faceTool_.op == FaceOp::Move || faceTool_.op == FaceOp::Extrude) want = units::fromShown(want);
+        } catch (...) {}
     } else if (faceTool_.axis.valid) {
         const Vec2 cur = mouseInViewport();
         if (pointerDrives() && faceTool_.axis.facingCamera(camera_)) {
@@ -5406,7 +5425,10 @@ void Application::updatePattern(bool snap, bool follow) {
     Real v = patternTool_.dragged();
     if (follow) {
         if (!patternTool_.typedValue.empty()) {
-            try { v = std::stod(patternTool_.typedValue); } catch (...) {}
+            try {
+                v = std::stod(patternTool_.typedValue);
+                if (patternTool_.mode != PatternMode::Circular) v = units::fromShown(v);
+            } catch (...) {}
         } else if (patternTool_.axis.valid && pointerDrives() &&
                    patternTool_.axis.facingCamera(camera_)) {
             v = patternTool_.axis.valueAt(camera_, mouseInViewport());
@@ -5589,7 +5611,7 @@ void Application::updateDivide(bool snap, bool follow) {
     const Real len = length(divideTool_.dir);
     Real along = divideTool_.t * len;
     if (!divideTool_.typedValue.empty()) {
-        try { along = std::stod(divideTool_.typedValue); } catch (...) {}
+        try { along = units::fromShown(std::stod(divideTool_.typedValue)); } catch (...) {}
     } else if (divideTool_.axis.valid && pointerDrives() &&
                divideTool_.axis.facingCamera(camera_)) {
         along = divideTool_.axis.valueAt(camera_, mouseInViewport());
@@ -7388,7 +7410,7 @@ void Application::updateFillet(bool snap, bool follow) {
     Real newR = filletTool_.baseRadius;
     if (!filletTool_.typedValue.empty()) {
         try {
-            newR = std::max(Real(0.01), Real(std::stod(filletTool_.typedValue)));
+            newR = std::max(Real(0.01), units::fromShown(std::stod(filletTool_.typedValue)));
         } catch (...) {}
     } else {
         // The radius is how far the cursor is from the edge being rounded.
@@ -8646,6 +8668,7 @@ void Application::drawUnsavedPrompt() {
             switch (next) {
                 case PendingAction::New:  newProject(); break;
                 case PendingAction::Open: beginFilePrompt(FileMode::Open); break;
+                case PendingAction::OpenRecent: runFileOperation(FileMode::Open, pendingPath_); break;
                 case PendingAction::Quit: running_ = false; break;
                 case PendingAction::None: break;
             }
@@ -8810,6 +8833,8 @@ void Application::runFileOperation(FileMode mode, const std::string& path) {
         if (r.ok) {
             projectPath_ = path;
             savedRevision_ = undo_.revision();
+            rememberRecent(prefs_, path);
+            savePrefs();
             setNotice("Saved " + path);
         }
         else      setNotice("Save failed: " + r.error);
@@ -8819,6 +8844,8 @@ void Application::runFileOperation(FileMode mode, const std::string& path) {
         const ProjectResult r = loadProject(scene_, path);
         if (r.ok) {
             projectPath_ = path;
+            rememberRecent(prefs_, path);
+            savePrefs();
             section_ = SectionState{};
             // History from the previous project cannot apply to this one.
             undo_.clear();
@@ -9045,7 +9072,17 @@ void Application::drawFilePrompt() {
         ImGui::TextColored(ui::im(palette::kTextDim), "Tolerance");
         ImGui::SameLine(ui::labelColumn());
         ImGui::SetNextItemWidth(140.0f);
-        ImGui::DragFloat("##tol", &exportDeviationMm_, 0.001f, 0.001f, 0.5f, "%.3f mm");
+        {
+            // In the unit shown, kept in millimetres.
+            double tol = units::toShown(exportDeviationMm_);
+            const double lo = units::toShown(0.001), hi = units::toShown(0.5);
+            char fmt[24];
+            std::snprintf(fmt, sizeof fmt, "%%.%df %s", units::current() == units::Length::Millimetre ? 3 : 4,
+                          units::suffix());
+            if (ImGui::DragScalar("##tol", ImGuiDataType_Double, &tol, static_cast<float>(units::toShown(0.001)),
+                                  &lo, &hi, fmt))
+                exportDeviationMm_ = static_cast<float>(units::fromShown(tol));
+        }
         ImGui::SameLine();
         ImGui::TextColored(ui::im(palette::kTextFaint), "how far a triangle may sit from the surface");
         ImGui::Spacing();
@@ -9115,6 +9152,11 @@ void Application::applyActions() {
         endExplode();
 
     if (a.quit && confirmDiscard(PendingAction::Quit)) running_ = false;
+    if (a.openPreferences) prefsOpen_ = true;
+    if (!a.openRecent.empty()) {
+        pendingPath_ = a.openRecent;
+        if (confirmDiscard(PendingAction::OpenRecent)) runFileOperation(FileMode::Open, pendingPath_);
+    }
     if (a.section) toggleSection();
 
     if (a.newProject && confirmDiscard(PendingAction::New))   newProject();
@@ -9484,6 +9526,7 @@ void Application::buildUi() {
     drawExplodePanel();
     drawSectionPanel();
     drawCombinePanel();
+    drawPreferences();
     syncToolSettled();
     if (createTool_.applied() && createTool_.takeAdjusted()) recommitSettled();
     if (sketchTool_.applied() && sketchTool_.takeAdjusted()) recommitSettled();
@@ -9703,7 +9746,16 @@ int Application::run() {
         ui_.notice = notice_;
         ui_.noticeAge = noticeAge_;
         ui_.projectName = projectPath_.empty() ? "Untitled" : fileStem(projectPath_);
+        ui_.projectPath = projectPath_;
         ui_.dirty = dirty();
+        {
+            // The window's title too, for the task bar and the window list.
+            const std::string title = (ui_.dirty ? "\xE2\x80\xA2 " : "") + ui_.projectName + " \xE2\x80\x94 Tangent";
+            if (title != windowTitle_) {
+                windowTitle_ = title;
+                SDL_SetWindowTitle(window_, title.c_str());
+            }
+        }
 
         ui_.measuring = measure_.active();
         ui_.measurement = measureResult_;
@@ -9719,47 +9771,48 @@ int Application::run() {
                 std::snprintf(buf, sizeof buf, "Scale face  %+.1f %%", faceTool_.value);
                 break;
             case FaceOp::Extrude:
-                std::snprintf(buf, sizeof buf, "Extrude %s  %.2f mm%s",
-                              extrudeOpName(faceTool_.choice.op), faceTool_.value,
+                std::snprintf(buf, sizeof buf, "Extrude %s  %s%s",
+                              extrudeOpName(faceTool_.choice.op), units::length(faceTool_.value).c_str(),
                               faceTool_.choice.automatic ? " (following the drag)" : "");
                 break;
             case FaceOp::Move:
-                std::snprintf(buf, sizeof buf, "Push / pull  %.2f mm", faceTool_.value);
+                std::snprintf(buf, sizeof buf, "Push / pull  %s", units::length(faceTool_.value).c_str());
                 break;
             }
             ui_.toolStatus = buf;
         } else if (reduceTool_.active) {
             char buf[160];
-            std::snprintf(buf, sizeof buf, "Reduce Mesh  within %.3g mm%s",
-                          static_cast<double>(reduceTool_.tolerance),
+            std::snprintf(buf, sizeof buf, "Reduce Mesh  within %s%s",
+                          units::length(reduceTool_.tolerance, 3).c_str(),
                           reduceTool_.preview.busy() ? "   reducing..." : "");
             ui_.toolStatus = buf;
         } else if (patternTool_.active) {
             char buf[160];
             if (patternTool_.mode == PatternMode::Mirror)
-                std::snprintf(buf, sizeof buf, "Mirror  plane at %.2f mm", patternTool_.offset);
+                std::snprintf(buf, sizeof buf, "Mirror  plane at %s", units::length(patternTool_.offset).c_str());
+            else if (patternTool_.mode == PatternMode::Circular)
+                std::snprintf(buf, sizeof buf, "%s  %d x  %.2f\xC2\xB0 apart", patternModeName(patternTool_.mode),
+                              patternTool_.count, patternTool_.dragged());
             else
-                std::snprintf(buf, sizeof buf, "%s  %d x  %.2f %s apart",
-                              patternModeName(patternTool_.mode), patternTool_.count,
-                              patternTool_.dragged(),
-                              patternTool_.mode == PatternMode::Circular ? "deg" : "mm");
+                std::snprintf(buf, sizeof buf, "%s  %d x  %s apart", patternModeName(patternTool_.mode),
+                              patternTool_.count, units::length(patternTool_.dragged()).c_str());
             ui_.toolStatus = buf;
         } else if (divideTool_.active) {
             char buf[128];
-            std::snprintf(buf, sizeof buf, "Divide  %.2f mm along the edge",
-                          divideTool_.t * length(divideTool_.dir));
+            std::snprintf(buf, sizeof buf, "Divide  %s along the edge",
+                          units::length(divideTool_.t * length(divideTool_.dir)).c_str());
             ui_.toolStatus = buf;
         } else if (holeTool_.placing) {
             const HoleCut cut = holeCutNow();
             char buf[160];
-            std::snprintf(buf, sizeof(buf), "Hole  %s %.2f mm, %s",
+            std::snprintf(buf, sizeof(buf), "Hole  %s %s, %s",
                           holeTool_.fastener >= 0 ? fastenerAt(holeTool_.fastener).name : "custom",
-                          static_cast<double>(cut.diameter),
+                          units::length(cut.diameter).c_str(),
                           cut.through ? "through" : "to a depth");
             ui_.toolStatus = buf;
         } else if (filletTool_.active) {
             char buf[128];
-            std::snprintf(buf, sizeof(buf), "Fillet  %.2f mm", filletTool_.currentRadius);
+            std::snprintf(buf, sizeof(buf), "Fillet  %s", units::length(filletTool_.currentRadius).c_str());
             ui_.toolStatus = buf;
         } else if (jointTool_.picking()) {
             ui_.toolStatus = "Joint: " + jointTool_.prompt();
@@ -9805,7 +9858,7 @@ int Application::run() {
                 std::string what = describeSnap(hit);
                 if (hit.radius > 0.0) {
                     char buf[48];
-                    std::snprintf(buf, sizeof buf, "  (\u00D8 %.3f mm)", hit.radius * 2.0);
+                    std::snprintf(buf, sizeof buf, "  (\u00D8 %s)", units::length(hit.radius * 2.0, 3).c_str());
                     what += buf;
                 }
                 ui_.toolStatus = what;
@@ -9825,11 +9878,12 @@ int Application::run() {
             if (ui_.toolStatus.empty() && section_.on && !sectionPanelShown()) {
                 char buf[96];
                 if (section_.plane == 3)
-                    std::snprintf(buf, sizeof buf, "Section view: %.2f mm in from a face   (V to adjust)",
-                                  section_.faceAt - section_.offset);
+                    std::snprintf(buf, sizeof buf, "Section view: %s in from a face   (V to adjust)",
+                                  units::length(section_.faceAt - section_.offset).c_str());
                 else
-                    std::snprintf(buf, sizeof buf, "Section view: %s at %.2f mm   (V to adjust)",
-                                  section_.plane == 0 ? "Z" : section_.plane == 1 ? "Y" : "X", section_.offset);
+                    std::snprintf(buf, sizeof buf, "Section view: %s at %s   (V to adjust)",
+                                  section_.plane == 0 ? "Z" : section_.plane == 1 ? "Y" : "X",
+                                  units::length(section_.offset).c_str());
                 ui_.toolStatus = buf;
             }
         }

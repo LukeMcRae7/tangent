@@ -1,4 +1,5 @@
 #include "ui/panels.h"
+#include "core/units.h"
 
 #include "geom/fasteners.h"
 #include "ui/command_panel.h"
@@ -455,7 +456,7 @@ void jointRow(UiContext& ctx, Scene& scene, Joint& j) {
     }
     const bool troubled = !j.problem.empty();
     drawGlyph(dl, troubled ? Glyph::Alert : jointGlyph(j.kind), ImVec2(at.x + 18.0f, at.y + h * 0.5f), 16.0f,
-              troubled ? IM_COL32(240, 90, 70, 255) : u32(palette::kBrand));
+              troubled ? u32(palette::kBrandHover) : u32(palette::kBrand));
     pushFont(selected ? FontWeight::Medium : FontWeight::Regular);
     const float textY = at.y + (h - ImGui::GetTextLineHeight()) * 0.5f;
     dl->AddText(ImVec2(at.x + 34.0f, textY), u32(palette::kText), j.name.c_str());
@@ -516,10 +517,12 @@ void featureDetails(UiContext& ctx, SceneObject& obj, Feature& f, bool& changed)
         ImGui::TextColored(dim, "Within");
         ImGui::SameLine(ui::labelColumn());
         ImGui::SetNextItemWidth(-1.0f);
-        double tol = f.reduceTolerance;
-        ImGui::InputDouble("##rtol", &tol, 0.0, 0.0, "%.3f mm");
-        if (ImGui::IsItemDeactivatedAfterEdit() && tol > 0.0 && tol != f.reduceTolerance) {
-            f.reduceTolerance = tol;
+        double tol = units::toShown(f.reduceTolerance);
+        char tolFmt[24];
+        std::snprintf(tolFmt, sizeof tolFmt, "%%.%df %s", units::decimals() + 1, units::suffix());
+        ImGui::InputDouble("##rtol", &tol, 0.0, 0.0, tolFmt);
+        if (ImGui::IsItemDeactivatedAfterEdit() && tol > 0.0 && units::fromShown(tol) != f.reduceTolerance) {
+            f.reduceTolerance = units::fromShown(tol);
             changed = true;
         }
         ImGui::AlignTextToFramePadding();
@@ -1230,6 +1233,77 @@ void sketchActions(UiContext& ctx, Scene::SketchRef ref, bool bare) {
         ctx.actions.deleteSketch = true;
 }
 
+// The inspector with nothing selected: the project as a whole, and how to
+// start. A column that only said "Nothing selected" was a quarter of a narrow
+// window saying nothing.
+void projectInspector(UiContext& ctx) {
+    Scene& scene = *ctx.scene;
+    const ImVec4 dim = im(palette::kTextDim);
+    auto row = [&](const char* label, const std::string& value) {
+        ImGui::TextColored(dim, "%s", label);
+        ImGui::SameLine(ui::labelColumn());
+        ImGui::TextUnformatted(value.c_str());
+    };
+
+    ui::sectionTitle("Project");
+    size_t bodies = 0, sketches = 0, meshes = 0;
+    Real volume = 0.0;
+    bool allKnown = true;
+    AABB box;
+    for (const auto& o : scene.objects()) {
+        switch (kindOf(*o)) {
+            case ObjectKind::Body:   ++bodies; break;
+            case ObjectKind::Sketch: ++sketches; break;
+            case ObjectKind::Mesh:   ++meshes; break;
+        }
+        if (!o->visible || o->body.empty()) continue;
+        box.expand(o->worldBounds());
+        if (o->healthVersion == o->geometryVersion) volume += o->health.volume;
+        else                                         allKnown = false;
+    }
+    auto count = [](size_t n, const char* one, const char* many) {
+        return std::to_string(n) + " " + (n == 1 ? one : many);
+    };
+    std::string parts = count(bodies, "part", "parts");
+    if (sketches) parts += ", " + count(sketches, "sketch", "sketches");
+    if (meshes)   parts += ", " + count(meshes, "mesh", "meshes");
+    row("Holds", scene.objectCount() ? parts : std::string("nothing yet"));
+    if (!scene.assembly().joints.empty())
+        row("Joints", std::to_string(scene.assembly().joints.size()));
+    if (box.valid()) {
+        const Vec3 s = box.size();
+        row("Size", units::number(s.x, 1) + " x " + units::number(s.y, 1) + " x " + units::length(s.z, 1));
+        if (bodies) row("Material", allKnown ? units::volume(volume) : std::string("measuring..."));
+    }
+
+    ImGui::Dummy(ImVec2(0, 10));
+    ui::sectionTitle("Start");
+    struct Key { const char* keys; const char* what; };
+    static const Key kKeys[] = {
+        {"Shift+A", "Add a shape"},
+        {"Shift+S", "Sketch on a plane or a face"},
+        {"Ctrl+K", "Find any command by name"},
+        {"Click", "A face, edge or corner to work on"},
+        {"Ctrl+click", "A whole part"},
+    };
+    for (const Key& k : kKeys) {
+        // The keys as a cap, the words beside them.
+        pushFont(FontWeight::Medium, uiFonts().size * 0.82f);
+        const ImVec2 ts = ImGui::CalcTextSize(k.keys);
+        const ImVec2 at = ImGui::GetCursorScreenPos();
+        const float h = ImGui::GetFrameHeight() - 6.0f;
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        dl->AddRectFilled(at, ImVec2(at.x + ts.x + 12.0f, at.y + h), u32(palette::kRaised), 4.0f);
+        dl->AddText(ImVec2(at.x + 6.0f, at.y + (h - ts.y) * 0.5f), u32(palette::kText), k.keys);
+        ImGui::PopFont();
+        ImGui::Dummy(ImVec2(ts.x + 12.0f, h));
+        ImGui::SameLine(0.0f, 8.0f);
+        ImGui::AlignTextToFramePadding();
+        ImGui::SetCursorPosY(ImGui::GetCursorPosY() - 3.0f);
+        ImGui::TextColored(dim, "%s", k.what);
+    }
+}
+
 // The inspector, while a sketch is what is selected.
 void sketchInspector(UiContext& ctx, Scene::SketchRef ref) {
     Scene& scene = *ctx.scene;
@@ -1330,6 +1404,34 @@ void drawOutliner(UiContext& ctx) {
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4.0f, 2.0f));
 
     Scene& scene = *ctx.scene;
+
+    // The project, heading what it holds: its name, a dot while there are
+    // changes not saved, and where it is kept on hover.
+    {
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        const ImVec2 at = ImGui::GetCursorScreenPos();
+        const float w = ImGui::GetContentRegionAvail().x;
+        const float h = ImGui::GetFrameHeight() + 4.0f;
+        ImGui::InvisibleButton("##project", ImVec2(std::max(w, 1.0f), h));
+        if (ImGui::IsItemHovered())
+            ui::hoverTip(ctx.projectPath.empty() ? "Not saved yet: Ctrl+S saves it"
+                         : (ctx.projectPath + (ctx.dirty ? "\nChanged since it was saved" : "")).c_str());
+        drawGlyph(dl, Glyph::Save, ImVec2(at.x + 12.0f, at.y + h * 0.5f), 15.0f, u32(palette::kTextDim));
+        pushFont(FontWeight::SemiBold, uiFonts().size);
+        const float th = ImGui::GetTextLineHeight();
+        const float room = w - 30.0f - (ctx.dirty ? 16.0f : 0.0f);
+        std::string name = ctx.projectName;
+        while (name.size() > 1 && ImGui::CalcTextSize(name.c_str()).x > room) name.pop_back();
+        if (name.size() < ctx.projectName.size()) name += "\xE2\x80\xA6";
+        dl->AddText(ImVec2(at.x + 26.0f, at.y + (h - th) * 0.5f), u32(palette::kText), name.c_str());
+        const float nw = ImGui::CalcTextSize(name.c_str()).x;
+        ImGui::PopFont();
+        if (ctx.dirty)
+            dl->AddCircleFilled(ImVec2(at.x + 26.0f + nw + 9.0f, at.y + h * 0.5f), 3.5f, u32(palette::kBrand));
+        dl->AddLine(ImVec2(at.x, at.y + h + 3.0f), ImVec2(at.x + w, at.y + h + 3.0f), u32(palette::kBorder));
+        ImGui::Dummy(ImVec2(0, 8));
+    }
+
     if (scene.objectCount() == 0) {
         ImGui::Dummy(ImVec2(0, 6));
         ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 8.0f);
@@ -1436,7 +1538,8 @@ void groupInspector(UiContext& ctx, Group& group) {
     if (box.valid()) {
         char b[96];
         const Vec3 sz = box.size();
-        std::snprintf(b, sizeof b, "%.1f x %.1f x %.1f mm", sz.x, sz.y, sz.z);
+        std::snprintf(b, sizeof b, "%s x %s x %s", units::number(sz.x, 1).c_str(), units::number(sz.y, 1).c_str(),
+                      units::length(sz.z, 1).c_str());
         row("Size", b);
     }
     const GroupId parent = group.parent;
@@ -1510,11 +1613,7 @@ void drawInspector(UiContext& ctx) {
     }
     SceneObject* obj = scene.find(scene.contextObject());
     if (!obj) {
-        ImGui::Dummy(ImVec2(0, 6));
-        ImGui::TextColored(im(palette::kTextDim), "Nothing selected");
-        pushFont(FontWeight::Regular, uiFonts().size * 0.88f);
-        ImGui::TextColored(im(palette::kTextFaint), "Click a body, or a row on the left");
-        ImGui::PopFont();
+        projectInspector(ctx);
         ImGui::End();
         return;
     }
@@ -1585,7 +1684,7 @@ void drawInspector(UiContext& ctx) {
         ui::hoverTip("Its place comes from the joint: open it to move it, or delete the joint to move it freely");
     }
     ui::fieldHeader("Position", "mm");
-    ui::axisFields("pos", obj->transform.position, 0.1f, "%.1f", placedBy != 0);
+    ui::axisFields("pos", obj->transform.position, 0.1f, "%.1f", placedBy != 0, /*length=*/true);
 
     // Euler angles are a display convention only; the transform stores a
     // quaternion, so the conversion round-trips through it on every edit.
@@ -1617,7 +1716,7 @@ void drawInspector(UiContext& ctx) {
         Vec3 size = b.valid() ? b.size() : Vec3{};
         size = {size.x * obj->transform.scale.x, size.y * obj->transform.scale.y,
                 size.z * obj->transform.scale.z};
-        ui::axisFields("bounds", size, 0.0f, "%.1f", /*readOnly=*/true);
+        ui::axisFields("bounds", size, 0.0f, "%.1f", /*readOnly=*/true, /*length=*/true);
     }
 
     // Any transform field that moved becomes one undo entry per drag.
@@ -1661,7 +1760,14 @@ void drawInspector(UiContext& ctx) {
         struct Stat { const char* label; char value[32]; };
         Stat stats[3] = {{"Volume", ""}, {"Vertices", ""}, {"Faces", ""}};
         if (obj->healthVersion == obj->geometryVersion)
-            std::snprintf(stats[0].value, sizeof stats[0].value, "%.1f cm\xC2\xB3", obj->health.volume / 1000.0);
+        {
+            // Cubic centimetres for metric work -- the number a slicer and a
+            // spool are reckoned in -- and cubic inches for imperial.
+            if (units::current() == units::Length::Inch)
+                std::snprintf(stats[0].value, sizeof stats[0].value, "%.2f in\xC2\xB3", obj->health.volume / 16387.064);
+            else
+                std::snprintf(stats[0].value, sizeof stats[0].value, "%.1f cm\xC2\xB3", obj->health.volume / 1000.0);
+        }
         else
             std::snprintf(stats[0].value, sizeof stats[0].value, "...");
         std::snprintf(stats[1].value, sizeof stats[1].value, "%d", obj->body.vertexCount());
@@ -1796,15 +1902,20 @@ void drawMeasurePanel(UiContext& ctx) {
     if (!ui::beginCommand("##measure", "Measure", Glyph::Measure)) return;
 
     const MeasureResult& m = ctx.measurement;
+    // Lengths and areas in the unit chosen, to a ten-thousandth of it.
     auto value = [](const char* label, const char* fmt, double v, bool lead) {
+        std::string text;
+        if (std::strstr(fmt, "mm\xC2\xB2")) text = units::area(v);
+        else if (std::strstr(fmt, "mm"))      text = units::length(v, units::decimals() + 2);
+        else { char b[64]; std::snprintf(b, sizeof b, fmt, v); text = b; }
         ui::commandRow(label);
         ImGui::AlignTextToFramePadding();
         if (lead) {
             pushFont(FontWeight::SemiBold);
-            ImGui::TextColored(im(palette::kBrand), fmt, v);
+            ImGui::TextColored(im(palette::kBrand), "%s", text.c_str());
             ImGui::PopFont();
         } else {
-            ImGui::Text(fmt, v);
+            ImGui::TextUnformatted(text.c_str());
         }
     };
 

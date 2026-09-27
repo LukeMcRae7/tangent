@@ -105,6 +105,17 @@ ImFont* addFontFile(const std::string& path, float sizePx, bool quiet) {
 
 } // namespace
 
+void applyTheme(bool light) {
+    if (light) palette::applyLight();
+    else       palette::applyDark();
+    applyDarkTheme();
+    // A lighter veil behind a dialog on a light ground: the dark one reads as
+    // the screen going out.
+    if (light) ImGui::GetStyle().Colors[ImGuiCol_ModalWindowDimBg] = ImVec4(0.1f, 0.1f, 0.1f, 0.18f);
+}
+
+// Named for where it started; it builds the style from whatever the palette
+// holds, dark or light.
 void applyDarkTheme() {
     using namespace palette;
 

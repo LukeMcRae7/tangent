@@ -1,4 +1,5 @@
 #include "app/printability.h"
+#include "core/units.h"
 
 #include "core/bvh.h"
 
@@ -95,9 +96,9 @@ std::string summarise(const PrintReport& report) {
     if (report.clean()) return {};
 
     char buf[160];
-    std::snprintf(buf, sizeof buf, "%d wall%s thinner than the nozzle can lay (%.2f mm)",
+    std::snprintf(buf, sizeof buf, "%d wall%s thinner than the nozzle can lay (%s)",
                   report.thinWalls, report.thinWalls == 1 ? "" : "s",
-                  report.thinnestWallMm);
+                  units::length(report.thinnestWallMm).c_str());
     return buf;
 }
 

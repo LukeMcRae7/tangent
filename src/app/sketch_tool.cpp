@@ -1,4 +1,5 @@
 #include "app/sketch_tool.h"
+#include "core/units.h"
 
 #include "app/overlay_shapes.h"
 #include "app/snap_overlay.h"
@@ -967,15 +968,15 @@ bool SketchTool::typeKey(int key) {
     switch (target) {
     case Target::Depth:
         depthTyped_ = ok;
-        if (ok) depth_ = v;
+        if (ok) depth_ = units::fromShown(v);
         break;
     case Target::Size:
         fixed_[typedField_] = ok && v > 0.0;
-        if (fixed_[typedField_]) fixedValue_[typedField_] = v;
+        if (fixed_[typedField_]) fixedValue_[typedField_] = units::fromShown(v);
         break;
     case Target::Offset:
         if (planeTyping_ == 2) setPlaneTilt((ok ? v : 0.0) * kDeg2Rad);
-        else                   setPlaneOffset(ok ? v : 0.0);
+        else                   setPlaneOffset(ok ? units::fromShown(v) : 0.0);
         break;
     case Target::Dimension:
     case Target::None:
@@ -1886,7 +1887,7 @@ bool SketchTool::handleKey(int key, bool shift, bool ctrl, Scene& scene, Camera&
                 Real v = 0.0;
                 if (parseNumber(typed_, v)) {
                     const SketchConstraint* k = sketch_.constraint(activeDim_);
-                    setDimension(activeDim_, k && k->rule == SketchRule::Angle ? v * kDeg2Rad : v);
+                    setDimension(activeDim_, k && k->rule == SketchRule::Angle ? v * kDeg2Rad : units::fromShown(v));
                 }
                 typed_.clear();
                 return true;
@@ -2409,11 +2410,13 @@ void SketchTool::drawPlacementRows() {
     auto sizeRow = [&](const char* label, Real natural, const char* id) {
         if (natural < 1e-9) return;
         ui::commandRow(label);
-        double v = natural * at.scale;
+        double v = units::toShown(natural * at.scale);
         ImGui::SetNextItemWidth(-1.0f);
-        ImGui::InputDouble(id, &v, 0.0, 0.0, "%.2f mm");
-        if (ImGui::IsItemDeactivatedAfterEdit() && v > 1e-6) {
-            at.scale = v / natural;
+        char fmt[24];
+        std::snprintf(fmt, sizeof fmt, "%%.%df %s", units::decimals(), units::suffix());
+        ImGui::InputDouble(id, &v, 0.0, 0.0, fmt);
+        if (ImGui::IsItemDeactivatedAfterEdit() && v > 1e-9) {
+            at.scale = units::fromShown(v) / natural;
             changed = true;
         }
     };
@@ -2521,8 +2524,9 @@ void SketchTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& fi
     case SketchStage::SelectPlane: {
         char hint[200] = "";
         if (importPending())
-            std::snprintf(hint, sizeof hint, "Where %s goes: a plane, or click a face to put it on.  %.1f x %.1f mm.",
-                          pendingSvgName_.c_str(), pendingSvg_.size().x, pendingSvg_.size().y);
+            std::snprintf(hint, sizeof hint, "Where %s goes: a plane, or click a face to put it on.  %s x %s.",
+                          pendingSvgName_.c_str(), units::number(pendingSvg_.size().x, 1).c_str(),
+                          units::length(pendingSvg_.size().y, 1).c_str());
         else
             std::snprintf(hint, sizeof hint, "Click a face of a body to sketch on it, or an origin plane.");
         if (picker_.drawRows(hint)) setPlane(picker_.frame(), kNoObject, &camera);
@@ -2637,7 +2641,7 @@ void SketchTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& fi
                 names += std::string(k ? sketchRuleName(k->rule) : "constraint") + " #" +
                          std::to_string(id);
             }
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.35f, 0.25f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ui::im(palette::kBrand));
             ImGui::TextWrapped("%s cannot both hold", names.c_str());
             ImGui::PopStyleColor();
         } else if (!solved_.redundant.empty()) {
@@ -2668,13 +2672,14 @@ void SketchTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& fi
             const bool active = activeDim_ == k.id;
             const bool bad = contains(solved_.conflicting, k.id);
             const bool repeated = contains(solved_.redundant, k.id);
-            if (bad)           ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.55f, 0.16f, 0.10f, 0.65f));
-            else if (repeated) ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.45f, 0.35f, 0.10f, 0.55f));
-            else if (active)   ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.20f, 0.40f, 0.62f, 0.55f));
-            double v = k.rule == SketchRule::Angle ? k.value * kRad2Deg : k.value;
+            if (bad)           ImGui::PushStyleColor(ImGuiCol_FrameBg, ui::im(palette::kBrand, 0.35f));
+            else if (repeated) ImGui::PushStyleColor(ImGuiCol_FrameBg, ui::im(palette::kWarn, 0.35f));
+            else if (active)   ImGui::PushStyleColor(ImGuiCol_FrameBg, ui::im(palette::kInfo, 0.35f));
+            double v = k.rule == SketchRule::Angle ? k.value * kRad2Deg : units::toShown(k.value);
             ImGui::SetNextItemWidth(-1.0f);
-            ImGui::InputDouble("##dim", &v, 0.0, 0.0,
-                               k.rule == SketchRule::Angle ? "%.2f deg" : "%.3f mm");
+            char dimFmt[24];
+            std::snprintf(dimFmt, sizeof dimFmt, "%%.%df %s", units::decimals() + 1, units::suffix());
+            ImGui::InputDouble("##dim", &v, 0.0, 0.0, k.rule == SketchRule::Angle ? "%.2f\xC2\xB0" : dimFmt);
             const SketchId kid = k.id;
             const SketchRule rule = k.rule;
             if (bad || repeated || active) ImGui::PopStyleColor();
@@ -2682,7 +2687,7 @@ void SketchTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& fi
             const bool edited = ImGui::IsItemDeactivatedAfterEdit();
             ImGui::PopID();
             if (edited) {
-                setDimension(kid, rule == SketchRule::Angle ? v * kDeg2Rad : v);
+                setDimension(kid, rule == SketchRule::Angle ? v * kDeg2Rad : units::fromShown(v));
                 break;   // the constraints may have been replaced; draw them next frame
             }
         }
@@ -2836,11 +2841,11 @@ void SketchTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& fi
             const ImVec2 at(std::floor(static_cast<float>(px.x) + viewX_ - size.x * 0.5f + 0.5f),
                             std::floor(static_cast<float>(px.y) + viewY_ - size.y - 6.0f + 0.5f));
             dl->AddRectFilled(ImVec2(at.x - 4, at.y - 2), ImVec2(at.x + size.x + 4, at.y + size.y + 2),
-                              IM_COL32(28, 28, 32, 220), 3.0f);
+                              ui::u32(palette::kCommand, 0.9f), 3.0f);
             if (active)
                 dl->AddRect(ImVec2(at.x - 4, at.y - 2), ImVec2(at.x + size.x + 4, at.y + size.y + 2),
-                            IM_COL32(243, 68, 37, 255), 3.0f);
-            dl->AddText(at, active ? IM_COL32(243, 68, 37, 255) : IM_COL32(235, 235, 240, 255), text);
+                            ui::u32(palette::kBrand), 3.0f);
+            dl->AddText(at, active ? ui::u32(palette::kBrand) : ui::u32(palette::kText), text);
         }
     }
 }

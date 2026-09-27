@@ -5,6 +5,7 @@
 // edit is an AssemblyCommand: the whole of the groups and joints either side,
 // which is small.
 #include "app/application.h"
+#include "core/units.h"
 
 #include "core/palette.h"
 #include "ui/command_panel.h"
@@ -299,7 +300,7 @@ std::string gapText(const ClearancePair& p) {
     char b[64];
     if (p.overlap)       std::snprintf(b, sizeof b, "overlap");
     else if (p.touching) std::snprintf(b, sizeof b, "touching");
-    else                 std::snprintf(b, sizeof b, "%.2f mm", p.gap);
+    else                 std::snprintf(b, sizeof b, "%s", units::length(p.gap).c_str());
     return b;
 }
 
@@ -388,7 +389,7 @@ void Application::drawClearancePanel() {
         std::string line = "Clearance  ";
         if (r.pairs.empty()) {
             char b[64];
-            std::snprintf(b, sizeof b, "clear by more than %.1f mm", r.limit);
+            std::snprintf(b, sizeof b, "clear by more than %s", units::length(r.limit, 1).c_str());
             line += b;
         } else {
             const ClearancePair& p = r.pairs.front();
@@ -432,7 +433,14 @@ void Application::drawClearancePanel() {
         ui::commandRow("");
         for (int i = 0; i < 4; ++i) {
             if (i) ImGui::SameLine(0.0f, 3.0f);
-            if (ui::pillButton(kFits[i].label, std::fabs(clearance_.required - kFits[i].mm) < 1e-9))
+            // The presets are printer gaps in millimetres; in another unit
+            // they are shown converted, and say which unit they are in.
+            const std::string label = units::current() == units::Length::Millimetre
+                                          ? std::string(kFits[i].label) : units::number(kFits[i].mm, 3);
+            ImGui::PushID(i);
+            const bool picked = ui::pillButton(label.c_str(), std::fabs(clearance_.required - kFits[i].mm) < 1e-9);
+            ImGui::PopID();
+            if (picked)
                 clearance_.required = kFits[i].mm;
             ui::hoverTip(kFits[i].tip);
         }
@@ -460,9 +468,9 @@ void Application::drawClearancePanel() {
     if (r.ok) {
         char summary[160];
         if (r.pairs.empty()) {
-            std::snprintf(summary, sizeof summary, "Every part is clear by more than %.1f mm", r.limit);
+            std::snprintf(summary, sizeof summary, "Every part is clear by more than %s", units::length(r.limit, 1).c_str());
         } else if (over + tight + touch == 0) {
-            std::snprintf(summary, sizeof summary, "Every pair keeps %.2f mm", r.required);
+            std::snprintf(summary, sizeof summary, "Every pair keeps %s", units::length(r.required).c_str());
         } else {
             std::string s;
             auto add = [&](size_t n, const char* what) {
@@ -483,8 +491,9 @@ void Application::drawClearancePanel() {
             const bool slider = j && j->kind == JointKind::Slider;
             const ClearancePair& p = r.pairs.front();
             char at[96];
-            std::snprintf(at, sizeof at, "%s at %.1f %s", gapText(p).c_str(),
-                          r.sampleValues[static_cast<size_t>(p.sample)], slider ? "mm" : "\xC2\xB0");
+            const Real sv = r.sampleValues[static_cast<size_t>(p.sample)];
+            if (slider) std::snprintf(at, sizeof at, "%s at %s", gapText(p).c_str(), units::length(sv, 1).c_str());
+            else        std::snprintf(at, sizeof at, "%s at %.1f\xC2\xB0", gapText(p).c_str(), sv);
             ui::commandValue("Tightest", at);
         }
 
@@ -496,9 +505,9 @@ void Application::drawClearancePanel() {
             const std::string label = nameOf(p.a) + " / " + nameOf(p.b);
             ui::commandRow(i == 0 ? "Pairs" : "");
             const bool bad = p.overlap || p.gap < r.required;
-            const ImVec4 col = p.overlap ? ImVec4(1.0f, 0.42f, 0.36f, 1.0f)
-                             : bad       ? ImVec4(1.0f, 0.74f, 0.3f, 1.0f)
-                                         : ImVec4(0.55f, 0.85f, 0.65f, 1.0f);
+            const ImVec4 col = p.overlap ? ui::im(palette::kBrandHover)
+                             : bad       ? ui::im(palette::kWarn)
+                                         : ui::im(palette::kValid);
             const float w = ImGui::GetContentRegionAvail().x;
             const ImVec2 lo = ImGui::GetCursorScreenPos();
             if (ImGui::InvisibleButton("##pair", ImVec2(w, ImGui::GetFrameHeight()))) {
@@ -541,9 +550,9 @@ void Application::drawClearancePanel() {
         if (r.partial) ui::commandRefused("Stopped part way: the parts touch over so much that measuring every "
                                           "pair would take too long. Measure fewer parts at once.");
         char how[128];
-        std::snprintf(how, sizeof how, "%s  %.0f ms, to within %.3f mm", clearance_.running || !fresh ? "Measuring..."
-                                                                                                  : "Measured in",
-                      r.ms, r.deviation);
+        std::snprintf(how, sizeof how, "%s  %.0f ms, to within %s", clearance_.running || !fresh ? "Measuring..."
+                                                                                                : "Measured in",
+                      r.ms, units::length(r.deviation, 3).c_str());
         ui::commandValue("", how);
     } else {
         ui::commandValue("Result", "Measuring...");

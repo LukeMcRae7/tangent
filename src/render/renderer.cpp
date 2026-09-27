@@ -255,7 +255,7 @@ void Renderer::drawGrid(const Camera& camera, const ViewOptions& opts) {
     gridShader_.set("uSubdivide", opts.gridSubdivide);
     gridShader_.set("uAxisXColor", toVec3(palette::kGridAxisX));
     gridShader_.set("uAxisYColor", toVec3(palette::kGridAxisY));
-    gridShader_.set("uLineColor", Vec3{0.30f, 0.30f, 0.32f});
+    gridShader_.set("uLineColor", toVec3(palette::kGridLine));
     // Fade with zoom so the grid always dissolves near the horizon rather than
     // at a fixed world radius. The far end is kept fairly tight because at
     // grazing angles the ground point runs to thousands of millimetres, where

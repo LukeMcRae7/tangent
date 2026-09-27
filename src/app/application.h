@@ -14,6 +14,7 @@
 #include "app/sketch_tool.h"
 #include "app/file_dialog.h"
 #include "app/printability.h"
+#include "app/preferences.h"
 #include "app/measure.h"
 #include "mesh/export_stl.h"
 #include "scene/serialize.h"
@@ -45,6 +46,9 @@ public:
 
     // Renders `frames` and exits; used to smoke-test startup non-interactively.
     void setSmokeTest(int frames) { smokeFrames_ = frames; }
+    // For screenshots of the other look and the other units.
+    void setLightTheme() { prefs_.lightTheme = true; }
+    void setUnits(units::Length u) { prefs_.units = u; }
 
     // Keeps the operating system's own title bar and borders instead of the
     // bar the application draws. For a desktop that cannot move or resize a
@@ -271,6 +275,7 @@ public:
         screenshotPath_ = path;
         screenshotFrame_ = afterFrames;
     }
+    void setScreenshotFrame(int frame) { screenshotFrame_ = frame; }
 
 private:
     void handleEvent(const SDL_Event& e);
@@ -456,7 +461,8 @@ private:
     void newProject();
 
     // What to do once the user has answered the unsaved-work prompt.
-    enum class PendingAction { None, New, Open, Quit };
+    enum class PendingAction { None, New, Open, OpenRecent, Quit };
+    std::string pendingPath_;         // the recent file OpenRecent opens
     void drawUnsavedPrompt();
     bool confirmDiscard(PendingAction next);
 
@@ -971,6 +977,18 @@ private:
     // Whether a modal editing operation is running -- one that owns the model
     // until it is confirmed or cancelled.
     bool editToolActive() const;
+
+    // ---- Preferences (app_prefs.cpp) ---------------------------------------
+    Preferences prefs_;
+    bool prefsOpen_ = false;
+    bool unattended_ = false;       // a demo or a test: no preferences read or written
+    void applyPreferences();
+    void applyAppTheme(bool light);
+    void savePrefs();
+    void drawPreferences();
+    PrintProfile printProfile() const;
+    bool snapNow() const;
+    std::string windowTitle_;
     // The wheel: toward the part in hand, or else toward the pointer.
     void zoomView(float steps);
 

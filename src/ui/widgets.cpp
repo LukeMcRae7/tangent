@@ -1,4 +1,5 @@
 #include "ui/widgets.h"
+#include "core/units.h"
 
 #include "ui/theme.h"
 
@@ -154,6 +155,9 @@ void fieldHeader(const char* label, const char* unit) {
     ImGui::TextColored(im(palette::kTextDim), "%s", label);
     ImGui::PopFont();
     if (unit && *unit) {
+        // Millimetres are only how lengths are kept: shown, they are in the
+        // unit chosen.
+        if (std::strcmp(unit, "mm") == 0) unit = units::suffix();
         char text[32];
         std::snprintf(text, sizeof text, "[%s]", unit);
         pushFont(FontWeight::Regular, uiFonts().size * 0.8f);
@@ -164,7 +168,17 @@ void fieldHeader(const char* label, const char* unit) {
     }
 }
 
-bool axisFields(const char* id, Vec3& v, float speed, const char* fmt, bool readOnly) {
+bool axisFields(const char* id, Vec3& v, float speed, const char* fmt, bool readOnly, bool length) {
+    // A length is shown, dragged and typed in the chosen unit and handed back
+    // in millimetres.
+    if (length) {
+        Vec3 shown{units::toShown(v.x), units::toShown(v.y), units::toShown(v.z)};
+        char f[16];
+        std::snprintf(f, sizeof f, "%%.%df", units::decimals() - (units::current() == units::Length::Millimetre ? 1 : 0));
+        const bool changed = axisFields(id, shown, static_cast<float>(units::toShown(speed)), f, readOnly, false);
+        if (changed) v = {units::fromShown(shown.x), units::fromShown(shown.y), units::fromShown(shown.z)};
+        return changed;
+    }
     ImGui::PushID(id);
     const ImGuiStyle& st = ImGui::GetStyle();
     const float avail = ImGui::GetContentRegionAvail().x;
@@ -210,6 +224,25 @@ bool axisFields(const char* id, Vec3& v, float speed, const char* fmt, bool read
 }
 
 bool labelledNumber(const char* label, Real& v, float speed, Real lo, Real hi, const char* fmt) {
+    // A length -- its format ends in millimetres -- is shown in the unit
+    // chosen, and handed back in millimetres.
+    const size_t n = std::strlen(fmt);
+    if (n >= 2 && std::strcmp(fmt + n - 2, "mm") == 0) {
+        Real shown = units::toShown(v);
+        char f[24];
+        std::snprintf(f, sizeof f, "%%.%df %s", units::decimals(), units::suffix());
+        ImGui::PushID(label);
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextColored(im(palette::kTextDim), "%s", label);
+        ImGui::SameLine(kLabelColumn);
+        ImGui::SetNextItemWidth(-1.0f);
+        const Real slo = units::toShown(lo), shi = units::toShown(hi);
+        const bool changed = ImGui::DragScalarN("##v", ImGuiDataType_Double, &shown, 1,
+                                                static_cast<float>(units::toShown(speed)), &slo, &shi, f);
+        ImGui::PopID();
+        if (changed) v = units::fromShown(shown);
+        return changed;
+    }
     ImGui::PushID(label);
     ImGui::AlignTextToFramePadding();
     ImGui::TextColored(im(palette::kTextDim), "%s", label);

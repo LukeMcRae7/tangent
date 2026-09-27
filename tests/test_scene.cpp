@@ -4,6 +4,7 @@
 #include "app/camera.h"
 #include "mesh/primitives.h"
 #include "geom/brep.h"
+#include "core/units.h"
 
 #include <cmath>
 #include <cstdio>
@@ -135,6 +136,24 @@ int main() {
         std::printf("\n");
         check(s.elementSelection().size() == 2 && topKept && sideKept,
               "selected faces are still the top and the side after a hole renumbers them");
+    }
+
+    // ---- Units: shown and typed ------------------------------------------------
+    {
+        Real mm = 0.0;
+        check(units::length(12.0) == "12.00 mm", "12 mm is shown as 12.00 mm");
+        check(units::parse("25.4", mm) && std::fabs(mm - 25.4) < 1e-12, "a bare number is in the unit shown");
+        check(units::parse("1in", mm) && std::fabs(mm - 25.4) < 1e-12, "1in is 25.4 mm");
+        check(units::parse("1.5 cm", mm) && std::fabs(mm - 15.0) < 1e-12, "1.5 cm is 15 mm");
+        check(units::parse("0.5\"", mm) && std::fabs(mm - 12.7) < 1e-12, "half an inch with a quote mark");
+        check(!units::parse("abc", mm) && !units::parse("3 furlongs", mm), "not a length is refused");
+        units::setCurrent(units::Length::Inch);
+        check(units::length(25.4) == "1.000 in", "an inch of millimetres is shown as 1.000 in");
+        check(units::parse("2", mm) && std::fabs(mm - 50.8) < 1e-12, "a bare number is inches when inches are shown");
+        check(units::length(-0.0001) == "0.000 in", "no minus zero");
+        units::setCurrent(units::Length::Centimetre);
+        check(units::volume(1000.0) == "1.000 cm\xC2\xB3", "a thousand cubic millimetres is one cubic centimetre");
+        units::setCurrent(units::Length::Millimetre);
     }
 
     // ---- Zooming toward the pointer ---------------------------------------

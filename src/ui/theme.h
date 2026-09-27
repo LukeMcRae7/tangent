@@ -10,6 +10,8 @@ namespace tg {
 // All colours come from tg::palette (core/palette.h); this only translates
 // them into ImGui's style table.
 void applyDarkTheme();
+// The palette for the theme, then everything ImGui draws from it.
+void applyTheme(bool light);
 
 // The interface face at its four weights. One ImFont per weight; sizes are
 // chosen at the point of use with pushFont, since ImGui rasterises on demand.

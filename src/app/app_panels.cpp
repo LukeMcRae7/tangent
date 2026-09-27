@@ -7,6 +7,7 @@
 // views of the same value: pull the arrow and the bar fills, pull the bar and
 // the arrow follows.
 #include "app/application.h"
+#include "core/units.h"
 
 #include "geom/fasteners.h"
 
@@ -116,7 +117,7 @@ void Application::drawFilletPanel() {
     // for it, and a maximum that grows as you read it is worse than none.
     if (!filletTool_.search.active && filletTool_.maxRadius > 0.0) {
         char limit[48];
-        std::snprintf(limit, sizeof limit, "%.2f mm", filletTool_.maxRadius);
+        std::snprintf(limit, sizeof limit, "%s", units::length(filletTool_.maxRadius).c_str());
         ui::commandValue("Largest", limit);
     }
 
@@ -152,9 +153,12 @@ void Application::drawFilletPanel() {
         if (tapering) {
             ui::commandRow("Ends at");
             ImGui::SetNextItemWidth(-1.0f);
-            if (ImGui::DragScalar("##end", ImGuiDataType_Double, &filletTool_.endRadius,
-                                  0.05f, nullptr, nullptr, "%.2f mm")) {
-                filletTool_.endRadius = std::max(filletTool_.endRadius, Real(0.05));
+            double shownEnd = units::toShown(filletTool_.endRadius);
+            char endFmt[24];
+            std::snprintf(endFmt, sizeof endFmt, "%%.%df %s", units::decimals(), units::suffix());
+            if (ImGui::DragScalar("##end", ImGuiDataType_Double, &shownEnd,
+                                  static_cast<float>(units::toShown(0.05)), nullptr, nullptr, endFmt)) {
+                filletTool_.endRadius = std::max(units::fromShown(shownEnd), Real(0.05));
                 filletTool_.requestedRadius = -1.0;
                 filletTool_.previewValid = false;
             }
@@ -798,8 +802,8 @@ void Application::drawDraftPanel() {
             const Real height = (&size.x)[std::clamp(draftTool_.axis, 0, 2)];
             const Real reach = std::fabs(std::tan(draftTool_.angle)) * height;
             char in[80];
-            std::snprintf(in, sizeof in, "%.2f mm over %.1f mm", static_cast<double>(reach),
-                          static_cast<double>(height));
+            std::snprintf(in, sizeof in, "%s over %s", units::length(reach).c_str(),
+                          units::length(height, 1).c_str());
             ui::commandValue("Leans", in);
         }
         (void)o;
@@ -955,11 +959,11 @@ void Application::drawHolePanel() {
         const HoleCut c = holeCutNow();
         char at[96];
         if (holeTool_.fastener >= 0 && printedAllowance(holeTool_.fit) > 0.0)
-            std::snprintf(at, sizeof at, "%.2f mm  (%.2f + %.2f for printing)", c.diameter,
-                          c.diameter - printedAllowance(holeTool_.fit),
-                          printedAllowance(holeTool_.fit));
+            std::snprintf(at, sizeof at, "%s  (%s + %s for printing)", units::length(c.diameter).c_str(),
+                          units::number(c.diameter - printedAllowance(holeTool_.fit)).c_str(),
+                          units::number(printedAllowance(holeTool_.fit)).c_str());
         else
-            std::snprintf(at, sizeof at, "%.2f mm", c.diameter);
+            std::snprintf(at, sizeof at, "%s", units::length(c.diameter).c_str());
         ui::commandValue("Cut at", at);
     }
 
@@ -1080,7 +1084,8 @@ void Application::drawThreadPanel() {
         const ThreadCut cut =
             threadFor(threadTool_.fastener, threadTool_.external, threadTool_.printed);
         char what[96];
-        std::snprintf(what, sizeof what, "%.2f mm a turn, %.2f mm deep", cut.pitch, cut.height);
+        std::snprintf(what, sizeof what, "%s a turn, %s deep", units::length(cut.pitch).c_str(),
+                      units::length(cut.height).c_str());
         ui::commandValue("Cut", what);
         ui::commandValue("Kind", threadTool_.external ? "outside, on a shaft" : "inside, in a bore");
     }
@@ -1137,7 +1142,8 @@ void Application::drawOffsetPanel() {
         if (b.valid()) {
             char size[80];
             const Vec3 e = b.size();
-            std::snprintf(size, sizeof size, "%.2f x %.2f x %.2f mm", e.x, e.y, e.z);
+            std::snprintf(size, sizeof size, "%s x %s x %s", units::number(e.x).c_str(), units::number(e.y).c_str(),
+                          units::length(e.z).c_str());
             ui::commandValue("Now", size);
         }
     }
@@ -1197,16 +1203,16 @@ void Application::drawShellPanel() {
     // on a printed part: a wall is a whole number of lines or it is not the
     // wall you asked for.
     {
-        const PrintProfile profile;
+        const PrintProfile profile = printProfile();
         char walls[64];
-        std::snprintf(walls, sizeof walls, "%.1f lines of %.2f mm",
-                      shellTool_.amount / profile.nozzleMm, static_cast<double>(profile.nozzleMm));
+        std::snprintf(walls, sizeof walls, "%.1f lines of %s",
+                      shellTool_.amount / profile.nozzleMm, units::length(profile.nozzleMm).c_str());
         ui::commandValue("Prints as", walls);
         if (shellTool_.amount < profile.minWallMm) {
             ui::commandRow("");
             ImGui::AlignTextToFramePadding();
-            ImGui::TextColored(ui::im(palette::kBrand), "thinner than %.2f mm prints badly",
-                               static_cast<double>(profile.minWallMm));
+            ImGui::TextColored(ui::im(palette::kBrand), "thinner than %s prints badly",
+                               units::length(profile.minWallMm).c_str());
         }
     }
 
@@ -1340,9 +1346,9 @@ void Application::drawSplitPanel() {
             if (style >= 0 && style != on) splitTool_.pins.dowel = style == 1;
 
             char fit[72];
-            std::snprintf(fit, sizeof fit, "socket %.2f mm for a %.2f mm pin",
-                          splitTool_.pins.diameter + splitTool_.pins.clearance,
-                          splitTool_.pins.diameter);
+            std::snprintf(fit, sizeof fit, "socket %s for a %s pin",
+                          units::length(splitTool_.pins.diameter + splitTool_.pins.clearance).c_str(),
+                          units::length(splitTool_.pins.diameter).c_str());
             ui::commandValue("Fit", fit);
         }
     }
@@ -1405,7 +1411,7 @@ void Application::drawDividePanel() {
              [&] { updateDivide(true); });
 
     char of[48];
-    std::snprintf(of, sizeof of, "%.2f mm", len);
+    std::snprintf(of, sizeof of, "%s", units::length(len).c_str());
     ui::commandValue("Edge", of);
 
     if (settled) ui::commandApplied("Divide");
@@ -1499,11 +1505,11 @@ void Application::drawReducePanel() {
         ui::commandValue("Triangles", text);
     }
     if (shown && shown->result.ok) {
-        std::snprintf(text, sizeof text, "%.3g mm, measured%s", static_cast<double>(shown->result.deviationMm),
+        std::snprintf(text, sizeof text, "%s, measured%s", units::length(shown->result.deviationMm, 3).c_str(),
                       shown->result.withinTolerance ? "" : " -- over");
         ui::commandValue("Moved", text);
         if (shown->result.toleranceUsedMm > shown->tolerance * 1.0001) {
-            std::snprintf(text, sizeof text, "loosened to %.3g mm", static_cast<double>(shown->result.toleranceUsedMm));
+            std::snprintf(text, sizeof text, "loosened to %s", units::length(shown->result.toleranceUsedMm, 3).c_str());
             ui::commandValue("To fit", text);
         }
         if (shown->solidFaces <= kSolidifyFaceLimit)
@@ -1560,8 +1566,8 @@ void Application::drawDragGuides() {
         const SceneObject* o = scene_.find(filletTool_.objectId);
         const Real step = o ? DragAxis::stepFor(camera_, filletTool_.axis.origin, filletTool_.maxRadius)
                             : 0.0;
-        std::snprintf(label, sizeof label, "%s %.2f mm", filletTool_.chamfer ? "Chamfer" : "Fillet",
-                      filletTool_.currentRadius);
+        std::snprintf(label, sizeof label, "%s %s", filletTool_.chamfer ? "Chamfer" : "Fillet",
+                      units::length(filletTool_.currentRadius).c_str());
         ui::drawDragGuide(filletTool_.axis, camera_, origin, filletTool_.currentRadius, step,
                           filletTool_.maxRadius, label);
     }
@@ -1571,19 +1577,21 @@ void Application::drawDragGuides() {
                         : DragAxis::stepFor(camera_, faceTool_.axis.origin, faceTool_.axis.spanValue);
         if (faceTool_.op == FaceOp::Rotate)      std::snprintf(label, sizeof label, "%.1f\xC2\xB0", faceTool_.value);
         else if (faceTool_.op == FaceOp::Scale)  std::snprintf(label, sizeof label, "%+.1f %%", faceTool_.value);
-        else                                     std::snprintf(label, sizeof label, "%.2f mm", faceTool_.value);
+        else                                     std::snprintf(label, sizeof label, "%s", units::length(faceTool_.value).c_str());
         ui::drawDragGuide(faceTool_.axis, camera_, origin, faceTool_.value, step, 0.0, label);
     }
     if (patternTool_.active && patternTool_.axis.valid) {
         const Real step = DragAxis::stepFor(camera_, patternTool_.axis.origin, patternTool_.axis.spanValue);
-        std::snprintf(label, sizeof label, patternTool_.mode == PatternMode::Circular ? "%.1f\xC2\xB0" : "%.2f mm",
-                      patternTool_.dragged());
+        if (patternTool_.mode == PatternMode::Circular)
+            std::snprintf(label, sizeof label, "%.1f\xC2\xB0", patternTool_.dragged());
+        else
+            std::snprintf(label, sizeof label, "%s", units::length(patternTool_.dragged()).c_str());
         ui::drawDragGuide(patternTool_.axis, camera_, origin, patternTool_.dragged(), step,
                           patternTool_.axis.spanValue, label);
     }
     if (divideTool_.active && divideTool_.axis.valid) {
         const Real step = DragAxis::stepFor(camera_, divideTool_.axis.origin, divideTool_.axis.spanValue);
-        std::snprintf(label, sizeof label, "%.2f mm", divideTool_.t * length(divideTool_.dir));
+        std::snprintf(label, sizeof label, "%s", units::length(divideTool_.t * length(divideTool_.dir)).c_str());
         ui::drawDragGuide(divideTool_.axis, camera_, origin, divideTool_.t * length(divideTool_.dir),
                           step, divideTool_.axis.spanValue, label);
     }

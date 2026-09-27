@@ -38,7 +38,9 @@ bool closeButton(const char* id, float sizePx = 13.0f);
 // "Position                      [mm]": the line above a row of fields.
 void fieldHeader(const char* label, const char* unit);
 // Three fields, each with its axis letter in the axis's own colour.
-bool axisFields(const char* id, Vec3& v, float speed, const char* fmt, bool readOnly = false);
+// `length`: millimetres, shown in the unit chosen.
+bool axisFields(const char* id, Vec3& v, float speed, const char* fmt, bool readOnly = false,
+                bool length = false);
 // One labelled number, the field stretched to the right edge.
 bool labelledNumber(const char* label, Real& v, float speed, Real lo, Real hi,
                     const char* fmt = "%.2f mm");

@@ -1,4 +1,5 @@
 #include "app/create_tool.h"
+#include "core/units.h"
 
 #include "app/overlay_shapes.h"
 #include "ui/command_panel.h"
@@ -1033,7 +1034,7 @@ void CreateTool::syncTypedField() {
     } catch (...) {
         return;                                   // "-" or "." on their own
     }
-    setField(typedField_, v);
+    setField(typedField_, units::fromShown(v));   // every field it types is a length
 }
 
 void CreateTool::clearLocks(HandleId id) {
@@ -1761,7 +1762,7 @@ bool CreateTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& ou
         if (kind_ != PrimitiveKind::Cylinder && !isFilleting_) {
             ui::commandRow("Corners");
             char r[32];
-            std::snprintf(r, sizeof r, "%.2f mm", uniformCornerRadius());
+            std::snprintf(r, sizeof r, "%s", units::length(uniformCornerRadius()).c_str());
             ImGui::AlignTextToFramePadding();
             ImGui::TextUnformatted(r);
             ImGui::SameLine();

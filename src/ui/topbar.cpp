@@ -36,6 +36,7 @@ using ui::im;
 using ui::u32;
 
 GLuint g_logoTex = 0;
+GLuint g_logoLightTex = 0;     // dark lettering, for the light theme
 int    g_logoW = 0, g_logoH = 0;
 
 constexpr float kIconPx   = 20.0f;
@@ -70,6 +71,19 @@ void fileMenu(UiContext& ctx) {
     if (menuEntry(Glyph::Open, "Open...",    "Ctrl+O")) ctx.actions.openProject = true;
     if (menuEntry(Glyph::Save, "Save",       "Ctrl+S")) ctx.actions.saveProject = true;
     if (menuEntry(Glyph::Save, "Save As...", nullptr))  ctx.actions.saveProjectAs = true;
+    // What was open last, most recent first: the path is on hover.
+    if (!ctx.recentFiles.empty()) {
+        menuHeader("Recent");
+        for (size_t i = 0; i < ctx.recentFiles.size() && i < 6; ++i) {
+            const std::string& path = ctx.recentFiles[i];
+            const size_t slash = path.find_last_of("/\\");
+            const std::string name = slash == std::string::npos ? path : path.substr(slash + 1);
+            ImGui::PushID(static_cast<int>(i));
+            if (menuEntry(Glyph::Clock, name.c_str())) ctx.actions.openRecent = path;
+            if (ImGui::IsItemHovered()) hoverTip(path.c_str());
+            ImGui::PopID();
+        }
+    }
     menuGap();
     if (menuEntry(Glyph::Import, "Import STEP...")) ctx.actions.importStep = true;
     menuNote("Reads a STEP file as exact surfaces, not as a mesh of them, so its faces can be filleted and bored.");
@@ -87,6 +101,9 @@ void fileMenu(UiContext& ctx) {
     menuGap();
     if (menuEntry(Glyph::Undo, "Undo", "Ctrl+Z", ctx.canUndo)) ctx.actions.undo = true;
     if (menuEntry(Glyph::Redo, "Redo", "Ctrl+Shift+Z", ctx.canRedo)) ctx.actions.redo = true;
+    menuGap();
+    if (menuEntry(Glyph::Settings, "Preferences...", "Ctrl+,")) ctx.actions.openPreferences = true;
+    menuNote("Units, theme, orbit, snapping, your printer, autosave.");
     menuGap();
     if (menuEntry(Glyph::Close, "Quit", "Ctrl+Q")) ctx.actions.quit = true;
 }
@@ -296,21 +313,31 @@ bool loadBrandAssets(const std::string& assetDir) {
                      assetDir.c_str());
         return false;
     }
-    glGenTextures(1, &g_logoTex);
-    glBindTexture(GL_TEXTURE_2D, g_logoTex);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, g_logoW, g_logoH, 0, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
-    glGenerateMipmap(GL_TEXTURE_2D);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glBindTexture(GL_TEXTURE_2D, 0);
+    auto upload = [](GLuint& tex, int w, int h, const std::vector<unsigned char>& data) {
+        glGenTextures(1, &tex);
+        glBindTexture(GL_TEXTURE_2D, tex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, data.data());
+        glGenerateMipmap(GL_TEXTURE_2D);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glBindTexture(GL_TEXTURE_2D, 0);
+    };
+    upload(g_logoTex, g_logoW, g_logoH, px);
+    // The same logo with its lettering dark, for a light bar. Without it the
+    // light theme falls back to the wordmark in text.
+    int lw = 0, lh = 0;
+    std::vector<unsigned char> lpx;
+    if (readPng(assetDir + "/logo-light.png", lw, lh, lpx) && lw == g_logoW && lh == g_logoH)
+        upload(g_logoLightTex, lw, lh, lpx);
     return true;
 }
 
 void unloadBrandAssets() {
     if (g_logoTex) glDeleteTextures(1, &g_logoTex);
-    g_logoTex = 0;
+    if (g_logoLightTex) glDeleteTextures(1, &g_logoLightTex);
+    g_logoTex = g_logoLightTex = 0;
     g_logoW = g_logoH = 0;
 }
 
@@ -346,26 +373,20 @@ float drawTopBar(UiContext& ctx) {
     const float rowY = ImGui::GetCursorPosY();
     {
         const float logoH = 26.0f;
-        if (g_logoTex && g_logoH > 0) {
+        const GLuint logo = palette::isLight() ? g_logoLightTex : g_logoTex;
+        if (logo && g_logoH > 0) {
             const float logoW = logoH * static_cast<float>(g_logoW) / static_cast<float>(g_logoH);
             ImGui::SetCursorPosY(rowY + (buttonH + captionH - logoH) * 0.5f);
-            ImGui::Image(static_cast<ImTextureID>(g_logoTex), ImVec2(logoW, logoH));
+            ImGui::Image(static_cast<ImTextureID>(logo), ImVec2(logoW, logoH));
         } else {
             pushFont(FontWeight::Bold, uiFonts().size * 1.55f);
             ImGui::SetCursorPosY(rowY + (buttonH + captionH - ImGui::GetTextLineHeight()) * 0.5f);
             ImGui::TextColored(im(palette::kBrand), "tangent");
             ImGui::PopFont();
         }
-        // The project's name, small, beside it: the one thing a title bar
-        // is for.
-        if (!ctx.projectName.empty()) {
-            ImGui::SameLine(0.0f, 14.0f);
-            pushFont(FontWeight::Regular, uiFonts().size * 0.86f);
-            ImGui::SetCursorPosY(rowY + (buttonH + captionH - ImGui::GetTextLineHeight()) * 0.5f);
-            ImGui::TextColored(im(palette::kTextDim), "%s%s", ctx.projectName.c_str(),
-                               ctx.dirty ? " *" : "");
-            ImGui::PopFont();
-        }
+        // The project's name is not here: squeezed between the logo and the
+        // first group it read as clutter. It heads the outliner, over what
+        // the project holds, and is the window's title.
     }
 
     // ---- the groups -------------------------------------------------------

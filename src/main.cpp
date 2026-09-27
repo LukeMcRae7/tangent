@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 
 int main(int argc, char** argv) {
     tg::Application app;
@@ -128,6 +129,14 @@ int main(int argc, char** argv) {
             app.setOffsetDemo(static_cast<float>(std::atof(argv[++i])));
         } else if (std::strcmp(argv[i], "--assembly-demo") == 0 && i + 1 < argc) {
             app.setAssemblyDemo(std::atoi(argv[++i]));
+        } else if (std::strcmp(argv[i], "--screenshot-frame") == 0 && i + 1 < argc) {
+            app.setScreenshotFrame(std::atoi(argv[++i]));
+        } else if (std::strcmp(argv[i], "--light") == 0) {
+            app.setLightTheme();
+        } else if (std::strcmp(argv[i], "--units") == 0 && i + 1 < argc) {
+            const std::string u = argv[++i];
+            app.setUnits(u == "in" ? tg::units::Length::Inch : u == "cm" ? tg::units::Length::Centimetre
+                                                              : tg::units::Length::Millimetre);
         } else if (std::strcmp(argv[i], "--section-demo") == 0 && i + 1 < argc) {
             app.setSectionDemo(std::atoi(argv[++i]));
         } else if (std::strcmp(argv[i], "--thread-demo") == 0 && i + 1 < argc) {

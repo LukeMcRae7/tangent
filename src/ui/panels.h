@@ -161,6 +161,10 @@ struct UiActions {
     bool explode = false;
     // The section view: on, its panel back, or off -- see Application::toggleSection.
     bool section = false;
+    // Files and settings.
+    bool        openPreferences = false;
+    std::string openRecent;             // a path from the recent files
+    bool        clearRecent = false;
 };
 
 struct UiStats {
@@ -200,6 +204,8 @@ struct UiContext {
 
     // The file, for the title.
     std::string  projectName;
+    std::string  projectPath;      // empty until saved
+    std::vector<std::string> recentFiles;   // most recent first
     bool         dirty = false;
 
     // Live measurement, shown while the measure tool is active.

@@ -1,4 +1,5 @@
 #include "app/joint_tool.h"
+#include "core/units.h"
 
 #include "core/palette.h"
 #include "ui/command_panel.h"
@@ -384,17 +385,19 @@ bool JointTool::handleKey(int key, Scene& scene, UndoStack& undo) {
 void JointTool::applyTyped(Scene& scene, UndoStack& undo, double v) {
     Joint* j = joint(scene);
     if (!j) return;
+    // Lengths are typed in the unit shown; turns in degrees.
+    const double mm = units::fromShown(v);
     switch (typing_) {
-        case Field::Offset: setOffset(scene, undo, v); break;
+        case Field::Offset: setOffset(scene, undo, mm); break;
         case Field::Angle:  setAngle(scene, undo, v * kDeg2Rad); break;
-        case Field::Motion: setMotion(scene, undo, j->kind == JointKind::Slider ? v : v * kDeg2Rad); break;
-        case Field::SlideX: apply(scene, undo, "Move Joint", [&](Joint& k) { k.slideX = v; }); break;
-        case Field::SlideY: apply(scene, undo, "Move Joint", [&](Joint& k) { k.slideY = v; }); break;
+        case Field::Motion: setMotion(scene, undo, j->kind == JointKind::Slider ? mm : v * kDeg2Rad); break;
+        case Field::SlideX: apply(scene, undo, "Move Joint", [&](Joint& k) { k.slideX = mm; }); break;
+        case Field::SlideY: apply(scene, undo, "Move Joint", [&](Joint& k) { k.slideY = mm; }); break;
         case Field::Lo:
-            apply(scene, undo, "Joint", [&](Joint& k) { k.lo = k.kind == JointKind::Slider ? v : v * kDeg2Rad; });
+            apply(scene, undo, "Joint", [&](Joint& k) { k.lo = k.kind == JointKind::Slider ? mm : v * kDeg2Rad; });
             break;
         case Field::Hi:
-            apply(scene, undo, "Joint", [&](Joint& k) { k.hi = k.kind == JointKind::Slider ? v : v * kDeg2Rad; });
+            apply(scene, undo, "Joint", [&](Joint& k) { k.hi = k.kind == JointKind::Slider ? mm : v * kDeg2Rad; });
             break;
         case Field::None: break;
     }
@@ -519,10 +522,10 @@ void JointTool::drawPointerPrompt(Vec2 mouseScreen) const {
     const ImVec2 at(std::floor(static_cast<float>(mouseScreen.x)) + 18.0f,
                     std::floor(static_cast<float>(mouseScreen.y)) + 16.0f);
     dl->AddRectFilled(ImVec2(at.x - 6, at.y - 4), ImVec2(at.x + size.x + 6, at.y + size.y + 4),
-                      IM_COL32(24, 24, 28, 225), 4.0f);
+                      ui::u32(palette::kCommand, 0.94f), 4.0f);
     dl->AddRect(ImVec2(at.x - 6, at.y - 4), ImVec2(at.x + size.x + 6, at.y + size.y + 4),
-                warn ? IM_COL32(240, 90, 70, 255) : IM_COL32(243, 68, 37, 200), 4.0f);
-    dl->AddText(at, IM_COL32(236, 236, 240, 255), text.c_str());
+                warn ? ui::u32(palette::kBrandHover) : ui::u32(palette::kBrand, 0.8f), 4.0f);
+    dl->AddText(at, ui::u32(palette::kText), text.c_str());
 }
 
 void JointTool::drawHud(Scene& scene, UndoStack& undo, bool& finished) {

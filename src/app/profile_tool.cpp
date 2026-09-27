@@ -1153,10 +1153,10 @@ void ProfileTool::drawPointerPrompt(Vec2 mouseScreen) const {
     const ImVec2 at(std::floor(static_cast<float>(mouseScreen.x)) + 18.0f,
                     std::floor(static_cast<float>(mouseScreen.y)) + 16.0f);
     dl->AddRectFilled(ImVec2(at.x - 6, at.y - 4), ImVec2(at.x + size.x + 6, at.y + size.y + 4),
-                      IM_COL32(24, 24, 28, 225), 4.0f);
+                      ui::u32(palette::kCommand, 0.94f), 4.0f);
     dl->AddRect(ImVec2(at.x - 6, at.y - 4), ImVec2(at.x + size.x + 6, at.y + size.y + 4),
-                error_.empty() ? IM_COL32(243, 68, 37, 200) : IM_COL32(240, 90, 70, 255), 4.0f);
-    dl->AddText(at, IM_COL32(236, 236, 240, 255), text.c_str());
+                error_.empty() ? ui::u32(palette::kBrand, 0.8f) : ui::u32(palette::kBrandHover), 4.0f);
+    dl->AddText(at, ui::u32(palette::kText), text.c_str());
 }
 
 void ProfileTool::drawHud(Scene& scene, UndoStack& undo, bool& finished) {
