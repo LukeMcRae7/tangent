@@ -51,7 +51,7 @@ void Application::drawPickFilterBar() {
     struct Option { PickFilter f; Glyph g; const char* label; const char* tip; };
     static const Option kOptions[] = {
         {PickFilter::Any, Glyph::Select, "Any", "A click takes the face, edge or corner under it"},
-        {PickFilter::Faces, Glyph::Body, "Faces", "Only faces: clicks near an edge still take the face"},
+        {PickFilter::Faces, Glyph::Plane, "Faces", "Only faces: clicks near an edge still take the face"},
         {PickFilter::Edges, Glyph::Line, "Edges", "Only edges, with more reach"},
         {PickFilter::Points, Glyph::Dot, "Corners", "Only corners, with more reach"},
         {PickFilter::Parts, Glyph::Box, "Parts", "Whole parts, as Ctrl+click takes them"},

@@ -241,7 +241,8 @@ void drawViewCube(UiContext& ctx, float x, float y, float w, float h,
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ui::im(palette::kHover, 0.6f));
         ImGui::PushStyleColor(ImGuiCol_ButtonActive, ui::im(palette::kActive, 0.6f));
-        ImGui::PushStyleColor(ImGuiCol_Text, ui::im(palette::kBrand));
+        // Quiet: it is a setting, and the brand's red read as a warning.
+        ImGui::PushStyleColor(ImGuiCol_Text, ui::im(palette::kTextDim));
         const float tw = ImGui::CalcTextSize(proj).x + ImGui::GetStyle().FramePadding.x * 2.0f;
         ImGui::SetCursorPosX(ImGui::GetCursorPosX() + std::max(0.0f, (box - tw) * 0.5f));
         if (ImGui::Button(proj)) camera.toggleProjection();

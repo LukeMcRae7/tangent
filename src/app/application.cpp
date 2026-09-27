@@ -9570,7 +9570,11 @@ void Application::buildUi() {
     drawCombinePanel();
     drawPreferences();
     drawRecoveryPrompt();
-    drawPickFilterBar();
+    // Only while a click would select: a tool that takes the clicks itself --
+    // a sketch, a pick, a drag -- has no use for it.
+    if (!editToolActive() && !jointTool_.active() && !tool_.active() && !createTool_.active() &&
+        !sketchTool_.active() && !measure_.active())
+        drawPickFilterBar();
     drawBoxSelect();
     ui::drawCommandPalette(ui_);
     syncToolSettled();
