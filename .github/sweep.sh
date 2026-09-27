@@ -31,6 +31,7 @@ modes=(
   "--assembly-demo 1" "--assembly-demo 2" "--assembly-demo 3" "--assembly-demo 4"
   "--assembly-demo 5" "--assembly-demo 6" "--assembly-demo 7" "--assembly-demo 8"
   "--section-demo 1" "--section-demo 2" "--section-demo 3"
+  "--select-demo 1"
 )
 
 fail=0
@@ -219,6 +220,16 @@ for m in 1 2; do
     printf '  ok    --section-demo %s\n' "$m"
   fi
 done
+
+# A box has to take what it says: a window what is wholly in it, a crossing
+# what it overlaps -- a part clipped through the middle included.
+out=$(timeout 60 ./build/tangent --select-demo 1 --smoke-test 10 2>&1)
+if echo "$out" | grep "\[select-demo\]" | grep -q "agrees=1"; then
+  printf '  ok    --select-demo 1\n'
+else
+  printf '  FAIL  select-demo: %s\n' "$(echo "$out" | grep select-demo)"
+  fail=1
+fi
 
 # A large mesh has to get all the way to being useful: reduced to fit, turned
 # into a solid, bored, and split -- each step checked for what it made, not

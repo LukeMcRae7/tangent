@@ -133,6 +133,8 @@ int main(int argc, char** argv) {
             app.setScreenshotFrame(std::atoi(argv[++i]));
         } else if (std::strcmp(argv[i], "--palette") == 0 && i + 1 < argc) {
             app.setPaletteDemo(argv[++i]);
+        } else if (std::strcmp(argv[i], "--select-demo") == 0 && i + 1 < argc) {
+            app.setSelectDemo(std::atoi(argv[++i]));
         } else if (std::strcmp(argv[i], "--light") == 0) {
             app.setLightTheme();
         } else if (std::strcmp(argv[i], "--units") == 0 && i + 1 < argc) {

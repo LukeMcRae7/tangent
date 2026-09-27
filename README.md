@@ -344,6 +344,8 @@ The icons are [Tabler Icons](https://tabler.io/icons), bundled as
 | Click | Select the edge, face or vertex under the cursor — what a click would take is lit as the pointer passes over it |
 | Ctrl + click | Select the whole object (as clicking its outliner row) |
 | Shift + click | Extend either selection |
+| Drag | Box select: to the right, what is wholly inside; to the left, whatever it touches. Shift adds |
+| Filter (bottom left of the view) | Any, faces, edges, corners or whole parts: what a click and a box take |
 | E | Extrude selected faces, then drag to set the height (Shift + E starts it as a cut) |
 | J / D / I / N | *(while extruding)* join, cut, intersect or a new body — until one is picked the drag decides: out joins, in cuts |
 | F | Fillet the selected edges |

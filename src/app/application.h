@@ -981,6 +981,24 @@ private:
     // until it is confirmed or cancelled.
     bool editToolActive() const;
 
+    // ---- Selection filter and box select (app_select.cpp) --------------------
+    enum class PickFilter { Any, Faces, Edges, Points, Parts };
+    PickFilter pickFilter_ = PickFilter::Any;
+    bool boxPress_ = false;         // the left button went down in the view, idle
+    bool boxSelecting_ = false;     // and has been dragged far enough to be a box
+    Vec2 boxFrom_{};
+    std::vector<ElementHit> filteredPicks(const Ray& ray, Vec2 m) const;
+    void drawPickFilterBar();
+    void finishBoxSelect(bool additive);
+    void drawBoxSelect();
+    int  selectDemo_ = 0;
+    int  selectDemoFrame_ = 0;
+    void runSelectDemo();
+public:
+    // 1: a window and a crossing box over three parts, checked by count.
+    void setSelectDemo(int n) { selectDemo_ = n; }
+private:
+
     // ---- Preferences (app_prefs.cpp) ---------------------------------------
     Preferences prefs_;
     bool prefsOpen_ = false;

@@ -2140,6 +2140,7 @@ void Application::handleViewportMouse() {
     stepCoplanarDemo();
     stepAssemblyDemo();
     stepSectionDemo();
+    if (selectDemo_ > 0 && ++selectDemoFrame_ == 3) runSelectDemo();
 
     // The section view's arrow, and the face its plane goes on. Only while its
     // panel is out, which is only while nothing else is running.
@@ -2322,9 +2323,25 @@ void Application::handleViewportMouse() {
         return;
     }
 
+    // A left drag with nothing else going on is a box: it runs on wherever
+    // the pointer goes, and ends wherever it is let go.
+    if (boxPress_ && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 5.0f)) boxSelecting_ = true;
+    if (ImGui::IsMouseReleased(ImGuiMouseButton_Left) && boxSelecting_) {
+        finishBoxSelect(io.KeyShift);
+        boxSelecting_ = boxPress_ = false;
+        justFinishedModal_ = false;
+        return;
+    }
+    if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) boxPress_ = boxSelecting_ = false;
+    if (boxSelecting_) { clearHover(); return; }
+
     if (!overViewport) return;
     if (io.MouseWheel != 0.0f && !uiPointer) zoomView(io.MouseWheel);
     if (uiClicks) return;
+    if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !justFinishedModal_) {
+        boxPress_ = true;
+        boxFrom_ = mouseInViewport();
+    }
 
     // The sketch under the pointer, lit; a double-click on one opens it.
     hoverSketch_ = sketchAt(mouseInViewport(), false);
@@ -2386,7 +2403,7 @@ void Application::handleViewportClick(bool shift, bool ctrl) {
         }
     }
 
-    if (ctrl) {
+    if (ctrl || pickFilter_ == PickFilter::Parts) {
         std::vector<ObjectId> bodies;
         for (const RayHit& h : scene_.raycastCoincident(ray)) bodies.push_back(h.object);
         if (bodies.empty()) {
@@ -2403,9 +2420,7 @@ void Application::handleViewportClick(bool shift, bool ctrl) {
         return;
     }
 
-    const std::vector<ElementHit> picks = scene_.pickElements(ray, camera_.viewProjection(),
-                                                              camera_.viewportW, camera_.viewportH,
-                                                              cursor);
+    const std::vector<ElementHit> picks = filteredPicks(ray, cursor);
     if (!picks.empty()) {
         const size_t at = nextInCycle(picks.size(), shift,
                                       [&](size_t i) { return scene_.isElementSelected(picks[i].ref); });
@@ -2899,8 +2914,8 @@ void Application::updateHover(bool ctrl) {
     hoverKey_ = key;
 
     const Ray ray = camera_.rayThroughPixel(static_cast<float>(m.x), static_cast<float>(m.y));
-    const std::vector<ElementHit> picks =
-        scene_.pickElements(ray, vp, camera_.viewportW, camera_.viewportH, m);
+    if (pickFilter_ == PickFilter::Parts) { clearHover(); return; }
+    const std::vector<ElementHit> picks = filteredPicks(ray, m);
     ElementRef ref;
     if (!picks.empty()) {
         // Measuring takes the first; selecting steps past what is selected.
@@ -9533,6 +9548,8 @@ void Application::buildUi() {
     drawSectionPanel();
     drawCombinePanel();
     drawPreferences();
+    drawPickFilterBar();
+    drawBoxSelect();
     ui::drawCommandPalette(ui_);
     syncToolSettled();
     if (createTool_.applied() && createTool_.takeAdjusted()) recommitSettled();

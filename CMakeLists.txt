@@ -181,6 +181,7 @@ add_executable(tangent
   src/app/app_assembly.cpp
   src/app/app_section.cpp
   src/app/app_prefs.cpp
+  src/app/app_select.cpp
   src/app/preferences.cpp
   src/app/clearance.cpp
   src/app/plane_pick.cpp
