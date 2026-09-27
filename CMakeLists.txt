@@ -208,6 +208,7 @@ add_executable(tangent
   src/render/lod.cpp
   src/ui/theme.cpp
   src/ui/panels.cpp
+  src/ui/command_palette.cpp
   src/ui/topbar.cpp
   src/ui/widgets.cpp
   src/ui/glyph.cpp

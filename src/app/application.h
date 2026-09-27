@@ -276,6 +276,9 @@ public:
         screenshotFrame_ = afterFrames;
     }
     void setScreenshotFrame(int frame) { screenshotFrame_ = frame; }
+    void setPaletteDemo(const std::string& query) { paletteDemo_ = query; paletteDemoOn_ = true; }
+    std::string paletteDemo_;
+    bool paletteDemoOn_ = false;
 
 private:
     void handleEvent(const SDL_Event& e);

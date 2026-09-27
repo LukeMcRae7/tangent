@@ -354,6 +354,8 @@ The icons are [Tabler Icons](https://tabler.io/icons), bundled as
 | F | *(adjusting a joint)* flip it over on its axis |
 | Ctrl + G / Ctrl + Shift + G | Group the selection / take it out of its group |
 | D | Measure — one entity for its own size, two for the distance between |
+| Ctrl + K | Find any command by name, with its key |
+| Ctrl + , | Preferences: units, theme, orbit, snapping, printer, autosave |
 | V | Section view — cut the model with a plane you slide; again for its panel, or to put the model back whole |
 | Numpad 1 / 3 / 7 | Front / Right / Top (Ctrl for opposite) |
 | Numpad 4 / 6 / 8 / 2 | Orbit in 15° steps |

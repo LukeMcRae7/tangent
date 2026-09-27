@@ -1,5 +1,6 @@
 #include "app/application.h"
 #include "core/units.h"
+#include "ui/command_palette.h"
 
 #include "mesh/export_3mf.h"
 #include "mesh/import_mesh.h"
@@ -1276,6 +1277,7 @@ bool Application::init() {
 
     if (assemblyDemo_ > 0) setupAssemblyDemo();
     if (sectionDemo_ > 0) setupSectionDemo();
+    if (paletteDemoOn_) ui::openCommandPalette(paletteDemo_.c_str());
 
     if (threadDemo_ > 0) {
         // A thread cut the way the panel cuts one: a hole is drilled, its wall
@@ -2092,6 +2094,9 @@ void Application::beginTransform(TransformMode mode) {
 void Application::handleViewportMouse() {
     ImGuiIO& io = ImGui::GetIO();
     hoverLive_ = false;
+    // The palette has the pointer while it is open: a click away from it
+    // closes it, and is not also a pick.
+    if (ui::commandPaletteOpen()) return;
 
     // A demo's pointer is over the view wherever it is put.
     const bool overViewport =
@@ -3379,6 +3384,7 @@ void Application::handleShortcuts() {
         if (ImGui::IsKeyPressed(ImGuiKey_S, false)) ui_.actions.saveProject = true;
         if (ImGui::IsKeyPressed(ImGuiKey_E, false)) ui_.actions.exportStl = true;
         if (ImGui::IsKeyPressed(ImGuiKey_Comma, false)) ui_.actions.openPreferences = true;
+        if (ImGui::IsKeyPressed(ImGuiKey_K, false)) ui::openCommandPalette();
     }
 
     if (ctrl && ImGui::IsKeyPressed(ImGuiKey_Z, false)) {
@@ -9527,6 +9533,7 @@ void Application::buildUi() {
     drawSectionPanel();
     drawCombinePanel();
     drawPreferences();
+    ui::drawCommandPalette(ui_);
     syncToolSettled();
     if (createTool_.applied() && createTool_.takeAdjusted()) recommitSettled();
     if (sketchTool_.applied() && sketchTool_.takeAdjusted()) recommitSettled();
