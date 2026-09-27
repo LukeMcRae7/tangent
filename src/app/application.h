@@ -15,6 +15,8 @@
 #include "app/file_dialog.h"
 #include "app/printability.h"
 #include "app/preferences.h"
+#include "app/crash.h"
+#include "core/crashlog.h"
 #include "app/measure.h"
 #include "mesh/export_stl.h"
 #include "scene/serialize.h"
@@ -50,6 +52,9 @@ public:
     void setLightTheme() { prefs_.lightTheme = true; }
     // For a screenshot of the offer to recover: shown although unattended.
     void setOfferRecovery() { offerRecoveryDemo_ = true; }
+    // Crash on purpose a few frames in, with the handler installed, so the
+    // report and the save aside can be checked.
+    void setCrashTest() { crashTest_ = true; }
     bool offerRecoveryDemo_ = false;
     void setUnits(units::Length u) { prefs_.units = u; }
 
@@ -1021,6 +1026,14 @@ private:
     std::string recoveryFrom_;        // the project the recovered work was, or empty
     std::string recoveryWhen_;
     void stepAutosave();
+    bool writeRecovery();             // the work, saved aside with a note of what it was
+public:
+    crash::Saved saveAsideForCrash();  // for the crash handler's forked copy
+private:
+    std::string crashReport_;         // the report the last session left, if it crashed
+    bool crashTest_ = false;
+    int  crashTestFrame_ = 0;
+    void installCrashHandler();
     void clearRecovery();
     void checkRecovery();
     void drawRecoveryPrompt();
@@ -1637,7 +1650,11 @@ private:
     // Transient message shown in the status bar, e.g. a refused edit.
     std::string notice_;
     float       noticeAge_ = 0.0f;
-    void setNotice(const std::string& text) { notice_ = text; noticeAge_ = 0.0f; }
+    void setNotice(const std::string& text) {
+        notice_ = text;
+        noticeAge_ = 0.0f;
+        crashlog::note("said: %s", text.c_str());
+    }
 
     // Reverts a just-applied edit that would leave the model unprintable.
     bool editKeepsSolid(ObjectId id);

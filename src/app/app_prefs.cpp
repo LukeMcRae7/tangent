@@ -7,6 +7,8 @@
 #include "app/application.h"
 
 #include "core/palette.h"
+#include "core/crashlog.h"
+#include "app/crash.h"
 #include "core/units.h"
 #include "scene/serialize.h"
 #include "ui/theme.h"
@@ -82,12 +84,13 @@ void Application::stepAutosave() {
     // At a quiet moment: not in the middle of a drag or an operation, when
     // what is on screen is not yet what the project holds.
     if (ImGui::IsMouseDown(ImGuiMouseButton_Left) || commandCornerTaken()) return;
-    const std::string path = recoveryPath();
-    if (path.empty()) return;
-    const ProjectResult r = saveProject(scene_, path);
     autosaveClock_ = 0.0f;
-    if (!r.ok) return;
-    autosavedRevision_ = undo_.revision();
+    if (writeRecovery()) autosavedRevision_ = undo_.revision();
+}
+
+bool Application::writeRecovery() {
+    const std::string path = recoveryPath();
+    if (path.empty() || !saveProject(scene_, path).ok) return false;
     // What it was, and when, for the offer to recover it.
     if (FILE* f = std::fopen(recoveryNote().c_str(), "w")) {
         const std::time_t now = std::time(nullptr);
@@ -96,6 +99,39 @@ void Application::stepAutosave() {
         std::fprintf(f, "%s\n%s\n", projectPath_.c_str(), when);
         std::fclose(f);
     }
+    return true;
+}
+
+namespace {
+// Called in a forked copy of the crashed process: the work, saved aside.
+crash::Saved emergencySave(void* context) {
+    return static_cast<Application*>(context)->saveAsideForCrash();
+}
+std::string crashDirectory() {
+    const std::string dir = configDirectory();
+    return dir.empty() ? std::string() : dir + "/crashes";
+}
+} // namespace
+
+crash::Saved Application::saveAsideForCrash() {
+    if (!dirty()) return crash::Saved::Nothing;
+    return writeRecovery() ? crash::Saved::Done : crash::Saved::Failed;
+}
+
+void Application::installCrashHandler() {
+    // Not for a demo or a test, which would leave a report -- and work to
+    // recover -- in the person's own settings; except the crash test itself.
+    const std::string dir = crashDirectory();
+    if (dir.empty()) return;
+    if (!unattended_ || offerRecoveryDemo_) crashReport_ = crash::pendingReport(dir);
+    if (unattended_ && !crashTest_) return;
+#if defined(TANGENT_BUILD)
+    const char* build = TANGENT_BUILD;
+#else
+    const char* build = "unknown";
+#endif
+    crash::install(dir, build, &emergencySave, this);
+    crashlog::note("started, build %s", build);
 }
 
 void Application::clearRecovery() {
@@ -107,6 +143,7 @@ void Application::clearRecovery() {
 }
 
 void Application::checkRecovery() {
+    installCrashHandler();
     if (unattended_ && !offerRecoveryDemo_) return;
     std::error_code ec;
     if (!std::filesystem::exists(recoveryPath(), ec)) return;
@@ -126,6 +163,26 @@ void Application::checkRecovery() {
 }
 
 void Application::drawRecoveryPrompt() {
+    // A crash with nothing unsaved: said, with where the report is.
+    if (!recoveryOffered_ && !crashReport_.empty()) {
+        ImGui::OpenPopup("##crashed");
+        if (ui::beginCard("##crashed", "Tangent quit unexpectedly", 440.0f)) {
+            ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 404.0f);
+            ImGui::TextColored(ui::im(palette::kTextDim), "Nothing unsaved was lost. What happened was written to:");
+            ImGui::PopTextWrapPos();
+            ImGui::TextUnformatted(crashReport_.c_str());
+            ImGui::Dummy(ImVec2(0, 10));
+            if (ui::quietButton("Copy the path", ImVec2(130, 0))) ImGui::SetClipboardText(crashReport_.c_str());
+            ImGui::SameLine();
+            if (ui::primaryButton("OK", ImVec2(90, 0)) || ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+                crash::acknowledge(crashDirectory());
+                crashReport_.clear();
+                ImGui::CloseCurrentPopup();
+            }
+            ui::endCard();
+        }
+        return;
+    }
     if (!recoveryOffered_) return;
     ImGui::OpenPopup("##recover");
     if (!ui::beginCard("##recover", "Recover unsaved work?", 420.0f)) return;
@@ -133,8 +190,11 @@ void Application::drawRecoveryPrompt() {
                                                    : std::filesystem::path(recoveryFrom_).filename().string();
     ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 384.0f);
     ImGui::TextColored(ui::im(palette::kTextDim),
-                       "Tangent closed with changes that were not saved. %s was kept aside%s%s.", name.c_str(),
+                       "Tangent %s with changes that were not saved. %s was kept aside%s%s.",
+                       crashReport_.empty() ? "closed" : "quit unexpectedly", name.c_str(),
                        recoveryWhen_.empty() ? "" : " at ", recoveryWhen_.c_str());
+    if (!crashReport_.empty())
+        ImGui::TextColored(ui::im(palette::kTextFaint), "What happened was written to %s", crashReport_.c_str());
     ImGui::PopTextWrapPos();
     ImGui::Dummy(ImVec2(0, 10));
     if (ui::primaryButton("Recover", ImVec2(110, 0))) {
@@ -152,12 +212,16 @@ void Application::drawRecoveryPrompt() {
             setNotice("The kept work could not be read: " + r.error);
         }
         recoveryOffered_ = false;
+        crash::acknowledge(crashDirectory());
+        crashReport_.clear();
         ImGui::CloseCurrentPopup();
     }
     ImGui::SameLine();
     if (ui::quietButton("Discard", ImVec2(110, 0))) {
         clearRecovery();
         recoveryOffered_ = false;
+        crash::acknowledge(crashDirectory());
+        crashReport_.clear();
         ImGui::CloseCurrentPopup();
     }
     ui::endCard();

@@ -1,4 +1,5 @@
 #include "app/undo.h"
+#include "core/crashlog.h"
 
 #include <algorithm>
 
@@ -171,6 +172,7 @@ void MeshCommand::redo(Scene& scene) { apply(scene, after_, specAfter_); }
 // ---------------------------------------------------------------------------
 void UndoStack::push(std::unique_ptr<Command> cmd, bool merge) {
     if (!cmd) return;
+    crashlog::note("did: %s", cmd->label().c_str());
 
     ++revision_;
     if (merge && !mergeBarrier_ && !done_.empty() && done_.back()->mergeWith(*cmd)) {

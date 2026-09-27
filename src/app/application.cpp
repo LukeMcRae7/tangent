@@ -8847,6 +8847,7 @@ std::string fileStem(const std::string& path) {
 } // namespace
 
 void Application::runFileOperation(FileMode mode, const std::string& path) {
+    crashlog::note("file operation %d: %s", static_cast<int>(mode), path.c_str());
     if (path.empty()) return;
 
     switch (mode) {
@@ -9995,6 +9996,11 @@ int Application::run() {
         gProbe.begin();
         applyActions();
         stepAutosave();
+        if (crashTest_ && ++crashTestFrame_ == 5) {
+            // Something unsaved first, so the save aside has work to keep.
+            undo_.push(std::make_unique<ColourCommand>(kNoObject, false, Vec3{}, true, Vec3{}));
+            crash::crashNow();
+        }
         gProbe.end("actions");
 
         // A feature that dropped out of the chain during any of the above.

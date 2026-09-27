@@ -235,6 +235,21 @@ for m in 1 2; do
   fi
 done
 
+# A crash has to leave something behind: a report that says what and where,
+# and the unsaved work saved aside for the next start to offer back.
+cfg=$(mktemp -d)
+XDG_CONFIG_HOME=$cfg timeout 60 ./build/tangent --crash-test --smoke-test 30 >/dev/null 2>&1
+report=$(ls $cfg/tangent/crashes/crash-*.txt 2>/dev/null | head -1)
+if [ -n "$report" ] && grep -q "SIGSEGV" "$report" && grep -q "crashing on purpose" "$report" \
+   && grep -q "saved aside" "$report" && [ -s $cfg/tangent/recovery.tangent ] && [ -f $cfg/tangent/crashes/pending ]; then
+  printf '  ok    --crash-test\n'
+else
+  printf '  FAIL  crash-test: no report, or the work was not saved aside\n'
+  [ -n "$report" ] && sed 's/^/        /' "$report" | head -20
+  fail=1
+fi
+rm -rf "$cfg"
+
 # A large mesh has to get all the way to being useful: reduced to fit, turned
 # into a solid, bored, and split -- each step checked for what it made, not
 # only for running. The plate is generated, so this needs no file on disk.

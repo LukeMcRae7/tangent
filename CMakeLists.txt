@@ -164,7 +164,7 @@ if(TANGENT_BREP)
     ${OpenCASCADE_DataExchange_LIBRARIES})
 endif()
 
-set(TANGENT_GEOM src/core/units.cpp src/geom/body.cpp src/geom/operations.cpp src/geom/fasteners.cpp
+set(TANGENT_GEOM src/core/units.cpp src/core/crashlog.cpp src/geom/body.cpp src/geom/operations.cpp src/geom/fasteners.cpp
                  src/geom/kernel_guard.cpp src/mesh/decimate.cpp src/sketch/sketch.cpp
                  src/sketch/svg.cpp src/scene/sketch_project.cpp
                  ${TANGENT_BREP_SRC})
@@ -182,6 +182,7 @@ add_executable(tangent
   src/app/app_section.cpp
   src/app/app_prefs.cpp
   src/app/app_select.cpp
+  src/app/crash.cpp
   src/app/preferences.cpp
   src/app/clearance.cpp
   src/app/plane_pick.cpp
@@ -225,6 +226,18 @@ target_include_directories(tangent PRIVATE src)
 # Where guarded kernel work is tried on a platform without fork, and on Linux
 # when TANGENT_ISOLATION=worker asks for it. It has to sit beside whatever runs
 # it, so everything that guards work depends on it being built.
+# The build a crash report names: the version, and the commit it was built from.
+execute_process(COMMAND git rev-parse --short HEAD WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+                OUTPUT_VARIABLE TANGENT_COMMIT OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+if(NOT TANGENT_COMMIT)
+  set(TANGENT_COMMIT "unknown")
+endif()
+target_compile_definitions(tangent PRIVATE "TANGENT_BUILD=\"${PROJECT_VERSION} (${TANGENT_COMMIT})\"")
+# Function names in a crash report's backtrace, not bare addresses.
+if(NOT WIN32)
+  target_link_options(tangent PRIVATE -rdynamic)
+endif()
+
 add_executable(tangent_trial src/scene/trial_worker.cpp src/scene/trials.cpp
   src/scene/serialize.cpp src/scene/scene.cpp src/scene/assembly.cpp src/core/units.cpp src/scene/feature.cpp
   src/mesh/health.cpp ${TANGENT_GEOM} src/mesh/halfedge.cpp src/mesh/primitives.cpp)
@@ -353,7 +366,7 @@ target_link_libraries(test_sketch_tool PRIVATE imgui tangent_epoxy)
 target_compile_options(test_sketch_tool PRIVATE ${TANGENT_WARNINGS})
 add_test(NAME sketch_tool COMMAND test_sketch_tool)
 
-add_executable(test_guard tests/test_guard.cpp
+add_executable(test_guard tests/test_guard.cpp src/app/crash.cpp
   src/scene/scene.cpp src/scene/assembly.cpp src/core/units.cpp src/scene/feature.cpp src/scene/serialize.cpp src/scene/trials.cpp
   src/mesh/health.cpp ${TANGENT_GEOM} src/mesh/halfedge.cpp src/mesh/primitives.cpp
   src/app/camera.cpp)
