@@ -11,6 +11,13 @@ if [ "$rc" -ne 0 ] && [ -f build/Testing/Temporary/LastTestsFailed.log ]; then
            grep -v "^Test project\|^ *Start\|tests passed\|Total Test\|^$" | tail -14)
     tail=${tail//%/%25}; tail=${tail//$'\r'/}; tail=${tail//$'\n'/%0A}
     echo "::error title=test ${name}::${tail}"
+    # A crash prints nothing useful on its own; where it happened does.
+    if command -v gdb >/dev/null; then
+      bt=$( (cd build && gdb -q -batch -ex run -ex bt "./test_${name}") 2>&1 |
+            grep -E "signal|^#[0-9]" | head -18)
+      bt=${bt//%/%25}; bt=${bt//$'\r'/}; bt=${bt//$'\n'/%0A}
+      echo "::error title=backtrace ${name}::${bt}"
+    fi
   done < build/Testing/Temporary/LastTestsFailed.log
 fi
 exit "$rc"

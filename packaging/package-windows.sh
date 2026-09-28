@@ -11,6 +11,7 @@ out=dist/$name
 
 rm -rf dist && mkdir -p "$out"
 cp build/tangent.exe build/tangent_trial.exe "$out/"
+strip "$out/tangent.exe" "$out/tangent_trial.exe"
 cp -r shaders "$out/"
 mkdir "$out/assets"
 cp -r assets/fonts assets/icons assets/icon.png assets/icon.svg "$out/assets/"

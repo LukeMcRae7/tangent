@@ -95,7 +95,12 @@ jobs:
       # These drive the application itself.
       - name: Demo sweep
         if: matrix.kernel
-        run: xvfb-run -a ./.github/sweep.sh
+        run: |
+          set -o pipefail
+          xvfb-run -a ./.github/sweep.sh 2>&1 | tee sweep.log && exit 0
+          # Each failure and the lines it printed, as annotations.
+          grep -A8 "FAIL" sweep.log | head -120 | awk -v RS="--\n" '{gsub(/%/,"%25"); gsub(/\n/,"%0A"); print "::error title=sweep::" $0}'
+          exit 1
 
       - name: Package
         if: matrix.kernel
@@ -137,10 +142,12 @@ jobs:
             git p7zip
           pacboy: >-
             gcc:p cmake:p ninja:p pkgconf:p
-            sdl3:p libepoxy:p zlib:p opencascade:p
+            sdl3:p libepoxy:p zlib:p opencascade:p gdb:p
 
       - name: Configure
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+        # With symbols, so a crashing test's backtrace names functions; the
+        # package strips them.
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
 
       - name: Build
         run: .github/build-annotated.sh
