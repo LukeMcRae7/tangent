@@ -97,7 +97,7 @@ jobs:
         if: matrix.kernel
         run: |
           set -o pipefail
-          xvfb-run -a ./.github/sweep.sh 2>&1 | tee sweep.log && exit 0
+          xvfb-run -a -s "-screen 0 1920x1080x24" ./.github/sweep.sh 2>&1 | tee sweep.log && exit 0
           # Each failure and the lines it printed, as annotations.
           grep -A8 "FAIL" sweep.log | head -120 | awk -v RS="--\n" '{gsub(/%/,"%25"); gsub(/\n/,"%0A"); print "::error title=sweep::" $0}'
           exit 1
@@ -113,7 +113,7 @@ jobs:
         run: |
           sudo mv /opt/deps /opt/deps.hidden
           img=$(ls tangent-*.AppImage)
-          out=$(APPIMAGE_EXTRACT_AND_RUN=1 xvfb-run -a ./"$img" --step-demo /tmp/smoke.step --smoke-test 2>&1) || true
+          out=$(APPIMAGE_EXTRACT_AND_RUN=1 xvfb-run -a -s "-screen 0 1920x1080x24" ./"$img" --step-demo /tmp/smoke.step --smoke-test 2>&1) || true
           sudo mv /opt/deps.hidden /opt/deps
           echo "$out" | tail -20
           echo "$out" | grep -q "rendered cleanly"
