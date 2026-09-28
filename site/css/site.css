@@ -444,7 +444,11 @@ h2 {
 }
 @media (max-width: 760px) {
   :root { --nav-h: 60px; }
-  .nav-links { display: none; }
+  /* The pages stay reachable: a smaller pill, without the Download link the
+     button beside it already is. */
+  .nav { gap: 12px; }
+  .nav-links a { padding: 6px 12px; font-size: 13px; }
+  .nav-links a[href$="#download"] { display: none; }
   .hero { align-items: flex-end; padding-bottom: 88px; }
   .chip { margin-bottom: 20px; }
   h1 { margin-bottom: 20px; }
@@ -465,6 +469,12 @@ h2 {
   .credits li { grid-template-columns: 1fr auto; }
   .credits li span:nth-child(2) { display: none; }
   .doc-section { padding-bottom: 64px; margin-bottom: 64px; }
+}
+
+@media (max-width: 480px) {
+  /* Room for the pill on a phone: the mark stands for the name, and GitHub
+     is linked from the download section. */
+  .brand span, .nav-end .icon-btn { display: none; }
 }
 
 @media (prefers-reduced-motion: reduce) {

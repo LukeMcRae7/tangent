@@ -79,9 +79,12 @@ function buildFloor(y, brand) {
   const floor = new THREE.Group();
   floor.position.y = y;
 
-  // Where the part's shadow falls.
+  // Where the part's shadow falls. Everything on the floor lies a fraction
+  // of a millimetre above it, closer than a phone's depth buffer can tell
+  // apart, so nothing on the floor writes depth: each layer is drawn in turn
+  // by renderOrder instead, and only the part can hide them.
   const shadow = new THREE.Mesh(new THREE.PlaneGeometry(900, 900),
-    new THREE.ShadowMaterial({ opacity: 0.55 }));
+    new THREE.ShadowMaterial({ opacity: 0.55, depthWrite: false }));
   shadow.rotation.x = -Math.PI / 2;
   shadow.receiveShadow = true;
   floor.add(shadow);
@@ -100,11 +103,12 @@ function buildFloor(y, brand) {
   }));
   pool.rotation.x = -Math.PI / 2;
   pool.position.y = 0.02;
+  pool.renderOrder = 1;
   floor.add(pool);
 
   const flat = (geo, mat, lift) => {
     const m = new THREE.Mesh(geo, mat);
-    m.rotation.x = -Math.PI / 2; m.position.y = lift; floor.add(m); return m;
+    m.rotation.x = -Math.PI / 2; m.position.y = lift; m.renderOrder = 2; floor.add(m); return m;
   };
 
   // One thin line across the floor, touching the circle the part turns in
@@ -134,6 +138,7 @@ function buildFloor(y, brand) {
   const dot = flat(new THREE.CircleGeometry(1.1, 32),
     new THREE.MeshBasicMaterial({ color: brand, transparent: true, opacity: 0.9, depthWrite: false }), 0.12);
   dot.position.x = P.x; dot.position.z = P.z;
+  dot.renderOrder = 3;
 
   return floor;
 }
@@ -227,7 +232,9 @@ export async function start(stage, config) {
   const floor = buildFloor(floorY, brand);
   scene.add(floor);
 
-  const camera = new THREE.PerspectiveCamera(26, 1, 5, 3000);
+  // The camera never comes within ~130 mm of anything, and a near plane
+  // pulled in closer than it needs throws away depth precision.
+  const camera = new THREE.PerspectiveCamera(26, 1, 40, 3000);
   const target = new THREE.Vector3(0, -3, 0);
 
   // Render at HDR with MSAA, bloom the bright things, tone map at the end.
