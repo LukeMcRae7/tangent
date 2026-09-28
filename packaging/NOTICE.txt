@@ -17,6 +17,6 @@ This build includes the following projects, each under its own licence:
   Space Grotesk   typeface                    OFL-1.1  (assets/fonts/OFL.txt)
   Tabler Icons    icons                       MIT      (assets/fonts/tabler-icons-LICENSE.txt)
 
-The Windows build also carries the MinGW-w64 runtime and the libraries
-OpenCASCADE depends on, as packaged by MSYS2 (https://www.msys2.org); their
+The Windows build also carries the Visual C++ runtime and the libraries
+tangent depends on, as packaged by vcpkg (https://vcpkg.io); their
 licences are in licenses/.

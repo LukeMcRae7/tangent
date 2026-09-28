@@ -6,8 +6,9 @@
 #             tests, the headless demo sweep, then an AppImage, which is
 #             itself smoke-tested.
 #   no-kernel The same, built without OpenCASCADE: meshes only.
-#   windows   MSYS2 UCRT64, whose packages include SDL3 and OpenCASCADE.
-#             Unit tests, then a portable zip with every DLL beside the .exe.
+#   windows   MSVC, with SDL3 and OpenCASCADE from vcpkg (vcpkg.json), its
+#             built packages cached. Unit tests, then a portable zip with
+#             every DLL and the C++ runtime beside the .exe.
 #   release   Tags only: both packages attached to a GitHub release.
 name: build
 
@@ -139,57 +140,46 @@ jobs:
     runs-on: windows-2022
     defaults:
       run:
-        shell: msys2 {0}
+        shell: bash
     env:
-      # OpenCASCADE's DLLs, for the tests and for the package to find.
-      OCCT_PREFIX: C:/occt
+      # vcpkg's built packages, kept between runs: OpenCASCADE takes an hour.
+      VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}/.vcpkg-bin,readwrite
     steps:
       - uses: actions/checkout@v5
 
-      - uses: msys2/setup-msys2@v2
-        with:
-          msystem: UCRT64
-          update: true
-          install: >-
-            git p7zip
-          pacboy: >-
-            gcc:p cmake:p ninja:p pkgconf:p
-            sdl3:p libepoxy:p zlib:p gdb:p
+      # MSVC rather than MinGW: OpenCASCADE 7.9.3 built by MinGW's GCC 16
+      # crashed inside Extrema_ExtCC in every boolean that classified a point
+      # against a solid, whether MSYS2 built it or this job did.
+      - uses: ilammy/msvc-dev-cmd@v1
 
-      # Built here, as on Linux, rather than taken from MSYS2: MSYS2's own
-      # build crashed inside Extrema_ExtCC in every boolean that classified a
-      # point against a solid, where the same release built plainly does not.
-      - name: Restore OpenCASCADE
-        id: occt
+      # The same commit as vcpkg.json's builtin-baseline, so the versions the
+      # manifest names are the ones this vcpkg knows.
+      - uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgGitCommitId: '3723ec118c8354290925feb58d021a9205a3e772'
+
+      - name: Restore vcpkg packages
+        id: vcpkg-bin
         uses: actions/cache/restore@v4
         with:
-          path: C:/occt
-          key: occt-msys2-ucrt64-${{ env.OCCT_TAG }}-v1
-
-      - name: Build OpenCASCADE
-        if: steps.occt.outputs.cache-hit != 'true'
-        run: |
-          git clone --depth 1 -b "$OCCT_TAG" https://github.com/Open-Cascade-SAS/OCCT /tmp/OCCT
-          cmake -S /tmp/OCCT -B /tmp/OCCT/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_INSTALL_PREFIX="$OCCT_PREFIX" -DINSTALL_DIR_LAYOUT=Unix \
-            -DBUILD_MODULE_Visualization=OFF -DBUILD_MODULE_ApplicationFramework=OFF \
-            -DBUILD_MODULE_Draw=OFF -DBUILD_MODULE_DETools=OFF -DBUILD_DOC_Overview=OFF \
-            -DUSE_FREETYPE=OFF -DUSE_TK=OFF -DUSE_TCL=OFF -DUSE_OPENGL=OFF -DUSE_D3D=OFF -DUSE_TBB=OFF
-          cmake --build /tmp/OCCT/build && cmake --install /tmp/OCCT/build
-
-      - name: Save OpenCASCADE
-        if: steps.occt.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: C:/occt
-          key: ${{ steps.occt.outputs.cache-primary-key }}
+          path: .vcpkg-bin
+          key: vcpkg-bin-msvc-${{ hashFiles('vcpkg.json') }}-v1
+          restore-keys: vcpkg-bin-msvc-
 
       - name: Configure
-        # With symbols, so a crashing test's backtrace names functions; the
-        # package strips them.
+        # vcpkg installs the manifest's dependencies here.
         run: >
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
-          -DCMAKE_PREFIX_PATH="$OCCT_PREFIX"
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl
+          -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
+          -DVCPKG_TARGET_TRIPLET=x64-windows
+
+      - name: Save vcpkg packages
+        if: steps.vcpkg-bin.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .vcpkg-bin
+          key: ${{ steps.vcpkg-bin.outputs.cache-primary-key }}
 
       - name: Build
         run: .github/build-annotated.sh
@@ -197,10 +187,10 @@ jobs:
       # Windows has no fork isolation, so a kernel fault that Linux survives is
       # fatal here. Running the tests is how that stops being a surprise.
       - name: Test
-        run: PATH="$(cygpath "$OCCT_PREFIX")/bin:$PATH" .github/test-annotated.sh
+        run: .github/test-annotated.sh
 
       - name: Package
-        run: PATH="$(cygpath "$OCCT_PREFIX")/bin:$PATH" packaging/package-windows.sh "${GITHUB_REF_NAME#v}" "$OCCT_PREFIX"
+        run: packaging/package-windows.sh "${GITHUB_REF_NAME#v}"
 
       - uses: actions/upload-artifact@v4
         with:
