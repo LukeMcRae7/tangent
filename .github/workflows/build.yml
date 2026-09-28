@@ -69,6 +69,14 @@ jobs:
             -DUSE_FREETYPE=OFF -DUSE_TK=OFF -DUSE_TCL=OFF -DUSE_OPENGL=OFF -DUSE_XLIB=OFF
           cmake --build /tmp/OCCT/build && cmake --install /tmp/OCCT/build
 
+      # The OpenCASCADE libraries load one another, and an executable's
+      # RUNPATH covers only its own direct dependencies, so the prefix goes to
+      # the loader itself.
+      - name: Make the prefix's libraries loadable
+        run: |
+          echo /opt/deps/lib | sudo tee /etc/ld.so.conf.d/tangent-deps.conf
+          sudo ldconfig
+
       - name: Configure
         run: >
           cmake -S . -B build -G Ninja

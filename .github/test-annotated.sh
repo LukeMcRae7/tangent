@@ -6,6 +6,7 @@ ctest --test-dir build --output-on-failure 2>&1 | tee test.log
 rc=${PIPESTATUS[0]}
 if [ "$rc" -ne 0 ] && [ -f build/Testing/Temporary/LastTestsFailed.log ]; then
   while IFS=: read -r _ name; do
+    name=${name%$'\r'}   # native ctest on Windows writes CRLF
     tail=$(ctest --test-dir build -R "^${name}\$" --output-on-failure 2>&1 |
            grep -v "^Test project\|^ *Start\|tests passed\|Total Test\|^$" | tail -14)
     tail=${tail//%/%25}; tail=${tail//$'\r'/}; tail=${tail//$'\n'/%0A}
