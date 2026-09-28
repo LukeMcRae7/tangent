@@ -88,8 +88,6 @@ bool Application::init() {
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
     SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
     SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
-    SDL_GL_SetAttribute(SDL_GL_MULTISAMPLEBUFFERS, 1);
-    SDL_GL_SetAttribute(SDL_GL_MULTISAMPLESAMPLES, 4);
 
     // The application draws its own frame: the bar along the top is the title
     // bar, and the window's three buttons sit at its right-hand end. The
@@ -98,7 +96,23 @@ bool Application::init() {
     SDL_WindowFlags windowFlags = SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE |
                                   SDL_WINDOW_HIGH_PIXEL_DENSITY;
     if (!nativeFrame_) windowFlags |= SDL_WINDOW_BORDERLESS;
-    window_ = SDL_CreateWindow("Tangent", 1600, 950, windowFlags);
+
+    // Multisampled if the display has it, and plain if not: a virtual machine,
+    // a software renderer or a headless X server may offer no multisampled
+    // visual, and jagged edges beat no window. Either the window or the
+    // context can be where that shows, depending on the platform.
+    for (const int samples : {4, 0}) {
+        SDL_GL_SetAttribute(SDL_GL_MULTISAMPLEBUFFERS, samples ? 1 : 0);
+        SDL_GL_SetAttribute(SDL_GL_MULTISAMPLESAMPLES, samples);
+        window_ = SDL_CreateWindow("Tangent", 1600, 950, windowFlags);
+        if (window_) {
+            glCtx_ = SDL_GL_CreateContext(window_);
+            if (glCtx_) break;
+            SDL_DestroyWindow(window_);
+            window_ = nullptr;
+        }
+        std::fprintf(stderr, "[app] no window with %d samples: %s\n", samples, SDL_GetError());
+    }
     if (!window_) {
         std::fprintf(stderr, "[app] SDL_CreateWindow failed: %s\n", SDL_GetError());
         return false;
@@ -119,11 +133,6 @@ bool Application::init() {
         SDL_SetWindowMinimumSize(window_, 900, 560);
     }
 
-    glCtx_ = SDL_GL_CreateContext(window_);
-    if (!glCtx_) {
-        std::fprintf(stderr, "[app] GL context creation failed: %s\n", SDL_GetError());
-        return false;
-    }
     SDL_GL_MakeCurrent(window_, static_cast<SDL_GLContext>(glCtx_));
     SDL_GL_SetSwapInterval(1);
 
