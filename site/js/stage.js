@@ -5,9 +5,6 @@
 // sits fixed behind the page. It holds the part beside the hero, keeps it
 // beside the features while they scroll past (lighting up the faces each one
 // is about), and fades it out before the rest of the page.
-//
-// On the floor is the brand's own figure, kept faint: a straight line that
-// touches the circle the part turns in at exactly one point.
 import * as THREE from 'three';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
@@ -101,8 +98,8 @@ const ramp = stops => x => {
   return stops[stops.length - 1][1];
 };
 
-// ── The floor: a shadow, a pool of light, and the line tangent to it ────
-function buildFloor(y, brand) {
+// ── The floor: a shadow, a pool of light, and the circle the part turns in ─
+function buildFloor(y) {
   const floor = new THREE.Group();
   floor.position.y = y;
 
@@ -132,27 +129,11 @@ function buildFloor(y, brand) {
     m.rotation.x = -Math.PI / 2; m.position.y = lift; m.renderOrder = 2; floor.add(m); return m;
   };
 
-  // One thin line across the floor, touching the circle the part turns in
-  // at a single point: the name, said quietly. It fades out at both ends
-  // rather than running off the edge of the page.
+  // The circle the part turns in, kept faint.
   const R = 62;
-  const fade = alphaTexture(512, 1, ramp([[0, 0], [0.5, 1], [1, 0]]));
-  const theta = 28 * DEG;
-  const P = new THREE.Vector3(Math.cos(theta) * R, 0, Math.sin(theta) * R);
-  const line = flat(new THREE.PlaneGeometry(420, 0.45), new THREE.MeshBasicMaterial({
-    color: brand, map: fade, transparent: true, opacity: 0.4, depthWrite: false,
-  }), 0.08);
-  line.position.x = P.x; line.position.z = P.z;
-  line.rotation.z = Math.atan2(-Math.cos(theta), -Math.sin(theta));   // along (-sin, 0, cos) once laid flat
-
-  // The circle the part turns in, and the point where the line touches it.
   flat(new THREE.RingGeometry(R - 0.22, R + 0.22, 256), new THREE.MeshBasicMaterial({
     color: 0xffffff, transparent: true, opacity: 0.14, depthWrite: false,
   }), 0.05);
-  const dot = flat(new THREE.CircleGeometry(1.1, 32),
-    new THREE.MeshBasicMaterial({ color: brand, transparent: true, opacity: 0.9, depthWrite: false }), 0.12);
-  dot.position.x = P.x; dot.position.z = P.z;
-  dot.renderOrder = 3;
 
   return floor;
 }
@@ -248,7 +229,7 @@ export async function start(stage, config) {
   scene.add(spinner);
 
   const floorY = -info.size_mm[2] / 2 - 0.05;
-  const floor = buildFloor(floorY, brand);
+  const floor = buildFloor(floorY);
   scene.add(floor);
 
   // The camera never comes within ~130 mm of anything, and a near plane
