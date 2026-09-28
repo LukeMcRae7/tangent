@@ -59,6 +59,11 @@ if(MSVC)
 else()
   set(TANGENT_WARNINGS -Wall -Wextra)
   set(TANGENT_WARNINGS_LOOSE -Wall -Wextra -Wno-unused-parameter)
+  # MinGW, as the MSVC branch: strict C++20 hides M_PI, which OpenCASCADE's
+  # own headers use, and <windows.h> would otherwise take min and max.
+  if(WIN32)
+    add_compile_definitions(NOMINMAX _USE_MATH_DEFINES)
+  endif()
 endif()
 
 # ---- Dear ImGui (docking branch) ------------------------------------------
