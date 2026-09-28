@@ -9,35 +9,37 @@
   <meta property="og:title" content="tangent">
   <meta property="og:description" content="Exact 3D modelling for printing.">
   <meta property="og:image" content="site/model/poster.png">
-  <link rel="icon" href="assets/icon.svg" type="image/svg+xml">
-  <link rel="apple-touch-icon" href="assets/icon.png">
+  <link rel="icon" href="assets/icon.svg?v=dev" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="assets/icon.png?v=dev">
 
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap">
-  <link rel="stylesheet" href="site/css/site.css">
-  <link rel="modulepreload" href="site/js/stage.js">
-  <link rel="preload" href="site/model/part.bin" as="fetch" crossorigin>
+  <link rel="stylesheet" href="site/css/site.css?v=dev">
+  <link rel="modulepreload" href="site/js/stage.js?v=dev">
+  <link rel="preload" href="site/model/part.bin?v=dev" as="fetch" crossorigin>
 
   <script type="importmap">
     { "imports": {
         "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
-        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/" } }
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/",
+        "./site/js/config.js": "./site/js/config.js?v=dev",
+        "./site/js/stage.js": "./site/js/stage.js?v=dev" } }
   </script>
-  <script type="module" src="site/js/site.js"></script>
+  <script type="module" src="site/js/site.js?v=dev"></script>
 </head>
 <body>
 
 <!-- The part, drawn behind everything. It sits beside the hero, then beside
      the features as they scroll past, then fades out. See site/js/stage.js. -->
 <div class="stage" id="stage" aria-hidden="true">
-  <img class="stage-poster" src="site/model/poster.png" alt="">
+  <img class="stage-poster" src="site/model/poster.png?v=dev" alt="">
 </div>
 <svg class="callouts" id="callouts" aria-hidden="true"></svg>
 
 <header class="nav" id="nav">
   <a class="brand" href="#home" aria-label="tangent home">
-    <img src="assets/icon.svg" alt="" width="30" height="30">
+    <img src="assets/icon.svg?v=dev" alt="" width="30" height="30">
     <span>tangent</span>
   </a>
   <nav class="nav-links" aria-label="Sections">
@@ -178,7 +180,7 @@
   <!-- ───────────────────────── Download ───────────────────────── -->
   <section class="download" id="download">
     <div class="download-card">
-      <img class="download-icon" src="assets/icon.svg" alt="" width="72" height="72">
+      <img class="download-icon" src="assets/icon.svg?v=dev" alt="" width="72" height="72">
       <h2>Get tangent<span class="stop">.</span></h2>
       <p class="lede">Builds are on GitHub Releases. tangent is still in development, so expect rough edges.</p>
       <div class="actions actions-center">

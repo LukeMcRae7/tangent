@@ -1,0 +1,47 @@
+# The website, deployed to GitHub Pages on every push to main.
+#
+# GitHub serves every file with a ten-minute cache and no way to change it, so
+# a phone can keep a page's old scripts for ten minutes after a deploy. The
+# pages name every file they load with ?v=dev; this swaps that for the commit,
+# so each deploy's files have new names and are fetched fresh.
+#
+# Needs Settings > Pages > Source set to "GitHub Actions".
+name: pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Stamp the commit into the file names
+        run: |
+          mkdir _site
+          cp -r index.html about.html site assets _site/
+          v=${GITHUB_SHA::10}
+          sed -i "s/?v=dev/?v=$v/g" _site/*.html _site/site/js/*.js
+          ! grep -rn '?v=dev' _site/*.html _site/site/js
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - id: deploy
+        uses: actions/deploy-pages@v4

@@ -6,20 +6,23 @@
   <title>About | tangent</title>
   <meta name="description" content="What tangent is, why it exists, how it is built, and how AI is used in its development.">
   <meta name="theme-color" content="#0E0E0F">
-  <link rel="icon" href="assets/icon.svg" type="image/svg+xml">
-  <link rel="apple-touch-icon" href="assets/icon.png">
+  <link rel="icon" href="assets/icon.svg?v=dev" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="assets/icon.png?v=dev">
 
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap">
-  <link rel="stylesheet" href="site/css/site.css">
-  <script type="module" src="site/js/site.js"></script>
+  <link rel="stylesheet" href="site/css/site.css?v=dev">
+  <script type="importmap">
+    { "imports": { "./site/js/config.js": "./site/js/config.js?v=dev" } }
+  </script>
+  <script type="module" src="site/js/site.js?v=dev"></script>
 </head>
 <body class="page-about">
 
 <header class="nav" id="nav">
   <a class="brand" href="index.html" aria-label="tangent home">
-    <img src="assets/icon.svg" alt="" width="30" height="30">
+    <img src="assets/icon.svg?v=dev" alt="" width="30" height="30">
     <span>tangent</span>
   </a>
   <nav class="nav-links" aria-label="Pages">
@@ -71,7 +74,7 @@
           tangent refuses it and says why.
         </p>
         <figure class="media" style="--ratio: 16 / 9">
-          <img src="assets/screenshots/modelling_window.png" alt="The modelling window">
+          <img src="assets/screenshots/modelling_window.png?v=dev" alt="The modelling window">
           <figcaption>The modelling window</figcaption>
         </figure>
       </section>
@@ -90,7 +93,7 @@
           Every export is checked to be solid before it leaves.
         </p>
         <figure class="media" style="--ratio: 16 / 9">
-          <video src="assets/screenshots/from_sketch.mp4" autoplay muted loop playsinline></video>
+          <video src="assets/screenshots/from_sketch.mp4?v=dev" autoplay muted loop playsinline></video>
           <figcaption>From a sketch to a part ready for the slicer</figcaption>
         </figure>
       </section>
@@ -111,11 +114,11 @@
         </p>
         <div class="media-pair">
           <figure class="media" style="--ratio: 4 / 3">
-            <img src="assets/screenshots/sketching.png" alt="Sketching with constraints">
+            <img src="assets/screenshots/sketching.png?v=dev" alt="Sketching with constraints">
             <figcaption>Sketching with constraints</figcaption>
           </figure>
           <figure class="media" style="--ratio: 4 / 3">
-            <img src="assets/screenshots/revolute_joint_operation.png" alt="Joint revolution operation">
+            <img src="assets/screenshots/revolute_joint_operation.png?v=dev" alt="Joint revolution operation">
             <figcaption>Joint tool operation: Revolute</figcaption>
           </figure>
         </div>

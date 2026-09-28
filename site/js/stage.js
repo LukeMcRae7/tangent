@@ -180,6 +180,11 @@ export async function start(stage, config) {
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   stage.append(renderer.domElement);
+  // A phone short of GPU memory (a reload, before the old page has let go of
+  // its own) can take the context away; the canvas would hold its last frame.
+  // The still stands in until the browser gives the context back.
+  renderer.domElement.addEventListener('webglcontextlost', () => stage.classList.add('lost'));
+  renderer.domElement.addEventListener('webglcontextrestored', () => stage.classList.remove('lost'));
 
   const bg = token('--bg'), brand = token('--brand'), partColour = token('--part');
   const edgeColour = token('--edge'), valid = token('--valid');

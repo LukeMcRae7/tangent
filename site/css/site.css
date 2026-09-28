@@ -87,6 +87,8 @@ svg { width: 1em; height: 1em; flex: none; }
 }
 .stage.no-webgl .stage-poster { opacity: 1; }
 .stage.ready .stage-poster { display: none; }
+.stage.lost canvas { visibility: hidden; }
+.stage.ready.lost .stage-poster { display: block; opacity: 1; }
 .stage video { width: 100%; height: 100%; object-fit: cover; }
 
 /* Dimension callouts, pinned to points on the part. Drawn by stage.js. */
