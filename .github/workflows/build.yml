@@ -81,7 +81,7 @@ jobs:
         run: .github/build-annotated.sh
 
       - name: Test
-        run: ctest --test-dir build --output-on-failure
+        run: .github/test-annotated.sh
 
       # A gesture that segfaults or draws nothing still passes the unit tests.
       # These drive the application itself.
@@ -140,7 +140,7 @@ jobs:
       # Windows has no fork isolation, so a kernel fault that Linux survives is
       # fatal here. Running the tests is how that stops being a surprise.
       - name: Test
-        run: ctest --test-dir build --output-on-failure
+        run: .github/test-annotated.sh
 
       - name: Package
         run: packaging/package-windows.sh "${GITHUB_REF_NAME#v}"
