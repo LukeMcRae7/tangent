@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>About | tangent</title>
+  <meta name="description" content="What tangent is, why it exists, how it is built, and how AI is used in its development.">
+  <meta name="theme-color" content="#0E0E0F">
+  <link rel="icon" href="assets/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="assets/icon.png">
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="site/css/site.css">
+  <script type="module" src="site/js/site.js"></script>
+</head>
+<body class="page-about">
+
+<header class="nav" id="nav">
+  <a class="brand" href="index.html" aria-label="tangent home">
+    <img src="assets/icon.svg" alt="" width="30" height="30">
+    <span>tangent</span>
+  </a>
+  <nav class="nav-links" aria-label="Pages">
+    <a href="index.html#features">Features</a>
+    <a href="about.html" class="active" aria-current="page">About</a>
+    <a href="index.html#download">Download</a>
+  </nav>
+  <div class="nav-end">
+    <a class="icon-btn" href="https://github.com/LukeMcRae7/tangent" aria-label="Source on GitHub">
+      <svg><use href="site/icons.svg#brand-github"/></svg>
+    </a>
+    <a class="btn btn-small" href="index.html#download">Download</a>
+  </div>
+</header>
+
+<main class="doc">
+
+  <header class="page-head">
+    <p class="eyebrow"><svg><use href="site/icons.svg#tangent"/></svg>About</p>
+    <h1>About tangent<span class="stop">.</span></h1>
+    <p class="lede">Reason for existing, and how it comes together</p>
+  </header>
+
+  <div class="doc-body">
+
+    <!-- Contents: one link per section below. Add a section, add a link. -->
+    <nav class="toc" aria-label="On this page">
+      <p class="toc-head">On this page</p>
+      <a href="#what">What it is</a>
+      <a href="#why">Why it exists</a>
+      <a href="#built">Software stack</a>
+      <a href="#ai">“AI slop”</a>
+      <a href="#status">Status</a>
+      <a href="#credits">Credits and licence</a>
+    </nav>
+
+    <div class="doc-content">
+
+      <section class="doc-section" id="what">
+        <p class="doc-no">01</p>
+        <h2>What it is</h2>
+        <p>
+          tangent is a 3D modeller for Windows & Linux, made for people who design parts to print.
+          It aims for the ergonomics of Blender and the precision of Fusion&nbsp;360: quick,
+          keyboard-driven modelling with exact geometry, with native export to 3MF and STL.
+        </p>
+        <p>
+          When an operation would produce something a slicer would reject,
+          tangent refuses it and says why.
+        </p>
+        <figure class="media" style="--ratio: 16 / 9">
+          <img src="assets/screenshots/modelling_window.png" alt="The modelling window">
+          <figcaption>The modelling window</figcaption>
+        </figure>
+      </section>
+
+      <section class="doc-section" id="why">
+        <p class="doc-no">02</p>
+        <h2>Why it exists</h2>
+        <p>
+          Artistic modellers are fast but approximate. Engineering CAD is exact but slow to
+          work in, with popular options rarely available to Linux. tangent provides a quick tool that gets the
+          numbers right.
+        </p>
+        <p>
+          So tangent is built around printing. Holes can be chosen by the screw, with a
+          printer's allowance. Threads are real geometry. Split parts get alignment pins.
+          Every export is checked to be solid before it leaves.
+        </p>
+        <figure class="media" style="--ratio: 16 / 9">
+          <video src="assets/screenshots/from_sketch.mp4" autoplay muted loop playsinline></video>
+          <figcaption>From a sketch to a part ready for the slicer</figcaption>
+        </figure>
+      </section>
+
+      <section class="doc-section" id="built">
+        <p class="doc-no">03</p>
+        <h2>Software stack</h2>
+        <p>
+          tangent is C++20 on OpenGL&nbsp;3.3 with SDL3, targeting Windows and Linux. The
+          geometry comes from OpenCASCADE's boundary representation. Only its modelling
+          libraries are linked. Sketches are solved by planegcs, FreeCAD's constraint solver.
+        </p>
+        <p>
+          A kernel call that might crash is tried in a separate process first, so a bad
+          operation only shows an error message instead of crashing the app. Every build runs twice,
+          with and without the kernel, along with the test suite and a headless sweep that
+          drives each operation through the real code.
+        </p>
+        <div class="media-pair">
+          <figure class="media" style="--ratio: 4 / 3">
+            <img src="assets/screenshots/sketching.png" alt="Sketching with constraints">
+            <figcaption>Sketching with constraints</figcaption>
+          </figure>
+          <figure class="media" style="--ratio: 4 / 3">
+            <img src="assets/screenshots/revolute_joint_operation.png" alt="Joint revolution operation">
+            <figcaption>Joint tool operation: Revolute</figcaption>
+          </figure>
+        </div>
+        <dl class="specs">
+          <div><dt>Kernel</dt><dd>OpenCASCADE</dd></div>
+          <div><dt>Exports</dt><dd>3MF · STL · STEP</dd></div>
+          <div><dt>Imports</dt><dd>STL · OBJ · STEP · SVG</dd></div>
+          <div><dt>Platform</dt><dd>Windows · Linux</dd></div>
+          <div><dt>Written in</dt><dd>C++20 · OpenGL 3.3</dd></div>
+          <div><dt>Licence</dt><dd>GPL-3.0</dd></div>
+        </dl>
+      </section>
+
+      <section class="doc-section" id="ai">
+        <p class="doc-no">04</p>
+        <h2>“AI slop”</h2>
+        <p>
+          tangent was developed alongside <b>Claude Code</b>, as shown by many of the commits in the repository
+          (including the implementation of this website's design). As a solo developer with a full-time job, creating this
+          project would not be feasible without use of AI tools for much of the tedious work involved in tangent's development.
+        </p>
+        <p>
+          I generally dislike the idea of "vibe-coded" projects in favor of well-designed, fleshed out products, which is
+          why I attempted to restrict Claude Code usage to backend operation development. I did this by giving it little
+          control of the interface, functionality, and project design. Essentially anything the user interacts with was
+          designed by myself, as well as the project structure and stack decisions.
+        </p>
+        <p>
+          All AI code is reviewed and tested extensively. Only one agent was ever used at a given time to allow for human supervision
+          and to reserve decision-making to myself.
+        </p>
+      </section>
+
+      <section class="doc-section" id="status">
+        <p class="doc-no">05</p>
+        <h2>Status</h2>
+        <p>
+          tangent is currently in development and not yet fully functional. Expect rough edges
+          and changes between releases. If you encounter any bugs or would like to request features, please let me know.
+          Contributions are welcome.
+        </p>
+        <p>
+          <a class="link-arrow" href="https://github.com/LukeMcRae7/tangent/issues">
+            Follow along or report a problem <svg><use href="site/icons.svg#arrow-up-right"/></svg>
+          </a>
+        </p>
+      </section>
+
+      <section class="doc-section" id="credits">
+        <p class="doc-no">06</p>
+        <h2>Credits and licence</h2>
+        <p>tangent is free software under the GPL-3.0. It stands on these projects:</p>
+        <ul class="credits">
+          <li><span>OpenCASCADE</span><span>geometry kernel</span><span>LGPL-2.1</span></li>
+          <li><span>planegcs</span><span>sketch solver, from FreeCAD</span><span>LGPL-2.1</span></li>
+          <li><span>Eigen</span><span>linear algebra</span><span>MPL-2.0</span></li>
+          <li><span>SDL3</span><span>windows and input</span><span>zlib</span></li>
+          <li><span>Dear ImGui</span><span>interface</span><span>MIT</span></li>
+          <li><span>libepoxy</span><span>OpenGL loading</span><span>MIT</span></li>
+          <li><span>Space Grotesk</span><span>typeface</span><span>OFL-1.1</span></li>
+          <li><span>Tabler Icons</span><span>icons</span><span>MIT</span></li>
+          <li><span>three.js</span><span>this website's 3D</span><span>MIT</span></li>
+        </ul>
+      </section>
+
+      <a class="link-arrow back" href="index.html">
+        <svg><use href="site/icons.svg#arrow-left"/></svg> Back to the home page
+      </a>
+    </div>
+  </div>
+</main>
+
+<footer class="footer">
+  <div class="footer-mark" aria-hidden="true">
+    <span>tangent</span>
+    <i class="footer-line"></i>
+  </div>
+  <p class="footer-fine">© 2026 Luke McRae · GPL-3.0</p>
+</footer>
+
+</body>
+</html>

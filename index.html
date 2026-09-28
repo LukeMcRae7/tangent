@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>tangent - clean 3D design</title>
+  <meta name="description" content="tangent is a 3D modeller for 3D printing: the ergonomics of Blender with the precision of Fusion 360, on an exact kernel, exporting 3MF and STL natively.">
+  <meta name="theme-color" content="#0E0E0F">
+  <meta property="og:title" content="tangent">
+  <meta property="og:description" content="Exact 3D modelling for printing.">
+  <meta property="og:image" content="site/model/poster.png">
+  <link rel="icon" href="assets/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="assets/icon.png">
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="site/css/site.css">
+  <link rel="modulepreload" href="site/js/stage.js">
+  <link rel="preload" href="site/model/part.bin" as="fetch" crossorigin>
+
+  <script type="importmap">
+    { "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/" } }
+  </script>
+  <script type="module" src="site/js/site.js"></script>
+</head>
+<body>
+
+<!-- The part, drawn behind everything. It sits beside the hero, then beside
+     the features as they scroll past, then fades out. See site/js/stage.js. -->
+<div class="stage" id="stage" aria-hidden="true">
+  <img class="stage-poster" src="site/model/poster.png" alt="">
+</div>
+<svg class="callouts" id="callouts" aria-hidden="true"></svg>
+
+<header class="nav" id="nav">
+  <a class="brand" href="#home" aria-label="tangent home">
+    <img src="assets/icon.svg" alt="" width="30" height="30">
+    <span>tangent</span>
+  </a>
+  <nav class="nav-links" aria-label="Sections">
+    <a href="#features">Features</a>
+    <a href="about.html">About</a>
+    <a href="#download">Download</a>
+  </nav>
+  <div class="nav-end">
+    <a class="icon-btn" href="https://github.com/LukeMcRae7/tangent" aria-label="Source on GitHub">
+      <svg><use href="site/icons.svg#brand-github"/></svg>
+    </a>
+    <a class="btn btn-small" href="#download">Download</a>
+  </div>
+</header>
+
+<main>
+
+  <!-- ─────────────────────────── Home ─────────────────────────── -->
+  <section class="hero" id="home">
+    <div class="hero-copy">
+      <p class="chip">
+        Open source · In development
+      </p>
+      <h1>
+        Exact modelling<br>
+        <span class="dim">for printing</span><span class="stop">.</span>
+      </h1>
+      <p class="lede">
+        The ergonomics of Blender with the precision of Fusion&nbsp;360.
+        A lightweight CAD tool that just works.
+      </p>
+      <div class="actions">
+        <a class="btn btn-arrow" href="#download">
+          Download <span class="btn-box"><svg><use href="site/icons.svg#arrow-right"/></svg></span>
+        </a>
+        <a class="link-arrow" href="#features">
+          See what it does <svg><use href="site/icons.svg#arrow-right"/></svg>
+        </a>
+      </div>
+    </div>
+
+    <div class="readout" id="readout">
+      <span class="ok"><i></i>solid</span>
+      <span data-part="faces">73 faces</span>
+      <span data-part="volume">28.13 cm³</span>
+      <span data-part="size">72 × 52 × 35 mm</span>
+    </div>
+  </section>
+
+  <!-- ───────────────────────── Features ───────────────────────── -->
+  <!-- Each step lights up the faces its operation made on the part:
+       data-group is 1 rounds, 2 holes, 3 thread, "all" the whole part. -->
+  <section class="features" id="features">
+    <header class="section-head">
+      <p class="eyebrow"><svg><use href="site/icons.svg#tangent"/></svg>Features</p>
+      <h2>Build your ideas<br><span class="dim">without friction<span class="stop">.</span></span></h2>
+    </header>
+
+    <div class="steps">
+      <article class="step" data-group="none" data-pitch="22">
+        <p class="step-no">01</p>
+        <svg class="step-icon"><use href="site/icons.svg#ruler-measure"/></svg>
+        <h3>Exact, not approximate</h3>
+        <p>Modelling happens on a boundary representation.</p>
+        <p class="spec">OpenCASCADE B-rep · STEP in and out</p>
+      </article>
+
+      <article class="step" data-group="2" data-pitch="48">
+        <p class="step-no">02</p>
+        <svg class="step-icon"><use href="site/icons.svg#circle-dot"/></svg>
+        <h3>Holes chosen by the screw</h3>
+        <p>Pick M2 to M10 and a fit. The millimetres come from the standards, with the allowance a nozzle takes back.</p>
+        <p class="spec">Close · normal · loose · tapped · counterbore · countersink</p>
+      </article>
+
+      <article class="step" data-group="3" data-pitch="14">
+        <p class="step-no">03</p>
+        <svg class="step-icon"><use href="site/icons.svg#spiral"/></svg>
+        <h3>Threads made easy</h3>
+        <p>The helix is a preset geometry, not a texture. A printed part has no second operation to cut it with.</p>
+        <p class="spec">Inside and outside · printed fit by default</p>
+      </article>
+
+      <article class="step" data-group="1" data-pitch="30">
+        <p class="step-no">04</p>
+        <svg class="step-icon"><use href="site/icons.svg#border-corner-rounded"/></svg>
+        <h3>Rounds and chamfers</h3>
+        <p>Round every rim of a part in one operation, and chamfer the bottom edge against elephant's foot.</p>
+        <p class="spec">Per-edge radii · tapered rounds · chamfers</p>
+      </article>
+
+      <article class="step" data-group="all" data-pitch="26">
+        <p class="step-no">05</p>
+        <svg class="step-icon"><use href="site/icons.svg#shield-check"/></svg>
+        <h3>Checked before it leaves</h3>
+        <p>Open surfaces and non-manifold edges are refused, with the reason, before a slicer ever sees them.</p>
+        <p class="spec">3MF · STL · tessellated to your tolerance</p>
+      </article>
+    </div>
+
+    <div class="more">
+      <h3 class="more-head">And the rest of the bench</h3>
+      <ul class="cards">
+        <li class="card">
+          <svg><use href="site/icons.svg#vector-bezier"/></svg>
+          <h4>Drawings as sketches</h4>
+          <p>Import an SVG at its real size, then extrude the letters, not the holes in them.</p>
+        </li>
+        <li class="card">
+          <svg><use href="site/icons.svg#arrows-split"/></svg>
+          <h4>Splits with pins</h4>
+          <p>Cut a part too big for the bed, with alignment pins and sockets cut for a printed fit.</p>
+        </li>
+        <li class="card">
+          <svg><use href="site/icons.svg#box-margin"/></svg>
+          <h4>Offset</h4>
+          <p>Grow or shrink a whole body with its corners kept, for a clearance copy or a pocket.</p>
+        </li>
+        <li class="card">
+          <svg><use href="site/icons.svg#eraser"/></svg>
+          <h4>Delete face</h4>
+          <p>Remove a hole or a boss from a STEP file, and the surrounding faces close over the gap.</p>
+        </li>
+        <li class="card">
+          <svg><use href="site/icons.svg#arrows-move-vertical"/></svg>
+          <h4>Push and pull</h4>
+          <p>Drag any face, including curved ones, to make a collar or cut a groove.</p>
+        </li>
+        <li class="card">
+          <svg><use href="site/icons.svg#link"/></svg>
+          <h4>Assemblies</h4>
+          <p>Joint parts together, check the clearances between them, and section through the whole.</p>
+        </li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- ───────────────────────── Download ───────────────────────── -->
+  <section class="download" id="download">
+    <div class="download-card">
+      <img class="download-icon" src="assets/icon.svg" alt="" width="72" height="72">
+      <h2>Get tangent<span class="stop">.</span></h2>
+      <p class="lede">Builds are on GitHub Releases. tangent is still in development, so expect rough edges.</p>
+      <div class="actions actions-center">
+        <a class="btn btn-arrow" href="https://github.com/LukeMcRae7/tangent/releases/latest">
+          Download latest release <span class="btn-box"><svg><use href="site/icons.svg#download"/></svg></span>
+        </a>
+        <a class="link-arrow" href="https://github.com/LukeMcRae7/tangent">
+          Source on GitHub <svg><use href="site/icons.svg#arrow-up-right"/></svg>
+        </a>
+      </div>
+      <div class="build">
+        <div class="build-head">
+          <span><svg><use href="site/icons.svg#terminal-2"/></svg>Build from source</span>
+          <button class="copy" type="button" data-copy="build-cmds" aria-label="Copy commands">
+            <svg><use href="site/icons.svg#copy"/></svg><span>Copy</span>
+          </button>
+        </div>
+<pre id="build-cmds"><code>git clone https://github.com/LukeMcRae7/tangent
+cd tangent
+cmake -S . -B build -G Ninja
+cmake --build build
+./build/tangent</code></pre>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<footer class="footer">
+  <div class="footer-mark" aria-hidden="true">
+    <span>tangent</span>
+    <i class="footer-line"></i>
+  </div>
+  <p class="footer-fine">© 2026 Luke McRae · GPL-3.0</p>
+</footer>
+
+</body>
+</html>
