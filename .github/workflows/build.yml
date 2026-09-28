@@ -131,6 +131,9 @@ jobs:
     defaults:
       run:
         shell: msys2 {0}
+    env:
+      # OpenCASCADE's DLLs, for the tests and for the package to find.
+      OCCT_PREFIX: C:/occt
     steps:
       - uses: actions/checkout@v5
 
@@ -142,12 +145,35 @@ jobs:
             git p7zip
           pacboy: >-
             gcc:p cmake:p ninja:p pkgconf:p
-            sdl3:p libepoxy:p zlib:p opencascade:p gdb:p
+            sdl3:p libepoxy:p zlib:p gdb:p
+
+      # Built here, as on Linux, rather than taken from MSYS2: MSYS2's own
+      # build crashed inside Extrema_ExtCC in every boolean that classified a
+      # point against a solid, where the same release built plainly does not.
+      - name: Restore OpenCASCADE
+        id: occt
+        uses: actions/cache@v4
+        with:
+          path: C:/occt
+          key: occt-msys2-ucrt64-${{ env.OCCT_TAG }}-v1
+
+      - name: Build OpenCASCADE
+        if: steps.occt.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 -b "$OCCT_TAG" https://github.com/Open-Cascade-SAS/OCCT /tmp/OCCT
+          cmake -S /tmp/OCCT -B /tmp/OCCT/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$OCCT_PREFIX" -DINSTALL_DIR_LAYOUT=Unix \
+            -DBUILD_MODULE_Visualization=OFF -DBUILD_MODULE_ApplicationFramework=OFF \
+            -DBUILD_MODULE_Draw=OFF -DBUILD_MODULE_DETools=OFF -DBUILD_DOC_Overview=OFF \
+            -DUSE_FREETYPE=OFF -DUSE_TK=OFF -DUSE_TCL=OFF -DUSE_OPENGL=OFF -DUSE_D3D=OFF -DUSE_TBB=OFF
+          cmake --build /tmp/OCCT/build && cmake --install /tmp/OCCT/build
 
       - name: Configure
         # With symbols, so a crashing test's backtrace names functions; the
         # package strips them.
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
+        run: >
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DCMAKE_PREFIX_PATH="$OCCT_PREFIX"
 
       - name: Build
         run: .github/build-annotated.sh
@@ -155,10 +181,10 @@ jobs:
       # Windows has no fork isolation, so a kernel fault that Linux survives is
       # fatal here. Running the tests is how that stops being a surprise.
       - name: Test
-        run: .github/test-annotated.sh
+        run: PATH="$(cygpath "$OCCT_PREFIX")/bin:$PATH" .github/test-annotated.sh
 
       - name: Package
-        run: packaging/package-windows.sh "${GITHUB_REF_NAME#v}"
+        run: PATH="$(cygpath "$OCCT_PREFIX")/bin:$PATH" packaging/package-windows.sh "${GITHUB_REF_NAME#v}" "$OCCT_PREFIX"
 
       - uses: actions/upload-artifact@v4
         with:

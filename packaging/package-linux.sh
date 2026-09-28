@@ -14,6 +14,11 @@ cp -r shaders AppDir/usr/bin/
 mkdir AppDir/usr/bin/assets
 cp -r assets/fonts assets/icons assets/icon.png assets/icon.svg AppDir/usr/bin/assets/
 cp LICENSE packaging/NOTICE.txt AppDir/
+# OpenCASCADE's licence travels with its libraries, as the LGPL asks.
+mkdir -p AppDir/licenses/opencascade
+find "$prefix" -maxdepth 4 \( -name 'LICENSE_LGPL_21.txt' -o -name 'OCCT_LGPL_EXCEPTION.txt' \) \
+  -exec cp {} AppDir/licenses/opencascade/ \;
+[ -n "$(ls AppDir/licenses/opencascade)" ] || { echo "OpenCASCADE's licence not found under $prefix"; exit 1; }
 
 tools=$PWD/.packaging-tools && mkdir -p "$tools"
 [ -x "$tools/linuxdeploy" ] || {
