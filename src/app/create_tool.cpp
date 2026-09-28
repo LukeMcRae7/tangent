@@ -276,7 +276,7 @@ Real CreateTool::rayPlaneExtrudeDepth(const Camera& camera, Vec2 mousePx) const 
 }
 
 std::vector<Vec2> CreateTool::getCurrentProfile() const {
-    if (kind_ == PrimitiveKind::Cylinder) {
+    if (drawsCircle()) {
         return makeCirclePolygon(pt1_, currentRadius_, 32);
     } else {
         return makeRectPolygon(pt1_, pt2_, cornerRadii_, 6);
@@ -295,7 +295,7 @@ void CreateTool::getCurrentProfileArcs(std::vector<Vec3>& points, std::vector<Re
     std::vector<Vec2> uv;
     std::vector<Real> bulge;
 
-    if (kind_ == PrimitiveKind::Cylinder) {
+    if (drawsCircle()) {
         const Real r = currentRadius_;
         if (r <= 1e-9) return;
         for (int i = 0; i < 4; ++i) {
@@ -607,7 +607,7 @@ void CreateTool::update(const Scene& scene, const Camera& camera, Vec2 mousePx, 
             // anyone does here, and the scene knows nothing about it.
             uv = placePoint(uv, true);
 
-            if (kind_ == PrimitiveKind::Cylinder) {
+            if (drawsCircle()) {
                 if (fieldFixed_[0]) {
                     // Typed. The cursor still says which way round, and nothing
                     // more: the radius is the user's.
@@ -742,7 +742,7 @@ void CreateTool::update(const Scene& scene, const Camera& camera, Vec2 mousePx, 
                 case HandleId::EdgeTop:    pt2_.y = std::max(placed.y, pt1_.y + kMin); break;
                 case HandleId::None:       break;
             }
-            if (kind_ != PrimitiveKind::Cylinder) {
+            if (!drawsCircle()) {
                 currentWidth_ = pt2_.x - pt1_.x;
                 currentDepth_ = pt2_.y - pt1_.y;
                 clampCornerRadii();
@@ -763,7 +763,7 @@ void CreateTool::update(const Scene& scene, const Camera& camera, Vec2 mousePx, 
             return false;
         };
 
-        if (kind_ == PrimitiveKind::Cylinder) {
+        if (drawsCircle()) {
             const Vec3 rPoint = planeOrigin_ + planeU_ * (pt1_.x + currentRadius_) + planeV_ * pt1_.y;
             testScreenHandle(rPoint, HandleId::RadiusHandle);
         } else {
@@ -837,7 +837,13 @@ void CreateTool::handleMouseDown(Vec2 mousePx, Scene& scene, Camera& camera, Und
     }
 
     if (stage_ == CreateStage::DrawProfile_Pt2) {
-        if (kind_ != PrimitiveKind::Cylinder) {
+        // A centre and a radius are all a sphere, a cone or a torus is drawn
+        // with: it is made now, and the rest is asked for on the panel.
+        if (drawsCircle() && !extrudes()) {
+            finishPlaced(scene, camera, undo);
+            return;
+        }
+        if (!drawsCircle()) {
             const Real uMin = std::min(pt1_.x, pt2_.x);
             const Real uMax = std::max(pt1_.x, pt2_.x);
             const Real vMin = std::min(pt1_.y, pt2_.y);
@@ -958,13 +964,13 @@ bool CreateTool::handleTypedKey(int key) {
 int CreateTool::fieldCount() const {
     if (stage_ == CreateStage::ExtrudeDepth) return 1;
     if (stage_ == CreateStage::AdjustProfile && isFilleting_) return 1;
-    return kind_ == PrimitiveKind::Cylinder ? 1 : 2;
+    return drawsCircle() ? 1 : 2;
 }
 
 const char* CreateTool::fieldName(int field) const {
     if (stage_ == CreateStage::ExtrudeDepth) return "Depth";
     if (stage_ == CreateStage::AdjustProfile && isFilleting_) return "Radius";
-    if (kind_ == PrimitiveKind::Cylinder) return "Radius";
+    if (drawsCircle()) return "Radius";
     return field == 0 ? "Width" : "Depth";
 }
 
@@ -972,7 +978,7 @@ Real CreateTool::fieldDisplay(int field) const {
     if (stage_ == CreateStage::ExtrudeDepth) return extrudeDepth_;
     if (stage_ == CreateStage::AdjustProfile && isFilleting_)
         return activeFilletCorners_.empty() ? 0.0 : cornerRadii_[activeFilletCorners_.front()];
-    if (kind_ == PrimitiveKind::Cylinder) return currentRadius_;
+    if (drawsCircle()) return currentRadius_;
     return field == 0 ? currentWidth_ : currentDepth_;
 }
 
@@ -1000,7 +1006,7 @@ void CreateTool::setField(int field, Real v) {
 
     if (v <= 0.0) return;                       // a size has to be positive
 
-    if (kind_ == PrimitiveKind::Cylinder) {
+    if (drawsCircle()) {
         currentRadius_ = v;
         pt2_ = pt1_ + Vec2{currentRadius_, 0};
         fix(v);
@@ -1126,7 +1132,11 @@ bool CreateTool::handleKey(int key, bool shift, bool ctrl, Camera& camera, Scene
             return true;
         }
         if (stage_ == CreateStage::DrawProfile_Pt2) {
-            if (kind_ != PrimitiveKind::Cylinder) {
+            if (drawsCircle() && !extrudes()) {
+                finishPlaced(scene, camera, undo);
+                return true;
+            }
+            if (!drawsCircle()) {
                 const Real uMin = std::min(pt1_.x, pt2_.x);
                 const Real uMax = std::max(pt1_.x, pt2_.x);
                 const Real vMin = std::min(pt1_.y, pt2_.y);
@@ -1150,6 +1160,11 @@ bool CreateTool::handleKey(int key, bool shift, bool ctrl, Camera& camera, Scene
                 clearFields();
                 return true;
             }
+            // A plane is the outline and nothing more: there is no depth to ask.
+            if (!extrudes()) {
+                finishPlaced(scene, camera, undo);
+                return true;
+            }
             clearFields();   // each step asks its own questions
             stage_ = CreateStage::ExtrudeDepth;
             extrudeBaseDepth_ = 20.0;
@@ -1164,7 +1179,7 @@ bool CreateTool::handleKey(int key, bool shift, bool ctrl, Camera& camera, Scene
 
     // F = Fillet
     if (key == 'F' || key == 'f') {
-        if (stage_ == CreateStage::AdjustProfile && kind_ != PrimitiveKind::Cylinder) {
+        if (stage_ == CreateStage::AdjustProfile && kind_ == PrimitiveKind::Box) {
             HandleId target = (hoveredHandle_ != HandleId::None) ? hoveredHandle_ : selectedElement_;
             const Real uMin = pt1_.x, uMax = pt2_.x;
             const Real vMin = pt1_.y, vMax = pt2_.y;
@@ -1259,7 +1274,7 @@ bool CreateTool::finishCreation(Scene& scene, Camera& camera, UndoStack& undo) {
 bool CreateTool::recommit(Scene& scene, Camera& camera, UndoStack& undo) {
     (void)camera;
     if (stage_ != CreateStage::Applied) return false;
-    return commitExtrusion(scene, undo);
+    return extrudes() ? commitExtrusion(scene, undo) : commitPlaced(scene, undo);
 }
 
 void CreateTool::refreshReach(const Scene& scene) {
@@ -1423,6 +1438,74 @@ bool CreateTool::commitExtrusion(Scene& scene, UndoStack& undo) {
     return true;
 }
 
+PrimitiveSpec CreateTool::drawnSpec() const {
+    PrimitiveSpec s;
+    s.kind = kind_;
+    const Real r = std::max(currentRadius_, Real(0.1));
+    switch (kind_) {
+        case PrimitiveKind::Sphere:
+            s.sphere.radius = r;
+            break;
+        // To a point, as tall as it is wide: a cone that reads as one. The
+        // panel changes either.
+        case PrimitiveKind::Cone:
+            s.cone.bottomRadius = r;
+            s.cone.topRadius = 0.0;
+            s.cone.height = 2.0 * r;
+            break;
+        // The radius drawn is to the middle of the ring, and the ring is a
+        // quarter of that thick.
+        case PrimitiveKind::Torus:
+            s.torus.majorRadius = r;
+            s.torus.minorRadius = r * 0.25;
+            break;
+        case PrimitiveKind::Plane:
+            s.plane.width = currentWidth_;
+            s.plane.depth = currentDepth_;
+            break;
+        default:
+            break;
+    }
+    return s;
+}
+
+// On the plane, square to it. A sphere and a torus are centred on the point
+// drawn, the way Fusion puts them; a cone stands on the plane with its base
+// on the circle drawn, which is the only way round that circle means anything.
+Transform CreateTool::placedAt(const PrimitiveSpec& spec) const {
+    const Vec2 at = kind_ == PrimitiveKind::Plane ? (pt1_ + pt2_) * 0.5 : pt1_;
+    Vec3 pos = planeOrigin_ + planeU_ * at.x + planeV_ * at.y;
+    if (kind_ == PrimitiveKind::Cone) pos += planeNormal_ * (spec.cone.height * 0.5);
+    // A plane is a plate, and lies on the plane it was drawn on rather than
+    // half into it: drawn on a face, it is a skin on that face.
+    if (kind_ == PrimitiveKind::Plane) pos += planeNormal_ * (kPlaneThickness * 0.5);
+    return Transform{pos, Quat::fromFrame(planeU_, planeV_, planeNormal_), {1, 1, 1}};
+}
+
+bool CreateTool::commitPlaced(Scene& scene, UndoStack& undo) {
+    const Transform at = placedAt(placed_);
+    const ObjectId id = scene.addPrimitive(kind_, placed_, at.position);
+    if (id == kNoObject) {
+        lastError_ = std::string("That ") + primitiveName(kind_) + " could not be made";
+        return false;
+    }
+    scene.setBasePlacement(id, at);
+    undo.push(ExistenceCommand::forCreate(scene, {id}));
+    scene.select(id);
+    return true;
+}
+
+void CreateTool::finishPlaced(Scene& scene, Camera& camera, UndoStack& undo) {
+    restoreCamera(camera);
+    clearFields();
+    placed_ = drawnSpec();
+    if (!commitPlaced(scene, undo)) {
+        cancel(camera);
+        return;
+    }
+    stage_ = CreateStage::Applied;
+}
+
 // ---------------------------------------------------------------------------
 // 3D Viewport Overlays
 // ---------------------------------------------------------------------------
@@ -1503,6 +1586,24 @@ void CreateTool::drawOverlay(const Scene& scene, const Camera& camera, Renderer&
         }
     }
 
+    // A sphere, cone or torus is made the moment its radius is set, so what
+    // it will be is shown while the radius is being drawn.
+    if (stage_ == CreateStage::DrawProfile_Pt2 && drawsCircle() && !extrudes()) {
+        const PrimitiveSpec spec = drawnSpec();
+        Body shape;
+        if (makePrimitive(spec, shape, Backend::Mesh)) {
+            const Mat4 m = placedAt(spec).matrix();
+            const Vec4 wire = toVec4(palette::kBrand, 0.35f);
+            std::vector<EdgeId> edges;
+            shape.allEdges(edges);
+            for (EdgeId e : edges) {
+                Vec3 a, b;
+                shape.edgePositions(e, a, b);
+                renderer.addLine(transformPoint(m, a), transformPoint(m, b), wire);
+            }
+        }
+    }
+
     // Handles in AdjustProfile stage.
     //
     // Each shape says what pulling on it does, because they no longer all do
@@ -1539,7 +1640,7 @@ void CreateTool::drawOverlay(const Scene& scene, const Camera& camera, Renderer&
             overlay::filled(renderer, pos, frameAt(camera, pos), pts, 4, on ? lit : idle);
         };
 
-        if (kind_ == PrimitiveKind::Cylinder) {
+        if (drawsCircle()) {
             const Vec3 rPt = planeOrigin_ + planeU_ * (pt1_.x + currentRadius_) + planeV_ * pt1_.y;
             const bool on = state(HandleId::RadiusHandle);
             overlay::disc(renderer, rPt, frameAt(camera, rPt), on ? 5.0 : 3.8, on ? lit : idle);
@@ -1668,6 +1769,7 @@ bool CreateTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& ou
                      : kind_ == PrimitiveKind::Sphere     ? Glyph::Sphere
                      : kind_ == PrimitiveKind::Cone       ? Glyph::Cone
                      : kind_ == PrimitiveKind::Torus      ? Glyph::Torus
+                     : kind_ == PrimitiveKind::Plane      ? Glyph::Plane
                                                           : Glyph::Box;
     char title[64];
     if (rounding)
@@ -1717,7 +1819,7 @@ bool CreateTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& ou
     case CreateStage::DrawProfile_Pt1: {
         char at[64];
         std::snprintf(at, sizeof at, "%.2f, %.2f", pt1_.x, pt1_.y);
-        ui::commandValue(kind_ == PrimitiveKind::Cylinder ? "Centre" : "Corner", at);
+        ui::commandValue(drawsCircle() ? "Centre" : "Corner", at);
         // Where the plane stands and how it leans: the same two rows a
         // sketch's plane has, before anything is drawn on it.
         {
@@ -1734,7 +1836,7 @@ bool CreateTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& ou
                 camera.animateTo(planeOrigin_, camera.distance, y, p);
             }
         }
-        ui::commandHint("Click to place it.  Ctrl for free placement.");
+        ui::commandHint("Click to place it; it snaps to the grid and to the model.");
         footer = ui::commandFooter(nullptr);
         break;
     }
@@ -1746,8 +1848,8 @@ bool CreateTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& ou
                                         f == typedField_ && typing(), typedValue_.c_str(),
                                         0.0, fieldMax));
         ui::commandHint(fieldCount() > 1
-            ? "Type a number to fix a side; the other still follows the mouse.  Tab next, Enter confirm."
-            : "Type a number to fix the radius.  Enter confirms.");
+            ? "Type a number to fix a side; the other still follows the mouse."
+            : "Move to size it, or type a radius.");
         footer = ui::commandFooter(nullptr);
         break;
     }
@@ -1759,7 +1861,7 @@ bool CreateTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& ou
                                         f == typedField_ && typing(), typedValue_.c_str(),
                                         0.0, fieldMax));
 
-        if (kind_ != PrimitiveKind::Cylinder && !isFilleting_) {
+        if (kind_ == PrimitiveKind::Box && !isFilleting_) {
             ui::commandRow("Corners");
             char r[32];
             std::snprintf(r, sizeof r, "%s", units::length(uniformCornerRadius()).c_str());
@@ -1777,16 +1879,59 @@ bool CreateTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& ou
             }
         }
 
-        ui::commandHint(isFilleting_
-            ? "Move away from the corner to open it out.  Click or Enter confirms, Esc puts it back."
-            : "Drag a handle to move it.  Hover one and press F to round that corner.");
-        footer = ui::commandFooter(isFilleting_ ? "Done" : "Extrude");
+        ui::commandHint(isFilleting_ ? "Move away from the corner to round it."
+                        : extrudes() ? "Drag a handle to reshape the outline, or round a corner before extruding it."
+                                     : "Drag a handle to reshape the outline.");
+        footer = ui::commandFooter(isFilleting_ ? "Done" : extrudes() ? "Extrude" : "Finish");
         break;
     }
 
     // -----------------------------------------------------------------------
-    case CreateStage::ExtrudeDepth:
-    case CreateStage::Applied: {
+    // A sphere, cone, torus or plane, made: its own numbers, and each change
+    // makes it again.
+    case CreateStage::Applied:
+        if (!extrudes()) {
+            const double span = std::max(extent, 1.0);
+            auto row = [&](const char* name, Real& v, double lo) {
+                const ui::NumberEdit e = ui::commandNumber(name, v, "mm", false, false, nullptr, lo,
+                                                           std::max(span, static_cast<double>(v)));
+                if (e.dragged && e.value > lo && std::fabs(e.value - v) > 1e-9) {
+                    v = e.value;
+                    adjusted_ = true;
+                }
+            };
+            switch (kind_) {
+                case PrimitiveKind::Sphere:
+                    row("Radius", placed_.sphere.radius, 0.0);
+                    break;
+                case PrimitiveKind::Cone:
+                    row("Base radius", placed_.cone.bottomRadius, 0.0);
+                    row("Top radius", placed_.cone.topRadius, -1e-9);
+                    row("Height", placed_.cone.height, 0.0);
+                    break;
+                case PrimitiveKind::Torus:
+                    row("Radius", placed_.torus.majorRadius, 0.0);
+                    row("Thickness", placed_.torus.minorRadius, 0.0);
+                    // A ring thicker than its own radius runs into itself.
+                    placed_.torus.minorRadius = std::min(placed_.torus.minorRadius,
+                                                         placed_.torus.majorRadius * 0.98);
+                    break;
+                case PrimitiveKind::Plane:
+                    row("Width", placed_.plane.width, 0.0);
+                    row("Depth", placed_.plane.depth, 0.0);
+                    break;
+                default:
+                    break;
+            }
+            ui::commandApplied(primitiveName(kind_));
+            ui::commandHint("Change a size and it is made again.");
+            footer = ui::commandFooter("Done", true, nullptr);
+            break;
+        }
+        [[fallthrough]];
+
+    // -----------------------------------------------------------------------
+    case CreateStage::ExtrudeDepth: {
         const bool applied = stage_ == CreateStage::Applied;
         {
             // Either way. As far as the view is tall.
@@ -1819,7 +1964,7 @@ bool CreateTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& ou
 
         if (applied) ui::commandApplied("Extrude");
         ui::commandHint(applied ? "Change the depth, the operation or the bodies, and it is made again."
-                                : "Move to set the depth, drag the bar, or type one.  Click a body above to leave it out.");
+                                : "Move to set the depth, or type one. Click a body above to leave it out.");
         footer = applied ? ui::commandFooter("Done", true, nullptr) : ui::commandFooter("Finish");
         break;
     }

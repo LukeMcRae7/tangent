@@ -2691,27 +2691,23 @@ void SketchTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& fi
                 break;   // the constraints may have been replaced; draw them next frame
             }
         }
-        if (!anyDim && !sketch_.empty())
-            ui::commandHint("No dimensions yet: D, then click a line or a circle to size it.");
 
         const char* hint = "";
         switch (mode_) {
             case SketchMode::Select:    hint = "Drag a point, or the rim of a circle, and the constraints hold it."; break;
-            case SketchMode::Line:      hint = "Click point to point. End on a point to close the loop; Enter ends the chain."; break;
-            case SketchMode::Rectangle: hint = "Click two opposite corners. Type to fix a side, Tab for the other."; break;
-            case SketchMode::Circle:    hint = "Click the centre, then the rim. Type a radius."; break;
+            case SketchMode::Line:      hint = "Click point to point, and end on a point to close the loop."; break;
+            case SketchMode::Rectangle: hint = "Click two opposite corners, or type the size of a side."; break;
+            case SketchMode::Circle:    hint = "Click the centre, then the rim, or type a radius."; break;
             case SketchMode::Arc:       hint = "Click the centre, the start, then the end."; break;
             case SketchMode::Dimension: hint = activeDim_ != kNoSketchId
-                                                ? "Type the new value and press Enter."
+                                                ? "Type the new value."
                                                 : "Click a line or a circle to size it."; break;
             case SketchMode::Curve:     hint = pen_.empty() ? "Click for a corner, or press and drag for a smooth point."
-                                             : pen_.size() >= 2 ? "Next point: click, or drag for a smooth one. Click the first to close; Enter ends."
-                                                                : "Next point: click, or drag for a smooth one. Enter ends."; break;
+                                             : pen_.size() >= 2 ? "Click, or drag for a smooth point. Click the first point to close the shape."
+                                                                : "Click, or drag for a smooth point."; break;
             case SketchMode::Project:   hint = "Click an edge of a body, or a face for all its edges: they come onto the plane, fixed."; break;
         }
         ui::commandHint(hint);
-        ui::commandHint("S select, L line, R rectangle, C circle, A arc, B curve, D dimension, P project an edge. "
-                        "Hover and press X to delete, Q for construction; Ctrl+Z steps back. Enter finishes, Esc leaves.");
 
         if (ui::quietButton("Import SVG...")) importRequested_ = true;
         ui::hoverTip("Bring the outlines of an SVG drawing into this sketch");
@@ -2733,7 +2729,7 @@ void SketchTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& fi
         if (ui::quietButton("All")) chooseAllRegions();
         ImGui::SameLine();
         if (ui::quietButton("None")) chooseNoRegions();
-        ui::commandHint("Click a region to add it or take it out, then Next to set the depth. Esc cancels.");
+        ui::commandHint("Click a region to add it or take it out, then Next to set the depth.");
         footer = ui::commandFooter("Next", !chosen_.empty(), "Cancel");
         break;
     }
@@ -2770,9 +2766,7 @@ void SketchTool::drawHud(Scene& scene, Camera& camera, UndoStack& undo, bool& fi
         }
         if (applied) ui::commandApplied("Extrude");
         ui::commandHint(applied ? "Change the depth, the operation or the bodies, and it is made again."
-                                : "Move to set the depth, drag the bar, or type one. Click a body above to "
-                                  "leave it out. J joins, D cuts, I intersects, N makes a new body; "
-                                  "Enter finishes, Esc goes back.");
+                                : "Move to set the depth, or type one. Click a body above to leave it out.");
         footer = applied ? ui::commandFooter("Done", true, nullptr) : ui::commandFooter("Finish", true, "Back");
         break;
     }

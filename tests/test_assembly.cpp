@@ -412,6 +412,196 @@ int main() {
         std::printf("[kernel] skipped: no exact kernel in this build\n");
     }
 
+    // ---- A chest lid hinged on two edges -------------------------------------------
+    //
+    // The way a person makes one: the lid's bottom edge, then the box's top
+    // edge, along the back, the front or a side. Which face beside each edge
+    // the click lands on decides which way that frame's X points, and the two
+    // can come out a quarter turn apart; whichever they are, the lid has to
+    // close on the box, and a positive turn has to open it rather than drive
+    // it into the box.
+    if (brep::available()) {
+        auto alongEdge = [](const Body& b, bool alongX, Real at, Real z) {
+            std::vector<EdgeId> es;
+            b.allEdges(es);
+            for (EdgeId e : es) {
+                Vec3 p, q;
+                b.edgePositions(e, p, q);
+                const Real pa = alongX ? p.y : p.x, qa = alongX ? q.y : q.x;
+                if (near(pa, at) && near(qa, at) && near(p.z, z) && near(q.z, z)) return e;
+            }
+            return EdgeId(kInvalid);
+        };
+        auto facing = [](const Body& b, Vec3 n) {
+            for (FaceId f = 0; f < b.faceCount(); ++f)
+                if (dot(b.faceNormal(f), n) > 0.99) return f;
+            return FaceId(kNoFace);
+        };
+        auto edgeSide = [](const Scene& s, ObjectId id, EdgeId e, FaceId on) {
+            const Body& b = s.find(id)->body;
+            JointSide side;
+            side.object = id;
+            side.at = JointAt::Edge;
+            side.element = b.edgeName(e);
+            side.onFace = b.faceName(on);
+            jointFrameFrom(b, JointAt::Edge, e, on, side.frame);
+            side.foundOn = s.find(id)->geometryVersion;
+            side.straightEdge = true;
+            return side;
+        };
+        const char* hinges[3] = {"back", "front", "side"};
+        int good = 0;
+        for (int c = 0; c < 12; ++c) {
+            Scene s;
+            PrimitiveSpec base;
+            base.kind = PrimitiveKind::Box;
+            base.box = {40, 30, 20};
+            const ObjectId box = s.addPrimitive(PrimitiveKind::Box, base, {0, 0, 10});   // z 0..20
+            PrimitiveSpec lidSpec;
+            lidSpec.kind = PrimitiveKind::Box;
+            lidSpec.box = {40, 30, 5};
+            const ObjectId lid = s.addPrimitive(PrimitiveKind::Box, lidSpec, {100, 50, 2.5});
+            const Body& lb = s.find(lid)->body;
+            const Body& bb = s.find(box)->body;
+
+            const int where = c / 4;
+            const Vec3 out = where == 0 ? Vec3{0, -1, 0} : where == 1 ? Vec3{0, 1, 0} : Vec3{1, 0, 0};
+            const bool alongX = where != 2;
+            const Real at = where == 0 ? -15.0 : where == 1 ? 15.0 : 20.0;
+            Joint j;
+            j.kind = JointKind::Revolute;
+            j.moving = edgeSide(s, lid, alongEdge(lb, alongX, at, -2.5),
+                                (c & 1) ? facing(lb, out) : facing(lb, {0, 0, -1}));
+            j.fixed = edgeSide(s, box, alongEdge(bb, alongX, at, 10.0),
+                               (c & 2) ? facing(bb, out) : facing(bb, {0, 0, 1}));
+            std::string why;
+            check(checkJoint(s, j, &why), why);
+            settleJointLayout(s, j);
+            const uint32_t id = addJoint(s, j);
+            const std::string what = std::string(hinges[where]) + " hinge, picked beside the " +
+                                     ((c & 1) ? "lid's side" : "lid's underside") + " and the " +
+                                     ((c & 2) ? "box's side" : "box's top");
+
+            const AABB shut = s.find(lid)->worldBounds();
+            const bool closed = near(shut.min, {-20, -15, 20}, 1e-6) && near(shut.max, {20, 15, 25}, 1e-6);
+            check(closed, what + ": the lid closes on the box");
+
+            s.assembly().joint(id)->turn = kHalfPi;
+            solveAssembly(s);
+            const AABB open = s.find(lid)->worldBounds();
+            // Standing up past the hinge line, clear of the box.
+            const bool upright = near(open.min.z, 20.0, 1e-6) && near(open.max.z - open.min.z, where == 2 ? 40.0 : 30.0, 1e-6) &&
+                                 (where == 0 ? near(open.max.y, -15.0, 1e-6)
+                                  : where == 1 ? near(open.min.y, 15.0, 1e-6)
+                                               : near(open.min.x, 20.0, 1e-6));
+            check(upright, what + ": ninety degrees opens it upright behind the hinge");
+            if (closed && upright) ++good;
+        }
+        // A lid modelled where it goes: sitting on the box, its rim a little
+        // down over the box's top. It is joined there, not moved off to where
+        // two edges would meet, and it still opens up and over the hinge.
+        {
+            Scene s;
+            PrimitiveSpec base;
+            base.kind = PrimitiveKind::Box;
+            base.box = {20, 20, 12};
+            const ObjectId box = s.addPrimitive(PrimitiveKind::Box, base, {0, 0, 6});        // z 0..12
+            PrimitiveSpec lidSpec;
+            lidSpec.kind = PrimitiveKind::Box;
+            lidSpec.box = {21, 20, 8};
+            const ObjectId lid = s.addPrimitive(PrimitiveKind::Box, lidSpec, {0.5, 0, 14});   // z 10..18
+            const Body& lb = s.find(lid)->body;
+            const Body& bb = s.find(box)->body;
+            Joint j;
+            j.kind = JointKind::Revolute;
+            j.moving = edgeSide(s, lid, alongEdge(lb, false, -10.5, -4.0), facing(lb, {0, 0, -1}));
+            j.fixed = edgeSide(s, box, alongEdge(bb, false, -10.0, 6.0), facing(bb, {0, 0, 1}));
+            std::string why;
+            check(checkJoint(s, j, &why), why);
+            settleJointLayout(s, j);
+            check(j.asBuilt, "parts modelled together are joined where they are");
+            const uint32_t id = addJoint(s, j);
+            const AABB rest = s.find(lid)->worldBounds();
+            check(near(rest.min, {-10, -10, 10}, 1e-6) && near(rest.max, {11, 10, 18}, 1e-6),
+                  "the lid has not moved");
+            s.assembly().joint(id)->turn = kHalfPi;
+            solveAssembly(s);
+            const AABB open = s.find(lid)->worldBounds();
+            check(open.max.z > 25.0 && open.max.x < 0.0, "ninety degrees opens it up over the hinge, not into the box");
+            std::printf("[chest] a lid built on its box is hinged where it sits\n");
+        }
+
+        // Saved, the way the motion counts comes back with it.
+        {
+            Scene s;
+            const ObjectId a = s.addPrimitive(PrimitiveKind::Box);
+            const ObjectId b = s.addPrimitive(PrimitiveKind::Box, PrimitiveSpec{}, {40, 0, 0});
+            Joint j;
+            j.kind = JointKind::Revolute;
+            j.moving = faceSide(a, {0, 0, -10}, {0, 0, -1});
+            j.fixed = faceSide(b, {0, 0, 10}, {0, 0, 1});
+            j.reverse = true;
+            j.asBuilt = true;
+            j.built = {Quat::fromAxisAngle({0, 0, 1}, 0.3), {1, 2, 3}};
+            addJoint(s, j);
+            const std::string path = tempPath("tangent_joint_reverse.tgp");
+            check(saveProject(s, path).ok, "saved");
+            Scene back;
+            const ProjectResult r = loadProject(back, path);
+            check(r.ok && back.assembly().joints.size() == 1 && back.assembly().joints[0].reverse,
+                  "a reversed joint is still reversed after a file");
+            check(r.ok && back.assembly().joints.size() == 1 && back.assembly().joints[0].asBuilt &&
+                      near(back.assembly().joints[0].built.t, {1, 2, 3}) &&
+                      near(back.assembly().joints[0].built.q.z, std::sin(0.15)),
+                  "and one joined where it was built keeps that");
+            std::remove(path.c_str());
+        }
+        std::printf("[chest] %d of 12 ways of picking a hinge close the lid and open it\n", good);
+    }
+
+    // ---- A flat face stays one a joint can stand on, however it was made -------------
+    //
+    // A box with its corners rounded and then stretched along one axis: the
+    // rounds become elliptic, the kernel stretches the whole shape the general
+    // way, and every face comes back a spline -- the flat ones included. They
+    // are still flat, and a joint has to be able to go on them.
+    if (brep::available()) {
+        Scene s;
+        PrimitiveSpec spec;
+        spec.kind = PrimitiveKind::Box;
+        spec.box = {20, 20, 20};
+        const ObjectId id = s.addPrimitive(PrimitiveKind::Box, spec);
+        {
+            const Body& b = s.find(id)->body;
+            std::vector<EdgeId> es, upright;
+            b.allEdges(es);
+            for (EdgeId e : es) {
+                Vec3 p, q;
+                b.edgePositions(e, p, q);
+                if (near(p.x, q.x) && near(p.y, q.y)) upright.push_back(e);
+            }
+            Feature round;
+            round.kind = FeatureKind::Bevel;
+            round.edges = nameEdges(b, upright, false);
+            round.width = 4.0;
+            std::string why;
+            check(s.addFeature(id, round, &why), "the corners round: " + why);
+        }
+        std::string why;
+        check(s.recordScale(id, {1.09, 1.0, 0.95}, {0, 0, 0}, &why), "stretched: " + why);
+        const Body& b = s.find(id)->body;
+        FaceId front = kNoFace;
+        for (FaceId f = 0; f < b.faceCount(); ++f)
+            if (dot(b.faceNormal(f), {0, 1, 0}) > 0.999) front = f;
+        check(front != kNoFace, "the front is found");
+        JointFrame frame;
+        const bool ok = front != kNoFace && jointFrameFrom(b, JointAt::Face, front, front, frame, &why);
+        check(ok, "a joint stands on the stretched box's flat front: " + why);
+        check(!ok || (near(frame.z, {0, 1, 0}, 1e-6) && near(frame.origin.y, 10.0, 1e-6)),
+              "looking straight out of it, on it");
+        std::printf("[stretched] a flat face made a spline by a stretch still takes a joint\n");
+    }
+
     // ---- Clearance: the gap between parts, measured ------------------------------
     {
         // Two triangles in parallel planes 0.3 apart, and two that cross.

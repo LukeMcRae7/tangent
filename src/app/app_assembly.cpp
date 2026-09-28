@@ -32,6 +32,9 @@ void Application::applyAssemblyActions() {
         scene_.clearElementSelection();
         if (!a.pickGroupAdditive) scene_.clearSelection();
         for (ObjectId id : members) scene_.select(id, /*additive=*/true);
+        // As for a body's row: the click left the outliner holding the
+        // keyboard, so G, R and S would do nothing to the group just picked.
+        ImGui::SetWindowFocus(nullptr);
     }
 
     if (a.groupSelected || a.ungroupSelected || a.moveNodeRequested || a.joint || a.editJoint)
@@ -457,7 +460,7 @@ void Application::drawClearancePanel() {
                 ui::commandNextPill(j->name.c_str(), 3.0f);
                 ImGui::PushID(static_cast<int>(j->id));
                 if (ui::pillButton(j->name.c_str(), clearance_.sweepJoint == j->id)) clearance_.sweepJoint = j->id;
-                ui::hoverTip("Through the whole of this joint's motion -- its limits, or all the way round");
+                ui::hoverTip("Through the whole of this joint's motion: its limits, or all the way round");
                 ImGui::PopID();
             }
         }
@@ -557,11 +560,8 @@ void Application::drawClearancePanel() {
     } else {
         ui::commandValue("Result", "Measuring...");
     }
-    ui::commandHint("Where two parts come closer than the gap asked for, both are marked in amber; where they "
-                    "run into each other, in red. A part that has to turn or slide against another wants the "
-                    "gap all round, after printing: 0.2 mm on a well-calibrated printer.");
-    ui::commandHint("Measured on the surfaces meshed to within the tolerance shown, triangle to triangle. "
-                    "It keeps measuring while you move parts or turn a joint, and stays drawn until Done.");
+    ui::commandHint("Marks parts closer than the gap in amber and parts that run into each other in red. "
+                    "A part that turns or slides against another wants about 0.2 mm all round.");
     const int footer = ui::commandFooter("Done", true, nullptr);
     ui::endCommand();
     if (footer > 0) toggleClearance();
@@ -779,9 +779,8 @@ void Application::drawExplodePanel() {
                               joints == 1 ? "" : "s");
     else        std::snprintf(how, sizeof how, "Out from the middle: join parts to pull them apart along their joints");
     ui::commandValue("How", how);
-    ui::commandHint("A view: nothing about the parts changes, and it closes when anything else starts. A part "
-                    "joined to another comes away along the joint -- a pin out of its hole, a lid up off its "
-                    "box -- and what is joined to it comes with it and further again.");
+    ui::commandHint("Pulls joined parts apart along their joints, to show how they go together. "
+                    "It is only a view, and nothing about the parts changes.");
     const int footer = ui::commandFooter("Done", true, nullptr);
     ui::endCommand();
     if (footer > 0) explode_.open = false;

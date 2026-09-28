@@ -119,7 +119,7 @@ std::vector<Command> commands(UiContext& ctx) {
     add("Modify", "Extrude as a Cut", "Shift+E", "pocket remove", Glyph::Extrude, need(faces > 0, "select a face first"),
         [&a] { a.extrude = true; a.extrudeCut = true; });
     add("Modify", "Fillet or Chamfer", "F", "round bevel edge", Glyph::Fillet,
-        either(noKernel, need(edges > 0 || faces > 0, "select an edge or a face first")), [&a] { a.fillet = true; });
+        either(noKernel, need(hasObject, "select a body, a face or an edge first")), [&a] { a.fillet = true; });
     add("Modify", "Hole", "H", "drill bore screw counterbore countersink", Glyph::Hole, noKernel, [&a] { a.hole = true; });
     add("Modify", "Thread", nullptr, "screw tap helix", Glyph::Thread, either(noKernel, need(faces > 0, "select a round face first")),
         [&a] { a.thread = true; });
@@ -176,6 +176,8 @@ std::vector<Command> commands(UiContext& ctx) {
         [&v] { v.showGrid = !v.showGrid; });
     add("View", v.showWireframe ? "Hide Edges" : "Show Edges", "Z", "wireframe lines", Glyph::Wire, nullptr,
         [&v] { v.showWireframe = !v.showWireframe; });
+    add("View", v.showKeyHints ? "Hide Key Hints" : "Show Key Hints", nullptr, "shortcuts keyboard help reminder",
+        Glyph::Help, nullptr, [&v] { v.showKeyHints = !v.showKeyHints; });
     add("View", cam.orthographic ? "Perspective" : "Orthographic", "Numpad 5", "projection camera", Glyph::Orthographic,
         nullptr, [&cam] { cam.setOrthographic(!cam.orthographic); });
     add("View", "Frame Selected", "Numpad .", "zoom fit focus", Glyph::FrameSelected, need(hasSel, selectSomething),

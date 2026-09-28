@@ -299,6 +299,11 @@ target_include_directories(test_names PRIVATE src)
 target_compile_options(test_names PRIVATE ${TANGENT_WARNINGS})
 add_test(NAME names COMMAND test_names)
 
+add_executable(test_preferences tests/test_preferences.cpp src/app/preferences.cpp src/core/units.cpp)
+target_include_directories(test_preferences PRIVATE src)
+target_compile_options(test_preferences PRIVATE ${TANGENT_WARNINGS})
+add_test(NAME preferences COMMAND test_preferences)
+
 add_executable(test_features tests/test_features.cpp
   src/scene/scene.cpp src/scene/assembly.cpp src/core/units.cpp src/scene/serialize.cpp src/scene/feature.cpp src/mesh/health.cpp
   ${TANGENT_GEOM} src/mesh/halfedge.cpp src/mesh/primitives.cpp)

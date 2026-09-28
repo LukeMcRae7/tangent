@@ -21,7 +21,18 @@ struct Preferences {
     // Navigation
     bool invertOrbitX = false;
     bool invertOrbitY = false;
-    bool orthographic = true;
+    // Perspective to start with: a first look at a part is a look at the
+    // thing. Numpad 5, the view cube and the View menu change it, and whichever
+    // was last asked for is what the next start opens to.
+    bool orthographic = false;
+
+    // The view's toggles (Inspect menu), as last left.
+    bool showPrintIssues = false;
+    bool showGrid = true;
+    bool showEdges = true;
+    bool showSelectionBox = false;
+    bool backfaceCulling = true;
+    bool showKeyHints = true;
 
     // Modelling: snapping is on unless Ctrl is held; turned off here, Ctrl
     // turns it on instead.
@@ -39,6 +50,10 @@ struct Preferences {
 // The directory preferences, autosaves and recovery files live in, created if
 // it is not there. Empty when there is nowhere to put them.
 std::string configDirectory();
+
+// Where the panels' layout is kept: in the config directory, so it is the same
+// whichever directory Tangent was started from. Empty when there is nowhere.
+std::string layoutPath();
 
 bool loadPreferences(Preferences& out);
 bool savePreferences(const Preferences& prefs);

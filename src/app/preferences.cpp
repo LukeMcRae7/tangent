@@ -20,6 +20,11 @@ std::string configDirectory() {
     return ec ? std::string() : dir.string();
 }
 
+std::string layoutPath() {
+    const std::string dir = configDirectory();
+    return dir.empty() ? std::string() : dir + "/layout.ini";
+}
+
 namespace {
 
 std::string prefsPath() {
@@ -57,6 +62,12 @@ bool loadPreferences(Preferences& out) {
         else if (key == "invert_orbit_y") p.invertOrbitY = truthy(value);
         else if (key == "orthographic")   p.orthographic = truthy(value);
         else if (key == "snap")           p.snap = truthy(value);
+        else if (key == "print_problems") p.showPrintIssues = truthy(value);
+        else if (key == "grid")           p.showGrid = truthy(value);
+        else if (key == "edges")          p.showEdges = truthy(value);
+        else if (key == "selection_box")  p.showSelectionBox = truthy(value);
+        else if (key == "backface_cull")  p.backfaceCulling = truthy(value);
+        else if (key == "key_hints")      p.showKeyHints = truthy(value);
         else if (key == "nozzle_mm")      p.nozzleMm = std::clamp(std::atof(value.c_str()), 0.05, 5.0);
         else if (key == "min_wall_mm")    p.minWallMm = std::clamp(std::atof(value.c_str()), 0.05, 20.0);
         else if (key == "autosave_minutes") p.autosaveMinutes = std::clamp(std::atoi(value.c_str()), 0, 120);
@@ -77,6 +88,12 @@ bool savePreferences(const Preferences& p) {
     o << "invert_orbit_y = " << (p.invertOrbitY ? 1 : 0) << "\n";
     o << "orthographic = " << (p.orthographic ? 1 : 0) << "\n";
     o << "snap = " << (p.snap ? 1 : 0) << "\n";
+    o << "print_problems = " << (p.showPrintIssues ? 1 : 0) << "\n";
+    o << "grid = " << (p.showGrid ? 1 : 0) << "\n";
+    o << "edges = " << (p.showEdges ? 1 : 0) << "\n";
+    o << "selection_box = " << (p.showSelectionBox ? 1 : 0) << "\n";
+    o << "backface_cull = " << (p.backfaceCulling ? 1 : 0) << "\n";
+    o << "key_hints = " << (p.showKeyHints ? 1 : 0) << "\n";
     o << "nozzle_mm = " << p.nozzleMm << "\n";
     o << "min_wall_mm = " << p.minWallMm << "\n";
     o << "autosave_minutes = " << p.autosaveMinutes << "\n";

@@ -144,12 +144,29 @@ bool Application::init() {
     // its hands off the layout a person saved: the CI sweep runs in the
     // checkout, and every run of it was writing its window over theirs.
     const bool unattended = smokeFrames_ > 0 || !screenshotPath_.empty() || probeActive_;
-    io.IniFilename = unattended ? nullptr : "tangent.ini";
+    //
+    // Kept with the preferences, not in the working directory: started from a
+    // launcher, that is the home directory or /, and the layout was lost or
+    // left lying about. One left by an earlier version is carried over once.
     unattended_ = unattended;
+    if (!unattended_) {
+        layoutFile_ = layoutPath();
+        std::error_code ec;
+        if (!layoutFile_.empty() && !std::filesystem::exists(layoutFile_, ec) &&
+            std::filesystem::exists("tangent.ini", ec))
+            std::filesystem::copy_file("tangent.ini", layoutFile_, ec);
+    }
+    io.IniFilename = unattended_ || layoutFile_.empty() ? nullptr : layoutFile_.c_str();
     // Preferences likewise: a demo runs the same on every machine.
     if (!unattended_) {
         loadPreferences(prefs_);
         camera_.setOrthographic(prefs_.orthographic);
+        view_.showPrintIssues = prefs_.showPrintIssues;
+        view_.showGrid = prefs_.showGrid;
+        view_.showWireframe = prefs_.showEdges;
+        view_.showSelectionBox = prefs_.showSelectionBox;
+        view_.backfaceCulling = prefs_.backfaceCulling;
+        view_.showKeyHints = prefs_.showKeyHints;
     }
 
     loadFonts(resolveAssetDir(), 14.0f);
@@ -202,6 +219,64 @@ bool Application::init() {
         }
     }
 
+    if (placeDemo_ >= 0) {
+        const auto kind = static_cast<PrimitiveKind>(placeDemo_);
+        for (const auto& o : scene_.objects()) scene_.find(o->id)->visible = false;
+        createTool_.start(kind);
+        createTool_.handleKey('7', false, false, camera_, scene_, undo_);
+        if (kind == PrimitiveKind::Plane) {
+            createTool_.setProfileRect({-15, -10}, {15, 10}, 0.0);
+            createTool_.setStage(CreateStage::AdjustProfile);
+        } else {
+            createTool_.setProfileCircle({0, 0}, 10.0);
+            createTool_.setStage(CreateStage::DrawProfile_Pt2);
+        }
+        createTool_.handleKey(13, false, false, camera_, scene_, undo_);
+        std::fprintf(stderr, "[place-demo] stage %d, %zu objects\n", static_cast<int>(createTool_.stage()),
+                     scene_.objects().size());
+    }
+
+    if (pushFilletDemo_ != 0.0f && !scene_.objects().empty()) {
+        // A cube with one upright edge rounded, and a side the round runs
+        // along pushed by the given distance through the real gesture: the
+        // round has to go with the face rather than stay where it was.
+        const ObjectId id = scene_.objects().front()->id;
+        const Body& m = scene_.find(id)->body;
+        std::vector<EdgeId> es;
+        m.allEdges(es);
+        EdgeId edge = kInvalid;
+        for (EdgeId e : es) {
+            Vec3 p, q;
+            m.edgePositions(e, p, q);
+            if (std::fabs(q.x - p.x) < 1e-9 && std::fabs(q.y - p.y) < 1e-9 && p.x > 0 && p.y < 0) edge = e;
+        }
+        Feature round;
+        round.kind = FeatureKind::Bevel;
+        round.edges = nameEdges(m, {edge}, false);
+        round.width = 5.0;
+        std::string why;
+        if (!scene_.addFeature(id, round, &why)) std::fprintf(stderr, "[push-fillet] round refused: %s\n", why.c_str());
+        const Body& r = scene_.find(id)->body;
+        FaceId side = kNoFace;
+        for (FaceId f = 0; f < r.faceCount(); ++f)
+            if (dot(r.faceNormal(f), Vec3{1, 0, 0}) > 0.99) side = f;
+        scene_.clearSelection();
+        scene_.selectElement({id, ElementKind::Face, side});
+        beginFaceMove(FaceOp::Move);
+        char buf[32];
+        std::snprintf(buf, sizeof buf, "%g", static_cast<double>(pushFilletDemo_));
+        faceTool_.typedValue = buf;
+        updateFaceMove(false);
+        while (faceTool_.preview.busy()) updateFaceMove(false);
+        updateFaceMove(false);
+        if (!holdTransform_) commitFaceMove();
+        const SceneObject* after = scene_.find(id);
+        std::fprintf(stderr, "[push-fillet] %d features, %d faces, %.1f mm3, valid=%d\n",
+                     static_cast<int>(after->features.size()), after->body.faceCount(),
+                     after->body.health(false).volume, (int)after->body.validate());
+        for (const Feature& f : after->features) std::fprintf(stderr, "[push-fillet]   %s\n", f.summary().c_str());
+    }
+
     if (filletEdgesDemo_ && !scene_.objects().empty()) {
         const ObjectId id = scene_.objects().front()->id;
         const Body& m = scene_.find(id)->body;
@@ -231,8 +306,9 @@ bool Application::init() {
     if (roundAllDemo_ && !scene_.objects().empty()) {
         const ObjectId id = scene_.objects().front()->id;
         scene_.select(id);
+        scene_.clearElementSelection();
         const Real before = scene_.find(id)->body.health(false).volume;
-        roundAllEdges();
+        beginFillet();
         const bool opened = filletTool_.active;
         const size_t picked = filletTool_.edges.size();
         if (opened) {
@@ -258,7 +334,7 @@ bool Application::init() {
         const ObjectId meshId = scene_.addBody(Body(std::move(cube)), {40, 0, 10}, "Mesh cube");
         scene_.select(meshId);
         notice_.clear();
-        roundAllEdges();
+        beginFillet();
         std::fprintf(stderr, "[round-all] on a mesh: opened=%d notice \"%s\"\n",
                      (int)filletTool_.active, notice_.c_str());
     }
@@ -3308,6 +3384,26 @@ void Application::handleShortcuts() {
         return;
     }
 
+    // The same for the refused panels with a Try again, and for a hole being
+    // placed: Esc puts it away, as it does every other operation.
+    if (draftTool_.pending || threadTool_.pending || offsetTool_.pending || holeTool_.pending) {
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+            draftTool_.reset();
+            threadTool_.reset();
+            offsetTool_.reset();
+            abortHole();
+            return;
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_Enter, false) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false)) {
+            if (draftTool_.pending)       { draftTool_.active = true; commitDraft(); }
+            else if (threadTool_.pending) { threadTool_.active = true; commitThread(); }
+            else if (offsetTool_.pending) { offsetTool_.active = true; commitOffset(); }
+            else                          { holeTool_.active = true; commitHole(); }
+            return;
+        }
+    }
+    if (holeTool_.placing && ImGui::IsKeyPressed(ImGuiKey_Escape, false)) { abortHole(); return; }
+
     if (divideTool_.active) {
         if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) { abortDivide(); return; }
         if (ImGui::IsKeyPressed(ImGuiKey_Enter, false) ||
@@ -3468,7 +3564,7 @@ void Application::handleShortcuts() {
                  std::pair{ImGuiKey_A, 'A'}, std::pair{ImGuiKey_D, 'D'}, std::pair{ImGuiKey_Q, 'Q'},
                  std::pair{ImGuiKey_X, 'X'}, std::pair{ImGuiKey_E, 'E'}, std::pair{ImGuiKey_J, 'J'},
                  std::pair{ImGuiKey_N, 'N'}, std::pair{ImGuiKey_Z, 'Z'}, std::pair{ImGuiKey_S, 'S'},
-                 std::pair{ImGuiKey_K, 'K'}}) {
+                 std::pair{ImGuiKey_K, 'K'}, std::pair{ImGuiKey_B, 'B'}, std::pair{ImGuiKey_P, 'P'}}) {
             if (ImGui::IsKeyPressed(imKey, false)) { send(ch); return; }
         }
         for (int d = 0; d <= 9; ++d) {
@@ -3624,7 +3720,6 @@ void Application::handleShortcuts() {
         ui_.actions.pattern = true;
     if (!ctrl && !alt && !shift && ImGui::IsKeyPressed(ImGuiKey_M, false))
         ui_.actions.mirror = true;
-    if (ctrl && !shift && ImGui::IsKeyPressed(ImGuiKey_B, false)) ui_.actions.bevel = true;
 
     // Fillet the selected edges. F, as in Fusion, and reachable by the left
     // hand next to the other edit keys.
@@ -3829,28 +3924,6 @@ void Application::abortTransform() {
     tool_.cancel(scene_);
 }
 
-// Every edge of the body, through the same gesture as a picked edge. That
-// gesture is what finds how large a round the part can take, and it does so in
-// another process -- a round the size of a wall can take OpenCASCADE down with
-// it, and committing a width straight from the menu gave it that chance.
-void Application::roundAllEdges() {
-    // Checked before the selection is touched: beginFillet would decline too,
-    // but only after this had replaced what the user had picked.
-    if (tool_.active() || createTool_.active() || sketchTool_.active() || editToolActive()) return;
-    const ObjectId id = scene_.contextObject();
-    SceneObject* obj = scene_.find(id);
-    if (!obj || obj->body.empty()) { setNotice("Select an object to round"); return; }
-    if (refuseMeshEdit(*obj, "Rounding edges")) return;
-
-    std::vector<EdgeId> all;
-    obj->body.allEdges(all);
-    if (all.empty()) { setNotice("That body has no edges to round"); return; }
-    scene_.select(id);
-    scene_.clearElementSelection();
-    for (EdgeId e : all) scene_.selectElement({id, ElementKind::Edge, e}, true);
-    beginFillet();
-}
-
 // ---------------------------------------------------------------------------
 // Reducing a mesh.
 
@@ -4024,7 +4097,7 @@ void Application::convertSelectedToSolid() {
                   r.facesAfter,
                   r.facesAfter < r.facesBefore / 2
                       ? "" : "  (little merged: the mesh may not have been CAD)",
-                  baked > 0 ? "  -- the steps before it are part of the solid now" : "");
+                  baked > 0 ? ". The steps before it are part of the solid now" : "");
     setNotice(buf);
 }
 
@@ -4716,6 +4789,7 @@ void Application::beginFaceMove(FaceOp op) {
     faceTool_.names = nameFaces(obj->body, faces);
     faceTool_.before = obj->body;
     faceTool_.chainBefore = obj->features;
+    if (op == FaceOp::Move) faceTool_.cacheBefore = obj->featureCache;
     faceTool_.value = 0.0;
     preEditSolid_ = obj->healthVersion == obj->geometryVersion && obj->health.solid();
 
@@ -5020,14 +5094,30 @@ void Application::updateFaceMove(bool snap, bool follow) {
         });
     } else {
         // The sign is the operation. Out adds, in cuts; there is nothing else
-        // a moved face can mean. The way it goes is in the body's own space,
-        // which is where the faces are: `direction` is in the world, and on a
-        // body that has been turned the two are not the same.
-        const Vec3 along = faceAlongLocal(*obj);
-        faceTool_.preview.request(faceTool_.before, [faces, want, along](Body& b) {
-            return extrudeFaces(b, faces, want, nullptr, 7002, ExtrudeOp::Auto, nullptr,
-                                true, along);
-        });
+        // a moved face can mean. It is made where the face was put, not on
+        // the end, and everything after that is built again on the moved
+        // face -- so the preview is the history from there on, and a step
+        // that newly fails in it means the face cannot go that far.
+        size_t from = 0;
+        std::vector<Feature> chain = faceMoveChain(*obj, want, &from);
+        std::vector<Body> cache = faceTool_.cacheBefore;
+        std::vector<ElementId> wasBroken;
+        for (const Feature& f : faceTool_.chainBefore)
+            if (f.errored) wasBroken.push_back(f.uid);
+        faceTool_.preview.request(faceTool_.before,
+            [chain = std::move(chain), cache = std::move(cache), wasBroken = std::move(wasBroken),
+             from](Body& b) {
+                std::vector<Feature> run = chain;
+                std::vector<Body> built = cache;
+                Body out;
+                if (!evaluateFrom(run, from, built, out)) return false;
+                for (size_t i = from; i < run.size(); ++i)
+                    if (run[i].errored &&
+                        std::find(wasBroken.begin(), wasBroken.end(), run[i].uid) == wasBroken.end())
+                        return false;
+                b = std::move(out);
+                return true;
+            });
     }
     faceTool_.previewValid = false;
 }
@@ -5193,17 +5283,16 @@ void Application::commitFaceMove() {
             f.angle = radians(faceTool_.value);
             f.axisPoint = faceTool_.hingePoint;
             f.axisDir = faceTool_.hingeDir;
-        } else {
-            f.kind = FeatureKind::Extrude;
-            f.distance = faceTool_.value;
-            f.extrudeOp = ExtrudeOp::Auto;
-            f.mergeFlush = true;
-            f.alongAxis = faceTool_.lockedAxis >= 0;
-            if (f.alongAxis) f.axisDir = faceAlongLocal(*obj);
         }
         f.faces = nameFaces(faceTool_.before, faceTool_.faces);
 
-        if (!scene_.addFeature(id, std::move(f), &why) || !editKeepsSolid(id)) {
+        // A push / pull goes where the face was put and the steps after it
+        // are built again on the moved face; the others go on the end.
+        const bool placed = faceTool_.op == FaceOp::Move
+            ? scene_.setFeatures(id, faceMoveChain(*obj, faceTool_.value, nullptr), &why,
+                                 /*onlyNewFailures=*/true)
+            : scene_.addFeature(id, std::move(f), &why);
+        if (!placed || !editKeepsSolid(id)) {
             putBack(why.empty() ? "" : "Refused: " + why, "The face could not be moved");
             return;
         }
@@ -5245,6 +5334,27 @@ void Application::commitFaceMove() {
     // typed, and showing a cursor in it would say otherwise.
     faceTool_.typedValue.clear();
     settleCommand(Settled::Face, id);
+}
+
+Feature Application::faceMoveStep(const SceneObject& obj, Real distance) const {
+    Feature f;
+    f.kind = FeatureKind::Extrude;
+    f.distance = distance;
+    f.extrudeOp = ExtrudeOp::Auto;
+    f.mergeFlush = true;
+    f.alongAxis = faceTool_.lockedAxis >= 0;
+    if (f.alongAxis) f.axisDir = faceAlongLocal(obj);
+    f.faces = faceTool_.names;
+    return f;
+}
+
+std::vector<Feature> Application::faceMoveChain(const SceneObject& obj, Real distance,
+                                                size_t* from) const {
+    Feature f = faceMoveStep(obj, distance);
+    const FaceMovePlace where = placeFaceMove(faceTool_.chainBefore, faceTool_.cacheBefore, f.faces,
+                                              distance, f.alongAxis, f.axisDir);
+    if (from) *from = where.at;
+    return withFaceMove(faceTool_.chainBefore, where, std::move(f));
 }
 
 void Application::abortFaceMove() {
@@ -5363,14 +5473,14 @@ void Application::settleCommand(Settled kind, ObjectId id) {
 // that starts an operation puts away -- saying the same thing.
 void Application::syncToolSettled() {
     if (createTool_.applied() && settled_ != Settled::Create) {
-        dismissSettled();
+        dismissSettled(Settled::Create);
         settled_ = Settled::Create;
         settledRevision_ = undo_.revision();
     } else if (!createTool_.applied() && settled_ == Settled::Create) {
         settled_ = Settled::None;
     }
     if (sketchTool_.applied() && settled_ != Settled::Sketch) {
-        dismissSettled();
+        dismissSettled(Settled::Sketch);
         settled_ = Settled::Sketch;
         settledRevision_ = undo_.revision();
     } else if (!sketchTool_.applied() && settled_ == Settled::Sketch) {
@@ -5378,9 +5488,11 @@ void Application::syncToolSettled() {
     }
 }
 
-void Application::dismissSettled() {
-    createTool_.dismissApplied();
-    sketchTool_.dismissApplied();
+void Application::dismissSettled(Settled keep) {
+    // The create and sketch tools settle themselves; putting away whatever
+    // else was open must not put away the one that has just applied.
+    if (keep != Settled::Create) createTool_.dismissApplied();
+    if (keep != Settled::Sketch) sketchTool_.dismissApplied();
     // A joint's panel is the same kind of thing: applied, and adjusting.
     if (jointTool_.adjusting()) jointTool_.finish(undo_);
     if (settled_ == Settled::None) return;
@@ -5974,11 +6086,19 @@ void Application::beginFillet() {
                 }
             }
             edges.assign(faceEdges.begin(), faceEdges.end());
+        } else if (scene_.isSelected(id)) {
+            // The whole body selected, and nothing on it: every edge. They are
+            // picked as well, so the view shows what the round will run along.
+            std::vector<EdgeId> all;
+            obj->body.allEdges(all);
+            scene_.clearElementSelection();
+            for (EdgeId e : all) scene_.selectElement({id, ElementKind::Edge, e}, true);
+            edges.assign(all.begin(), all.end());
         }
     }
 
     if (edges.empty()) {
-        setNotice("Select edges or faces to fillet");
+        setNotice(scene_.isSelected(id) ? "That body has no edges to round" : "Select edges or faces to fillet");
         return;
     }
 
@@ -7324,7 +7444,7 @@ void Application::stepPreviewCheck() {
     std::fprintf(stderr, "[preview] %s\n",
                  (p2->body.faceCount() == previewFaces &&
                   std::fabs(p2->body.health(false).volume - previewVolume) < 1e-3)
-                     ? "SAME" : "DIFFERENT -- the preview lied");
+                     ? "SAME" : "DIFFERENT: the preview lied");
 
     // 6 carries on into the panel that is still up: the fillet is cut and the
     // pointer is free, so Round/Flat and the taper are finally reachable
@@ -7397,6 +7517,7 @@ void Application::stepPrintDemo() {
     if (printDemo_ <= 0 || printDemoDone_ || viewRect_.w <= 0) return;
     if (scene_.objects().empty()) return;
     printDemoDone_ = true;
+    view_.showPrintIssues = true;     // off by default, and the check runs only while shown
 
     const ObjectId id = scene_.objects().front()->id;
     SceneObject* o = scene_.find(id);
@@ -9321,7 +9442,7 @@ void Application::applyActions() {
         a.openProject || a.saveProject || a.saveProjectAs || a.exportStl || a.export3mf || a.exportStep ||
         a.rebuildObject != kNoObject || a.transformEdited != kNoObject || a.resetTransform != kNoObject ||
         a.featuresEdited != kNoObject || a.pushPull || a.extrude || a.extrudeCut || a.rotateFace ||
-        a.scaleFace || a.divide || a.pattern || a.mirror || a.bevel || a.fillet || a.revolve || a.sweep ||
+        a.scaleFace || a.divide || a.pattern || a.mirror || a.fillet || a.revolve || a.sweep ||
         a.loft || a.moveObject || a.rotateObject || a.scaleObject || a.toggleMeasure || a.joint ||
         a.editJoint || a.groupSelected || a.ungroupSelected || a.moveNodeRequested || a.clearance ||
         a.historyEdit != UiActions::HistoryEdit::None)
@@ -9458,7 +9579,6 @@ void Application::applyActions() {
     if (a.mirror) beginPattern(PatternMode::Mirror);
     if (a.mergeFaces) mergeSelected();
     if (a.deleteFace) deleteSelectedFaces();
-    if (a.bevel)   roundAllEdges();
     if (a.split)   beginSplit();
     if (a.fillet)  beginFillet();
     if (a.shell)   beginShell();
@@ -9953,7 +10073,7 @@ int Application::run() {
         ui_.dirty = dirty();
         {
             // The window's title too, for the task bar and the window list.
-            const std::string title = (ui_.dirty ? "\xE2\x80\xA2 " : "") + ui_.projectName + " \xE2\x80\x94 Tangent";
+            const std::string title = (ui_.dirty ? "\xE2\x80\xA2 " : "") + ui_.projectName + " - Tangent";
             if (title != windowTitle_) {
                 windowTitle_ = title;
                 SDL_SetWindowTitle(window_, title.c_str());
@@ -10100,6 +10220,9 @@ int Application::run() {
                     ui_.toolStatus = summarise(o->printCheck);
         }
 
+        ui::clearKeyHints();
+        gatherKeyHints();
+
         if (measure_.active() && ui_.toolStatus.empty()) {
             const size_t n = measure_.picks().size();
             ui_.toolStatus = n == 0 ? "Measure: click a vertex, edge or face"
@@ -10148,6 +10271,7 @@ int Application::run() {
         gProbe.begin();
         applyActions();
         stepAutosave();
+        syncViewPreferences();
         if (crashTest_ && ++crashTestFrame_ == 5) {
             // Something unsaved first, so the save aside has work to keep.
             undo_.push(std::make_unique<ColourCommand>(kNoObject, false, Vec3{}, true, Vec3{}));

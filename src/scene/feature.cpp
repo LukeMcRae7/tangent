@@ -1038,4 +1038,105 @@ bool evaluateFeatures(std::vector<Feature>& features, Body& out) {
     return evaluateFrom(features, 0, scratch, out);
 }
 
+namespace {
+
+// A step the moved face cannot be slid in front of: what it adds does not
+// follow the face. A baked body stays where it was baked, a pattern's copies
+// are copies of the face as it stood, and a scale would scale the move.
+bool holdsFaceMoveBack(FeatureKind k) {
+    switch (k) {
+        case FeatureKind::Primitive:
+        case FeatureKind::BaseMesh:
+        case FeatureKind::Boolean:
+        case FeatureKind::Pattern:
+        case FeatureKind::Scale:
+        case FeatureKind::VertexEdit:
+        case FeatureKind::Reduce:
+            return true;
+        default:
+            return false;
+    }
+}
+
+} // namespace
+
+FaceMovePlace placeFaceMove(const std::vector<Feature>& features, const std::vector<Body>& cache,
+                            const ElementRefs& faces, Real delta, bool alongAxis, Vec3 axisDir) {
+    const size_t n = features.size();
+    FaceMovePlace place{n, false};
+    if (n == 0 || cache.size() < n || faces.kind != ElementRefs::Kind::Explicit || faces.ids.empty())
+        return place;
+
+    // Which way each face faces now. A face that faced another way earlier on
+    // was turned by some step, and a move made before that would go the wrong
+    // way.
+    const Body& now = cache[n - 1];
+    std::vector<Vec3> normals;
+    for (ElementId id : faces.ids) {
+        const FaceId f = now.findFace(id);
+        if (f == kNoFace) return place;
+        normals.push_back(now.faceNormal(f));
+    }
+    auto sameFaces = [&](const Body& b) {
+        for (size_t i = 0; i < faces.ids.size(); ++i) {
+            const FaceId f = b.findFace(faces.ids[i]);
+            if (f == kNoFace || dot(b.faceNormal(f), normals[i]) < 0.999) return false;
+        }
+        return true;
+    };
+    auto sameSet = [&](const ElementRefs& r) {
+        if (r.kind != ElementRefs::Kind::Explicit || r.ids.size() != faces.ids.size()) return false;
+        for (ElementId id : r.ids)
+            if (std::find(faces.ids.begin(), faces.ids.end(), id) == faces.ids.end()) return false;
+        return true;
+    };
+    auto touchesAny = [&](const ElementRefs& r) {
+        if (r.kind != ElementRefs::Kind::Explicit) return true;
+        for (ElementId id : r.ids)
+            if (std::find(faces.ids.begin(), faces.ids.end(), id) != faces.ids.end()) return true;
+        return false;
+    };
+
+    for (size_t k = n; k-- > 0;) {
+        const Feature& f = features[k];
+        // A step switched off builds nothing, so there is nothing to follow.
+        if (!f.enabled) { place.at = k; continue; }
+        if (holdsFaceMoveBack(f.kind)) break;
+
+        if (f.kind == FeatureKind::Extrude && touchesAny(f.faces)) {
+            // The step that last moved these faces. A push / pull takes the
+            // change whichever way it goes; an extrude only while it stays the
+            // same kind of extrude -- a boss pushed below its own base is
+            // not a shorter boss.
+            const bool sameWay = f.alongAxis == alongAxis &&
+                                 (!alongAxis || dot(f.axisDir, axisDir) > 0.999);
+            const Real after = f.distance + delta;
+            const bool keepsMeaning = f.mergeFlush ||
+                ((f.extrudeOp == ExtrudeOp::Join || f.extrudeOp == ExtrudeOp::Cut ||
+                  f.extrudeOp == ExtrudeOp::Auto) && after * f.distance > 0.0);
+            if (!f.errored && sameSet(f.faces) && sameWay && keepsMeaning) return {k, true};
+            break;
+        }
+
+        // Before this step, were the faces there, and facing the same way?
+        if (k == 0 || !sameFaces(cache[k - 1])) break;
+        place.at = k;
+    }
+    return place;
+}
+
+std::vector<Feature> withFaceMove(std::vector<Feature> features, FaceMovePlace where,
+                                  Feature move) {
+    if (where.adjust && where.at < features.size()) {
+        Feature& f = features[where.at];
+        f.distance += move.distance;
+        if (std::fabs(f.distance) < 1e-6 && f.mergeFlush)
+            features.erase(features.begin() + static_cast<std::ptrdiff_t>(where.at));
+        return features;
+    }
+    const size_t at = std::min(where.at, features.size());
+    features.insert(features.begin() + static_cast<std::ptrdiff_t>(at), std::move(move));
+    return features;
+}
+
 } // namespace tg

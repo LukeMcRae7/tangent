@@ -341,29 +341,28 @@ The icons are [Tabler Icons](https://tabler.io/icons), bundled as
 | MMB drag | Orbit |
 | Shift + MMB | Pan |
 | Wheel | Zoom straight in and out of the part in hand; with nothing selected, toward the pointer |
-| Click | Select the edge, face or vertex under the cursor — what a click would take is lit as the pointer passes over it |
+| Click | Select the edge, face or vertex under the cursor: what a click would take is lit as the pointer passes over it |
 | Ctrl + click | Select the whole object (as clicking its outliner row) |
 | Shift + click | Extend either selection |
 | Drag | Box select: to the right, what is wholly inside; to the left, whatever it touches. Shift adds |
 | Filter (bottom left of the view) | Any, faces, edges, corners or whole parts: what a click and a box take |
 | E | Extrude selected faces, then drag to set the height (Shift + E starts it as a cut) |
-| J / D / I / N | *(while extruding)* join, cut, intersect or a new body — until one is picked the drag decides: out joins, in cuts |
-| F | Fillet the selected edges |
-| H | Hole — point at the face it goes into and click; the size is chosen in the dialog |
-| Ctrl + B | Bevel all edges of the active object |
+| J / D / I / N | *(while extruding)* join, cut, intersect or a new body; until one is picked, the drag decides (out joins, in cuts) |
+| F | Fillet the selected edges, the edges around the selected faces, or every edge of a selected body |
+| H | Hole: point at the face it goes into and click; the size is chosen in the dialog |
 | Ctrl + Shift + U / D / I | Combine, set to join / cut / intersect: the first selected body is the target, the rest are tools |
-| J | Joint — point at the part that moves, then the part it goes on |
+| J | Joint: point at the part that moves, then the part it goes on |
 | F | *(adjusting a joint)* flip it over on its axis |
 | Ctrl + G / Ctrl + Shift + G | Group the selection / take it out of its group |
-| D | Measure — one entity for its own size, two for the distance between; Keep leaves it on the model, reading the part as it changes |
+| D | Measure: one entity for its own size, two for the distance between; Keep leaves it on the model, reading the part as it changes |
 | Ctrl + K | Find any command by name, with its key |
 | Ctrl + , | Preferences: units, theme, orbit, snapping, printer, autosave |
-| V | Section view — cut the model with a plane you slide; again for its panel, or to put the model back whole |
+| V | Section view: cut the model with a plane you slide; again for its panel, or to put the model back whole |
 | Numpad 1 / 3 / 7 | Front / Right / Top (Ctrl for opposite) |
 | Numpad 4 / 6 / 8 / 2 | Orbit in 15° steps |
 | Numpad 5 | Perspective / orthographic |
 | Numpad . / Home | Frame selection / frame all |
-| G / R / S | Move / rotate / scale — the object, or the selected faces/edges/vertices. An object's move, turn or scale is a step in its history |
+| G / R / S | Move / rotate / scale: the object, or the selected faces/edges/vertices. An object's move, turn or scale is a step in its history |
 | X / Y / Z | *(during a transform)* constrain to an axis |
 | Shift + X/Y/Z | *(during a transform)* constrain to a plane |
 | type a number | *(during a transform)* exact value |

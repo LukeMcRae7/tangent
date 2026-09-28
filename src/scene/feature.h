@@ -420,4 +420,35 @@ inline bool isPlacement(FeatureKind k) { return k == FeatureKind::Move || k == F
 bool evaluateFrom(std::vector<Feature>& features, size_t from,
                   std::vector<Body>& cache, Body& out);
 
+// Where a push / pull of some faces goes in a history.
+//
+// Not on the end. Moving a face is a change to the part's shape, and what was
+// built on that face afterwards -- a fillet on its edge, a shell behind it --
+// has to be built on the face where it now is, not left standing where the
+// face used to be. So the move goes back up the history as far as the face
+// goes unchanged, and everything after it is built again on top of it: the
+// fillet follows the face because it is made again on the moved one.
+//
+// It stops at the step that put the face where it is. A push / pull or an
+// extrude of exactly these faces is that step, and it is changed rather than
+// added to (`adjust`): pulling the top of a boss makes the boss taller, and
+// pushing a face twice leaves one step. It also stops where the face does not
+// yet exist, where it faced another way, and at a step that would not carry
+// the move with it -- a baked body, a pattern's copies, a scale.
+//
+// `delta` is how far the faces go, signed as the step would be. `cache` is the
+// body after each step, as SceneObject::featureCache holds it; if it does not
+// cover the history the move goes on the end, as it always used to.
+struct FaceMovePlace {
+    size_t at = 0;        // the step to change, or where the new one goes
+    bool   adjust = false;
+};
+FaceMovePlace placeFaceMove(const std::vector<Feature>& features, const std::vector<Body>& cache,
+                            const ElementRefs& faces, Real delta, bool alongAxis, Vec3 axisDir);
+
+// The history with `move` -- a push / pull step -- made at `where`: inserted,
+// or folded into the step there. A step folded back to nothing is removed.
+std::vector<Feature> withFaceMove(std::vector<Feature> features, FaceMovePlace where,
+                                  Feature move);
+
 } // namespace tg

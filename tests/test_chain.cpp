@@ -365,6 +365,94 @@ static void testHistory() {
     }
 }
 
+// Push / pull goes where the face was put, not on the end: what was built on
+// the face afterwards is built again on the moved one.
+static void testFaceMoveInHistory() {
+    std::printf("--- a push / pull moves what was built on the face ---\n");
+    Scene s;
+    PrimitiveSpec spec;
+    spec.kind = PrimitiveKind::Box;
+    spec.box = {20, 20, 20};
+    const ObjectId id = s.addPrimitive(PrimitiveKind::Box, spec);
+    Feature round;
+    round.kind = FeatureKind::Bevel;
+    round.edges = nameEdges(s.find(id)->body, {upright(s.find(id)->body, 5.0)}, false);
+    round.width = 3.0;
+    std::string why;
+    check(s.addFeature(id, round, &why), "the round goes on: " + why);
+    const Real corner = 9.0 * (1.0 - kPi / 4.0);
+    auto volume = [&] { return s.find(id)->body.health(false).volume; };
+    const int facesBefore = s.find(id)->body.faceCount();
+
+    // A side the round runs along.
+    Vec3 p, q;
+    s.find(id)->body.edgePositions(upright(s.find(id)->body, 5.0), p, q);
+    const Vec3 side = p.x > 0 ? Vec3{1, 0, 0} : Vec3{-1, 0, 0};
+
+    auto push = [&](Vec3 dir, Real by, FaceMovePlace* was = nullptr) {
+        SceneObject* o = s.find(id);
+        Feature f;
+        f.kind = FeatureKind::Extrude;
+        f.distance = by;
+        f.mergeFlush = true;
+        f.faces = nameFaces(o->body, {facing(o->body, dir)});
+        const FaceMovePlace where = placeFaceMove(o->features, o->featureCache, f.faces, by, false, Vec3{});
+        if (was) *was = where;
+        std::string err;
+        const bool ok = s.setFeatures(id, withFaceMove(o->features, where, f), &err, true);
+        if (!ok) std::printf("  (refused: %s)\n", err.c_str());
+        return ok;
+    };
+
+    FaceMovePlace where;
+    check(push(side, -5.0, &where), "the side goes in 5");
+    check(!where.adjust && where.at == 1, "in front of the round, not after it");
+    check(s.find(id)->features.size() == 3 && s.find(id)->features.back().kind == FeatureKind::Bevel,
+          "the round is still the last step");
+    check(s.find(id)->body.faceCount() == facesBefore, "no face left standing where the side was");
+    check(near(volume(), 15.0 * 20.0 * 20.0 - corner * 20.0, 1e-3),
+          "15 x 20 x 20 with the round on its new corner: " + std::to_string(volume()));
+
+    check(push(side, 2.0, &where), "and back out 2");
+    check(where.adjust && where.at == 1, "the same step changed, not another added");
+    check(s.find(id)->features.size() == 3 && near(s.find(id)->features[1].distance, -3.0),
+          "one push of -3");
+    check(near(volume(), 17.0 * 20.0 * 20.0 - corner * 20.0, 1e-3), "17 x 20 x 20: " + std::to_string(volume()));
+
+    check(push(side, 3.0), "and back where it began");
+    check(s.find(id)->features.size() == 2, "a push back to nothing is gone");
+    check(near(volume(), 8000.0 - corner * 20.0, 1e-3), "the rounded cube again");
+
+    // A face that only exists because of a step goes after that step.
+    {
+        SceneObject* o = s.find(id);
+        std::vector<FaceId> all;
+        o->body.allFaces(all);
+        FaceId curved = kNoFace;
+        for (FaceId f : all)
+            if (o->body.faceKind(f) != SurfaceKind::Plane) curved = f;
+        const ElementRefs named = nameFaces(o->body, {curved});
+        const FaceMovePlace at = placeFaceMove(o->features, o->featureCache, named, 1.0, false, Vec3{});
+        check(!at.adjust && at.at == o->features.size(), "the round's own face moves after the round");
+    }
+
+    // Pulling the top of a boss makes the boss taller.
+    {
+        SceneObject* o = s.find(id);
+        Feature boss;
+        boss.kind = FeatureKind::Extrude;
+        boss.distance = 10.0;
+        boss.mergeFlush = false;
+        boss.extrudeOp = ExtrudeOp::Join;
+        boss.faces = nameFaces(o->body, {facing(o->body, {0, 0, 1})});
+        check(s.addFeature(id, boss, &why), "a boss off the top: " + why);
+        const size_t bossAt = s.find(id)->features.size() - 1;
+        check(push({0, 0, 1}, 5.0, &where), "its top pulled 5");
+        check(where.adjust && where.at == bossAt, "the boss is what changed");
+        check(near(s.find(id)->features[bossAt].distance, 15.0), "to 15");
+    }
+}
+
 int main() {
     if (!brep::available()) {
         std::printf("exact kernel not built; a chain needs one\n");
@@ -374,6 +462,7 @@ int main() {
     // before it on the screen.
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     testHistory();
+    testFaceMoveInHistory();
 
     Scene s;
     const ObjectId id = buildChain(s);

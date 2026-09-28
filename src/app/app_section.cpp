@@ -362,12 +362,8 @@ void Application::drawSectionPanel() {
     else                      std::snprintf(through, sizeof through, "%zu of %zu parts", cut, all);
     ui::commandValue("Cuts", through);
 
-    ui::commandHint("A view: nothing about the parts changes. Drag the arrow in the view, or the bar, to slide "
-                    "the plane; the side the arrow points to is taken away, and the cut is filled and hatched, "
-                    "each part the other way to the next.");
-    ui::commandHint("It stays while you work -- measure a wall, fillet an edge inside -- and clicks do not "
-                    "reach what it has taken away. Done puts the panel away and leaves the model cut; Section "
-                    "on the bar brings it back. Remove puts the model back whole.");
+    ui::commandHint("Cuts the view with a plane you slide, to see inside; the parts themselves do not change. "
+                    "Done keeps the view cut while you work, and Remove puts the model back whole.");
     const int footer = ui::commandFooter("Done", true, "Remove");
     ui::endCommand();
     if (footer > 0) { section_.panel = false; section_.pickingFace = false; }

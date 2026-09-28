@@ -167,10 +167,8 @@ void Application::drawFilletPanel() {
 
     if (settled) ui::commandApplied(filletTool_.chamfer ? "Chamfer" : "Fillet");
     ui::commandHint(filletTool_.chamfer
-        ? "Pull along the arrow, drag the bar, or type a distance."
-        : "Pull along the arrow, drag the bar, or type a radius.");
-    if (filletTool_.active)
-        ui::commandHint("R rounds, C cuts flat. Click in the viewport to confirm, Esc to cancel.");
+        ? "Cuts the selected edges flat, the same distance back on both faces."
+        : "Rounds the selected edges. The largest radius that builds is found for you.");
 
     const int footer = settled ? ui::commandFooter("Done", true, nullptr)
                                : ui::commandFooter("Finish");
@@ -332,19 +330,6 @@ void Application::drawFacePanel() {
         }
     }
 
-    // What the number is doing to the body, said plainly. Not a choice: moving
-    // a face out adds material and moving it in takes some away.
-    if (!rotate && !scale && !extrude) {
-        ui::commandRow("Result");
-        ImGui::AlignTextToFramePadding();
-        const bool cutting = faceTool_.value < 0.0;
-        if (std::fabs(faceTool_.value) < 1e-6)
-            ImGui::TextColored(ui::im(palette::kTextDim), "unchanged");
-        else
-            ImGui::TextColored(cutting ? ui::im(palette::kBrand) : ui::im(palette::kValid),
-                               "%s", cutting ? "takes material away" : "adds material");
-    }
-
     // Only when it has actually run into something, and only for a push or
     // pull: that is the one this choice is acted on for. A scale that runs
     // into another body leaves it alone, and offering to join or cut there
@@ -366,19 +351,13 @@ void Application::drawFacePanel() {
         if (pick == 2) { faceTool_.combineWithMeet = true; faceTool_.meetOp = BooleanOp::Difference; }
     }
 
-    if (faceTool_.active)
-        ui::commandHint(extrude
-            ? "Move to set it, or type a number. J joins, D cuts, I intersects, N makes a new "
-              "body. Click in the viewport to confirm, Esc to cancel."
-            : "Move to set it, or type a number. X / Y / Z work along an axis. Click in the "
-              "viewport to confirm, Esc to cancel.");
     ui::commandHint(scale
-        ? "Pull out from the middle of the face to grow it, in to shrink it. The faces around it slant to follow."
+        ? "Grows or shrinks the face from its middle. The faces around it slant to follow."
         : rotate
-        ? "Pull either way across the pivot, or type an angle. X / Y / Z choose which way it turns."
+        ? "Turns the face about its pivot. The faces around it lean to follow."
         : extrude
-        ? "Grows off the face and keeps its outline. Out joins, in cuts, until you pick. Click a body to leave it out."
-        : "Moves the face; the body follows. X / Y / Z move it along a world axis instead of its own.");
+        ? "Grows a new piece off the face with the same outline. Out joins and in cuts, until you choose otherwise."
+        : "Moves the face, and anything built on it, such as a fillet or a shell, goes with it.");
 
     if (settled)
         ui::commandApplied(rotate ? "Rotation" : scale ? "Scale" : extrude ? "Extrude" : "Move");
@@ -509,8 +488,9 @@ void Application::drawCombinePanel() {
     }
 
     if (settled) ui::commandApplied("Combine");
-    ui::commandHint(settled ? "Change the operation, drop a tool, or keep the tools, and it is made again."
-                            : "Click bodies in the view to add or remove tools.");
+    ui::commandHint(settled ? "Change the operation or the tools and it is made again."
+                            : "Joins, cuts or intersects the target with the tools. Click bodies in the view to "
+                              "add or remove tools.");
 
     const int footer = settled ? ui::commandFooter("Done", true, nullptr)
                                : ui::commandFooter("Finish", ct.target != kNoObject && !ct.tools.empty());
@@ -690,9 +670,6 @@ void Application::drawPatternPanel() {
     }
 
     if (settled) ui::commandApplied(mirror ? "Mirror" : "Pattern");
-    if (patternTool_.active)
-        ui::commandHint("Move to set the spacing, or type it. Click in the viewport to confirm, "
-                        "Esc to cancel.");
     ui::commandHint(mirror
         ? (patternTool_.useTool
                ? "The last cut is reflected across the plane and made again."
@@ -1092,9 +1069,8 @@ void Application::drawThreadPanel() {
 
     if (settled) ui::commandApplied("Thread");
     else         ui::commandRefused(threadTool_.refusal.c_str());
-    ui::commandHint("The helix is cut, not drawn on: a printed part has no second operation to "
-                    "cut it with. A bore takes an inside thread and a shaft an outside one, so "
-                    "the face decides which this is.");
+    ui::commandHint("Cuts a real helical thread, sized for the screw with the allowance a printed "
+                    "part needs. A bore gets an inside thread and a shaft an outside one.");
 
     const int footer = settled ? ui::commandFooter("Done", true, nullptr)
                                : ui::commandFooter("Try again", true, "Cancel");
@@ -1363,8 +1339,7 @@ void Application::drawSplitPanel() {
     else         ui::commandRefused(splitTool_.refusal.c_str());
     ui::commandHint(splitTool_.by == By::Pieces
                         ? "The body was already in separate pieces; each is its own body now."
-                        : "The pieces keep the geometry, not the steps that made it: a split is "
-                          "where a history ends.");
+                        : "Cuts the body in two. The pieces keep the shape but not the steps that made it.");
 
     const int footer = settled ? ui::commandFooter("Done", true, nullptr)
                                : ui::commandFooter("Try again", true, "Cancel");
@@ -1415,11 +1390,8 @@ void Application::drawDividePanel() {
     ui::commandValue("Edge", of);
 
     if (settled) ui::commandApplied("Divide");
-    ui::commandHint("The cut runs square across the edge you chose and slides along it. "
-                    "The body stays whole.");
-    if (divideTool_.active)
-        ui::commandHint("Move to slide it, or type a distance. Click in the viewport to "
-                        "confirm, Esc to cancel.");
+    ui::commandHint("Draws a line square across the chosen edge, making a new face without "
+                    "cutting the body in two.");
 
     const int footer = settled ? ui::commandFooter("Done", true, nullptr)
                                : ui::commandFooter("Finish");
@@ -1506,7 +1478,7 @@ void Application::drawReducePanel() {
     }
     if (shown && shown->result.ok) {
         std::snprintf(text, sizeof text, "%s, measured%s", units::length(shown->result.deviationMm, 3).c_str(),
-                      shown->result.withinTolerance ? "" : " -- over");
+                      shown->result.withinTolerance ? "" : ", over the tolerance");
         ui::commandValue("Moved", text);
         if (shown->result.toleranceUsedMm > shown->tolerance * 1.0001) {
             std::snprintf(text, sizeof text, "loosened to %s", units::length(shown->result.toleranceUsedMm, 3).c_str());
@@ -1519,10 +1491,7 @@ void Application::drawReducePanel() {
         ui::commandValue("As a solid", text);
     }
 
-    ui::commandHint("Flat faces reduce to almost nothing; curved ones as far as the tolerance "
-                    "allows. Edges, corners and holes stay within the tolerance, and the result "
-                    "is measured before it is shown.");
-    ui::commandHint("Type a tolerance and press Enter; Esc cancels.");
+    ui::commandHint("Uses fewer triangles, keeping edges, corners and holes within the tolerance.");
 
     const int footer = ui::commandFooter(stale ? "Finish  (wait)" : "Finish", !stale);
     ui::endCommand();
@@ -1594,6 +1563,213 @@ void Application::drawDragGuides() {
         std::snprintf(label, sizeof label, "%s", units::length(divideTool_.t * length(divideTool_.dir)).c_str());
         ui::drawDragGuide(divideTool_.axis, camera_, origin, divideTool_.t * length(divideTool_.dir),
                           step, divideTool_.axis.spanValue, label);
+    }
+}
+
+} // namespace tg
+
+namespace tg {
+
+// The keys that do something now, for the corner of the view. One place for
+// every tool, so the same key reads the same way wherever it is shown: what
+// each tool does with them is in handleShortcuts and handleViewportMouse, and
+// this has to say the same.
+void Application::gatherKeyHints() {
+    using ui::keyHint;
+    auto finishCancel = [](const char* finish) {
+        keyHint("LMB / Enter", finish);
+        keyHint("RMB / Esc", "Cancel");
+    };
+    auto typeNumber = [](const char* what) { keyHint("0-9", what); };
+    auto ops = [] { keyHint("J D I N", "Join, cut, intersect, new body"); };
+
+    if (tool_.active()) {
+        finishCancel("Confirm");
+        keyHint("X Y Z", "Along an axis");
+        typeNumber("Type a value");
+        return;
+    }
+    if (settled_ != Settled::None) {
+        keyHint("Enter / Esc", "Done");
+        keyHint("Ctrl + Z", "Undo it");
+        return;
+    }
+    if (combineTool_.active) {
+        keyHint("LMB", "Add or remove a tool");
+        keyHint("J D I", "Join, cut, intersect");
+        keyHint("Enter", "Finish");
+        keyHint("Esc", "Cancel");
+        return;
+    }
+    if (faceTool_.active) {
+        finishCancel("Confirm");
+        if (faceTool_.op == FaceOp::Extrude) ops();
+        keyHint("X Y Z", faceTool_.op == FaceOp::Rotate ? "Turn about an axis" : "Along an axis");
+        typeNumber(faceTool_.op == FaceOp::Rotate ? "Type an angle" : "Type a distance");
+        return;
+    }
+    if (filletTool_.active) {
+        finishCancel("Confirm");
+        keyHint("R C", "Round, flat");
+        typeNumber(filletTool_.chamfer ? "Type a distance" : "Type a radius");
+        return;
+    }
+    if (reduceTool_.active) {
+        keyHint("Enter", "Finish");
+        keyHint("RMB / Esc", "Cancel");
+        typeNumber("Type a tolerance");
+        return;
+    }
+    if (patternTool_.active) {
+        finishCancel("Confirm");
+        keyHint("L C M", "Row, ring, mirror");
+        keyHint("X Y Z", "Axis");
+        typeNumber("Type the spacing");
+        return;
+    }
+    if (divideTool_.active) {
+        finishCancel("Confirm");
+        typeNumber("Type a distance");
+        return;
+    }
+    if (holeTool_.placing) {
+        keyHint("LMB", "Drill it");
+        keyHint("RMB / Esc", "Cancel");
+        return;
+    }
+    if (insetTool_.pending || shellTool_.pending || splitTool_.pending || draftTool_.pending ||
+        threadTool_.pending || offsetTool_.pending || holeTool_.pending) {
+        keyHint("Enter", "Try again");
+        keyHint("Esc", "Close");
+        return;
+    }
+    if (jointTool_.active()) {
+        if (jointTool_.typing()) {
+            keyHint("Enter", "Set it");
+            keyHint("Esc", "Leave it");
+        } else if (jointTool_.picking()) {
+            keyHint("LMB", "Pick a face, edge or corner");
+            keyHint("Backspace", "Take back the first pick");
+            keyHint("RMB / Esc", "Cancel");
+        } else {
+            keyHint("F", "Flip");
+            keyHint("Enter", "Done");
+            keyHint("Esc", "Close");
+        }
+        return;
+    }
+    if (profileTool_.active()) {
+        keyHint("LMB", "Pick");
+        keyHint("Backspace", "Take back the last pick");
+        if (profileTool_.build() == ProfileBuild::Revolve && profileTool_.slot() == ProfileSlot::Axis)
+            keyHint("X Y Z", "Turn about an axis");
+        ops();
+        keyHint("Enter", "Finish");
+        keyHint("RMB / Esc", "Cancel");
+        return;
+    }
+    if (sketchTool_.active()) {
+        switch (sketchTool_.stage()) {
+        case SketchStage::SelectPlane:
+            keyHint("LMB", "Pick a face or plane");
+            keyHint("1 3 7", "Front, side, top plane");
+            keyHint("Esc", "Cancel");
+            break;
+        case SketchStage::Draw:
+            keyHint("L R C A B", "Line, rectangle, circle, arc, curve");
+            keyHint("S D P", "Select, dimension, project");
+            keyHint("X / Q", "Delete, construction (hovered)");
+            keyHint("Enter", "Finish");
+            keyHint("Esc", "Stop drawing, then leave");
+            break;
+        case SketchStage::Regions:
+            keyHint("LMB", "Add or remove a region");
+            keyHint("E / Enter", "Next");
+            keyHint("RMB / Esc", "Cancel");
+            break;
+        case SketchStage::Depth:
+            keyHint("LMB / Enter", "Finish");
+            ops();
+            typeNumber("Type a depth");
+            keyHint("RMB / Esc", "Back");
+            break;
+        case SketchStage::Applied:
+        case SketchStage::None:
+            break;
+        }
+        return;
+    }
+    if (createTool_.active()) {
+        switch (createTool_.stage()) {
+        case CreateStage::SelectPlane:
+            keyHint("LMB", "Pick a face or plane");
+            keyHint("1 3 7", "Front, side, top plane");
+            keyHint("Esc", "Cancel");
+            break;
+        case CreateStage::DrawProfile_Pt1:
+            keyHint("LMB", "Place it");
+            keyHint("Esc", "Cancel");
+            break;
+        case CreateStage::DrawProfile_Pt2:
+            keyHint("LMB", createTool_.drawsCircle() ? "Set the radius" : "Set the size");
+            typeNumber(createTool_.drawsCircle() ? "Type a radius" : "Type a size");
+            if (!createTool_.drawsCircle()) keyHint("Tab", "Next size");
+            keyHint("Esc", "Cancel");
+            break;
+        case CreateStage::AdjustProfile:
+            keyHint("LMB", "Drag a handle");
+            if (createTool_.kind() == PrimitiveKind::Box) keyHint("F", "Round the corner (hovered)");
+            keyHint("E / Enter", createTool_.extrudes() ? "Extrude" : "Finish");
+            keyHint("Esc", "Cancel");
+            break;
+        case CreateStage::ExtrudeDepth:
+            keyHint("LMB / Enter", "Finish");
+            ops();
+            typeNumber("Type a depth");
+            keyHint("Esc", "Cancel");
+            break;
+        default:
+            break;
+        }
+        return;
+    }
+    if (measure_.active()) {
+        keyHint("LMB", "Pick one, then another");
+        keyHint("Esc", "Clear the picks");
+        keyHint("D", "Leave");
+        return;
+    }
+    if ((explode_.open && explode_.typing) || (clearance_.open && clearance_.typing) ||
+        (sectionPanelShown() && section_.typing)) {
+        keyHint("Enter", "Set it");
+        keyHint("Esc", "Leave it");
+        return;
+    }
+    if (sectionPanelShown()) {
+        keyHint("LMB", "Drag the arrow to slide it");
+        return;
+    }
+
+    // Nothing running: what the selection can have done to it. With nothing
+    // selected there is nothing to say -- the bar says what can be made -- and
+    // getting around the view is learned once, not reminded of.
+    const ObjectId id = scene_.contextObject();
+    const size_t faces = scene_.selectedFaces(id).size();
+    const size_t edges = scene_.selectedEdges(id).size();
+    if (scene_.selectedSketch().valid()) {
+        keyHint("E", "Extrude it");
+        keyHint("X", "Delete");
+    } else if (faces > 0) {
+        keyHint("G R S", "Push / pull, rotate, scale");
+        keyHint("E", "Extrude");
+        keyHint("F", "Fillet its edges");
+    } else if (edges > 0) {
+        keyHint("F", "Fillet");
+        keyHint("K", "Divide across it");
+    } else if (!scene_.selection().empty()) {
+        keyHint("G R S", "Move, rotate, scale");
+        keyHint("F", "Fillet every edge");
+        keyHint("Shift + D", "Duplicate");
     }
 }
 

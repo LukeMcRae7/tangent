@@ -303,8 +303,12 @@ public:
     // rather than after it, because the pattern's first copy is that boolean
     // and keeping both would cut the same hole twice. All or nothing -- a chain
     // that will not evaluate leaves the object as it was.
+    //
+    // `onlyNewFailures` lets through a step that was already failing before
+    // the swap, by uid: an edit early in a history that carries a known-bad
+    // step further down is not that step's fault.
     bool setFeatures(ObjectId id, std::vector<Feature> features,
-                     std::string* error = nullptr);
+                     std::string* error = nullptr, bool onlyNewFailures = false);
 
     // Appends a feature whose result has already been built -- by a preview on
     // another thread, from this object's current body -- instead of building it

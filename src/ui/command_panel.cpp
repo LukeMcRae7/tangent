@@ -11,8 +11,10 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
+#include <vector>
 
 namespace tg::ui {
 namespace {
@@ -50,6 +52,13 @@ ImVec4 g_rect{0, 0, 0, 0}, g_rectNow{0, 0, 0, 0};
 ImGuiID g_dragId = 0;
 bool    g_dragMoved = false;
 double  g_dragLo = 0.0, g_dragHi = 0.0;
+
+// The bar being typed into, when one has been double-clicked: every bar takes
+// a number, whether or not its tool also hears digits typed at the view.
+ImGuiID g_typeId = 0;
+bool    g_typeFocus = false;
+int     g_typeFrame = 0;         // last frame it was drawn; a panel that closes lets it go
+char    g_typeBuf[64] = "";
 
 // What the panel would have said, and where the mark that says it goes.
 //
@@ -260,7 +269,7 @@ void commandValue(const char* label, const char* value) {
 namespace {
 NumberEdit commandNumberShown(const char* label, double value, const char* unit,
                               bool fixed, bool editing, const char* buffer,
-                              double lo, double hi, bool signedRange, int places);
+                              double lo, double hi, bool signedRange, int places, bool isLength);
 }
 
 NumberEdit commandNumber(const char* label, double value, const char* unit,
@@ -271,21 +280,79 @@ NumberEdit commandNumber(const char* label, double value, const char* unit,
     // operation's panel.
     if (unit && std::strcmp(unit, "mm") == 0) {
         NumberEdit e = commandNumberShown(label, units::toShown(value), units::suffix(), fixed, editing, buffer,
-                                          units::toShown(lo), units::toShown(hi), signedRange, units::decimals());
+                                          units::toShown(lo), units::toShown(hi), signedRange, units::decimals(),
+                                          /*isLength=*/true);
         e.value = units::fromShown(e.value);
         return e;
     }
-    return commandNumberShown(label, value, unit, fixed, editing, buffer, lo, hi, signedRange, 2);
+    return commandNumberShown(label, value, unit, fixed, editing, buffer, lo, hi, signedRange, 2, false);
 }
 
 namespace {
+// What was typed into a bar, in the unit the bar shows. A length may carry a
+// unit of its own ("12mm", "0.5in"); anything else is the number alone, with
+// its sign or unit mark ("45", "45Â°", "20%") allowed after it.
+bool parseTyped(const char* text, bool isLength, double& out) {
+    if (isLength) {
+        Real mm = 0.0;
+        if (!units::parse(text, mm)) return false;
+        out = units::toShown(mm);
+        return true;
+    }
+    char* end = nullptr;
+    const double v = std::strtod(text, &end);
+    if (end == text) return false;
+    out = v;
+    return std::isfinite(v);
+}
+
 NumberEdit commandNumberShown(const char* label, double value, const char* unit,
                               bool fixed, bool editing, const char* buffer,
-                              double lo, double hi, bool signedRange, int places) {
+                              double lo, double hi, bool signedRange, int places, bool isLength) {
     NumberEdit out;
     out.value = value;
     ImGui::PushID(label);
     commandRow(label);
+
+    // Typed into: a field in the bar's place until Enter, a click away or Esc.
+    // What was typed comes back as a pull that has ended, which every caller
+    // already takes as a value to set.
+    const ImGuiID fieldId = ImGui::GetID("##field");
+    if (g_typeId == fieldId && g_typeFrame + 1 < ImGui::GetFrameCount() && !g_typeFocus) g_typeId = 0;
+    if (g_typeId == fieldId) {
+        g_typeFrame = ImGui::GetFrameCount();
+        const bool escaped = ImGui::IsKeyPressed(ImGuiKey_Escape, false);
+        const ImVec2 size(ImGui::GetContentRegionAvail().x, ImGui::GetFrameHeight());
+        const ImVec2 at = ImGui::GetCursorScreenPos();
+        if (g_typeFocus) { ImGui::SetKeyboardFocusHere(); g_typeFocus = false; }
+        ImGui::SetNextItemWidth(size.x);
+        ImGui::PushStyleColor(ImGuiCol_FrameBg, im(palette::kField));
+        const bool entered = ImGui::InputText("##typed", g_typeBuf, sizeof g_typeBuf,
+                                              ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll);
+        ImGui::PopStyleColor();
+        ImGui::GetWindowDrawList()->AddRect(at, ImVec2(at.x + size.x, at.y + size.y), u32(palette::kBrand), 5.0f);
+        const bool leftAfterEdit = ImGui::IsItemDeactivatedAfterEdit();
+        const bool left = ImGui::IsItemDeactivated() || (!ImGui::IsItemActive() && !g_typeFocus &&
+                                                         ImGui::IsMouseClicked(ImGuiMouseButton_Left) &&
+                                                         !ImGui::IsItemHovered());
+        if (escaped) {
+            g_typeId = 0;
+        } else if (entered || leftAfterEdit) {
+            double v = 0.0;
+            if (parseTyped(g_typeBuf, isLength, v)) {
+                out.dragged = true;
+                out.released = true;
+                out.value = std::fabs(v) < 1e-12 ? 0.0 : v;
+            }
+            g_typeId = 0;
+        } else if (left) {
+            g_typeId = 0;           // Esc, or a click away with nothing changed
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Type a number and press Enter. Esc leaves it as it was.");
+        ImGui::PopID();
+        return out;
+    }
 
     char text[64];
     if (editing) std::snprintf(text, sizeof text, "%s_", buffer ? buffer : "");
@@ -300,6 +367,19 @@ NumberEdit commandNumberShown(const char* label, double value, const char* unit,
     ImGui::InvisibleButton("##field", size);
     const ImGuiID id = ImGui::GetItemID();
     const bool hot = ImGui::IsItemHovered();
+
+    // A double-click types into it. The first click of the two has already
+    // been reported as a click, which only hands the value to the pointer
+    // until the typed one arrives.
+    if (hot && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+        g_typeId = id;
+        g_typeFocus = true;
+        g_dragId = 0;
+        std::snprintf(g_typeBuf, sizeof g_typeBuf, "%.*f", places, value);
+        ImGui::ClearActiveID();
+        ImGui::PopID();
+        return out;
+    }
 
     // Pulling the bar. A press that moves is a drag and sets the value; a
     // press that does not is a click and hands the value back to the pointer.
@@ -366,8 +446,8 @@ NumberEdit commandNumberShown(const char* label, double value, const char* unit,
     dl->AddText(ImVec2(hi2.x - ts.x - 9.0f, at.y + (size.y - ts.y) * 0.5f),
                 fixed || editing ? u32(palette::kBrand) : u32(palette::kText), text);
     if (hot && !ImGui::IsItemActive())
-        ImGui::SetTooltip("%s", ranged ? "Drag to set it, click to hand it back to the mouse, or type a number"
-                                       : "Click to hand it back to the mouse, or type a number");
+        ImGui::SetTooltip("%s", ranged ? "Drag to set it, or double-click to type a number"
+                                       : "Double-click to type a number");
 
     ImGui::PopID();
     return out;
@@ -470,8 +550,6 @@ void commandApplied(const char* what) {
     ImGui::Text("%s applied", what);
     ImGui::PopStyleColor();
     ImGui::PopFont();
-    commandHint("It is applied already. Change anything here and it is made again; "
-                "Done closes the panel and keeps it.");
 }
 
 void commandRefused(const char* why) {
@@ -483,8 +561,6 @@ void commandRefused(const char* why) {
     ImGui::PopTextWrapPos();
     ImGui::PopStyleColor();
     ImGui::PopFont();
-    commandHint("Nothing has been made yet. Change what it was refused for and it is "
-                "tried again.");
 }
 
 int commandFooter(const char* commitLabel, bool commitEnabled, const char* cancelLabel) {
@@ -504,6 +580,150 @@ int commandFooter(const char* commitLabel, bool commitEnabled, const char* cance
         if (quietButton(cancelLabel, ImVec2(cancelW, 0.0f))) result = -1;
     }
     return result;
+}
+
+// ---------------------------------------------------------------------------
+// Key hints
+
+namespace {
+struct KeyHintRow {
+    std::string keys;
+    std::string what;
+};
+std::vector<KeyHintRow> g_keyHints;
+
+enum class MouseButton { None, Left, Right, Middle, Wheel };
+
+MouseButton mouseToken(const std::string& t) {
+    if (t == "LMB") return MouseButton::Left;
+    if (t == "RMB") return MouseButton::Right;
+    if (t == "MMB") return MouseButton::Middle;
+    if (t == "Wheel") return MouseButton::Wheel;
+    return MouseButton::None;
+}
+
+std::vector<std::string> splitWords(const std::string& s) {
+    std::vector<std::string> out;
+    size_t i = 0;
+    while (i < s.size()) {
+        while (i < s.size() && s[i] == ' ') ++i;
+        size_t j = i;
+        while (j < s.size() && s[j] != ' ') ++j;
+        if (j > i) out.push_back(s.substr(i, j - i));
+        i = j;
+    }
+    return out;
+}
+
+// A mouse, 12 by 17, with one part of it lit.
+void drawMouse(ImDrawList* dl, ImVec2 at, float h, MouseButton lit, ImU32 line, ImU32 on) {
+    const float w = h * 0.7f;
+    const ImVec2 lo = at, hi(at.x + w, at.y + h);
+    const float r = w * 0.5f;
+    const float split = at.y + h * 0.42f;
+    const float mid = at.x + w * 0.5f;
+    if (lit == MouseButton::Left)
+        dl->AddRectFilled(lo, ImVec2(mid, split), on, r, ImDrawFlags_RoundCornersTopLeft);
+    if (lit == MouseButton::Right)
+        dl->AddRectFilled(ImVec2(mid, lo.y), ImVec2(hi.x, split), on, r, ImDrawFlags_RoundCornersTopRight);
+    dl->AddRect(lo, hi, line, r, 0, 1.3f);
+    dl->AddLine(ImVec2(lo.x, split), ImVec2(hi.x, split), line, 1.2f);
+    dl->AddLine(ImVec2(mid, lo.y), ImVec2(mid, split), line, 1.2f);
+    if (lit == MouseButton::Middle || lit == MouseButton::Wheel) {
+        const float ww = w * 0.22f;
+        dl->AddRectFilled(ImVec2(mid - ww, lo.y + h * 0.1f), ImVec2(mid + ww, split - h * 0.06f), on, ww);
+    }
+}
+} // namespace
+
+void keyHint(const char* keys, const char* what) {
+    if (!keys || !*keys) return;
+    g_keyHints.push_back({keys, what ? what : ""});
+}
+
+void clearKeyHints() { g_keyHints.clear(); }
+
+float drawKeyHints(ImDrawList* dl, float right, float bottom) {
+    if (g_keyHints.empty()) return 0.0f;
+
+    pushFont(FontWeight::Medium, uiFonts().size * 0.78f);
+    const float textH = ImGui::GetTextLineHeight();
+    const float capH = std::round(textH + 7.0f);
+    const float capPad = 6.0f, capGap = 3.0f, rowGap = 5.0f;
+    const float mouseH = capH - 1.0f, mouseW = mouseH * 0.7f;
+
+    // Widths first, so the caps line up in a column and the words after them.
+    struct Piece { std::string text; MouseButton mouse; bool cap; float w; };
+    std::vector<std::vector<Piece>> rows;
+    float keysW = 0.0f;
+    for (const KeyHintRow& row : g_keyHints) {
+        std::vector<Piece> pieces;
+        float w = 0.0f;
+        for (const std::string& word : splitWords(row.keys)) {
+            Piece p{word, mouseToken(word), word != "+" && word != "/", 0.0f};
+            if (p.mouse != MouseButton::None) p.w = mouseW + 4.0f;
+            else if (p.cap) p.w = std::max(capH, ImGui::CalcTextSize(word.c_str()).x + capPad * 2.0f);
+            else            p.w = ImGui::CalcTextSize(word.c_str()).x + 2.0f;
+            if (!pieces.empty()) w += capGap;
+            w += p.w;
+            pieces.push_back(std::move(p));
+        }
+        keysW = std::max(keysW, w);
+        rows.push_back(std::move(pieces));
+    }
+    ImGui::PopFont();
+    pushFont(FontWeight::Regular, uiFonts().size * 0.82f);
+    float whatW = 0.0f;
+    for (const KeyHintRow& row : g_keyHints) whatW = std::max(whatW, ImGui::CalcTextSize(row.what.c_str()).x);
+    ImGui::PopFont();
+
+    const float pad = 10.0f, gapCol = 10.0f;
+    const float boxW = pad * 2.0f + keysW + gapCol + whatW;
+    const float boxH = pad * 2.0f + capH * static_cast<float>(rows.size()) +
+                       rowGap * static_cast<float>(rows.size() - 1);
+    const ImVec2 lo(right - boxW, bottom - boxH), hi(right, bottom);
+    dl->AddRectFilled(lo, hi, u32(palette::kCommand, 0.78f), 8.0f);
+    dl->AddRect(lo, hi, u32(palette::kBorder, 0.7f), 8.0f);
+
+    const ImU32 capFill = u32(palette::kRaised, 0.95f);
+    const ImU32 capLine = u32(palette::kBorderStrong);
+    const ImU32 capText = u32(palette::kText);
+    const ImU32 dim = u32(palette::kTextDim);
+    float y = lo.y + pad;
+    for (size_t i = 0; i < rows.size(); ++i) {
+        float x = lo.x + pad;
+        pushFont(FontWeight::Medium, uiFonts().size * 0.78f);
+        for (size_t k = 0; k < rows[i].size(); ++k) {
+            const Piece& p = rows[i][k];
+            if (k) x += capGap;
+            if (p.mouse != MouseButton::None) {
+                drawMouse(dl, ImVec2(x + 2.0f, y + (capH - mouseH) * 0.5f), mouseH, p.mouse, capText,
+                          u32(palette::kBrand));
+            } else if (p.cap) {
+                dl->AddRectFilled(ImVec2(x, y), ImVec2(x + p.w, y + capH), capFill, 4.0f);
+                dl->AddRect(ImVec2(x, y), ImVec2(x + p.w, y + capH), capLine, 4.0f);
+                // A cap's bottom lip, as a key has.
+                dl->AddLine(ImVec2(x + 3.0f, y + capH - 0.5f), ImVec2(x + p.w - 3.0f, y + capH - 0.5f),
+                            u32(palette::kBorderStrong, 0.9f), 1.5f);
+                const ImVec2 ts = ImGui::CalcTextSize(p.text.c_str());
+                dl->AddText(ImVec2(x + (p.w - ts.x) * 0.5f, y + (capH - ts.y) * 0.5f - 0.5f), capText,
+                            p.text.c_str());
+            } else {
+                const ImVec2 ts = ImGui::CalcTextSize(p.text.c_str());
+                dl->AddText(ImVec2(x + 1.0f, y + (capH - ts.y) * 0.5f), dim, p.text.c_str());
+            }
+            x += p.w;
+        }
+        ImGui::PopFont();
+        pushFont(FontWeight::Regular, uiFonts().size * 0.82f);
+        const ImVec2 ts = ImGui::CalcTextSize(g_keyHints[i].what.c_str());
+        dl->AddText(ImVec2(lo.x + pad + keysW + gapCol, y + (capH - ts.y) * 0.5f), u32(palette::kText, 0.92f),
+                    g_keyHints[i].what.c_str());
+        ImGui::PopFont();
+        y += capH + rowGap;
+    }
+    g_keyHints.clear();
+    return boxH;
 }
 
 } // namespace tg::ui

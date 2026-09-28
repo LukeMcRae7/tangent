@@ -1663,6 +1663,110 @@ static void testSection14_HandlesAndFillets() {
     }
 }
 
+// ===========================================================================
+// SECTION 15: Shapes That Are Not Extruded
+//
+// A sphere, a cone and a torus are a plane, a centre and a radius, and are made
+// the moment the radius is set; a plane is a box's outline with no depth. Each
+// stays parametric, stands where it was drawn, and is left open to adjust.
+// ===========================================================================
+static void testSection15_PlacedShapes() {
+    std::printf("\n--- Section 15: Sphere, Cone, Torus, Plane ---\n");
+
+    auto size = [](const AABB& b) { return b.max - b.min; };
+    auto centre = [](const AABB& b) { return (b.max + b.min) * 0.5; };
+
+    struct Case { PrimitiveKind kind; int key; const char* what; };
+    const Case cases[] = {{PrimitiveKind::Sphere, '7', "sphere"},
+                          {PrimitiveKind::Cone, '7', "cone"},
+                          {PrimitiveKind::Torus, '3', "torus"}};
+    for (const Case& c : cases) {
+        Scene scene; Camera camera; UndoStack undo; CreateTool tool;
+        tool.start(c.kind);
+        tool.handleKey(c.key, false, false, camera, scene, undo);
+        check(tool.stage() == CreateStage::DrawProfile_Pt1, std::string(c.what) + ": plane picked");
+        tool.setProfileCircle({5, 0}, 8.0);
+        tool.setStage(CreateStage::DrawProfile_Pt2);
+        tool.handleKey(13, false, false, camera, scene, undo);
+        check(tool.stage() == CreateStage::Applied, std::string(c.what) + ": made on the radius, no extrude");
+        check(scene.objects().size() == 1, std::string(c.what) + ": one body");
+        if (scene.objects().empty()) continue;
+        SceneObject* o = scene.objects().back().get();
+        check(o->features.size() == 1 && o->features[0].kind == FeatureKind::Primitive &&
+                  o->spec.kind == c.kind,
+              std::string(c.what) + ": a parametric primitive");
+        const AABB b = o->worldBounds();
+        const Vec3 sz = size(b), mid = centre(b);
+        switch (c.kind) {
+            case PrimitiveKind::Sphere:
+                check(near(o->spec.sphere.radius, 8.0), "sphere: the radius drawn");
+                // Measured off the drawn facets, which fall a little inside the true sphere.
+                check(near(sz.x, 16.0, 0.02) && near(mid.x, 5.0, 0.01) && near(mid.z, 0.0, 0.01),
+                      "sphere: centred on the point drawn");
+                break;
+            case PrimitiveKind::Cone:
+                check(near(o->spec.cone.bottomRadius, 8.0) && near(o->spec.cone.topRadius, 0.0) &&
+                          near(o->spec.cone.height, 16.0),
+                      "cone: the radius drawn, to a point, as tall as it is wide");
+                check(near(b.min.z, 0.0, 1e-3) && near(b.max.z, 16.0, 1e-3) && near(mid.x, 5.0, 1e-3),
+                      "cone: standing on the plane over the circle drawn");
+                break;
+            case PrimitiveKind::Torus:
+                check(near(o->spec.torus.majorRadius, 8.0) && near(o->spec.torus.minorRadius, 2.0),
+                      "torus: the radius drawn, a quarter of it thick");
+                check(near(sz.x, 4.0, 1e-3) && near(sz.y, 20.0, 1e-3) && near(sz.z, 20.0, 1e-3),
+                      "torus: lying in the plane, square to it");
+                break;
+            default:
+                break;
+        }
+        // Adjusting takes it back and makes it again, as the panel does.
+        check(undo.undo(scene) && scene.objects().empty(), std::string(c.what) + ": undone");
+        check(tool.recommit(scene, camera, undo) && scene.objects().size() == 1,
+              std::string(c.what) + ": made again");
+        std::printf("  %-7s made on its radius, %.1f x %.1f x %.1f\n", c.what, sz.x, sz.y, sz.z);
+    }
+
+    // A plane: the outline, and then it is made. No depth is asked for. On the
+    // exact kernel it is a plate too thin to see, lying on the plane drawn on,
+    // and its face pushes out into a part like any other.
+    if (brep::available()) {
+        Scene scene; Camera camera; UndoStack undo; CreateTool tool;
+        scene.setDefaultBackend(Backend::Brep);
+        tool.start(PrimitiveKind::Plane);
+        tool.handleKey('7', false, false, camera, scene, undo);
+        tool.setProfileRect({-10, -5}, {10, 5}, 0.0);
+        tool.setStage(CreateStage::AdjustProfile);
+        tool.handleKey(13, false, false, camera, scene, undo);
+        check(tool.stage() == CreateStage::Applied, "plane: finished from the outline, no extrude");
+        check(scene.objects().size() == 1, "plane: one body");
+        if (!scene.objects().empty()) {
+            const SceneObject* o = scene.objects().back().get();
+            check(o->spec.kind == PrimitiveKind::Plane && near(o->spec.plane.width, 20.0) &&
+                      near(o->spec.plane.depth, 10.0),
+                  "plane: the outline drawn");
+            check(!o->body.isMesh(), "plane: exact, not a mesh");
+            const AABB b = o->worldBounds();
+            check(near(b.min.z, 0.0, 1e-6) && near(b.max.z, kPlaneThickness, 1e-6),
+                  "plane: a thin plate on the plane, not through it");
+
+            Feature pull;
+            pull.kind = FeatureKind::Extrude;
+            pull.distance = 5.0;
+            pull.mergeFlush = true;
+            FaceId top = kNoFace;
+            for (FaceId f = 0; f < o->body.faceCount(); ++f)
+                if (o->body.faceNormal(f).z > 0.99) top = f;
+            pull.faces = nameFaces(o->body, {top});
+            std::string why;
+            check(scene.addFeature(o->id, pull, &why), "plane: its face pulls up: " + why);
+            const Real vol = scene.find(o->id)->body.health(false).volume;
+            check(near(vol, 20.0 * 10.0 * (5.0 + kPlaneThickness), 1e-3),
+                  "plane: into a 20 x 10 block: " + std::to_string(vol));
+        }
+    }
+}
+
 int main() {
     std::printf("=========================================================\n");
     std::printf("  Running Comprehensive Object Creation Test Suite       \n");
@@ -1680,6 +1784,7 @@ int main() {
     testSection12_ParametricOnAnyPlane();
     testSection13_SnapToGeometry();
     testSection14_HandlesAndFillets();
+    testSection15_PlacedShapes();
 
     std::printf("\n=========================================================\n");
     std::printf("  Test Suite Summary: %s\n", gFailures == 0 ? "ALL PASS" : "FAILED");

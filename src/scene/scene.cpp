@@ -298,12 +298,6 @@ ObjectId Scene::addPrimitive(PrimitiveKind kind, const PrimitiveSpec& spec, Vec3
     base.uid = nextFeatureUid_++;
     obj->features.push_back(base);
 
-    // A plane is a surface, not a solid, and the exact kernel builds solids.
-    // Falling back keeps the construction plane working rather than refusing
-    // to make one at all.
-    if (base.backend == Backend::Brep && kind == PrimitiveKind::Plane)
-        obj->features.back().backend = Backend::Mesh;
-
     if (!evaluateFeatures(obj->features, obj->body)) return kNoObject;
 
     obj->id = nextId_++;
@@ -721,7 +715,8 @@ void Scene::addFeatureWithResult(ObjectId id, Feature feature, Body result) {
     pruneElementSelection();
 }
 
-bool Scene::setFeatures(ObjectId id, std::vector<Feature> features, std::string* error) {
+bool Scene::setFeatures(ObjectId id, std::vector<Feature> features, std::string* error,
+                        bool onlyNewFailures) {
     if (error) error->clear();
     SceneObject* obj = find(id);
     if (!obj) return false;
@@ -736,13 +731,21 @@ bool Scene::setFeatures(ObjectId id, std::vector<Feature> features, std::string*
 
     std::vector<Feature> previous = std::move(obj->features);
     obj->features = std::move(features);
+    std::vector<ElementId> wasBroken;
+    if (onlyNewFailures)
+        for (const Feature& f : previous)
+            if (f.errored) wasBroken.push_back(f.uid);
 
     Body next;
     const bool built = evaluateFrom(obj->features, from, obj->featureCache, next);
     syncKeys(*obj, from);
     size_t bad = obj->features.size();
     for (size_t i = 0; i < obj->features.size(); ++i)
-        if (obj->features[i].errored) { bad = i; break; }
+        if (obj->features[i].errored &&
+            std::find(wasBroken.begin(), wasBroken.end(), obj->features[i].uid) == wasBroken.end()) {
+            bad = i;
+            break;
+        }
 
     if (!built || bad < obj->features.size()) {
         if (error)

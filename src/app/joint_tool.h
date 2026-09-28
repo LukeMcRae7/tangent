@@ -55,6 +55,9 @@ public:
     // done in the panel since it opened.
     void setKind(Scene& scene, UndoStack& undo, JointKind kind);
     void setFlip(Scene& scene, UndoStack& undo, bool flip);
+    void setReverse(Scene& scene, UndoStack& undo, bool reverse);
+    // Keeps the moving part where it was built, or lays it onto the fixed pick.
+    void setAsBuilt(Scene& scene, UndoStack& undo, bool asBuilt);
     void setOffset(Scene& scene, UndoStack& undo, Real mm);
     void setAngle(Scene& scene, UndoStack& undo, Real radians);
     void setMotion(Scene& scene, UndoStack& undo, Real value);   // radians or mm, by kind

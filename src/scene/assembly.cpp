@@ -28,7 +28,10 @@ Rigid JointFrame::rigid() const {
 }
 
 Rigid Joint::motion() const {
-    auto clampMotion = [&](Real v) { return limited && hi >= lo ? std::clamp(v, lo, hi) : v; };
+    auto clampMotion = [&](Real v) {
+        const Real held = limited && hi >= lo ? std::clamp(v, lo, hi) : v;
+        return reverse ? -held : held;
+    };
     const Rigid lift{Quat{}, Vec3{0, 0, offset}};
     switch (kind) {
         case JointKind::Rigid:
@@ -430,7 +433,8 @@ struct Poses {
 // Where `joint` takes its moving part, as the move from where it now is.
 Rigid deltaFor(const Joint& joint, const Poses& poses) {
     const Rigid flip = joint.flip ? Rigid{} : Rigid{Quat::fromAxisAngle({1, 0, 0}, kPi), {}};
-    const Rigid target = poses.get(joint.fixed.object) * joint.fixed.frame.rigid() * joint.motion() * flip;
+    const Rigid target = poses.get(joint.fixed.object) * joint.fixed.frame.rigid() * joint.motion() * flip *
+                         (joint.asBuilt ? joint.built : Rigid{});
     const Rigid movingNow = poses.get(joint.moving.object);
     const Rigid movingNew = target * joint.moving.frame.rigid().inverse();
     return movingNew * movingNow.inverse();
@@ -635,11 +639,118 @@ bool checkJoint(const Scene& scene, Joint& c, std::string* why) {
     return true;
 }
 
-void settleJointLayout(const Scene& scene, Joint& joint) {
+namespace {
+
+// Positive opens. A little of the motion each way from where the part sits:
+// the way that runs further into the fixed part is the negative one. Measured
+// on the parts' boxes, which is coarse, but the question is only which way is
+// worse.
+void settleJointSense(const Scene& scene, Joint& joint, const std::vector<ObjectId>& unit) {
+    const SceneObject* fixed = scene.find(joint.fixed.object);
+    if (!fixed || !joint.hasMotion()) return;
+    const AABB target = fixed->worldBounds();
+    if (!target.valid()) return;
+    auto overlap = [&](const Joint& trial, Real& out) {
+        Rigid delta;
+        if (!jointDelta(scene, trial, delta)) return false;
+        const Mat4 m = translate(delta.t) * toMat4(delta.q);
+        // Two measures, added. How much the moving part's box would share
+        // with the fixed part's, which tells parts that stand apart. And how
+        // deep into the fixed part's box points on the moving part's surface
+        // would go -- the middles of its triangles, which unlike its corners
+        // do not sit on the fixed box's sides -- which tells a lid modelled
+        // on its box, whose box shares a slab with the other's either way.
+        out = 0.0;
+        AABB moved;
+        auto depth = [&](Vec3 p) {
+            const Vec3 in = minv(p - target.min, target.max - p);
+            if (in.x > 0 && in.y > 0 && in.z > 0) out += std::min({in.x, in.y, in.z});
+        };
+        for (ObjectId id : unit) {
+            const SceneObject* o = scene.find(id);
+            if (!o) continue;
+            const Mat4 model = m * o->modelMatrix();
+            const AABB b = o->body.bounds();
+            if (b.valid())
+                for (int c = 0; c < 8; ++c)
+                    moved.expand(transformPoint(model, {(c & 1) ? b.max.x : b.min.x, (c & 2) ? b.max.y : b.min.y,
+                                                        (c & 4) ? b.max.z : b.min.z}));
+            const RenderMesh& r = o->render;
+            const size_t tris = r.triangles.size() / 3;
+            const size_t stride = std::max<size_t>(1, tris / 2000);
+            for (size_t t = 0; t < tris; t += stride) {
+                const Vec3 c = (r.positions[r.triangles[3 * t]] + r.positions[r.triangles[3 * t + 1]] +
+                                r.positions[r.triangles[3 * t + 2]]) * (1.0 / 3.0);
+                depth(transformPoint(model, c));
+            }
+        }
+        if (moved.valid()) {
+            const Vec3 lo = maxv(moved.min, target.min), hi = minv(moved.max, target.max);
+            if (lo.x < hi.x && lo.y < hi.y && lo.z < hi.z) out += (hi.x - lo.x) * (hi.y - lo.y) * (hi.z - lo.z);
+        }
+        return true;
+    };
+    const Real step = joint.kind == JointKind::Revolute ? 0.26 : 1.0;   // 15 degrees, or 1 mm
+    Joint ahead = joint, back = joint;
+    ahead.reverse = back.reverse = false;
+    ahead.limited = back.limited = false;
+    if (joint.kind == JointKind::Revolute) { ahead.turn += step; back.turn -= step; }
+    else                                   { ahead.travel += step; back.travel -= step; }
+    Real oa = 0.0, ob = 0.0;
+    if (overlap(ahead, oa) && overlap(back, ob)) joint.reverse = oa > ob + 1e-9;
+}
+
+} // namespace
+
+void jointAsBuilt(const Scene& scene, Joint& joint) {
+    const SceneObject* fixed = scene.find(joint.fixed.object);
+    const SceneObject* moving = scene.find(joint.moving.object);
+    if (!fixed || !moving) return;
+    // With the motion at nothing, what takes the fixed side's frame to the
+    // moving part as it stands.
+    Joint rest = joint;
+    rest.asBuilt = false;
+    rest.turn = rest.travel = rest.slideX = rest.slideY = 0.0;
+    rest.offset = rest.angle = 0.0;
+    rest.flip = true;               // the frames as they are, not turned to face
+    const Rigid at = rigidOf(fixed->transform) * rest.fixed.frame.rigid() * rest.motion();
+    joint.built = at.inverse() * rigidOf(moving->transform) * joint.moving.frame.rigid();
+    joint.asBuilt = true;
+    joint.flip = true;
+    joint.offset = joint.angle = 0.0;
+    joint.turn = joint.travel = joint.slideX = joint.slideY = 0.0;
+}
+
+void settleJointLayout(const Scene& scene, Joint& joint, JointPlacing placing) {
     const SceneObject* fixed = scene.find(joint.fixed.object);
     if (!fixed) return;
     const std::vector<ObjectId> unit = jointUnit(scene, joint);
     if (unit.empty()) return;
+
+    // Already together -- a lid modelled on its box, a pin already in its
+    // hole -- and the joint keeps them as they are. Only parts that stand
+    // apart are laid onto one another.
+    bool together = placing == JointPlacing::WhereBuilt;
+    if (placing == JointPlacing::Auto) {
+        AABB f = fixed->worldBounds();
+        const Vec3 pad{0.05, 0.05, 0.05};
+        f.min -= pad;
+        f.max += pad;
+        for (ObjectId id : unit) {
+            const SceneObject* o = scene.find(id);
+            if (!o) continue;
+            const AABB b = o->worldBounds();
+            if (b.valid() && f.valid() && b.min.x <= f.max.x && b.max.x >= f.min.x && b.min.y <= f.max.y &&
+                b.max.y >= f.min.y && b.min.z <= f.max.z && b.max.z >= f.min.z)
+                together = true;
+        }
+    }
+    if (together) {
+        jointAsBuilt(scene, joint);
+        settleJointSense(scene, joint, unit);
+        return;
+    }
+    joint.asBuilt = false;
     // A hair inside each box, so parts that only touch do not count as
     // overlapping.
     AABB target = fixed->worldBounds();
@@ -649,15 +760,11 @@ void settleJointLayout(const Scene& scene, Joint& joint) {
     target.max -= shrink;
     const Vec3 targetCentre = (target.min + target.max) * 0.5;
 
-    Real bestOverlap = 1e300, bestGap = 1e300;
-    bool bestFlip = joint.flip;
-    Real bestAngle = joint.angle;
-    for (int k = 0; k < 4; ++k) {
-        Joint trial = joint;
-        trial.flip = (k & 1) != 0;
-        trial.angle = (k & 2) ? kPi : 0.0;
+    // How much of the fixed part the moving one would sit in for `trial`, and
+    // how far their middles are apart. False when it cannot be placed at all.
+    auto measure = [&](const Joint& trial, Real& overlap, Real& gap) {
         Rigid delta;
-        if (!jointDelta(scene, trial, delta)) return;
+        if (!jointDelta(scene, trial, delta)) return false;
         const Mat4 m = translate(delta.t) * toMat4(delta.q);
         AABB moved;
         for (ObjectId id : unit) {
@@ -669,22 +776,46 @@ void settleJointLayout(const Scene& scene, Joint& joint) {
                 moved.expand(transformPoint(m, {(c & 1) ? b.max.x : b.min.x, (c & 2) ? b.max.y : b.min.y,
                                                 (c & 4) ? b.max.z : b.min.z}));
         }
-        if (!moved.valid()) return;
+        if (!moved.valid()) return false;
         const Vec3 lo = maxv(moved.min, target.min), hi = minv(moved.max, target.max);
-        const Real overlap = lo.x < hi.x && lo.y < hi.y && lo.z < hi.z ? (hi.x - lo.x) * (hi.y - lo.y) * (hi.z - lo.z)
-                                                                         : 0.0;
-        const Real gap = length((moved.min + moved.max) * 0.5 - targetCentre);
-        // Clear first, then nearest; ties keep the earlier layout, which is
-        // the axes facing and unturned -- faces meeting face to face.
-        if (overlap < bestOverlap - 1e-9 || (std::fabs(overlap - bestOverlap) <= 1e-9 && gap < bestGap - 1e-6)) {
-            bestOverlap = overlap;
-            bestGap = gap;
-            bestFlip = trial.flip;
-            bestAngle = trial.angle;
+        overlap = lo.x < hi.x && lo.y < hi.y && lo.z < hi.z ? (hi.x - lo.x) * (hi.y - lo.y) * (hi.z - lo.z) : 0.0;
+        gap = length((moved.min + moved.max) * 0.5 - targetCentre);
+        return true;
+    };
+
+    // An edge's frame takes its X from whichever face beside the edge was
+    // clicked, so the two sides of a hinge can come out a quarter turn apart:
+    // the lid's underside against the box's back. The half turns alone then
+    // hang the lid off the back of the box instead of closing it.
+    const bool edge = joint.moving.straightEdge || joint.fixed.straightEdge;
+    const Real turns[4] = {0.0, kPi, kHalfPi, -kHalfPi};
+    const int nTurns = edge ? 4 : 2;
+
+    Real bestOverlap = 1e300, bestGap = 1e300;
+    bool bestFlip = joint.flip;
+    Real bestAngle = joint.angle;
+    for (int t = 0; t < nTurns; ++t) {
+        for (int f = 0; f < 2; ++f) {
+            Joint trial = joint;
+            trial.flip = f != 0;
+            trial.angle = turns[t];
+            Real overlap = 0.0, gap = 0.0;
+            if (!measure(trial, overlap, gap)) return;
+            // Clear first, then nearest; ties keep the earlier layout, which
+            // is the axes facing and unturned -- faces meeting face to face.
+            if (overlap < bestOverlap - 1e-9 ||
+                (std::fabs(overlap - bestOverlap) <= 1e-9 && gap < bestGap - 1e-6)) {
+                bestOverlap = overlap;
+                bestGap = gap;
+                bestFlip = trial.flip;
+                bestAngle = trial.angle;
+            }
         }
     }
     joint.flip = bestFlip;
     joint.angle = bestAngle;
+
+    settleJointSense(scene, joint, unit);
 }
 
 bool removeJointKeepingPlace(Scene& scene, uint32_t id) {

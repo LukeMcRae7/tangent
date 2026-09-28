@@ -130,10 +130,13 @@ public:
     // front.
     void setCoplanarDemo(int clicks) { coplanarDemo_ = clicks; }
     void setFilletEdgesDemo(int edges) { filletEdgesDemo_ = true; filletDemoEdges_ = edges; }
-    // Round All Edges on the startup box, committed at 2mm, then the same
-    // command on a mesh, which has to refuse and say how to get past it.
+    // Fillet with the startup box selected whole, which picks every edge,
+    // committed at 2mm; then the same on a mesh, which has to refuse and say
+    // how to get past it.
     void setRoundAllDemo() { roundAllDemo_ = true; }
     void setAutoExtrude(float mm) { autoExtrude_ = true; autoExtrudeMm_ = mm; }
+    void setPushFilletDemo(float mm) { pushFilletDemo_ = mm; }
+    void setPlaceDemo(int kind) { placeDemo_ = kind; }
     void setShellDemo(float wallMm) { shellDemo_ = wallMm; }
     void setInsetDemo(float mm) { insetDemo_ = mm; }
     // Grows the body by `mm`, then adjusts it in the panel to half that: what
@@ -634,8 +637,11 @@ private:
     //   Move      moves the face, and the body follows. Along its own normal
     //             unless X, Y or Z says otherwise. Out adds material and in
     //             takes it, which is not a choice to be made but a description
-    //             of what moving a face does. This is what G means when a face
-    //             is selected.
+    //             of what moving a face does. The step goes back up the
+    //             history to where the face was put, so a fillet or a shell
+    //             made on it since is made again on the moved face rather than
+    //             left behind -- see placeFaceMove. This is what G means when
+    //             a face is selected.
     //
     //   Extrude   grows a boss off the face and leaves its outline drawn, so
     //             the new part is something you can point at and act on
@@ -695,6 +701,10 @@ private:
 
         Body before;
         std::vector<Feature> chainBefore;
+        // What each step of chainBefore built. A push / pull goes back up the
+        // history to where the face was put -- see placeFaceMove -- and the
+        // preview builds on from there.
+        std::vector<Body> cacheBefore;
         std::string typedValue;
         AsyncBuild preview;
 
@@ -724,12 +734,17 @@ private:
             lockedAxis = -1;
             before = Body();
             chainBefore.clear();
+            cacheBefore.clear();
             typedValue.clear();
         }
     };
     FaceToolState faceTool_;
 
     void beginFaceMove(FaceOp op);
+    // The push / pull step the gesture stands for at `distance`, and the
+    // history with it made where it belongs.
+    Feature faceMoveStep(const SceneObject& obj, Real distance) const;
+    std::vector<Feature> faceMoveChain(const SceneObject& obj, Real distance, size_t* from) const;
 
     // Points the gesture along a world axis instead of the face's own normal,
     // or back at the normal when the same key is pressed twice.
@@ -1014,6 +1029,8 @@ private:
     void applyPreferences();
     void applyAppTheme(bool light);
     void savePrefs();
+    void syncViewPreferences();
+    void gatherKeyHints();
     void drawPreferences();
     PrintProfile printProfile() const;
     bool snapNow() const;
@@ -1046,6 +1063,7 @@ private:
     void stepKeptMeasures();
     void drawKeptMeasures();
     std::string windowTitle_;
+    std::string layoutFile_;          // ImGui keeps the pointer: it has to outlive the context
     ObjectId colourDragged_ = kNoObject;    // the part whose colour a picker drag is changing
     // The wheel: toward the part in hand, or else toward the pointer.
     void zoomView(float steps);
@@ -1055,7 +1073,6 @@ private:
     // converted before it can have one.
     bool refuseMeshEdit(const SceneObject& obj, const char* what);
 
-    void roundAllEdges();
     void beginReduce();
     void requestReducePreview();
     void updateReduce();
@@ -1579,7 +1596,7 @@ private:
     void settleCommand(Settled kind, ObjectId id);
 
     // Puts the panel away, keeping what it made.
-    void dismissSettled();
+    void dismissSettled(Settled keep = Settled::None);
 
     bool settledIs(Settled k) const { return settled_ == k; }
 
@@ -1693,6 +1710,8 @@ private:
     int         filletDemoEdges_ = 1;
     bool        autoExtrude_ = false;
     float       autoExtrudeMm_ = 10.0f;
+    float       pushFilletDemo_ = 0.0f;     // 0: off
+    int         placeDemo_ = -1;            // a PrimitiveKind, or -1: off
     float       filletDemo_ = 0.0f;     // radius in mm; 0 means do not
     float       shellExtrudeDemo_ = 0.0f;
     bool        shellFilletDemo_ = false;

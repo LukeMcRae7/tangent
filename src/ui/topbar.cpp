@@ -162,12 +162,11 @@ void modifyMenu(UiContext& ctx) {
     menuNote("Leans the selected walls away from the way the part comes off the bed, so nothing prints out over nothing.");
 
     menuHeader("Edges");
-    if (menuEntry(Glyph::Fillet, "Fillet / Chamfer", "F", selEdges > 0 || selFaces > 0)) ctx.actions.fillet = true;
+    if (menuEntry(Glyph::Fillet, "Fillet / Chamfer", "F", hasObject)) ctx.actions.fillet = true;
     menuNote(selEdges > 0   ? "Rounds or cuts the selected edges. The panel finds the largest radius that builds."
              : selFaces > 0 ? "Rounds every edge around the selected faces."
-                            : "Select an edge or a face first.");
-    if (menuEntry(Glyph::Fillet, "Round All Edges", "Ctrl+B", hasObject)) ctx.actions.bevel = true;
-    menuNote("Opens the fillet with every edge of the body picked.");
+             : hasObject    ? "Rounds every edge of the selected body."
+                            : "Select a body, a face or an edge first.");
     if (menuEntry(Glyph::Divide, "Divide Across an Edge", "K", selEdges > 0)) ctx.actions.divide = true;
     menuNote("Cuts a line across the body without cutting it in two, making a face that can be moved.");
     if (menuEntry(Glyph::Merge, "Merge Faces", nullptr, hasObject)) ctx.actions.mergeFaces = true;
@@ -185,7 +184,7 @@ void modifyMenu(UiContext& ctx) {
     if (menuEntry(Glyph::Mirror,  "Mirror...",  "M", hasObject)) ctx.actions.mirror = true;
     menuNote("Reflects it across a plane through the body.");
     if (menuEntry(Glyph::Split,   "Split Body...", nullptr, hasObject)) ctx.actions.split = true;
-    menuNote("Cuts the body in two on a face, another body's plane or an axis -- or takes its loose pieces apart.");
+    menuNote("Cuts the body in two on a face, another body's plane or an axis, or takes its loose pieces apart.");
 
     // Each opens the Combine dialog with that operation chosen: a target and
     // any number of tools, picked there or from what is selected.
@@ -228,6 +227,7 @@ void inspectMenu(UiContext& ctx) {
     menuToggle(Glyph::Wire, "Wireframe", &ctx.view->showWireframe, "Z");
     menuToggle(Glyph::Bounds, "Selection Box", &ctx.view->showSelectionBox);
     menuToggle(Glyph::Backface, "Backface Cull", &ctx.view->backfaceCulling);
+    menuToggle(Glyph::Help, "Key Hints", &ctx.view->showKeyHints);
     menuGap();
     menuHeader("View");
     if (menuEntry(Glyph::FrameSelected, "Frame Selected", "Numpad .")) ctx.actions.frameSelected = true;
@@ -453,39 +453,31 @@ float drawTopBar(UiContext& ctx) {
     // Create
     beginGroup(1);
     {
-        struct Shape { Icon icon; Glyph glyph; PrimitiveKind kind; const char* name; };
-        static const Shape kShapes[] = {
-            {Icon::Box,      Glyph::Box,      PrimitiveKind::Box,      "Box"},
-            {Icon::Cylinder, Glyph::Cylinder, PrimitiveKind::Cylinder, "Cylinder"},
-            {Icon::Sphere,   Glyph::Sphere,   PrimitiveKind::Sphere,   "Sphere"},
-            {Icon::Cone,     Glyph::Cone,     PrimitiveKind::Cone,     "Cone"},
-            {Icon::Torus,    Glyph::Torus,    PrimitiveKind::Torus,    "Torus"},
-        };
-        static int lastShape = 0;
+        // The same menu Shift+A opens in the view: one list of what can be
+        // made, wherever it is asked for. The button shows the shape last
+        // made from it.
+        static Glyph lastShape = Glyph::Box;
         if (room(1)) {
-            if (barButton(ctx, "shape", kShapes[lastShape].glyph, "Create a shape  (Shift+A)"))
+            if (barButton(ctx, "shape", lastShape, "Create a shape  (Shift+A)"))
                 ImGui::OpenPopup("##createobject");
             dropMark();
         }
         ImGui::SetNextWindowPos(ImVec2(ImGui::GetItemRectMin().x, ImGui::GetItemRectMax().y + 4.0f));
         if (ui::beginMenuPopup("##createobject")) {
             ctx.frame.popupOpen = true;
-            ui::menuHeader("Start from");
-            const float line = ImGui::GetTextLineHeight() + 6.0f;
-            for (int i = 0; i < static_cast<int>(sizeof kShapes / sizeof kShapes[0]); ++i) {
-                ImGui::PushID(i);
-                // The baked render: a picture of the actual shape, which is
-                // what a choice between shapes wants.
-                ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 8.0f);
-                iconImage(kShapes[i].icon, line);
-                ImGui::SameLine(0.0f, 8.0f);
-                ImGui::AlignTextToFramePadding();
-                if (ImGui::Selectable(kShapes[i].name, false, 0, ImVec2(150.0f, line))) {
-                    ctx.actions.addRequested = true;
-                    ctx.actions.addKind = kShapes[i].kind;
-                    lastShape = i;
+            ui::menuHeader("Add");
+            const bool asked = ctx.actions.addRequested;
+            drawAddMenuItems(ctx);
+            if (ctx.actions.addRequested && !asked) {
+                switch (ctx.actions.addKind) {
+                    case PrimitiveKind::Box:      lastShape = Glyph::Box;      break;
+                    case PrimitiveKind::Cylinder: lastShape = Glyph::Cylinder; break;
+                    case PrimitiveKind::Sphere:   lastShape = Glyph::Sphere;   break;
+                    case PrimitiveKind::Cone:     lastShape = Glyph::Cone;     break;
+                    case PrimitiveKind::Torus:    lastShape = Glyph::Torus;    break;
+                    case PrimitiveKind::Plane:    lastShape = Glyph::Plane;    break;
+                    case PrimitiveKind::Custom:   break;
                 }
-                ImGui::PopID();
             }
             ImGui::EndPopup();
         }
@@ -506,7 +498,7 @@ float drawTopBar(UiContext& ctx) {
                   brep::available()))
         ctx.actions.sweep = true;
     if (room(1) && barButton(ctx, "loft", Glyph::Loft,
-                  "Loft: a solid through two or more outlines -- sketch regions or flat faces",
+                  "Loft: a solid through two or more outlines, from sketch regions or flat faces",
                   brep::available()))
         ctx.actions.loft = true;
     if (room(1) && barButton(ctx, "plane", Glyph::Plane, "A flat plate to start from")) {
@@ -531,7 +523,7 @@ float drawTopBar(UiContext& ctx) {
     // Modify
     beginGroup(2);
     if (room(2) && barButton(ctx, "move", Glyph::Move,
-                  faces ? "Push / pull the face  (G)" : hasSel ? "Move  (G)" : "Move - select something first",
+                  faces ? "Push / pull the face  (G)" : hasSel ? "Move  (G)" : "Move: select something first",
                   hasSel || faces)) {
         if (faces) ctx.actions.pushPull = true;
         else       ctx.actions.moveObject = true;
@@ -555,26 +547,27 @@ float drawTopBar(UiContext& ctx) {
     }
     if (room(2) && barButton(ctx, "extrude", Glyph::Extrude,
                   faces ? "Extrude the face: a boss with its own outline  (E)"
-                        : "Extrude - select a face first", faces > 0))
+                        : "Extrude: select a face first", faces > 0))
         ctx.actions.extrude = true;
     if (room(2) && barButton(ctx, "fillet", Glyph::Fillet,
                   edges || faces ? "Fillet or chamfer the selected edges  (F)"
-                                 : "Fillet - select an edge or a face first", edges > 0 || faces > 0))
+                  : hasObject    ? "Fillet or chamfer every edge of the body  (F)"
+                                 : "Fillet: select a body, a face or an edge first", hasObject))
         ctx.actions.fillet = true;
     if (room(2) && barButton(ctx, "shell", Glyph::Shell,
                   hasObject ? "Shell: hollow the body, selected faces left open"
-                            : "Shell - select a body first", hasObject))
+                            : "Shell: select a body first", hasObject))
         ctx.actions.shell = true;
     if (room(2) && barButton(ctx, "pattern", Glyph::Pattern,
                   hasObject ? "Pattern: repeat in a row or around an axis  (P)"
-                            : "Pattern - select a body first", hasObject))
+                            : "Pattern: select a body first", hasObject))
         ctx.actions.pattern = true;
     if (room(2) && barButton(ctx, "mirror", Glyph::Mirror,
-                  hasObject ? "Mirror across a plane  (M)" : "Mirror - select a body first", hasObject))
+                  hasObject ? "Mirror across a plane  (M)" : "Mirror: select a body first", hasObject))
         ctx.actions.mirror = true;
     if (room(2) && barButton(ctx, "merge", Glyph::Merge,
                   hasObject ? "Merge faces: drop every division that does not define the shape"
-                            : "Merge faces - select a body first", hasObject))
+                            : "Merge faces: select a body first", hasObject))
         ctx.actions.mergeFaces = true;
     endGroup(2);
 
@@ -585,19 +578,19 @@ float drawTopBar(UiContext& ctx) {
                                              [](const auto& o) { return !o->body.empty(); }) >= 2;
         if (room(3) && barButton(ctx, "joint", Glyph::Joint,
                       twoBodies ? "Joint: put one part on another by a face, an edge or a corner  (J)"
-                                : "Joint - there need to be two parts", twoBodies))
+                                : "Joint: there need to be two parts", twoBodies))
             ctx.actions.joint = true;
         if (room(3) && barButton(ctx, "group", Glyph::Group,
-                      hasSel ? "Group the selection  (Ctrl+G)" : "Group - select something first", hasSel))
+                      hasSel ? "Group the selection  (Ctrl+G)" : "Group: select something first", hasSel))
             ctx.actions.groupSelected = true;
         if (room(3) && barButton(ctx, "clearance", Glyph::Clearance,
                       twoBodies ? "Clearance: where parts come too close to print apart"
-                                : "Clearance - there need to be two parts",
+                                : "Clearance: there need to be two parts",
                       twoBodies, false, ctx.clearanceOpen ? u32(palette::kBrand) : 0))
             ctx.actions.clearance = true;
         if (room(3) && barButton(ctx, "explode", Glyph::Explode,
                       twoBodies ? "Exploded view: pull the parts apart along their joints"
-                                : "Exploded view - there need to be two parts",
+                                : "Exploded view: there need to be two parts",
                       twoBodies, false, ctx.explodeOpen ? u32(palette::kBrand) : 0))
             ctx.actions.explode = true;
     }

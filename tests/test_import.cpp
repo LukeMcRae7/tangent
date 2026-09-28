@@ -175,8 +175,11 @@ int main() {
 
         if (brep::available()) {
             // An open surface cannot be a solid, and saying which is the point.
+            // An exact plane is a thin plate; the faceted one is still an open
+            // sheet, which is what this needs.
             PrimitiveSpec s; s.kind = PrimitiveKind::Plane;
             scene.clear();
+            scene.setDefaultBackend(Backend::Mesh);
             if (scene.addPrimitive(PrimitiveKind::Plane, s) != kNoObject) {
                 StlOptions opt; opt.binary = true;
                 exportStl(scene, path, opt);

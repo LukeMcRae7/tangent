@@ -1287,9 +1287,7 @@ void ProfileTool::drawHud(Scene& scene, UndoStack& undo, bool& finished) {
         const ObjectId toggled = drawReachedBodies(scene, reach_, choice_.op, owner);
         if (toggled != kNoObject) reach_.toggle(toggled);
     }
-    ui::commandHint("Click in the view to pick; Backspace takes back the last pick. Hidden sketches show "
-                    "faintly and can be picked too. J joins, D cuts, I intersects, N makes a new body. "
-                    "Enter finishes, Esc cancels.");
+    ui::commandHint("Hidden sketches show faintly and can be picked too.");
     const int footer = ui::commandFooter("Finish", previewOk_, "Cancel");
     ui::endCommand();
 

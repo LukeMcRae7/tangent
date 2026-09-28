@@ -251,6 +251,36 @@ void JointTool::setKind(Scene& scene, UndoStack& undo, JointKind kind) {
 void JointTool::setFlip(Scene& scene, UndoStack& undo, bool flip) {
     apply(scene, undo, "Joint", [&](Joint& j) { j.flip = flip; });
 }
+void JointTool::setReverse(Scene& scene, UndoStack& undo, bool reverse) {
+    // The part stays where it is: the number is what changes sign, and the
+    // limits with it.
+    apply(scene, undo, "Joint", [&](Joint& j) {
+        j.reverse = reverse;
+        j.turn = -j.turn;
+        j.travel = -j.travel;
+        if (j.limited) {
+            const Real lo = -j.hi, hi = -j.lo;
+            j.lo = lo;
+            j.hi = hi;
+        }
+    });
+}
+void JointTool::setAsBuilt(Scene& scene, UndoStack& undo, bool asBuilt) {
+    // Worked out with the part where the joint had it at rest, not wherever
+    // the motion has swung it.
+    apply(scene, undo, "Joint", [&](Joint& j) {
+        j.turn = j.travel = j.slideX = j.slideY = 0.0;
+        j.asBuilt = false;
+        j.flip = false;
+        j.angle = 0.0;
+        // Where it was built is its history's own placement, not wherever the
+        // joint has it now.
+        if (asBuilt)
+            for (ObjectId id : jointUnit(scene, j))
+                if (SceneObject* o = scene.find(id)) scene.place(*o);
+        settleJointLayout(scene, j, asBuilt ? JointPlacing::WhereBuilt : JointPlacing::Snap);
+    });
+}
 void JointTool::setOffset(Scene& scene, UndoStack& undo, Real mm) {
     apply(scene, undo, "Joint", [&](Joint& j) { j.offset = mm; });
 }
@@ -544,11 +574,8 @@ void JointTool::drawHud(Scene& scene, UndoStack& undo, bool& finished) {
              second ? std::string(movingNoun_) + " of " + objectName(scene, moving_.object) : std::string());
         slot("Goes on", false, second, std::string());
         if (!error_.empty()) ui::commandRefused(error_.c_str());
-        else                 ui::commandHint(prompt().c_str());
-        ui::commandHint("A flat face joins face to face; a round face or a circular edge joins on its axis, "
-                        "the way a pin goes in a hole; a straight edge is a hinge line or a rail. The part "
-                        "picked first is the one that moves, and it moves with everything in its group. "
-                        "Backspace takes the first pick back; Esc leaves.");
+        ui::commandHint("Pick the part that moves, then the part it goes on. A flat face joins face to face, "
+                        "a round face or circular edge on its axis, and a straight edge as a hinge or rail.");
         const int footer = ui::commandFooter(nullptr, false, "Cancel");
         ui::endCommand();
         if (footer < 0) { cancel(); finished = true; }
@@ -615,6 +642,16 @@ void JointTool::drawHud(Scene& scene, UndoStack& undo, bool& finished) {
     };
 
     {
+        ui::commandRow("Placed");
+        static const ui::Choice kPlaced[2] = {
+            {Glyph::Count, "Where built", nullptr, "Kept where it was modelled, turning about the joint from there"},
+            {Glyph::Count, "Snap", nullptr, "Laid onto the second pick, the way two faces meet"},
+        };
+        const int pick = ui::commandChoices("Placed", kPlaced, 2, j->asBuilt ? 0 : 1, /*compact=*/true);
+        if (pick >= 0 && (pick == 0) != j->asBuilt) setAsBuilt(scene, undo, pick == 0);
+        j = joint(scene);
+    }
+    {
         ui::commandRow("Direction");
         if (ui::pillButton("Flip", j->flip)) setFlip(scene, undo, !j->flip);
         ui::hoverTip("Turn it over on the joint: the two axes together instead of facing  (F)");
@@ -624,6 +661,11 @@ void JointTool::drawHud(Scene& scene, UndoStack& undo, bool& finished) {
             setAngle(scene, undo, a);
         }
         ui::hoverTip("A quarter turn about the joint's axis");
+        if (j->hasMotion()) {
+            ImGui::SameLine(0.0f, 3.0f);
+            if (ui::pillButton("Reverse", j->reverse)) setReverse(scene, undo, !j->reverse);
+            ui::hoverTip("Count the motion the other way, so the part opens as the number goes up");
+        }
     }
     if (ui::NumberEdit e = number(Field::Offset, "Offset", j->offset, "mm", -size, size, true); e.dragged)
         setOffset(scene, undo, e.value);
@@ -697,10 +739,8 @@ void JointTool::drawHud(Scene& scene, UndoStack& undo, bool& finished) {
 
     if (j && !j->problem.empty()) ui::commandRefused(j->problem.c_str());
     else                          ui::commandApplied("Joint");
-    ui::commandHint("Drag a bar, or click it and type a number and Enter. Flip turns it over on the joint "
-                    "(F). The part moves with everything in its group, and follows the part it is on "
-                    "wherever that goes. Double-click the joint in the outliner to name it.");
-    ui::commandHint("Delete takes the joint away and leaves the part where it is, as a move in its history.");
+    ui::commandHint("Sets where the part sits on the joint; it moves with its group and follows the part it is on. "
+                    "Delete removes the joint and leaves the part where it is.");
     const int footer = ui::commandFooter("Done", true, "Delete");
     ui::endCommand();
 

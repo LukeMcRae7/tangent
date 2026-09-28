@@ -691,6 +691,10 @@ ProjectResult saveProject(const Scene& scene, const std::string& path) {
         w.u8(j.limited ? 1 : 0);
         w.f64(j.lo);
         w.f64(j.hi);
+        w.u8(j.reverse ? 1 : 0);          // v27
+        w.u8(j.asBuilt ? 1 : 0);
+        w.f64(j.built.q.x); w.f64(j.built.q.y); w.f64(j.built.q.z); w.f64(j.built.q.w);
+        w.vec3(j.built.t);
     }
 
     // v26: the measurements kept on the model, by the names of what they are
@@ -929,6 +933,14 @@ ProjectResult loadProject(Scene& scene, const std::string& path) {
             j.limited = r.u8() != 0;
             j.lo = r.f64();
             j.hi = r.f64();
+            // Before v27 the motion counted the way the axis ran, which is
+            // what false keeps.
+            if (version >= 27) {
+                j.reverse = r.u8() != 0;
+                j.asBuilt = r.u8() != 0;
+                j.built.q.x = r.f64(); j.built.q.y = r.f64(); j.built.q.z = r.f64(); j.built.q.w = r.f64();
+                j.built.t = r.vec3();
+            }
             as.nextJoint = std::max(as.nextJoint, j.id + 1);
             // A joint to a part the file does not have is dropped rather than
             // left pointing at whatever gets that number next.

@@ -83,7 +83,6 @@ struct UiActions {
     bool mirror = false;
     bool reduceMesh = false;
     bool inset = false;
-    bool bevel = false;
     bool split = false;
     bool fillet = false;
     bool shell = false;

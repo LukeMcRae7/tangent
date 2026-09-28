@@ -103,6 +103,9 @@ bool drawPrimitiveParams(SceneObject& obj) {
     using ui::labelledInt;
     using ui::labelledNumber;
     bool changed = false;
+    // How many flat sides a round shape is drawn with means something only to
+    // a mesh. An exact cylinder is a true circle, and the count did nothing.
+    const bool faceted = obj.body.isMesh();
     switch (obj.spec.kind) {
         case PrimitiveKind::Box:
             changed |= labelledNumber("Width",  obj.spec.box.width,  0.1f, 0.01f, 10000.0f);
@@ -112,24 +115,28 @@ bool drawPrimitiveParams(SceneObject& obj) {
         case PrimitiveKind::Cylinder:
             changed |= labelledNumber("Radius", obj.spec.cylinder.radius, 0.1f, 0.01f, 10000.0f);
             changed |= labelledNumber("Height", obj.spec.cylinder.height, 0.1f, 0.01f, 10000.0f);
-            changed |= labelledInt   ("Sides",  obj.spec.cylinder.segments, 3, 512);
+            if (faceted) changed |= labelledInt("Sides", obj.spec.cylinder.segments, 3, 512);
             break;
         case PrimitiveKind::Sphere:
             changed |= labelledNumber("Radius",   obj.spec.sphere.radius, 0.1f, 0.01f, 10000.0f);
-            changed |= labelledInt   ("Segments", obj.spec.sphere.segments, 3, 512);
-            changed |= labelledInt   ("Rings",    obj.spec.sphere.rings, 2, 256);
+            if (faceted) {
+                changed |= labelledInt("Segments", obj.spec.sphere.segments, 3, 512);
+                changed |= labelledInt("Rings",    obj.spec.sphere.rings, 2, 256);
+            }
             break;
         case PrimitiveKind::Cone:
             changed |= labelledNumber("Base R",  obj.spec.cone.bottomRadius, 0.1f, 0.01f, 10000.0f);
             changed |= labelledNumber("Top R",   obj.spec.cone.topRadius, 0.1f, 0.0f, 10000.0f);
             changed |= labelledNumber("Height",  obj.spec.cone.height, 0.1f, 0.01f, 10000.0f);
-            changed |= labelledInt   ("Sides",   obj.spec.cone.segments, 3, 512);
+            if (faceted) changed |= labelledInt("Sides", obj.spec.cone.segments, 3, 512);
             break;
         case PrimitiveKind::Torus:
             changed |= labelledNumber("Major R", obj.spec.torus.majorRadius, 0.1f, 0.02f, 10000.0f);
             changed |= labelledNumber("Minor R", obj.spec.torus.minorRadius, 0.1f, 0.01f, 10000.0f);
-            changed |= labelledInt   ("Major",   obj.spec.torus.majorSegments, 3, 512);
-            changed |= labelledInt   ("Minor",   obj.spec.torus.minorSegments, 3, 256);
+            if (faceted) {
+                changed |= labelledInt("Major", obj.spec.torus.majorSegments, 3, 512);
+                changed |= labelledInt("Minor", obj.spec.torus.minorSegments, 3, 256);
+            }
             // The generator rejects a minor radius that would self-intersect,
             // so clamp here instead of letting the rebuild silently no-op.
             if (obj.spec.torus.minorRadius >= obj.spec.torus.majorRadius)
@@ -2000,6 +2007,11 @@ void drawViewportOverlays(UiContext& ctx, float x, float y, float w, float h) {
         }
         dl->AddText(ImVec2(rx - ts.x, ry), u32(palette::kTextFaint), line);
         ImGui::PopFont();
+
+        // The keys that do something now, stacked on the numbers. Too short a
+        // view to spare the room, and they give way to the model.
+        if (ctx.view->showKeyHints && h > 360.0f) ui::drawKeyHints(dl, x0 + w - 14.0f, ry - 10.0f);
+        else                                     ui::clearKeyHints();
     }
 }
 
@@ -2053,7 +2065,7 @@ void drawMeasurePanel(UiContext& ctx) {
             value("dZ", "%.4f mm", m.delta.z, false);
         }
         if (m.hasAngle) value("Angle", "%.3f\xC2\xB0", m.angleDeg, true);
-        ui::commandHint("Esc clears the picks. D leaves the tool.");
+        ui::commandHint("Keep leaves the measurement on the model, where it follows the part as it changes.");
     }
     // Keep: it stays on the model, and reads the part as it changes.
     const int footer = ui::commandFooter("Keep", m.valid, "Done");

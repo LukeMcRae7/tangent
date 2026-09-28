@@ -47,6 +47,13 @@ struct PlaneParams {
     Real depth = 20.0f;
 };
 
+// How thick an exact plane is. A plane is a plate rather than a surface so that
+// it is a solid like everything else: its face can be pushed and pulled into a
+// part, and a boolean can use it. Thin enough to read as flat, well clear of
+// the kernel's tolerance. A constant rather than a parameter, so a file does
+// not carry it.
+inline constexpr Real kPlaneThickness = 0.01;
+
 // Which generator a shape comes from, and the parameters for every one of
 // them. They travel together: the struct is small, and this keeps the feature
 // history and serialisation free of variant plumbing.

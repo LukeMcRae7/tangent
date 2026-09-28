@@ -118,6 +118,20 @@ struct Joint {
     Real offset = 0.0;              // along the axis: the gap between two faces
     Real angle = 0.0;               // about the axis, radians: how it is turned
 
+    // Which way the motion counts. The axis a hinge turns about runs whichever
+    // way its edge happened to be made, so without this a positive turn opens
+    // one lid and drives the next one into its box. Set when the joint is made
+    // so that positive moves the part away from what it is joined to.
+    bool reverse = false;
+
+    // Joined where the parts already are. A lid modelled sitting on its box
+    // is where it belongs already; laying one pick's frame onto the other's
+    // would move it somewhere else. `built` is what is left between the two
+    // frames with the motion at nothing, so the part stays put and still
+    // turns about the fixed pick's axis.
+    bool asBuilt = false;
+    Rigid built{};
+
     // The motion. A revolute's turn, radians; a slider's travel, mm; a
     // planar's slide in X and Y and its turn.
     Real turn = 0.0;
@@ -240,11 +254,22 @@ uint32_t placingJoint(const Scene& scene, ObjectId id);
 bool checkJoint(const Scene& scene, Joint& candidate, std::string* why);
 
 // Turns a new joint the way two parts picked like that are most likely meant
-// to go together: of its four layouts -- the axes facing or together, turned
-// or not -- the one that leaves the moving part clear of the fixed one and
-// nearest it. Faces put together come out face to face; a lid hinged on two
-// edges comes out closed on the box, not inside it or upside down on it.
-void settleJointLayout(const Scene& scene, Joint& joint);
+// to go together: of its layouts -- the axes facing or together, turned by a
+// half or, on an edge, a quarter -- the one that leaves the moving part clear
+// of the fixed one and nearest it. Faces put together come out face to face; a
+// lid hinged on two edges comes out closed on the box, not inside it, hanging
+// off it or upside down on it, whichever faces beside the edges were clicked.
+// A revolute or a slider is then counted so that positive moves the part away.
+//
+// Parts that already touch or overlap are taken to have been built together,
+// and are joined where they are (Joint::asBuilt); `placing` can insist on
+// either.
+enum class JointPlacing { Auto, WhereBuilt, Snap };
+void settleJointLayout(const Scene& scene, Joint& joint, JointPlacing placing = JointPlacing::Auto);
+
+// Makes a joint keep the moving part where it is now, turning about the fixed
+// pick's axis from there. See Joint::asBuilt.
+void jointAsBuilt(const Scene& scene, Joint& joint);
 
 // Takes a joint out, leaving what it placed where it is: the placement it had
 // becomes Move and Rotate steps in each body's history.

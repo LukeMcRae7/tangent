@@ -52,6 +52,32 @@ PrintProfile Application::printProfile() const {
     return p;
 }
 
+// The settings that are changed outside the Preferences dialog -- the
+// projection from Numpad 5, the view cube or the View menu, the orbit and the
+// view's toggles from the Inspect menu, the bar or the palette -- are picked up
+// here, whichever of those changed them, and saved when they have.
+void Application::syncViewPreferences() {
+    if (unattended_) return;
+    Preferences p = prefs_;
+    p.orthographic = camera_.preferOrtho;
+    p.invertOrbitX = camera_.invertOrbitX;
+    p.invertOrbitY = camera_.invertOrbitY;
+    p.showPrintIssues = view_.showPrintIssues;
+    p.showGrid = view_.showGrid;
+    p.showEdges = view_.showWireframe;
+    p.showSelectionBox = view_.showSelectionBox;
+    p.backfaceCulling = view_.backfaceCulling;
+    p.showKeyHints = view_.showKeyHints;
+    if (p.orthographic == prefs_.orthographic && p.invertOrbitX == prefs_.invertOrbitX &&
+        p.invertOrbitY == prefs_.invertOrbitY && p.showPrintIssues == prefs_.showPrintIssues &&
+        p.showGrid == prefs_.showGrid && p.showEdges == prefs_.showEdges &&
+        p.showSelectionBox == prefs_.showSelectionBox && p.backfaceCulling == prefs_.backfaceCulling &&
+        p.showKeyHints == prefs_.showKeyHints)
+        return;
+    prefs_ = std::move(p);
+    savePrefs();
+}
+
 bool Application::snapNow() const {
     // Snapping is the default and Ctrl lets go of it -- or, with it turned
     // off in the preferences, the other way about.

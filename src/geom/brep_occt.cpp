@@ -113,6 +113,8 @@
 #include <BRepPrimAPI_MakeTorus.hxx>
 #include <BRepTools.hxx>
 #include <BRepLib.hxx>
+#include <GeomLib_IsPlanarSurface.hxx>
+#include <gp_Ax3.hxx>
 #include <BRepTools_WireExplorer.hxx>
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
@@ -318,7 +320,8 @@ std::vector<ElementId> namePrimitiveFaces(const TopoDS_Shape& shape, PrimitiveKi
         ElementId id = kNoId;
 
         switch (kind) {
-            case PrimitiveKind::Box: {
+            case PrimitiveKind::Box:
+            case PrimitiveKind::Plane: {
                 const int ord = boxFaceOrdinal(n);
                 id = ord >= 0 ? ordinalFaceName(kind, topo, static_cast<uint64_t>(ord))
                               : ordinalFaceName(kind, topo, static_cast<uint64_t>(i));
@@ -405,10 +408,17 @@ BrepRef primitive(const PrimitiveSpec& spec) {
                 shape = BRepPrimAPI_MakeTorus(p.majorRadius, p.minorRadius).Shape();
                 break;
             }
-            // A plane is a surface, not a solid, and the operations this
-            // backend exists for are all solid operations. The mesh backend
-            // keeps it.
-            case PrimitiveKind::Plane:
+            // A plate too thin to see, not a surface: the operations this
+            // backend exists for are solid operations, and a plane is what
+            // they start from as often as anything.
+            case PrimitiveKind::Plane: {
+                const PlaneParams& p = spec.plane;
+                if (p.width <= 0 || p.depth <= 0) return {};
+                shape = BRepPrimAPI_MakeBox(
+                    gp_Pnt(-p.width / 2, -p.depth / 2, -kPlaneThickness / 2),
+                    p.width, p.depth, kPlaneThickness).Shape();
+                break;
+            }
             case PrimitiveKind::Custom:
                 return {};
         }
@@ -662,12 +672,41 @@ SurfaceKind faceKind(const BrepShape& s, FaceId f) {
     }
 }
 
+namespace {
+
+// Whether a spline is a straight line in all but name: every control point on
+// the line through its two ends. A stretch the kernel cannot do exactly turns
+// every edge into a spline, and a hinge along the top of a box that has been
+// made a little shorter still runs along a straight edge.
+template <typename Curve>
+bool polesInLine(const Handle(Curve)& c) {
+    const int n = c->NbPoles();
+    if (n < 2) return false;
+    const gp_Pnt a = c->Pole(1), b = c->Pole(n);
+    const gp_Vec ab(a, b);
+    const Real len = ab.Magnitude();
+    if (len < 1e-9) return false;
+    const gp_Dir d(ab);
+    for (int i = 2; i < n; ++i) {
+        const gp_Vec w(a, c->Pole(i));
+        if (w.Crossed(gp_Vec(d)).Magnitude() > 1e-7 * std::max(len, Real(1))) return false;
+    }
+    return true;
+}
+
+} // namespace
+
 CurveKind edgeKind(const BrepShape& s, EdgeId e) {
     if (!validEdge(s, e)) return CurveKind::Freeform;
-    switch (BRepAdaptor_Curve(edgeAt(s, e)).GetType()) {
+    const BRepAdaptor_Curve curve(edgeAt(s, e));
+    switch (curve.GetType()) {
         case GeomAbs_Line:    return CurveKind::Line;
         case GeomAbs_Circle:  return CurveKind::Circle;
         case GeomAbs_Ellipse: return CurveKind::Ellipse;
+        case GeomAbs_BSplineCurve:
+            return polesInLine(curve.BSpline()) ? CurveKind::Line : CurveKind::Freeform;
+        case GeomAbs_BezierCurve:
+            return polesInLine(curve.Bezier()) ? CurveKind::Line : CurveKind::Freeform;
         default:              return CurveKind::Freeform;
     }
 }
@@ -4217,6 +4256,78 @@ void findFaces(const BrepShape& s, ElementId id, std::vector<FaceId>& out) {
 
 namespace {
 
+// Faces that are flat but no longer say so, made planes again.
+//
+// The general stretch below turns every surface into a spline, the flat ones
+// with the rest. Nothing downstream can tell those are flat -- a joint will
+// not stand on one, an inset refuses it, a push goes the curved way -- so each
+// face whose spline is a plane to within the kernel's tolerance is rebuilt as
+// one on the same edges. Its name goes with it. Anything that does not come
+// out valid is left as it was: a spline that is flat is still the right shape.
+BrepRef replanarise(const BrepRef& made) {
+    if (!made || made->shape.IsNull()) return made;
+    try {
+        Handle(BRepTools_ReShape) reshape = new BRepTools_ReShape();
+        bool any = false;
+        for (int i = 1; i <= made->faces.Extent(); ++i) {
+            const TopoDS_Face face = TopoDS::Face(made->faces(i));
+            const TopoDS_Face fwd = TopoDS::Face(face.Oriented(TopAbs_FORWARD));
+            BRepAdaptor_Surface adaptor(fwd);
+            if (adaptor.GetType() == GeomAbs_Plane) continue;
+            const Handle(Geom_Surface) surf = BRep_Tool::Surface(fwd);
+            if (surf.IsNull()) continue;
+            GeomLib_IsPlanarSurface planar(surf, 1e-7);
+            if (!planar.IsPlanar()) continue;
+
+            // The plane facing the way the surface did, so the face keeps its
+            // side of the solid.
+            const Real u = 0.5 * (adaptor.FirstUParameter() + adaptor.LastUParameter());
+            const Real v = 0.5 * (adaptor.FirstVParameter() + adaptor.LastVParameter());
+            gp_Pnt p;
+            gp_Vec du, dv;
+            adaptor.D1(u, v, p, du, dv);
+            const gp_Vec n = du.Crossed(dv);
+            if (n.Magnitude() < 1e-12) continue;
+            gp_Pln pln = planar.Plan();
+            gp_Ax3 ax = pln.Position();
+            if (ax.Direction().Dot(gp_Dir(n)) < 0.0) ax.ZReverse();
+            if (!ax.Direct()) ax.YReverse();
+            pln.SetPosition(ax);
+
+            const TopoDS_Wire outer = BRepTools::OuterWire(fwd);
+            if (outer.IsNull()) continue;
+            BRepBuilderAPI_MakeFace mk(pln, outer, Standard_True);
+            if (!mk.IsDone()) continue;
+            for (TopExp_Explorer wx(fwd, TopAbs_WIRE); wx.More(); wx.Next())
+                if (!wx.Current().IsSame(outer)) mk.Add(TopoDS::Wire(wx.Current()));
+            if (!mk.IsDone()) continue;
+            TopoDS_Face flat = mk.Face();
+            for (TopExp_Explorer ex(flat, TopAbs_EDGE); ex.More(); ex.Next())
+                BRepLib::BuildPCurveForEdgeOnPlane(TopoDS::Edge(ex.Current()), flat);
+            reshape->Replace(fwd, flat);
+            any = true;
+        }
+        if (!any) return made;
+
+        const TopoDS_Shape out = reshape->Apply(made->shape);
+        if (out.IsNull() || !shapeIsValid(out)) return made;
+
+        TopTools_IndexedMapOfShape after;
+        TopExp::MapShapes(out, TopAbs_FACE, after);
+        std::vector<ElementId> names(static_cast<size_t>(after.Extent()), kNoId);
+        for (int k = 1; k <= made->faces.Extent(); ++k) {
+            const TopoDS_Shape& was = made->faces(k);
+            const TopoDS_Shape now = reshape->Value(was);
+            const int at = after.FindIndex(now.IsNull() ? was : now);
+            if (at > 0) names[static_cast<size_t>(at - 1)] = made->faceNames[static_cast<size_t>(k - 1)];
+        }
+        BrepRef fixed = makeBrep(out, names);
+        return fixed && closedShell(*fixed) ? fixed : made;
+    } catch (const Standard_Failure&) {
+        return made;
+    }
+}
+
 // A stretch along the three axes, done exactly.
 //
 // BRepBuilderAPI_GTransform can stretch anything, and does it by first turning
@@ -4583,7 +4694,7 @@ BrepRef transformed(const BrepShape& s, const Mat4& m) {
             if (at > 0) names[static_cast<size_t>(at - 1)] = s.faceNames[static_cast<size_t>(i - 1)];
         }
         if (!fullAnalyzerValid(out)) return {};
-        return makeBrep(out, names);
+        return replanarise(makeBrep(out, names));
     } catch (const Standard_Failure&) {
         return {};
     }

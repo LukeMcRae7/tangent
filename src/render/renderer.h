@@ -20,11 +20,14 @@ struct ViewOptions {
     bool  showWireframe  = true;
     bool  showSelectionBox = false;
 
-    // Faces a printer will struggle with, tinted on the model. On by default:
-    // this is what the tool is for, and a check nobody turns on is a check
-    // nobody runs.
-    bool  showPrintIssues = true;
+    // Faces a printer will struggle with, tinted on the model. Off until asked
+    // for (Inspect > Print Problems, or the bar's button): red on a part that
+    // is still being shaped reads as an error, not as advice. Remembered in
+    // the preferences once changed.
+    bool  showPrintIssues = false;
     bool  backfaceCulling = true;
+    // The keys that do something now, in the view's bottom right corner.
+    bool  showKeyHints = true;
     Real  creaseAngleDeg = 35.0;
 
     Vec3  background    = toVec3(palette::kViewport);

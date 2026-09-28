@@ -1838,7 +1838,7 @@ void finish(SvgDrawing& d) {
 
     if (d.empty()) {
         d.error = "There is no outline in it to import";
-        if (d.text > 0) d.error += ": its text is still text -- convert it to paths first";
+        if (d.text > 0) d.error += ": its text is still text, so convert it to paths first";
         return;
     }
 

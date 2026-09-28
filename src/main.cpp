@@ -163,6 +163,14 @@ int main(int argc, char** argv) {
             app.setShellDemo(static_cast<float>(std::atof(argv[++i])));
         } else if (std::strcmp(argv[i], "--measure-demo") == 0) {
             app.setMeasureDemo();
+        } else if (std::strcmp(argv[i], "--place-demo") == 0 && i + 1 < argc) {
+            // sphere, cone, torus or plane: drawn through the create tool and
+            // left open on its panel.
+            const char* k = argv[++i];
+            app.setPlaceDemo(std::strcmp(k, "sphere") == 0 ? 2 : std::strcmp(k, "cone") == 0 ? 3
+                             : std::strcmp(k, "torus") == 0 ? 4 : 5);
+        } else if (std::strcmp(argv[i], "--push-fillet-demo") == 0 && i + 1 < argc) {
+            app.setPushFilletDemo(static_cast<float>(std::atof(argv[++i])));
         } else if (std::strcmp(argv[i], "--auto-extrude") == 0 && i + 1 < argc) {
             app.setAutoExtrude(static_cast<float>(std::atof(argv[++i])));
         } else if (std::strcmp(argv[i], "--help") == 0) {
