@@ -45,9 +45,11 @@ jobs:
             libdecor-0-dev libdrm-dev libgbm-dev libdbus-1-dev libudev-dev \
             xvfb imagemagick file
 
+      # Restored and saved as separate steps: the save happens as soon as the
+      # build does, so a job that fails later does not throw the build away.
       - name: Restore SDL3 and OpenCASCADE
         id: deps
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: /opt/deps
           key: deps-ubuntu24-${{ env.SDL_TAG }}-${{ env.OCCT_TAG }}-v1
@@ -68,6 +70,13 @@ jobs:
             -DBUILD_MODULE_Draw=OFF -DBUILD_MODULE_DETools=OFF -DBUILD_DOC_Overview=OFF \
             -DUSE_FREETYPE=OFF -DUSE_TK=OFF -DUSE_TCL=OFF -DUSE_OPENGL=OFF -DUSE_XLIB=OFF
           cmake --build /tmp/OCCT/build && cmake --install /tmp/OCCT/build
+
+      - name: Save SDL3 and OpenCASCADE
+        if: steps.deps.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: /opt/deps
+          key: ${{ steps.deps.outputs.cache-primary-key }}
 
       # The OpenCASCADE libraries load one another, and an executable's
       # RUNPATH covers only its own direct dependencies, so the prefix goes to
@@ -152,7 +161,7 @@ jobs:
       # point against a solid, where the same release built plainly does not.
       - name: Restore OpenCASCADE
         id: occt
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: C:/occt
           key: occt-msys2-ucrt64-${{ env.OCCT_TAG }}-v1
@@ -167,6 +176,13 @@ jobs:
             -DBUILD_MODULE_Draw=OFF -DBUILD_MODULE_DETools=OFF -DBUILD_DOC_Overview=OFF \
             -DUSE_FREETYPE=OFF -DUSE_TK=OFF -DUSE_TCL=OFF -DUSE_OPENGL=OFF -DUSE_D3D=OFF -DUSE_TBB=OFF
           cmake --build /tmp/OCCT/build && cmake --install /tmp/OCCT/build
+
+      - name: Save OpenCASCADE
+        if: steps.occt.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: C:/occt
+          key: ${{ steps.occt.outputs.cache-primary-key }}
 
       - name: Configure
         # With symbols, so a crashing test's backtrace names functions; the
