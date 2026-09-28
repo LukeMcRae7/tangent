@@ -1,6 +1,8 @@
 #include "app/transform_tool.h"
+#include "core/units.h"
 #include "core/palette.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 
@@ -134,8 +136,11 @@ bool TransformTool::begin(TransformMode mode, Scene& scene, const Camera& camera
     } else {
         if (scene.selection().empty()) return false;
         target_ = TransformTarget::Objects;
-        for (ObjectId id : scene.selection())
+        for (ObjectId id : scene.selection()) {
+            if (std::find(skip_.begin(), skip_.end(), id) != skip_.end()) continue;
             if (const SceneObject* o = scene.find(id)) entries_.push_back({id, o->transform, {}});
+        }
+        skip_.clear();
         if (entries_.empty()) return false;
         pivot = scene.selectionCenter();
         for (Entry& e : entries_)
@@ -209,7 +214,7 @@ void TransformTool::apply(Scene& scene, const Camera& camera, Vec2 mousePx, bool
         if (typedValue) {
             // An exact distance needs an axis to travel along; without one
             // there is no defined direction, so the entry simply waits.
-            if (axisLocked) delta = constraintAxis() * typedNum;
+            if (axisLocked) delta = constraintAxis() * units::fromShown(typedNum);
         } else if (axisLocked) {
             const Vec3 axis = constraintAxis();
             float s0 = 0.0f, s1 = 0.0f;
@@ -495,8 +500,8 @@ std::string TransformTool::statusText() const {
         // dragged, which is otherwise ambiguous from the number alone.
         std::snprintf(buf, sizeof(buf), "%s%s  %s|%s%s",
                       transformModeName(mode_), axisName, typed_.c_str(),
-                      mode_ == TransformMode::Rotate ? " deg" :
-                      mode_ == TransformMode::Translate ? " mm" : "",
+                      mode_ == TransformMode::Rotate ? "\xC2\xB0" :
+                      mode_ == TransformMode::Translate ? (std::string(" ") + units::suffix()).c_str() : "",
                       needsAxis ? "   (press X, Y or Z)" : "");
         return buf;
     }
@@ -505,14 +510,15 @@ std::string TransformTool::statusText() const {
         case TransformMode::Translate: {
             char snapNote[48] = "";
             if (snapStep_ > 0.0f)
-                std::snprintf(snapNote, sizeof(snapNote), "   snap %g mm",
-                              static_cast<double>(snapStep_));
+                std::snprintf(snapNote, sizeof(snapNote), "   snap %g %s",
+                              static_cast<double>(units::toShown(snapStep_)), units::suffix());
             if (constraint_ != Constraint::None && !isPlane())
-                std::snprintf(buf, sizeof(buf), "Move%s  %.2f mm%s", axisName,
-                              dot(delta_, constraintAxis()), snapNote);
+                std::snprintf(buf, sizeof(buf), "Move%s  %s%s", axisName,
+                              units::length(dot(delta_, constraintAxis())).c_str(), snapNote);
             else
-                std::snprintf(buf, sizeof(buf), "Move%s  %.2f, %.2f, %.2f mm%s",
-                              axisName, delta_.x, delta_.y, delta_.z, snapNote);
+                std::snprintf(buf, sizeof(buf), "Move%s  %s, %s, %s%s", axisName,
+                              units::number(delta_.x).c_str(), units::number(delta_.y).c_str(),
+                              units::length(delta_.z).c_str(), snapNote);
             break;
         }
         case TransformMode::Rotate:

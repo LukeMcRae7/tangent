@@ -404,6 +404,67 @@ BrepRef revolveSketch(const Sketch& sketch, const std::vector<SketchProfile>& pr
                       const std::vector<SketchId>& keys, Vec2 axisAt, Vec2 axisDir, Real angle,
                       ElementId salt, std::string* reason);
 
+// The same regions carried along a path drawn in another sketch: a sweep. The
+// path is the entities named in `path`, joined end to end (see sketchPathOf),
+// and both sketches are in the same frame -- the part's own. The profile is
+// carried from whichever end of the path is nearer it, square to the path as it
+// turns, and mitred where the path has a corner.
+//
+// Refused: a path that starts along the profile's plane rather than out of it,
+// since that sweeps nothing. Faces are named as a turn names them: the two ends
+// are caps (a closed path has none), and each wall is named for the profile
+// entity that swept it.
+BrepRef sweepSketch(const Sketch& sketch, const std::vector<SketchProfile>& profiles,
+                    const std::vector<SketchId>& keys, const Sketch& pathSketch,
+                    const std::vector<SketchId>& path, ElementId salt, std::string* reason);
+
+// A solid through the outlines of several regions, one per sketch, in order: a
+// loft. `ruled` joins neighbouring outlines with straight walls; otherwise the
+// walls run smoothly through all of them. A region with a hole in it is
+// refused -- a loft goes through outlines. The first and last outlines are the
+// caps, and each wall is named for the entity of the first outline it starts
+// from.
+struct LoftSection {
+    const Sketch* sketch = nullptr;
+    const SketchProfile* region = nullptr;
+};
+BrepRef loftSketches(const std::vector<LoftSection>& sections, bool ruled, ElementId salt,
+                     std::string* reason);
+
+// ---- The same three, from a sketch or from a body ---------------------------
+//
+// What a revolve, a sweep or a loft builds from can be drawn -- regions of a
+// sketch -- or already there: flat faces of a body. Both are in the part's own
+// frame. A wall made from a sketch entity is named for the entity, as above; one
+// made from a body's edge is named for that edge's name, so it too stays itself
+// when the steps before it change.
+struct OutlineSource {
+    const Sketch* sketch = nullptr;
+    const std::vector<SketchProfile>* regions = nullptr;
+    std::vector<SketchId> keys;
+    const BrepShape* body = nullptr;
+    std::vector<FaceId> faces;
+};
+
+// A path: curves of a sketch joined end to end, or edges of a body joined end
+// to end -- which need not lie in one plane.
+struct PathSource {
+    const Sketch* sketch = nullptr;
+    std::vector<SketchId> entities;
+    const BrepShape* body = nullptr;
+    std::vector<EdgeId> edges;
+};
+
+// Turned about the line through `axisPoint` along `axisDir`, `angle` radians.
+// An outline that crosses an axis lying in its plane is refused.
+BrepRef revolveOutline(const OutlineSource& outline, Vec3 axisPoint, Vec3 axisDir, Real angle,
+                       ElementId salt, std::string* reason);
+BrepRef sweepOutline(const OutlineSource& outline, const PathSource& path, ElementId salt,
+                     std::string* reason);
+// Each source is one outline: one region, or one face.
+BrepRef loftOutlines(const std::vector<OutlineSource>& outlines, bool ruled, ElementId salt,
+                     std::string* reason);
+
 // A solid from a closed outline on a plane, swept between two heights along the
 // plane's normal. The create tool's profiles arrive this way.
 //

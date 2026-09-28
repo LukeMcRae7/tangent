@@ -1,6 +1,8 @@
 #include "scene/scene.h"
 
 #include <algorithm>
+#include <thread>
+#include <atomic>
 #include <limits>
 
 namespace tg {
@@ -66,17 +68,62 @@ Feature* trailing(SceneObject& obj, FeatureKind kind) {
     return f.enabled && f.kind == kind ? &f : nullptr;
 }
 
+// A step's fingerprint chained onto the one before it: two histories agree at
+// step i only if every step up to i agrees, so a cached result is never
+// trusted after something before it has changed -- a step put in ahead of it
+// included.
+uint64_t chainKey(uint64_t before, const Feature& f) {
+    uint64_t h = before ^ featureKey(f);
+    h *= 1099511628211ULL;
+    return h ^ (h >> 29);
+}
+constexpr uint64_t kChainSeed = 0x9e3779b97f4a7c15ULL;
+
+// How many leading steps of `features` are what the cache holds.
+size_t builtPrefix(const SceneObject& obj, const std::vector<Feature>& features) {
+    const size_t known = std::min(obj.featureKeys.size(), obj.featureCache.size());
+    uint64_t k = kChainSeed;
+    size_t i = 0;
+    for (; i < features.size() && i < known; ++i) {
+        k = chainKey(k, features[i]);
+        if (k != obj.featureKeys[i]) break;
+    }
+    return i;
+}
+
+// The fingerprints kept beside the cache, made true again after the steps from
+// `from` on were run: those are what the cache now holds. Fingerprints before
+// `from` are kept only when all of them are known; a gap means the next re-run
+// starts at the gap, which is the safe direction to be wrong in.
+void syncKeys(SceneObject& obj, size_t from) {
+    if (from == 0 || obj.featureKeys.size() < from) {
+        obj.featureKeys.resize(std::min(obj.featureKeys.size(), from));
+        if (from != 0) return;
+    }
+    obj.featureKeys.resize(from);
+    const size_t n = std::min(obj.features.size(), obj.featureCache.size());
+    uint64_t k = from > 0 ? obj.featureKeys[from - 1] : kChainSeed;
+    for (size_t i = from; i < n; ++i) {
+        k = chainKey(k, obj.features[i]);
+        obj.featureKeys.push_back(k);
+    }
+}
+
 // A placement step appended without evaluating anything: the body after it is
 // the body before it, so the cache only needs that body repeated.
 void appendUnchanged(SceneObject& obj, Feature f) {
     const bool whole = obj.featureCache.size() == obj.features.size();
     obj.features.push_back(std::move(f));
-    if (whole) obj.featureCache.push_back(obj.body);
+    if (whole) {
+        obj.featureCache.push_back(obj.body);
+        syncKeys(obj, obj.features.size() - 1);
+    }
 }
 
 void dropLast(SceneObject& obj) {
     obj.features.pop_back();
     if (obj.featureCache.size() > obj.features.size()) obj.featureCache.resize(obj.features.size());
+    if (obj.featureKeys.size() > obj.features.size()) obj.featureKeys.resize(obj.features.size());
 }
 
 } // namespace
@@ -160,6 +207,7 @@ bool Scene::recordScale(ObjectId id, Vec3 factors, Vec3 aboutLocal, std::string*
     if (from < obj->features.size()) {
         Body next;
         const bool ok = evaluateFrom(obj->features, from, obj->featureCache, next);
+        syncKeys(*obj, from);
         if (!ok || obj->features[from].errored) {
             if (error) *error = obj->features[from].error.empty() ? "the body could not be scaled"
                                                                   : obj->features[from].error;
@@ -174,6 +222,7 @@ bool Scene::recordScale(ObjectId id, Vec3 factors, Vec3 aboutLocal, std::string*
         Body back;
         if (!evaluateFrom(obj->features, obj->features.size(), obj->featureCache, back))
             evaluateFeatures(obj->features, back);
+        syncKeys(*obj, obj->features.size());
         obj->body = std::move(back);
     }
     obj->refreshDerived();
@@ -249,12 +298,6 @@ ObjectId Scene::addPrimitive(PrimitiveKind kind, const PrimitiveSpec& spec, Vec3
     base.uid = nextFeatureUid_++;
     obj->features.push_back(base);
 
-    // A plane is a surface, not a solid, and the exact kernel builds solids.
-    // Falling back keeps the construction plane working rather than refusing
-    // to make one at all.
-    if (base.backend == Backend::Brep && kind == PrimitiveKind::Plane)
-        obj->features.back().backend = Backend::Mesh;
-
     if (!evaluateFeatures(obj->features, obj->body)) return kNoObject;
 
     obj->id = nextId_++;
@@ -302,6 +345,7 @@ std::unique_ptr<SceneObject> buildFromChain(std::vector<Feature> features, bool&
     obj->spec.kind = PrimitiveKind::Custom;
     obj->features = std::move(features);
     built = evaluateFrom(obj->features, 0, obj->featureCache, obj->body);
+    syncKeys(*obj, 0);
     return obj;
 }
 
@@ -353,11 +397,64 @@ ObjectId Scene::addChainAsIs(std::vector<Feature> features, const std::string& n
     return id;
 }
 
+bool Scene::rollTo(ObjectId id, size_t active) {
+    SceneObject* o = find(id);
+    if (!o) return false;
+    // Every step, and what each built as far as that is known: the steps that
+    // ran, then what the waiting ones built when they last ran. Which of it
+    // still holds is for the fingerprints to say -- they are chained, so a
+    // step put in at the marker makes every one after it disagree.
+    const bool runWhole = o->featureCache.size() >= o->features.size() && o->featureKeys.size() >= o->features.size();
+    const bool aheadWhole = runWhole && o->aheadCache.size() == o->ahead.size() &&
+                            o->aheadKeys.size() == o->ahead.size();
+    std::vector<Feature> all = std::move(o->features);
+    const size_t ran = all.size();
+    std::vector<Body> cache = std::move(o->featureCache);
+    std::vector<uint64_t> keys = std::move(o->featureKeys);
+    cache.resize(std::min(cache.size(), ran));
+    keys.resize(std::min(keys.size(), ran));
+    all.insert(all.end(), std::make_move_iterator(o->ahead.begin()), std::make_move_iterator(o->ahead.end()));
+    if (aheadWhole) {
+        cache.insert(cache.end(), o->aheadCache.begin(), o->aheadCache.end());
+        keys.insert(keys.end(), o->aheadKeys.begin(), o->aheadKeys.end());
+    }
+    o->ahead.clear();
+    o->aheadCache.clear();
+    o->aheadKeys.clear();
+
+    // The first step is what the part starts from; there is no model before it.
+    active = std::clamp<size_t>(active, all.empty() ? 0 : 1, all.size());
+    o->ahead.assign(std::make_move_iterator(all.begin() + static_cast<long>(active)),
+                    std::make_move_iterator(all.end()));
+    all.resize(active);
+    o->features = std::move(all);
+    if (cache.size() > active) {
+        o->aheadCache.assign(cache.begin() + static_cast<long>(active), cache.end());
+        cache.resize(active);
+    }
+    if (keys.size() > active) {
+        o->aheadKeys.assign(keys.begin() + static_cast<long>(active), keys.end());
+        keys.resize(active);
+    }
+    o->featureCache = std::move(cache);
+    o->featureKeys = std::move(keys);
+    return reevaluate(id);
+}
+
+size_t Scene::historyLength(ObjectId id) const {
+    const SceneObject* o = find(id);
+    return o ? o->features.size() + o->ahead.size() : 0;
+}
+
 bool Scene::removeObject(ObjectId id) {
     auto it = std::find_if(objects_.begin(), objects_.end(),
                            [&](const auto& o) { return o->id == id; });
     if (it == objects_.end()) return false;
+    // A joint cannot hang from nothing, nor a group hold nothing.
+    forgetObjects(*this, {id});
+    it = std::find_if(objects_.begin(), objects_.end(), [&](const auto& o) { return o->id == id; });
     objects_.erase(it);
+    pruneEmptyGroups(*this);
     selection_.erase(std::remove(selection_.begin(), selection_.end(), id), selection_.end());
     elements_.erase(std::remove_if(elements_.begin(), elements_.end(),
         [id](const ElementRef& e) { return e.object == id; }), elements_.end());
@@ -379,6 +476,9 @@ ObjectId Scene::duplicateObject(ObjectId id) {
     obj->render      = src->render;
     obj->localBounds = src->localBounds;
     obj->visible     = src->visible;
+    obj->group       = src->group;       // beside the original, in its group
+    obj->coloured    = src->coloured;
+    obj->colour      = src->colour;
     obj->id          = nextId_++;
     // Strip any existing .NNN suffix so copies of Box.001 become Box.002.
     std::string base = src->name;
@@ -426,6 +526,8 @@ const SceneObject* Scene::find(ObjectId id) const {
 
 void Scene::clear() {
     objects_.clear();
+    assembly_.clear();
+    measures_.clear();
     selection_.clear();
     elements_.clear();
     nextId_ = 1;
@@ -460,6 +562,15 @@ void Scene::noteNewFailures(const SceneObject& obj,
     if (count > 1) chainNotice_ += " (and " + std::to_string(count - 1) + " more)";
 }
 
+bool Scene::reevaluate(ObjectId id) {
+    SceneObject* obj = find(id);
+    if (!obj) return false;
+    // From the first step that is not what the cache was built from. With
+    // nothing changed that is past the end, and nothing runs: the body is the
+    // cached one, which is what undo and rolling back mostly are.
+    return reevaluateFrom(id, builtPrefix(*obj, obj->features));
+}
+
 bool Scene::reevaluateFrom(ObjectId id, size_t fromFeature) {
     SceneObject* obj = find(id);
     if (!obj) return false;
@@ -474,7 +585,12 @@ bool Scene::reevaluateFrom(ObjectId id, size_t fromFeature) {
     // Evaluate into a scratch body: a chain that produces nothing must not
     // destroy the geometry the user can still see.
     Body next;
+    // Where evaluateFrom will really start: from the root when the cache
+    // cannot supply the point asked for.
+    const size_t start = fromFeature > 0 && (obj->featureCache.size() < fromFeature ||
+                                              fromFeature > obj->features.size()) ? 0 : fromFeature;
     const bool ok = evaluateFrom(obj->features, fromFeature, obj->featureCache, next);
+    syncKeys(*obj, start);
 
     // Either way: evaluateFrom has marked each step it ran, and a chain that
     // produced nothing at all is exactly the case worth saying something about.
@@ -491,6 +607,62 @@ bool Scene::reevaluateFrom(ObjectId id, size_t fromFeature) {
     return true;
 }
 
+void Scene::reevaluateMany(const std::vector<ObjectId>& ids) {
+    struct Job {
+        SceneObject* obj = nullptr;
+        std::vector<ElementId> wasBroken;
+        size_t from = 0, start = 0;
+        Body next;
+        bool ok = false;
+        bool alone = false;       // holds a baked body: run on this thread
+    };
+    std::vector<Job> jobs;
+    for (ObjectId id : ids) {
+        SceneObject* obj = find(id);
+        if (!obj) continue;
+        Job j;
+        j.obj = obj;
+        for (const Feature& f : obj->features) {
+            if (f.errored) j.wasBroken.push_back(f.uid);
+            if (!f.bakedBody.empty()) j.alone = true;
+        }
+        j.from = builtPrefix(*obj, obj->features);
+        j.start = j.from > 0 && (obj->featureCache.size() < j.from || j.from > obj->features.size()) ? 0 : j.from;
+        jobs.push_back(std::move(j));
+    }
+    auto run = [](Job& j) { j.ok = evaluateFrom(j.obj->features, j.from, j.obj->featureCache, j.next); };
+
+    std::vector<size_t> parallel;
+    for (size_t i = 0; i < jobs.size(); ++i) {
+        if (jobs[i].alone) run(jobs[i]);
+        else parallel.push_back(i);
+    }
+    const unsigned threads = std::min<unsigned>(std::max(1u, std::thread::hardware_concurrency()),
+                                                static_cast<unsigned>(parallel.size()));
+    if (threads <= 1) {
+        for (size_t i : parallel) run(jobs[i]);
+    } else {
+        std::atomic<size_t> next{0};
+        std::vector<std::thread> pool;
+        for (unsigned t = 0; t < threads; ++t)
+            pool.emplace_back([&] {
+                for (size_t k; (k = next.fetch_add(1)) < parallel.size();) run(jobs[parallel[k]]);
+            });
+        for (std::thread& t : pool) t.join();
+    }
+
+    for (Job& j : jobs) {
+        SceneObject* obj = j.obj;
+        syncKeys(*obj, j.start);
+        noteNewFailures(*obj, j.wasBroken);
+        place(*obj);
+        if (!j.ok) continue;
+        obj->body = std::move(j.next);
+        obj->refreshDerived();
+    }
+    pruneElementSelection();
+}
+
 bool Scene::addFeature(ObjectId id, Feature feature, std::string* error) {
     if (error) error->clear();
     SceneObject* obj = find(id);
@@ -500,19 +672,16 @@ bool Scene::addFeature(ObjectId id, Feature feature, std::string* error) {
     obj->features.push_back(std::move(feature));
 
     // Only the new feature needs running; everything before it is cached.
+    const size_t last = obj->features.size() - 1;
+    const size_t start = last > 0 && obj->featureCache.size() < last ? 0 : last;
     Body next;
-    if (!evaluateFrom(obj->features, obj->features.size() - 1,
-                      obj->featureCache, next)) {
+    const bool ran = evaluateFrom(obj->features, last, obj->featureCache, next);
+    syncKeys(*obj, start);
+    // A feature that errored did nothing; keeping it would leave a step in
+    // the timeline that has no effect and cannot be fixed.
+    if (!ran || obj->features.back().errored) {
         if (error) *error = obj->features.back().error;
-        obj->features.pop_back();
-        return false;
-    }
-    // A feature that evaluated but errored did nothing; keeping it would leave
-    // a step in the timeline that has no effect and cannot be fixed.
-    if (obj->features.back().errored) {
-        if (error) *error = obj->features.back().error;
-        obj->features.pop_back();
-        obj->featureCache.resize(obj->features.size());
+        dropLast(*obj);
         return false;
     }
 
@@ -534,17 +703,20 @@ void Scene::addFeatureWithResult(ObjectId id, Feature feature, Body result) {
     if (obj->featureCache.size() != obj->features.size()) {
         Body current;
         evaluateFrom(obj->features, 0, obj->featureCache, current);
+        syncKeys(*obj, 0);
     }
     if (feature.uid == 0) feature.uid = nextFeatureUid_++;
     obj->features.push_back(std::move(feature));
     obj->featureCache.push_back(result);
+    syncKeys(*obj, obj->features.size() - 1);
     obj->body = std::move(result);
     obj->refreshDerived();
     place(*obj);
     pruneElementSelection();
 }
 
-bool Scene::setFeatures(ObjectId id, std::vector<Feature> features, std::string* error) {
+bool Scene::setFeatures(ObjectId id, std::vector<Feature> features, std::string* error,
+                        bool onlyNewFailures) {
     if (error) error->clear();
     SceneObject* obj = find(id);
     if (!obj) return false;
@@ -552,23 +724,37 @@ bool Scene::setFeatures(ObjectId id, std::vector<Feature> features, std::string*
     for (Feature& f : features)
         if (f.uid == 0) f.uid = nextFeatureUid_++;
 
+    // Where the new history first differs from what the cache was built
+    // from: everything before that is already built. A step appended, or one
+    // near the end changed, costs that step rather than the whole part.
+    const size_t from = builtPrefix(*obj, features);
+
     std::vector<Feature> previous = std::move(obj->features);
-    std::vector<Body>    cache = std::move(obj->featureCache);
     obj->features = std::move(features);
-    obj->featureCache.clear();
+    std::vector<ElementId> wasBroken;
+    if (onlyNewFailures)
+        for (const Feature& f : previous)
+            if (f.errored) wasBroken.push_back(f.uid);
 
     Body next;
-    const bool built = evaluateFeatures(obj->features, next);
+    const bool built = evaluateFrom(obj->features, from, obj->featureCache, next);
+    syncKeys(*obj, from);
     size_t bad = obj->features.size();
     for (size_t i = 0; i < obj->features.size(); ++i)
-        if (obj->features[i].errored) { bad = i; break; }
+        if (obj->features[i].errored &&
+            std::find(wasBroken.begin(), wasBroken.end(), obj->features[i].uid) == wasBroken.end()) {
+            bad = i;
+            break;
+        }
 
     if (!built || bad < obj->features.size()) {
         if (error)
             *error = bad < obj->features.size() ? obj->features[bad].error
                                                 : "the chain produced nothing";
+        // Back as it was. The cache now holds the refused history from `from`
+        // on, and its fingerprints say so, so this re-runs just those steps.
         obj->features = std::move(previous);
-        obj->featureCache = std::move(cache);
+        reevaluate(id);
         return false;
     }
 
@@ -584,9 +770,28 @@ bool Scene::isSelected(ObjectId id) const {
     return std::find(selection_.begin(), selection_.end(), id) != selection_.end();
 }
 
-void Scene::clearSelection() { selection_.clear(); }
+void Scene::clearSelection() { selection_.clear(); sketch_ = SketchRef{}; }
+
+void Scene::selectSketch(SketchRef ref) {
+    selection_.clear();
+    elements_.clear();
+    sketch_ = sketchFeature(ref) ? ref : SketchRef{};
+}
+
+const Feature* Scene::sketchFeature(SketchRef ref) const {
+    const SceneObject* o = find(ref.object);
+    if (!o) return nullptr;
+    for (const Feature& f : o->features)
+        if (f.kind == FeatureKind::Sketch && f.uid == ref.uid) return &f;
+    return nullptr;
+}
+
+Scene::SketchRef Scene::selectedSketch() const {
+    return sketchFeature(sketch_) ? sketch_ : SketchRef{};
+}
 
 void Scene::select(ObjectId id, bool additive) {
+    sketch_ = SketchRef{};
     if (!additive) selection_.clear();
     if (id == kNoObject) return;
     if (!isSelected(id)) selection_.push_back(id);
@@ -599,6 +804,7 @@ void Scene::select(ObjectId id, bool additive) {
 }
 
 void Scene::toggleSelect(ObjectId id) {
+    sketch_ = SketchRef{};
     if (id == kNoObject) return;
     if (isSelected(id))
         selection_.erase(std::remove(selection_.begin(), selection_.end(), id), selection_.end());
@@ -607,6 +813,7 @@ void Scene::toggleSelect(ObjectId id) {
 }
 
 void Scene::selectAll() {
+    sketch_ = SketchRef{};
     selection_.clear();
     for (const auto& o : objects_) if (o->visible) selection_.push_back(o->id);
 }
@@ -662,7 +869,7 @@ float distToSegment(Vec2 p, Vec2 a, Vec2 b) {
 // at; picking runs on a click and not per frame, so this is not a frame cost.
 float distToEdgePx(const Body& body, const Mat4& model, EdgeId e,
                    const Mat4& viewProj, int w, int h, Vec2 cursorPx,
-                   std::vector<Vec3>& scratch) {
+                   std::vector<Vec3>& scratch, const SectionCut& cut) {
     body.edgePolyline(e, body.edgeLength(e) * 0.0005, scratch);
 
     float best = -1.0f;
@@ -670,7 +877,9 @@ float distToEdgePx(const Body& body, const Mat4& model, EdgeId e,
     bool havePrev = false;
     for (const Vec3& local : scratch) {
         Vec2 px;
-        if (!projectPx(viewProj, w, h, transformPoint(model, local), px)) {
+        const Vec3 world = transformPoint(model, local);
+        // What a section takes away is not drawn, so not there to click.
+        if (cut.removes(world) || !projectPx(viewProj, w, h, world, px)) {
             havePrev = false;
             continue;
         }
@@ -725,6 +934,7 @@ std::vector<ElementHit> Scene::pickElements(const Ray& ray, const Mat4& viewProj
             body.faceVertices(surface.face, fv);
             for (VertexId v : fv) {
                 Vec2 p;
+                if (section_.removes(transformPoint(model, body.vertexPosition(v)))) continue;
                 if (!atPixel(body.vertexPosition(v), p)) continue;
                 const float d = length(cursorPx - p);
                 if (d < bestVert) { bestVert = d; vertPick = v; }
@@ -739,7 +949,7 @@ std::vector<ElementHit> Scene::pickElements(const Ray& ray, const Mat4& viewProj
                 // would select a line the user cannot see.
                 if (body.isBridgeEdge(e)) continue;
                 const float d = distToEdgePx(body, model, e, viewProj, viewportW,
-                                             viewportH, cursorPx, edgePts);
+                                             viewportH, cursorPx, edgePts, section_);
                 if (d >= 0.0f && d < bestEdge) { bestEdge = d; edgePick = e; }
             }
 
@@ -752,6 +962,14 @@ std::vector<ElementHit> Scene::pickElements(const Ray& ray, const Mat4& viewProj
     }
     if (!found.empty()) return found;
     ElementHit out;
+
+    // A click on a section's cut face is a click on something solid, not on
+    // the empty space around the part: nothing behind it is reached for.
+    if (section_.on) {
+        bool capped = false;
+        raycast(ray, &capped);
+        if (capped) return found;
+    }
 
     // If raycast missed or didn't hit a surface, check nearby vertices and edges
     // of visible objects on screen (off-silhouette generous picking).
@@ -777,9 +995,29 @@ std::vector<ElementHit> Scene::pickElements(const Ray& ray, const Mat4& viewProj
                              transformPoint(model, local), px);
         };
 
+        // A body whose box on the screen is nowhere near the pointer has
+        // nothing near it either: this runs as the pointer moves, over empty
+        // space, and walking every edge of every part there was most of it.
+        {
+            const AABB b = obj->worldBounds();
+            float x0 = 1e30f, y0 = 1e30f, x1 = -1e30f, y1 = -1e30f;
+            bool all = b.valid();
+            for (int c = 0; c < 8 && all; ++c) {
+                Vec2 px;
+                const Vec3 p{(c & 1) ? b.max.x : b.min.x, (c & 2) ? b.max.y : b.min.y, (c & 4) ? b.max.z : b.min.z};
+                if (!projectPx(viewProj, viewportW, viewportH, p, px)) { all = false; break; }
+                x0 = std::min(x0, static_cast<float>(px.x)); x1 = std::max(x1, static_cast<float>(px.x));
+                y0 = std::min(y0, static_cast<float>(px.y)); y1 = std::max(y1, static_cast<float>(px.y));
+            }
+            const float tol = std::max(vertexTolPx, edgeTolPx);
+            if (all && (cursorPx.x < x0 - tol || cursorPx.x > x1 + tol || cursorPx.y < y0 - tol || cursorPx.y > y1 + tol))
+                continue;
+        }
+
         body.allVertices(verts);
         for (VertexId v : verts) {
             Vec2 p;
+            if (section_.removes(transformPoint(model, body.vertexPosition(v)))) continue;
             if (!atPixel(body.vertexPosition(v), p)) continue;
             const float d = length(cursorPx - p);
             if (d < bestVert) { bestVert = d; vertPick = v; vertObj = obj->id; }
@@ -789,7 +1027,7 @@ std::vector<ElementHit> Scene::pickElements(const Ray& ray, const Mat4& viewProj
         for (EdgeId e : edges) {
             if (body.isBridgeEdge(e)) continue;
             const float d = distToEdgePx(body, model, e, viewProj, viewportW,
-                                         viewportH, cursorPx, edgePts);
+                                         viewportH, cursorPx, edgePts, section_);
             if (d >= 0.0f && d < bestEdge) { bestEdge = d; edgePick = e; edgeObj = obj->id; }
         }
     }
@@ -829,14 +1067,31 @@ std::vector<ElementRef> Scene::faceGroup(const ElementRef& e) const {
     return out;
 }
 
+void Scene::rememberName(const ElementRef& e) {
+    const SceneObject* o = find(e.object);
+    if (!o) return;
+    ElementId name = 0;
+    switch (e.kind) {
+        case ElementKind::Face:   if (o->body.hasFace(e.index))   name = o->body.faceName(e.index); break;
+        case ElementKind::Edge:   if (o->body.hasEdge(e.index))   name = o->body.edgeName(e.index); break;
+        case ElementKind::Vertex: if (o->body.hasVertex(e.index)) name = o->body.vertexName(e.index); break;
+        case ElementKind::None:   break;
+    }
+    for (NamedRef& n : elementNames_)
+        if (n.ref == e) { n.name = name; return; }
+    elementNames_.push_back({e, name});
+}
+
 void Scene::selectElement(const ElementRef& e, bool additive) {
+    sketch_ = SketchRef{};
     if (!additive) elements_.clear();
     if (!e.valid()) return;
     for (const ElementRef& r : faceGroup(e))
-        if (!isElementSelected(r)) elements_.push_back(r);
+        if (!isElementSelected(r)) { elements_.push_back(r); rememberName(r); }
 }
 
 void Scene::toggleElement(const ElementRef& e) {
+    sketch_ = SketchRef{};
     if (!e.valid()) return;
     // The group goes in and out together, or a shift-click would peel one
     // invisible piece off a face and leave the rest selected.
@@ -850,7 +1105,7 @@ void Scene::toggleElement(const ElementRef& e) {
         return;
     }
     for (const ElementRef& r : group)
-        if (!isElementSelected(r)) elements_.push_back(r);
+        if (!isElementSelected(r)) { elements_.push_back(r); rememberName(r); }
 }
 
 std::vector<Index> Scene::selectedFaces(ObjectId id) const {
@@ -876,6 +1131,33 @@ std::vector<EdgeId> Scene::selectedEdges(ObjectId id) const {
 }
 
 void Scene::pruneElementSelection() {
+    // Found again by name first: the numbers may now belong to other faces.
+    std::vector<NamedRef> names;
+    std::vector<ElementRef> kept;
+    for (const ElementRef& e : elements_) {
+        const SceneObject* o = find(e.object);
+        if (!o) continue;
+        ElementId name = 0;
+        for (const NamedRef& n : elementNames_) if (n.ref == e) name = n.name;
+        ElementRef now = e;
+        if (name != 0) {
+            Index at = kInvalid;
+            switch (e.kind) {
+                case ElementKind::Face:   at = o->body.findFace(name); break;
+                case ElementKind::Edge:   at = o->body.findEdge(name); break;
+                case ElementKind::Vertex: at = o->body.findVertex(name); break;
+                case ElementKind::None:   break;
+            }
+            if (at == kInvalid) continue;          // it is gone
+            now.index = at;
+        }
+        if (std::find(kept.begin(), kept.end(), now) != kept.end()) continue;
+        kept.push_back(now);
+        names.push_back({now, name});
+    }
+    elements_ = std::move(kept);
+    elementNames_ = std::move(names);
+
     elements_.erase(std::remove_if(elements_.begin(), elements_.end(),
         [this](const ElementRef& e) {
             const SceneObject* o = find(e.object);
@@ -890,9 +1172,25 @@ void Scene::pruneElementSelection() {
         }), elements_.end());
 }
 
-RayHit Scene::raycast(const Ray& ray) const {
+namespace {
+
+// Under a section, a ray whose nearest surface is the inside of a wall -- a
+// triangle facing away from it -- came in through the cut and was inside the
+// part when it crossed the plane: it has hit the cut face, which is drawn
+// there. Whether this triangle is the inside of a wall.
+bool sectionInside(const SectionCut& cut, const Ray& ray, const Mat4& model, Vec3 a, Vec3 b, Vec3 c) {
+    if (!cut.on) return false;
+    const Vec3 wa = transformPoint(model, a);
+    const Vec3 n = cross(transformPoint(model, b) - wa, transformPoint(model, c) - wa);
+    return dot(n, ray.dir) > 0.0;
+}
+
+} // namespace
+
+RayHit Scene::raycast(const Ray& ray, bool* capped) const {
     RayHit best;
     float bestT = std::numeric_limits<float>::max();
+    bool bestIsCap = false;
 
     for (const auto& o : objects_) {
         if (!o->visible || o->render.triangles.empty()) continue;
@@ -915,14 +1213,18 @@ RayHit Scene::raycast(const Ray& ray) const {
         const RenderMesh& rm = o->render;
         for (size_t i = 0; i + 2 < rm.triangles.size(); i += 3) {
             Real t = 0.0;
-            if (!rayTriangle(local, rm.positions[rm.triangles[i + 0]],
-                                    rm.positions[rm.triangles[i + 1]],
-                                    rm.positions[rm.triangles[i + 2]], t)) continue;
+            const Vec3& a = rm.positions[rm.triangles[i + 0]];
+            const Vec3& b = rm.positions[rm.triangles[i + 1]];
+            const Vec3& c = rm.positions[rm.triangles[i + 2]];
+            if (!rayTriangle(local, a, b, c, t)) continue;
 
             const float worldT = t / dirScale;
             if (worldT >= bestT) continue;
-
+            if (section_.removes(ray.at(worldT))) continue;
             bestT = worldT;
+            bestIsCap = sectionInside(section_, ray, model, a, b, c);
+            if (bestIsCap) continue;
+
             best.object = o->id;
             best.face   = rm.triangleFace[i / 3];
             best.t      = worldT;
@@ -931,7 +1233,8 @@ RayHit Scene::raycast(const Ray& ray) const {
                                                     o->body.faceNormal(best.face)));
         }
     }
-    return best;
+    if (capped) *capped = bestIsCap;
+    return bestIsCap ? RayHit{} : best;
 }
 
 std::vector<RayHit> Scene::raycastCoincident(const Ray& ray) const {
@@ -966,6 +1269,10 @@ std::vector<RayHit> Scene::raycastCoincident(const Ray& ray) const {
                                     rm.positions[rm.triangles[i + 2]], t)) continue;
             const float worldT = t / dirScale;
             if (worldT > mineT) continue;
+            if (section_.removes(ray.at(worldT))) continue;
+            if (sectionInside(section_, ray, model, rm.positions[rm.triangles[i + 0]],
+                              rm.positions[rm.triangles[i + 1]], rm.positions[rm.triangles[i + 2]]))
+                continue;
             mineT = worldT;
             mine.object = o->id;
             mine.face   = rm.triangleFace[i / 3];

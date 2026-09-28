@@ -13,7 +13,11 @@ modes=(
   "--preview-check 1" "--preview-check 2" "--preview-check 3"
   "--preview-check 4" "--preview-check 5" "--preview-check 6"
   "--preview-check 7"
-  "--revolve-demo 1" "--revolve-demo 2" "--revolve-demo 3"
+  "--revolve-demo 1" "--revolve-demo 2" "--revolve-demo 3" "--revolve-demo 4" "--revolve-demo 5"
+  "--sweep-demo 1" "--sweep-demo 2" "--sweep-demo 3" "--sweep-demo 4"
+  "--loft-demo 1" "--loft-demo 2" "--loft-demo 3" "--loft-demo 4"
+  "--pen-demo 1" "--pen-demo 2" "--project-demo 1" "--plane-demo 1"
+  "--timeline-demo 1" "--timeline-demo 2"
   "--hole-demo 1" "--hole-demo 2" "--hole-demo 3"
   "--draft-demo 1" "--draft-demo 2" "--draft-demo 3"
   "--delete-face-demo 1" "--delete-face-demo 2" "--delete-face-demo 3"
@@ -23,6 +27,12 @@ modes=(
   "--inset-demo 2" "--shell-demo 2" "--split-demo 3" "--offset-demo 1"
   "--thread-demo 1" "--thread-demo 2" "--thread-demo 3"
   "--split-demo 4" "--split-demo 5"
+  "--perf-scene 1 --perf-size 6" "--perf-scene 2 --perf-size 6" "--perf-scene 3 --perf-size 6"
+  "--perf-scene 4 --perf-size 2"
+  "--assembly-demo 1" "--assembly-demo 2" "--assembly-demo 3" "--assembly-demo 4"
+  "--assembly-demo 5" "--assembly-demo 6" "--assembly-demo 7" "--assembly-demo 8"
+  "--section-demo 1" "--section-demo 2" "--section-demo 3"
+  "--select-demo 1" "--select-demo 2"
 )
 
 fail=0
@@ -51,17 +61,36 @@ for m in 1 2 3 4 5 7; do
   fi
 done
 
-# A turn has to make the volume arithmetic says it makes. The demo prints what
-# it built and what Pappus gives for the same profile, so the check is that the
-# two agree rather than that the run finished.
-for m in 1 2 3; do
-  out=$(timeout 200 ./build/tangent --revolve-demo $m --smoke-test 20 2>&1)
-  line=$(echo "$out" | grep "\[revolve-demo\]" | head -1)
-  if ! echo "$line" | grep -q "agrees=1"; then
-    printf '  FAIL  revolve-demo %s: %s\n' "$m" "$line"
+# Revolve, sweep and loft have to make the volume arithmetic says -- Pappus for
+# a turn, A times the centreline for a mitred bend, the frustum formula for a
+# loft -- whether built from a sketch or from a box's own face and edge, and a
+# sketch picked from has to end up inside the part rather than beside it.
+for dm in "revolve 1" "revolve 2" "revolve 3" "revolve 4" "sweep 1" "sweep 2" "sweep 3" \
+          "loft 1" "loft 2" "loft 3"; do
+  set -- $dm
+  out=$(timeout 200 ./build/tangent --$1-demo $2 --smoke-test 20 2>&1)
+  line=$(echo "$out" | grep "\[$1-demo\]" | head -1)
+  if ! echo "$line" | grep -q "agrees=1 tidy=1"; then
+    printf '  FAIL  %s-demo %s: %s\n' "$1" "$2" "$line"
     fail=1
   else
-    printf '  ok    --revolve-demo %s\n' "$m"
+    printf '  ok    --%s-demo %s\n' "$1" "$2"
+  fi
+done
+
+# The pen's corners draw straight sides, so a triangle of them extruded has the
+# prism's volume; and a sketch projected from a face goes round the face after
+# the part is widened, not round where the face was; and a round rolled past a
+# step put in under it finds its edge again and rounds all of it.
+for dm in "pen 1" "project 1" "timeline 1"; do
+  set -- $dm
+  out=$(timeout 200 ./build/tangent --$1-demo $2 --smoke-test 20 2>&1)
+  line=$(echo "$out" | grep "\[$1-demo\]" | head -1)
+  if ! echo "$line" | grep -q "agrees=1"; then
+    printf '  FAIL  %s-demo %s: %s\n' "$1" "$2" "$line"
+    fail=1
+  else
+    printf '  ok    --%s-demo %s\n' "$1" "$2"
   fi
 done
 
@@ -154,6 +183,85 @@ for m in 1 2 3; do
     printf '  ok    --thread-demo %s\n' "$m"
   fi
 done
+
+# Assemblies. A joint has to put a part where arithmetic says -- a hinged lid
+# shut on its box and opened seventy degrees about the hinge line, a pin down
+# through a drilled plate on the hole's axis, forty plates stacked to 118.5 --
+# the clearance has to find the tenth of a millimetre a 4.8 pin has in a 5 mm
+# hole and the post a lid's swing first runs into at 61 degrees, and an
+# exploded view has to take a pin straight out of its hole.
+for m in 2 4 5 6 7 8; do
+  out=$(timeout 300 ./build/tangent --assembly-demo $m --smoke-test 5 2>&1)
+  line=$(echo "$out" | grep "\[assembly-demo\] $m:.*agrees=" | head -1)
+  if ! echo "$line" | grep -q "agrees=1"; then
+    printf '  FAIL  assembly-demo %s: %s\n' "$m" "$line"
+    fail=1
+  else
+    printf '  ok    --assembly-demo %s\n' "$m"
+  fi
+done
+out=$(timeout 200 ./build/tangent --assembly-demo 1 --smoke-test 10 2>&1)
+if echo "$out" | grep -q "shows where the lid goes=1"; then
+  printf '  ok    --assembly-demo 1\n'
+else
+  printf '  FAIL  assembly-demo 1: the joint tool did not reach its second pick\n'
+  fail=1
+fi
+
+# A section view has to cut where it says: a ray down a hole the cut went past
+# reaches the far wall, one into solid stops at the cut face, and the arrow in
+# the view, pulled back 22 mm, puts the plane 22 mm in from the face.
+for m in 1 2; do
+  out=$(timeout 200 ./build/tangent --section-demo $m --smoke-test 10 2>&1)
+  line=$(echo "$out" | grep "\[section-demo\] $m:.*agrees=" | head -1)
+  if ! echo "$line" | grep -q "agrees=1"; then
+    printf '  FAIL  section-demo %s: %s\n' "$m" "$line"
+    fail=1
+  else
+    printf '  ok    --section-demo %s\n' "$m"
+  fi
+done
+
+# A box has to take what it says: a window what is wholly in it, a crossing
+# what it overlaps -- a part clipped through the middle included.
+# And a measurement kept on the model has to follow it: the gap between two
+# boxes, read again after one is widened.
+for m in 1 2; do
+  out=$(timeout 60 ./build/tangent --select-demo $m --smoke-test 10 2>&1)
+  if echo "$out" | grep "\[select-demo\]" | grep -q "agrees=1"; then
+    printf '  ok    --select-demo %s\n' "$m"
+  else
+    printf '  FAIL  select-demo %s: %s\n' "$m" "$(echo "$out" | grep select-demo)"
+    fail=1
+  fi
+done
+
+# Long histories have to build, save, open and re-run without a step lost:
+# two parts of a hundred steps each, opened as a project is.
+out=$(timeout 300 ./build/tangent --perf-scene 4 --perf-size 2 --smoke-test 3 2>&1)
+line=$(echo "$out" | grep "\[perf\] 2 parts")
+if echo "$line" | grep -q " 0 failed" && echo "$line" | grep -q "ok=1, 2 objects" && echo "$line" | grep -q "(0 failed)"; then
+  printf '  ok    long histories\n'
+else
+  printf '  FAIL  long histories: %s\n' "$line"
+  fail=1
+fi
+
+# A crash has to leave something behind: a report that says what and where,
+# and the unsaved work saved aside for the next start to offer back.
+cfg=$(mktemp -d)
+# In a subshell, so the shell does not announce the crash it was asked for.
+( XDG_CONFIG_HOME=$cfg timeout 60 ./build/tangent --crash-test --smoke-test 30 >/dev/null 2>&1; true ) 2>/dev/null
+report=$(ls $cfg/tangent/crashes/crash-*.txt 2>/dev/null | head -1)
+if [ -n "$report" ] && grep -q "SIGSEGV" "$report" && grep -q "crashing on purpose" "$report" \
+   && grep -q "saved aside" "$report" && [ -s $cfg/tangent/recovery.tangent ] && [ -f $cfg/tangent/crashes/pending ]; then
+  printf '  ok    --crash-test\n'
+else
+  printf '  FAIL  crash-test: no report, or the work was not saved aside\n'
+  [ -n "$report" ] && sed 's/^/        /' "$report" | head -20
+  fail=1
+fi
+rm -rf "$cfg"
 
 # A large mesh has to get all the way to being useful: reduced to fit, turned
 # into a solid, bored, and split -- each step checked for what it made, not

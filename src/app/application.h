@@ -8,9 +8,15 @@
 #include "geom/kernel_guard.h"
 #include "app/create_tool.h"
 #include "app/extrude_ops.h"
+#include "app/profile_tool.h"
+#include "app/joint_tool.h"
+#include "app/clearance.h"
 #include "app/sketch_tool.h"
 #include "app/file_dialog.h"
 #include "app/printability.h"
+#include "app/preferences.h"
+#include "app/crash.h"
+#include "core/crashlog.h"
 #include "app/measure.h"
 #include "mesh/export_stl.h"
 #include "scene/serialize.h"
@@ -42,6 +48,15 @@ public:
 
     // Renders `frames` and exits; used to smoke-test startup non-interactively.
     void setSmokeTest(int frames) { smokeFrames_ = frames; }
+    // For screenshots of the other look and the other units.
+    void setLightTheme() { prefs_.lightTheme = true; }
+    // For a screenshot of the offer to recover: shown although unattended.
+    void setOfferRecovery() { offerRecoveryDemo_ = true; }
+    // Crash on purpose a few frames in, with the handler installed, so the
+    // report and the save aside can be checked.
+    void setCrashTest() { crashTest_ = true; }
+    bool offerRecoveryDemo_ = false;
+    void setUnits(units::Length u) { prefs_.units = u; }
 
     // Keeps the operating system's own title bar and borders instead of the
     // bar the application draws. For a desktop that cannot move or resize a
@@ -115,10 +130,13 @@ public:
     // front.
     void setCoplanarDemo(int clicks) { coplanarDemo_ = clicks; }
     void setFilletEdgesDemo(int edges) { filletEdgesDemo_ = true; filletDemoEdges_ = edges; }
-    // Round All Edges on the startup box, committed at 2mm, then the same
-    // command on a mesh, which has to refuse and say how to get past it.
+    // Fillet with the startup box selected whole, which picks every edge,
+    // committed at 2mm; then the same on a mesh, which has to refuse and say
+    // how to get past it.
     void setRoundAllDemo() { roundAllDemo_ = true; }
     void setAutoExtrude(float mm) { autoExtrude_ = true; autoExtrudeMm_ = mm; }
+    void setPushFilletDemo(float mm) { pushFilletDemo_ = mm; }
+    void setPlaceDemo(int kind) { placeDemo_ = kind; }
     void setShellDemo(float wallMm) { shellDemo_ = wallMm; }
     void setInsetDemo(float mm) { insetDemo_ = mm; }
     // Grows the body by `mm`, then adjusts it in the panel to half that: what
@@ -150,11 +168,36 @@ public:
     // a line half-drawn, 2 choosing regions, 3 setting the depth, 4 the part it
     // made, re-opened for editing.
     void setSketchDemo(int step) { sketchDemo_ = step; }
-    // Turns a profile about an axis, the whole way through the tool: 1 a ring
-    // as a new part, 2 the same as a part turn, 3 a groove cut round a
-    // cylinder. Each prints the volume it made, against the one arithmetic
-    // says it should be.
+    // The pen: 1 a triangle of corner clicks, finished and extruded 10, against
+    // its volume; 2 a smooth shape of dragged anchors, left open in the tool.
+    void setPenDemo(int step) { penDemo_ = step; }
+    // A box's top face projected into a sketch on it, finished, and the box
+    // then widened in its history: the sketch has to follow.
+    void setProjectDemo(int step) { projectDemo_ = step; }
+    // The plane picker, three points, two picked: left there to be seen.
+    void setPlaneDemo(int step) { planeDemo_ = step; }
+    // The history as a whole: 1 a corner rounded, rolled back, the top pushed
+    // up there, rolled forward -- the round has to find its edge again -- and
+    // left rolled back; 2 a step that fails, rolled back to just before it,
+    // with the faces it should act on selected.
+    void setTimelineDemo(int step) { timelineDemo_ = step; }
+    // A heavy scene, every step of building it timed: 1 a plate cut with n x n
+    // holes (and, with `round`, every rim rounded), 2 a history of 2n steps
+    // rolled back and forward, 3 a sketch of 5n^2 circles. For --frame-probe.
+    void setPerfScene(int scene, int n, bool round) { perfScene_ = scene; perfSceneSize_ = n; perfSceneRound_ = round; }
+    // Revolve, sweep and loft through the tool that builds them, each checked
+    // against arithmetic and against leaving nothing standing beside the part:
+    //   revolve 1 a ring, 2 a quarter of it, 3 a groove cut round a cylinder,
+    //           4 a box's side face turned about its own edge, 5 = 4 left at
+    //           the picking;
+    //   sweep   1 a square round a corner, 2 a round bar round a quarter
+    //           circle, 3 a box's top face along a sketch path, 4 = 3 left
+    //           at the picking;
+    //   loft    1 a square frustum, 2 a round one, 3 from a box's top face
+    //           to a square above it, 4 = 3 left at the picking.
     void setRevolveDemo(int step) { revolveDemo_ = step; }
+    void setSweepDemo(int step) { sweepDemo_ = step; }
+    void setLoftDemo(int step) { loftDemo_ = step; }
     // Drills a hole the way the tool drills one: 1 an M3 clearance hole
     // through a plate, 2 an M4 counterbore adjusted to M5 in its panel,
     // 3 a blind tapped hole whose face then moves under it.
@@ -169,6 +212,20 @@ public:
     // picked, 3 extruded 3 mm, 4 cut 3 mm into a plate under it, 5 with the
     // busiest face of the result selected -- what the highlight costs to draw.
     void setSvgDemo(const std::string& path, int step) { svgDemo_ = path; svgDemoStep_ = step; }
+    // Assemblies, driven the way the tools drive them: 1 the joint tool with
+    // the lid picked, pointing at the box's top -- the lid shown where it
+    // would go; 2 a lid hinged on the box by two edges, opened 70 degrees in
+    // its panel; 3 groups in the outliner, one selected; 4 a pin put through
+    // a drilled plate by the rims; 5 the clearance of a pin in its hole and a
+    // bracket run into the plate; 6 a hinged lid's clearance through its whole
+    // swing, against a post it hits; 7 the exploded view; 8 forty parts,
+    // each joined to the one below, for --frame-probe -- every joint solved
+    // every frame, and the stack's clearance measured.
+    void setAssemblyDemo(int step) { assemblyDemo_ = step; }
+    // 1 a drilled plate and its pin cut down the middle, the panel open; 2 the
+    // plane put on a face of a box and slid into it, from the demo's own
+    // pointer; 3 forty parts cut, timed.
+    void setSectionDemo(int step) { sectionDemo_ = step; }
     // Print where each frame went, every `frames` frames. For finding a stall,
     // and for showing one is gone.
     void setFrameProbe(int frames);
@@ -229,6 +286,10 @@ public:
         screenshotPath_ = path;
         screenshotFrame_ = afterFrames;
     }
+    void setScreenshotFrame(int frame) { screenshotFrame_ = frame; }
+    void setPaletteDemo(const std::string& query) { paletteDemo_ = query; paletteDemoOn_ = true; }
+    std::string paletteDemo_;
+    bool paletteDemoOn_ = false;
 
 private:
     void handleEvent(const SDL_Event& e);
@@ -241,7 +302,16 @@ private:
     Vec2 mouseOverride_{-1.0, -1.0};
     int  snapDemo_ = 0;
     int  sketchDemo_ = 0;
+    int  penDemo_ = 0;
+    int  projectDemo_ = 0;
+    int  planeDemo_ = 0;
+    int  timelineDemo_ = 0;
+    int  perfScene_ = 0;
+    int  perfSceneSize_ = 0;
+    bool perfSceneRound_ = false;
     int  revolveDemo_ = 0;
+    int  sweepDemo_ = 0;
+    int  loftDemo_ = 0;
     int  holeDemo_ = 0;
     int  draftDemo_ = 0;
     int  deleteFaceDemo_ = 0;
@@ -322,6 +392,18 @@ private:
     std::vector<Highlight> highlights_;
     uint64_t highlightKey_ = 0;
     void refreshHighlights();
+    Highlight buildHighlight(const ElementRef& e, Real pixel) const;
+    void drawHighlight(const Highlight& h, Vec4 faceTint, Vec4 edgeCol);
+
+    // What a click would take, lit under the pointer before it is clicked:
+    // the same pick the click makes, so what is lit is what gets selected.
+    // Worked out again only when the pointer, the view or the scene moves.
+    ElementRef hoverRef_;
+    Highlight  hoverHighlight_;
+    uint64_t   hoverKey_ = 0;
+    bool       hoverLive_ = false;   // worked out this frame: nothing else has the pointer
+    void updateHover(bool ctrl);
+    void clearHover() { hoverRef_ = ElementRef{}; hoverHighlight_ = Highlight{}; hoverKey_ = 0; }
 
     // Drawing a body finer, off the frame thread, for the same reason. Meshing
     // a body of a few thousand faces is hundreds of milliseconds: done on the
@@ -393,7 +475,8 @@ private:
     void newProject();
 
     // What to do once the user has answered the unsaved-work prompt.
-    enum class PendingAction { None, New, Open, Quit };
+    enum class PendingAction { None, New, Open, OpenRecent, Quit };
+    std::string pendingPath_;         // the recent file OpenRecent opens
     void drawUnsavedPrompt();
     bool confirmDiscard(PendingAction next);
 
@@ -554,8 +637,11 @@ private:
     //   Move      moves the face, and the body follows. Along its own normal
     //             unless X, Y or Z says otherwise. Out adds material and in
     //             takes it, which is not a choice to be made but a description
-    //             of what moving a face does. This is what G means when a face
-    //             is selected.
+    //             of what moving a face does. The step goes back up the
+    //             history to where the face was put, so a fillet or a shell
+    //             made on it since is made again on the moved face rather than
+    //             left behind -- see placeFaceMove. This is what G means when
+    //             a face is selected.
     //
     //   Extrude   grows a boss off the face and leaves its outline drawn, so
     //             the new part is something you can point at and act on
@@ -615,6 +701,10 @@ private:
 
         Body before;
         std::vector<Feature> chainBefore;
+        // What each step of chainBefore built. A push / pull goes back up the
+        // history to where the face was put -- see placeFaceMove -- and the
+        // preview builds on from there.
+        std::vector<Body> cacheBefore;
         std::string typedValue;
         AsyncBuild preview;
 
@@ -644,12 +734,17 @@ private:
             lockedAxis = -1;
             before = Body();
             chainBefore.clear();
+            cacheBefore.clear();
             typedValue.clear();
         }
     };
     FaceToolState faceTool_;
 
     void beginFaceMove(FaceOp op);
+    // The push / pull step the gesture stands for at `distance`, and the
+    // history with it made where it belongs.
+    Feature faceMoveStep(const SceneObject& obj, Real distance) const;
+    std::vector<Feature> faceMoveChain(const SceneObject& obj, Real distance, size_t* from) const;
 
     // Points the gesture along a world axis instead of the face's own normal,
     // or back at the normal when the same key is pressed twice.
@@ -909,12 +1004,75 @@ private:
     // until it is confirmed or cancelled.
     bool editToolActive() const;
 
+    // ---- Selection filter and box select (app_select.cpp) --------------------
+    enum class PickFilter { Any, Faces, Edges, Points, Parts };
+    PickFilter pickFilter_ = PickFilter::Any;
+    bool boxPress_ = false;         // the left button went down in the view, idle
+    bool boxSelecting_ = false;     // and has been dragged far enough to be a box
+    Vec2 boxFrom_{};
+    std::vector<ElementHit> filteredPicks(const Ray& ray, Vec2 m) const;
+    void drawPickFilterBar();
+    void finishBoxSelect(bool additive);
+    void drawBoxSelect();
+    int  selectDemo_ = 0;
+    int  selectDemoFrame_ = 0;
+    void runSelectDemo();
+public:
+    // 1: a window and a crossing box over three parts, checked by count.
+    void setSelectDemo(int n) { selectDemo_ = n; }
+private:
+
+    // ---- Preferences (app_prefs.cpp) ---------------------------------------
+    Preferences prefs_;
+    bool prefsOpen_ = false;
+    bool unattended_ = false;       // a demo or a test: no preferences read or written
+    void applyPreferences();
+    void applyAppTheme(bool light);
+    void savePrefs();
+    void syncViewPreferences();
+    void gatherKeyHints();
+    void drawPreferences();
+    PrintProfile printProfile() const;
+    bool snapNow() const;
+
+    // Autosave and recovery: changed work written aside every few minutes,
+    // offered back after a crash, and put away on a clean exit or a save.
+    size_t autosavedRevision_ = static_cast<size_t>(-1);
+    float  autosaveClock_ = 0.0f;
+    bool   recoveryOffered_ = false;
+    std::string recoveryFrom_;        // the project the recovered work was, or empty
+    std::string recoveryWhen_;
+    void stepAutosave();
+    bool writeRecovery();             // the work, saved aside with a note of what it was
+public:
+    crash::Saved saveAsideForCrash();  // for the crash handler's forked copy
+private:
+    std::string crashReport_;         // the report the last session left, if it crashed
+    bool crashTest_ = false;
+    int  crashTestFrame_ = 0;
+    void installCrashHandler();
+    void clearRecovery();
+    void checkRecovery();
+    void drawRecoveryPrompt();
+
+    // Kept measurements (app_select.cpp): each worked out again only when a
+    // part it measures changes, and drawn with what it reads.
+    struct KeptReading { uint64_t key = 0; MeasureResult result; };
+    std::unordered_map<uint32_t, KeptReading> keptReadings_;
+    void keepMeasurement();
+    void stepKeptMeasures();
+    void drawKeptMeasures();
+    std::string windowTitle_;
+    std::string layoutFile_;          // ImGui keeps the pointer: it has to outlive the context
+    ObjectId colourDragged_ = kNoObject;    // the part whose colour a picker drag is changing
+    // The wheel: toward the part in hand, or else toward the pointer.
+    void zoomView(float steps);
+
     // True, with a notice saying how to get past it, when `obj` is a mesh: an
     // edit to part of a shape needs the exact kernel, and a mesh has to be
     // converted before it can have one.
     bool refuseMeshEdit(const SceneObject& obj, const char* what);
 
-    void roundAllEdges();
     void beginReduce();
     void requestReducePreview();
     void updateReduce();
@@ -1199,6 +1357,178 @@ private:
 
     CreateTool createTool_;
     SketchTool sketchTool_;
+    // Joining parts; see app/joint_tool.h and app/app_assembly.cpp.
+    JointTool jointTool_;
+    void applyAssemblyActions();
+    void beginJoint();
+    int  assemblyDemo_ = 0;
+    int  assemblyDemoFrame_ = 0;
+    void setupAssemblyDemo();
+    void stepAssemblyDemo();
+
+    // ---- Clearance ------------------------------------------------------------
+    //
+    // How close the parts come, measured on a worker whenever what is measured
+    // changes -- a part moved, a joint turned, the gap asked for -- and drawn
+    // on the parts until the panel is closed. See app/clearance.h. It keeps
+    // measuring while another operation has the panel's corner, and says the
+    // tightest gap in a line at the foot of the view instead: a hinge dragged
+    // in its own panel shows whether it clears as it goes.
+    struct ClearanceToolState {
+        bool open = false;
+        Real required = 0.2;
+        bool selectedOnly = false;
+        uint32_t sweepJoint = 0;        // through this joint's motion, or 0
+        int focus = -1;                 // the pair picked in the list
+        bool typing = false;
+        std::string typed;
+
+        std::future<ClearanceResult> job;
+        std::shared_ptr<std::atomic<bool>> cancel;
+        bool running = false;
+        uint64_t jobKey = 0;
+        std::unordered_map<ObjectId, uint32_t> jobVersions;
+        std::vector<std::future<ClearanceResult>> retired;
+
+        ClearanceResult shown;
+        uint64_t shownKey = 0;
+        uint64_t uploaded = 0;          // which result's marks the renderer holds
+        uint64_t wantKey = 0;
+        float stableFor = 0.0f;
+
+        // Each body's fine mesh, kept while its geometry stays the same: moving
+        // a part or turning a joint re-measures without re-meshing.
+        struct CachedMesh {
+            uint32_t version = 0;
+            Real deviation = 0.0;
+            std::shared_ptr<const RenderMesh> mesh;
+        };
+        std::unordered_map<ObjectId, CachedMesh> meshes;
+    };
+    ClearanceToolState clearance_;
+
+    // ---- Exploded view ----------------------------------------------------------
+    //
+    // A view, not an edit: the parts drawn pulled apart -- along their joints'
+    // axes, a pin out of its hole and a lid up off its box, and a part joined
+    // to a part joined to another further again -- and nothing about them
+    // changed. It closes when anything else starts, so no step is ever made
+    // against where a part only appears to be.
+    struct ExplodeState {
+        bool open = false;
+        Real amount = 0.6;          // how far, as a share of each part's own size
+        Real shown = 0.0;           // how far it is drawn now, easing to `amount`
+        bool trails = true;         // dashed lines back to where each part sits
+        bool typing = false;
+        std::string typed;
+        struct Trail { Vec3 from, to; };
+        std::vector<Trail> trailLines;
+    };
+    ExplodeState explode_;
+    void toggleExplode();
+    // Puts every part back where it goes at once, not over the next frames:
+    // for anything about to read where the parts are -- an export, an edit.
+    void endExplode();
+    void stepExplode();
+    void drawExplodePanel();
+    void drawExplodeOverlay();
+
+    // ---- Section view -----------------------------------------------------------
+    //
+    // The model drawn cut by a plane, the near side taken away and the cut
+    // faces filled and hatched, to see inside a part or how parts sit in one
+    // another. A view, like the exploded one, but one that stays: work goes on
+    // with the model cut -- measuring a wall, filleting an edge inside -- and
+    // clicks do not reach what the cut has taken away. Its panel steps aside
+    // for any other operation's and comes back after.
+    struct SectionState {
+        bool on = false;            // the model is drawn cut
+        bool panel = false;         // its panel is wanted
+        int  plane = 1;             // 0 Top (XY), 1 Front (XZ), 2 Right (YZ), 3 a face
+        Vec3 faceNormal{0.0, 0.0, 1.0};  // for a face: outwards, in the world
+        Real sign = 1.0;            // which side goes: +1 the side the plane's normal points to
+        Real offset = 0.0;          // along the plane's normal (unsigned), from the origin
+        Real faceAt = 0.0;          // for a face: where the face itself is, the same way
+        bool pickingFace = false;   // the next click in the view picks the face
+        bool typing = false;
+        std::string typed;
+        // The arrow in the view that slides the plane.
+        bool hoverHandle = false;
+        bool dragging = false;
+        Real dragFrom = 0.0;
+        Vec2 dragStartPx{};
+        // The flat face under the pointer while picking one, and its plane.
+        bool hoverFace = false;
+        Vec3 hoverNormal{};
+        Real hoverOffset = 0.0;
+    };
+    SectionState section_;
+    void toggleSection();
+    void sectionPlane(int plane);               // choose one of the three, or a face (3)
+    Vec3 sectionAxis() const;                   // the chosen plane's normal, unsigned
+    bool sectionPanelShown() const;
+    // How far the visible model reaches along `axis`; false when there is none.
+    bool sectionRange(Vec3 axis, Real& lo, Real& hi) const;
+    void stepSection();
+    // The drag and the face pick in the view. True when it used the event.
+    bool sectionMouse(bool uiPointer, bool uiClicks, bool overViewport);
+    void drawSectionPanel();
+    void drawSectionOverlay();
+    int  sectionDemo_ = 0;
+    int  sectionDemoFrame_ = 0;
+    void setupSectionDemo();
+    void stepSectionDemo();
+    void toggleClearance();
+    void stepClearance();
+    void drawClearancePanel();
+    void drawClearanceOverlay();
+    std::vector<ObjectId> clearanceBodies() const;
+    uint64_t clearanceKey() const;
+    void startClearanceJob(uint64_t key);
+    // Some other operation has the panel's corner.
+    bool commandCornerTaken() const;
+    // Revolve, sweep and loft, from sketches or from faces and edges.
+    ProfileTool profileTool_;
+    void beginProfileBuild(ProfileBuild build);
+    // The selected sketch: its regions extruded, or the sketch taken out.
+    void beginExtrudeSketch();
+    // Rolls the marker, moves a step, or re-points a failed one -- see
+    // UiActions::HistoryEdit.
+    void applyHistoryEdit(const UiActions& a);
+    void deleteSelectedSketch();
+    // The sketch drawn under the pointer; see the .cpp.
+    Scene::SketchRef sketchAt(Vec2 cursor, bool inside);
+    // The one the pointer is over, lit in the view.
+    Scene::SketchRef hoverSketch_;
+    // Each sketch shown in the view, as drawn: its curves sampled once in the
+    // world, and projected once per view. Sampling and projecting every curve
+    // of every sketch on every frame -- to draw them and to find the one under
+    // the pointer -- was most of a frame for a sketch of a few thousand
+    // circles; now that is done when the sketch, its part's placement or the
+    // view changes, and not otherwise.
+    struct SketchLines {
+        ObjectId object = kNoObject;
+        ElementId uid = 0;
+        uint64_t shape = 0;                 // of the sketch and where it stands
+        std::vector<Vec3> points;           // every curve's samples, one after another
+        std::vector<uint32_t> start;        // curve k is points[start[k] .. start[k + 1])
+        std::vector<uint8_t> construction;
+        uint64_t view = 0;                  // what `px` was projected for
+        std::vector<Vec2> px;
+        std::vector<uint8_t> onScreen;
+        std::vector<Vec2> boxLo, boxHi;     // each curve's extent on screen
+        bool regionsKnown = false;
+        std::vector<SketchProfile> regions;
+        bool used = false;
+    };
+    std::vector<SketchLines> sketchLines_;
+    // The cached lines of every sketch shown, brought up to date.
+    void refreshSketchLines();
+    SketchLines* sketchLinesOf(ObjectId object, ElementId uid);
+    const std::vector<SketchProfile>& sketchLineRegions(SketchLines& lines);
+    // The same count for a selected sketch that is hidden, and what it was of.
+    uint64_t hiddenRegionsShape_ = 0;
+    int hiddenRegions_ = 0;
 
     void beginAddPrimitivePrompt(PrimitiveKind kind);
     void beginSketch();
@@ -1266,7 +1596,7 @@ private:
     void settleCommand(Settled kind, ObjectId id);
 
     // Puts the panel away, keeping what it made.
-    void dismissSettled();
+    void dismissSettled(Settled keep = Settled::None);
 
     bool settledIs(Settled k) const { return settled_ == k; }
 
@@ -1337,7 +1667,11 @@ private:
     // Transient message shown in the status bar, e.g. a refused edit.
     std::string notice_;
     float       noticeAge_ = 0.0f;
-    void setNotice(const std::string& text) { notice_ = text; noticeAge_ = 0.0f; }
+    void setNotice(const std::string& text) {
+        notice_ = text;
+        noticeAge_ = 0.0f;
+        crashlog::note("said: %s", text.c_str());
+    }
 
     // Reverts a just-applied edit that would leave the model unprintable.
     bool editKeepsSolid(ObjectId id);
@@ -1376,6 +1710,8 @@ private:
     int         filletDemoEdges_ = 1;
     bool        autoExtrude_ = false;
     float       autoExtrudeMm_ = 10.0f;
+    float       pushFilletDemo_ = 0.0f;     // 0: off
+    int         placeDemo_ = -1;            // a PrimitiveKind, or -1: off
     float       filletDemo_ = 0.0f;     // radius in mm; 0 means do not
     float       shellExtrudeDemo_ = 0.0f;
     bool        shellFilletDemo_ = false;

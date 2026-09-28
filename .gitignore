@@ -6,3 +6,10 @@ tangent.ini
 *.o
 compile_commands.json
 .claude/
+
+# The website, not ready yet.
+/index.html
+/about.html
+/.nojekyll
+/site/
+/tools/site_model.cpp

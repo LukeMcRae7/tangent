@@ -95,6 +95,9 @@ int main() {
     // Sized to be heavy -- 37 wires and 1,732 edges on each drilled face, past
     // the threshold -- while keeping the full analyzer it is compared against
     // to about a second a case.
+    const TopoDS_Shape plainPlate = plate({});
+    // Nothing changed at all: nothing but the whole-shape edge check to run.
+    check(brep::shapeIsValidAfter(plainPlate, plainPlate), "a shape checked against itself is valid");
     for (const Case& c : cases) {
         auto t0 = std::chrono::steady_clock::now();
         const bool full = brep::fullAnalyzerValid(c.shape);
@@ -112,6 +115,11 @@ int main() {
         check(full == c.valid, std::string(c.name) + ": the full analyzer says what we expect");
         check(pruned == full, std::string(c.name) + ": the pruned check agrees with it");
         check(forced == full, std::string(c.name) + ": and so does checking every face in pieces");
+        // Checking only what changed from a shape that shares none of its
+        // faces is checking all of it: the same answer, every broken case
+        // included.
+        const bool after = brep::shapeIsValidAfter(c.shape, plainPlate);
+        check(after == full, std::string(c.name) + ": checking what changed agrees with it");
         if (c.valid)
             check(ms(t1, t2) * 2 < ms(t0, t1), std::string(c.name) + ": and is faster");
     }

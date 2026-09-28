@@ -1,4 +1,5 @@
 #include "app/measure.h"
+#include "core/units.h"
 #include "core/palette.h"
 
 #include <algorithm>
@@ -229,8 +230,9 @@ MeasureResult MeasureTool::compute(const Scene& scene) const {
         switch (A.kind) {
         case ElementKind::Vertex:
             r.from = r.to = A.pts[0];
-            std::snprintf(buf, sizeof(buf), "%.3f, %.3f, %.3f mm",
-                          A.pts[0].x, A.pts[0].y, A.pts[0].z);
+            std::snprintf(buf, sizeof(buf), "%s, %s, %s", units::number(A.pts[0].x, units::decimals() + 1).c_str(),
+                          units::number(A.pts[0].y, units::decimals() + 1).c_str(),
+                          units::length(A.pts[0].z, units::decimals() + 1).c_str());
             break;
         case ElementKind::Edge:
             r.from = A.pts[0];
@@ -245,10 +247,11 @@ MeasureResult MeasureTool::compute(const Scene& scene) const {
                 r.hasDiameter = true;
                 r.diameter = A.radius * 2.0;
                 r.centre = A.centre;
-                std::snprintf(buf, sizeof(buf), "\u00D8 %.3f mm  (%.3f mm around)",
-                              r.diameter, r.length);
+                std::snprintf(buf, sizeof(buf), "\u00D8 %s  (%s around)",
+                              units::length(r.diameter, units::decimals() + 1).c_str(),
+                              units::length(r.length, units::decimals() + 1).c_str());
             } else {
-                std::snprintf(buf, sizeof(buf), "%.3f mm", r.length);
+                std::snprintf(buf, sizeof(buf), "%s", units::length(r.length, units::decimals() + 1).c_str());
             }
             break;
         case ElementKind::Face: {
@@ -271,9 +274,9 @@ MeasureResult MeasureTool::compute(const Scene& scene) const {
                 r.diameter = A.radius * 2.0;
                 r.centre = A.centre;
                 r.from = r.to = A.centre;
-                std::snprintf(buf, sizeof(buf), "\u00D8 %.3f mm", r.diameter);
+                std::snprintf(buf, sizeof(buf), "\u00D8 %s", units::length(r.diameter, units::decimals() + 1).c_str());
             } else {
-                std::snprintf(buf, sizeof(buf), "%.3f mm2", area);
+                std::snprintf(buf, sizeof(buf), "%s", units::area(area).c_str());
             }
             break;
         }
@@ -303,9 +306,10 @@ MeasureResult MeasureTool::compute(const Scene& scene) const {
     }
 
     if (r.hasAngle)
-        std::snprintf(buf, sizeof(buf), "%.3f mm   %.2f deg", r.distance, r.angleDeg);
+        std::snprintf(buf, sizeof(buf), "%s   %.2f\xC2\xB0", units::length(r.distance, units::decimals() + 1).c_str(),
+                      r.angleDeg);
     else
-        std::snprintf(buf, sizeof(buf), "%.3f mm", r.distance);
+        std::snprintf(buf, sizeof(buf), "%s", units::length(r.distance, units::decimals() + 1).c_str());
     r.summary = buf;
     r.valid = true;
     return r;

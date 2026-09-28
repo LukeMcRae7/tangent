@@ -8,6 +8,7 @@
 
 #include "app/printability.h"
 #include "mesh/health.h"
+#include "scene/assembly.h"
 #include "scene/feature.h"
 
 #include <memory>
@@ -41,6 +42,16 @@ struct SceneObject {
     ObjectId      id = kNoObject;
     std::string   name;
 
+    // The group it is in, in the outliner, or kNoGroup. See scene/assembly.h:
+    // a group places nothing, but it is the unit a joint moves.
+    GroupId       group = kNoGroup;
+
+    // Its colour, when one has been chosen; until then it is drawn in the
+    // theme's grey, like every other part. Saved, and written into a 3MF so
+    // a slicer shows the parts apart.
+    bool          coloured = false;
+    Vec3          colour{0.74, 0.74, 0.75};
+
     // Where the object is. Derived, not set: `base` is where it was made --
     // the point a box was drawn at, the plane a part was drawn on -- and the
     // Move and Rotate steps in its history take it on from there. Scene keeps
@@ -58,9 +69,25 @@ struct SceneObject {
     // primitive; later entries are operations applied in order.
     std::vector<Feature> features;
 
+    // The steps after the rollback marker: kept, and not run. What the view
+    // shows and what the next operation builds on is `features` alone, so an
+    // operation done while rolled back goes in at the marker -- and moving the
+    // marker down again runs these on top of it, each finding what it names
+    // on the geometry as it now is. Empty when the marker is at the end.
+    std::vector<Feature> ahead;
+    // What those waiting steps built when they last ran, and its fingerprints:
+    // rolled forward again with nothing changed below them, they need not run.
+    std::vector<Body> aheadCache;
+    std::vector<uint64_t> aheadKeys;
+
     // featureCache[i] is the body as it stood after feature i, so an edit only
     // has to re-run from the feature it touched.
     std::vector<Body> featureCache;
+    // featureKeys[i] is the fingerprint (featureKey) of the step the cache holds
+    // the result of at i -- how a re-run knows where the history first differs
+    // from what was built, and starts there. Shorter than the cache when not
+    // known, which only costs a longer re-run.
+    std::vector<uint64_t> featureKeys;
 
     Body       body;
     RenderMesh render;
@@ -152,6 +179,38 @@ struct ElementHit {
     bool hit() const { return ref.valid(); }
 };
 
+// A section view: the model drawn cut by a plane, with everything on the side
+// the normal points to taken away -- for looking inside a part without changing
+// it. A view, not an edit: nothing about any body is touched. It lives on the
+// scene only because picking has to honour it too: a click on what is not
+// drawn must not select it, and a click on the cut face must not reach through
+// the cut to the wall behind it.
+struct SectionCut {
+    bool on = false;
+    Vec3 normal{0.0, 0.0, 1.0};     // unit; points into the side taken away
+    Real offset = 0.0;              // the plane is dot(normal, p) == offset
+
+    // Whether `p` is on the side taken away. A hair of tolerance keeps what
+    // lies in the plane itself -- a face the plane was put on -- drawn and
+    // pickable.
+    bool removes(Vec3 p) const { return on && dot(normal, p) > offset + 1e-6 * (1.0 + std::fabs(offset)); }
+};
+
+// A measurement kept on the model: what it was taken between, by the names
+// the geometry keeps through edits, so it reads the part as it is now and not
+// as it was when it was taken. Drawn in the view and listed in the outliner.
+struct KeptMeasure {
+    struct End {
+        ObjectId    object = kNoObject;
+        ElementKind kind = ElementKind::None;
+        ElementId   name = 0;
+    };
+    uint32_t id = 0;
+    End      ends[2];
+    int      count = 0;          // one end or two
+    bool     visible = true;
+};
+
 struct RayHit {
     ObjectId object = kNoObject;
     Index    face   = kInvalid;
@@ -177,6 +236,13 @@ public:
 
     ObjectId addPrimitive(PrimitiveKind kind, const PrimitiveSpec& spec = {},
                           Vec3 position = {});
+
+    // A sketch standing on its own that has just been built into its first
+    // solid is a part now, and is called one -- unless it was named by hand.
+    void nameAsPart(ObjectId id) {
+        SceneObject* o = find(id);
+        if (o && !o->body.empty() && o->name.rfind("Sketch", 0) == 0) o->name = uniqueName("Part");
+    }
 
     // Which kernel new bodies are built with. Exact where the build has it,
     // and a mesh otherwise, so the same code path serves both -- and so a build
@@ -237,8 +303,12 @@ public:
     // rather than after it, because the pattern's first copy is that boolean
     // and keeping both would cut the same hole twice. All or nothing -- a chain
     // that will not evaluate leaves the object as it was.
+    //
+    // `onlyNewFailures` lets through a step that was already failing before
+    // the swap, by uid: an edit early in a history that carries a known-bad
+    // step further down is not that step's fault.
     bool setFeatures(ObjectId id, std::vector<Feature> features,
-                     std::string* error = nullptr);
+                     std::string* error = nullptr, bool onlyNewFailures = false);
 
     // Appends a feature whose result has already been built -- by a preview on
     // another thread, from this object's current body -- instead of building it
@@ -281,7 +351,24 @@ public:
     // Re-runs an object's chain as it stands. rebuild() pushes the inspector's
     // spec into the base feature first; this does not, which is what undo
     // needs when restoring a whole chain.
-    bool reevaluate(ObjectId id) { return reevaluateFrom(id, 0); }
+    // Re-runs from the first step that differs from what the cache was built
+    // from -- nothing, if nothing does.
+    // Several parts at once: their histories are independent, so each runs on
+    // a thread of its own, and what they made is put in place afterwards on
+    // this one. A part whose history holds a body baked into it -- an import,
+    // a combine's tool -- may share that shape with another part, and runs
+    // here, in order, rather than beside something that might touch it.
+    void reevaluateMany(const std::vector<ObjectId>& ids);
+    bool reevaluate(ObjectId id);
+    // Every step, from the root, whatever the cache holds.
+    bool reevaluateAll(ObjectId id) { return reevaluateFrom(id, 0); }
+
+    // Moves the rollback marker so that the first `active` steps of the whole
+    // history run and the rest wait after it -- see SceneObject::ahead. False
+    // when a step that now runs fails; it is marked, as any failing step is.
+    bool rollTo(ObjectId id, size_t active);
+    // Every step, run or waiting.
+    size_t historyLength(ObjectId id) const;
 
     // Re-runs only from `fromFeature` onward, reusing the cached intermediate
     // before it. Pass 0 to rebuild everything.
@@ -299,6 +386,34 @@ public:
     // every frame of a slider drag.
     std::string takeChainNotice() { std::string s; s.swap(chainNotice_); return s; }
 
+    // ---- Groups and joints ----------------------------------------------------
+    // See scene/assembly.h, which holds the operations on them.
+    const Assembly& assembly() const { return assembly_; }
+    Assembly&       assembly()       { return assembly_; }
+
+    // ---- Kept measurements -------------------------------------------------------
+    std::vector<KeptMeasure>&       measures()       { return measures_; }
+    const std::vector<KeptMeasure>& measures() const { return measures_; }
+    uint32_t takeMeasureId() { return nextMeasure_++; }
+    // Where an end is now: its face, edge or corner found again by name. An
+    // invalid ref when that is gone.
+    ElementRef resolve(const KeptMeasure::End& e) const {
+        const SceneObject* o = find(e.object);
+        if (!o || e.name == 0) return {};
+        Index at = kInvalid;
+        switch (e.kind) {
+            case ElementKind::Face:   at = o->body.findFace(e.name); break;
+            case ElementKind::Edge:   at = o->body.findEdge(e.name); break;
+            case ElementKind::Vertex: at = o->body.findVertex(e.name); break;
+            case ElementKind::None:   break;
+        }
+        return at == kInvalid ? ElementRef{} : ElementRef{e.object, e.kind, at};
+    }
+
+    // ---- Section view ---------------------------------------------------------
+    const SectionCut& section() const { return section_; }
+    void setSection(const SectionCut& cut) { section_ = cut; }
+
     // ---- Selection -------------------------------------------------------
     const std::vector<ObjectId>& selection() const { return selection_; }
     bool isSelected(ObjectId id) const;
@@ -314,16 +429,39 @@ public:
     ObjectId contextObject() const {
         if (!selection_.empty()) return selection_.back();
         if (!elements_.empty()) return elements_.front().object;
+        if (sketch_.valid()) return sketch_.object;
         return kNoObject;
     }
+
+    // ---- A sketch, picked as a thing of its own ----------------------------
+    // A sketch is in the model, not only in a history: it can be pointed at in
+    // the view or in the outliner, and then edited or built from. Selecting it
+    // takes the object and element selection out of play, and selecting
+    // anything else drops it.
+    struct SketchRef {
+        ObjectId object = kNoObject;
+        ElementId uid = 0;
+        bool valid() const { return object != kNoObject && uid != 0; }
+        bool operator==(const SketchRef& o) const { return object == o.object && uid == o.uid; }
+    };
+    void selectSketch(SketchRef ref);
+    void clearSketchSelection() { sketch_ = SketchRef{}; }
+    // The selected sketch, or an invalid ref when there is none or it has gone.
+    SketchRef selectedSketch() const;
+    // The Sketch feature `ref` names, or null.
+    const Feature* sketchFeature(SketchRef ref) const;
 
     // ---- Queries ---------------------------------------------------------
     AABB bounds() const;
     AABB selectionBounds() const;
     Vec3 selectionCenter() const;
 
-    // Nearest surface hit along the ray, in world space.
-    RayHit raycast(const Ray& ray) const;
+    // Nearest surface hit along the ray, in world space. Under a section view,
+    // what the section takes away is not hit, and the cut face is: a ray whose
+    // nearest surface is the inside of a wall crossed the plane inside the
+    // part, so it meets the cut face first -- it misses, and `capped`, when
+    // given, says so.
+    RayHit raycast(const Ray& ray, bool* capped = nullptr) const;
 
     // Every surface the ray meets at the nearest depth, one hit per body.
     //
@@ -343,14 +481,14 @@ public:
     // scene layer stays independent of the application layer.
     ElementHit pickElement(const Ray& ray, const Mat4& viewProj,
                            int viewportW, int viewportH, Vec2 cursorPx,
-                           float vertexTolPx = 16.0f, float edgeTolPx = 12.0f) const;
+                           float vertexTolPx = 10.0f, float edgeTolPx = 7.0f) const;
 
     // Everything a click could mean there: what pickElement would choose on
     // each body raycastCoincident finds, each once. The first is what
     // pickElement returns.
     std::vector<ElementHit> pickElements(const Ray& ray, const Mat4& viewProj,
                                          int viewportW, int viewportH, Vec2 cursorPx,
-                                         float vertexTolPx = 16.0f, float edgeTolPx = 12.0f) const;
+                                         float vertexTolPx = 10.0f, float edgeTolPx = 7.0f) const;
 
     // ---- Sub-object selection --------------------------------------------
     const std::vector<ElementRef>& elementSelection() const { return elements_; }
@@ -377,8 +515,21 @@ private:
     std::string uniqueName(const std::string& base) const;
 
     std::vector<std::unique_ptr<SceneObject>> objects_;
+    Assembly assembly_;
+    SectionCut section_;
+    std::vector<KeptMeasure> measures_;
+    uint32_t nextMeasure_ = 1;
     std::vector<ObjectId> selection_;
     std::vector<ElementRef> elements_;
+    // The persistent name of each selected element, taken when it was
+    // selected. Indices are renumbered by any edit; the name is what finds the
+    // same face, edge or point again afterwards, so a selection kept across a
+    // change stays on what was picked instead of landing on whatever now has
+    // its number.
+    struct NamedRef { ElementRef ref; ElementId name = 0; };
+    std::vector<NamedRef> elementNames_;
+    void rememberName(const ElementRef& e);
+    SketchRef sketch_;
     ObjectId nextId_ = 1;
 
     // Handed to each new feature so it has an identity independent of where it

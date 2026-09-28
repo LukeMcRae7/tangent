@@ -32,6 +32,15 @@ inline constexpr size_t kPrunedCheckEdges = 256;
 
 bool shapeIsValid(const TopoDS_Shape& shape, size_t prunedAbove = kPrunedCheckEdges);
 
+// The same answer for a shape made from a valid one by an operation that left
+// most of its faces alone -- a hole drilled, a face pushed. A face that is the
+// very same face as before (the same TShape) was checked when it was made and
+// has not changed, so only the new and altered faces go through the analyzer;
+// the checks across faces are made for the whole shape, directly -- every
+// edge used once in each direction. On a part a hundred steps long this was
+// most of each step's check.
+bool shapeIsValidAfter(const TopoDS_Shape& result, const TopoDS_Shape& before);
+
 // The whole-shape analyzer, for tests to hold the pruned check against.
 bool fullAnalyzerValid(const TopoDS_Shape& shape);
 

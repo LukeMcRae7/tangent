@@ -117,6 +117,27 @@ BrepRef revolveSketch(const Sketch&, const std::vector<SketchProfile>&,
     if (reason) *reason = "built without OpenCASCADE";
     return {};
 }
+BrepRef sweepSketch(const Sketch&, const std::vector<SketchProfile>&, const std::vector<SketchId>&,
+                    const Sketch&, const std::vector<SketchId>&, ElementId, std::string* reason) {
+    if (reason) *reason = "built without OpenCASCADE";
+    return {};
+}
+BrepRef loftSketches(const std::vector<LoftSection>&, bool, ElementId, std::string* reason) {
+    if (reason) *reason = "built without OpenCASCADE";
+    return {};
+}
+BrepRef revolveOutline(const OutlineSource&, Vec3, Vec3, Real, ElementId, std::string* reason) {
+    if (reason) *reason = "built without OpenCASCADE";
+    return {};
+}
+BrepRef sweepOutline(const OutlineSource&, const PathSource&, ElementId, std::string* reason) {
+    if (reason) *reason = "built without OpenCASCADE";
+    return {};
+}
+BrepRef loftOutlines(const std::vector<OutlineSource>&, bool, ElementId, std::string* reason) {
+    if (reason) *reason = "built without OpenCASCADE";
+    return {};
+}
 BrepRef prism(const std::vector<Vec3>&, const std::vector<Real>&, Vec3, Real, Real,
               ElementId, std::string* reason) {
     if (reason) *reason = "built without OpenCASCADE";

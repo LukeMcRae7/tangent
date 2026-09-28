@@ -28,6 +28,7 @@ const char* sketchRuleName(SketchRule rule) {
         case SketchRule::Distance:      return "distance";
         case SketchRule::Radius:        return "radius";
         case SketchRule::Angle:         return "angle";
+        case SketchRule::Smooth:        return "smooth";
     }
     return "constraint";
 }
@@ -482,6 +483,22 @@ bool SketchSolver::Impl::addConstraint(const SketchConstraint& k) {
         double* v = fixed(k.value);
         sys.addConstraintL2LAngle(*l1, *l2, v, tag);
         dimensions[k.id] = v;
+        return true;
+    }
+    case SketchRule::Smooth: {
+        // The first curve's last handle and the second's first, mirrored
+        // about the point they share: the tangent runs straight through it.
+        const SketchEntity* e1 = sketch.entity(k.first);
+        const SketchEntity* e2 = sketch.entity(k.second);
+        if (!e1 || !e2 || e1->curve != SketchCurve::Bezier || e2->curve != SketchCurve::Bezier) return false;
+        GCS::Point* in = P(e1->c);
+        GCS::Point* out = P(e2->b);
+        GCS::Point* at = P(e2->a);
+        if (!in || !out || !at || e1->d != e2->a) return false;
+        use(*in);
+        use(*out);
+        use(*at);
+        sys.addConstraintP2PSymmetric(*in, *out, *at, tag);
         return true;
     }
     }
@@ -983,6 +1000,148 @@ bool sketchProfileContains(const Sketch& sketch, const SketchProfile& profile, V
     for (const SketchLoop& hole : profile.holes)
         if (inside(at, sketchLoopPoints(sketch, hole))) return false;
     return true;
+}
+
+// ---- Paths ------------------------------------------------------------------
+
+namespace {
+
+// Where an entity starts and ends, as it is stored. A circle has neither.
+bool entityEnds(const Sketch& sketch, const SketchEntity& e, Vec2& from, Vec2& to) {
+    SketchId a = kNoSketchId, b = kNoSketchId;
+    switch (e.curve) {
+        case SketchCurve::Line:   a = e.a; b = e.b; break;
+        case SketchCurve::Arc:    a = e.b; b = e.c; break;
+        case SketchCurve::Bezier: a = e.a; b = e.d; break;
+        case SketchCurve::Circle: return false;
+    }
+    const SketchPoint* p = sketch.point(a);
+    const SketchPoint* q = sketch.point(b);
+    if (!p || !q) return false;
+    from = p->at;
+    to = q->at;
+    return true;
+}
+
+// Two ends are one joint when they sit on each other, whether or not they are
+// the same point: an imported drawing joins its curves by position.
+bool sameEnd(Vec2 a, Vec2 b) { return lengthSq(a - b) < 1e-12; }
+
+} // namespace
+
+bool sketchPathOf(const Sketch& sketch, const std::vector<SketchId>& entities, SketchPath& out,
+                  std::string* reason) {
+    out = SketchPath{};
+    auto refuse = [&](const char* why) {
+        if (reason) *reason = why;
+        return false;
+    };
+    if (entities.empty()) return refuse("the path is empty");
+
+    struct Piece { SketchId id; Vec2 from, to; };
+    std::vector<Piece> pieces;
+    for (SketchId id : entities) {
+        const SketchEntity* e = sketch.entity(id);
+        if (!e) return refuse("a curve of the path is no longer in its sketch");
+        if (e->construction) return refuse("construction geometry is not a path");
+        if (e->curve == SketchCurve::Circle) {
+            if (entities.size() != 1) return refuse("a circle is a path on its own, not part of one");
+            out.entities = {id};
+            out.reversed = {false};
+            out.closed = true;
+            return true;
+        }
+        Piece p{id, {}, {}};
+        if (!entityEnds(sketch, *e, p.from, p.to)) return refuse("a curve of the path has no ends");
+        pieces.push_back(p);
+    }
+
+    // How many ends meet at each end: two is a joint, one is an end of the
+    // path, three or more is a branch that no single sweep can follow.
+    auto meeting = [&](Vec2 at) {
+        int n = 0;
+        for (const Piece& p : pieces) n += sameEnd(p.from, at) + sameEnd(p.to, at);
+        return n;
+    };
+    size_t start = 0;
+    bool startReversed = false;
+    int loose = 0;
+    for (size_t i = 0; i < pieces.size(); ++i) {
+        const int f = meeting(pieces[i].from), t = meeting(pieces[i].to);
+        if (f > 2 || t > 2) return refuse("the path branches: three curves meet at one point");
+        if (f == 1 && loose++ == 0) { start = i; startReversed = false; }
+        if (t == 1 && loose++ == 0) { start = i; startReversed = true; }
+    }
+    if (loose != 0 && loose != 2) return refuse("the curves of the path do not all join end to end");
+
+    // Walked from one end -- or, round a loop, from the first curve given.
+    std::vector<bool> used(pieces.size(), false);
+    size_t at = start;
+    bool rev = startReversed;
+    for (;;) {
+        used[at] = true;
+        out.entities.push_back(pieces[at].id);
+        out.reversed.push_back(rev);
+        const Vec2 end = rev ? pieces[at].from : pieces[at].to;
+        bool found = false;
+        for (size_t j = 0; j < pieces.size() && !found; ++j) {
+            if (used[j]) continue;
+            if (sameEnd(pieces[j].from, end))    { at = j; rev = false; found = true; }
+            else if (sameEnd(pieces[j].to, end)) { at = j; rev = true;  found = true; }
+        }
+        if (!found) break;
+    }
+    if (out.entities.size() != pieces.size())
+        return refuse("the curves of the path do not all join end to end");
+    out.closed = loose == 0;
+    return true;
+}
+
+bool sketchPathThrough(const Sketch& sketch, SketchId entity, SketchPath& out, std::string* reason) {
+    const SketchEntity* first = sketch.entity(entity);
+    if (!first) {
+        if (reason) *reason = "that is not a curve of the sketch";
+        return false;
+    }
+    if (first->curve == SketchCurve::Circle || first->construction)
+        return sketchPathOf(sketch, {entity}, out, reason);
+
+    // Out from the one clicked, through every joint two curves share, and no
+    // further than a point where a third meets them.
+    std::vector<SketchId> run{entity};
+    std::vector<Vec2> open;
+    {
+        Vec2 a, b;
+        if (entityEnds(sketch, *first, a, b)) { open.push_back(a); open.push_back(b); }
+    }
+    while (!open.empty()) {
+        const Vec2 at = open.back();
+        open.pop_back();
+        std::vector<const SketchEntity*> here;
+        for (const SketchEntity& e : sketch.entities) {
+            if (e.construction || e.curve == SketchCurve::Circle) continue;
+            Vec2 a, b;
+            if (!entityEnds(sketch, e, a, b)) continue;
+            if (sameEnd(a, at) || sameEnd(b, at)) here.push_back(&e);
+        }
+        if (here.size() != 2) continue;
+        for (const SketchEntity* e : here) {
+            if (std::find(run.begin(), run.end(), e->id) != run.end()) continue;
+            run.push_back(e->id);
+            Vec2 a, b;
+            entityEnds(sketch, *e, a, b);
+            open.push_back(sameEnd(a, at) ? b : a);
+        }
+    }
+    return sketchPathOf(sketch, run, out, reason);
+}
+
+std::vector<Vec2> sketchPathPoints(const Sketch& sketch, const SketchPath& path, int steps) {
+    std::vector<Vec2> out;
+    for (size_t k = 0; k < path.entities.size(); ++k)
+        if (const SketchEntity* e = sketch.entity(path.entities[k]))
+            sampleInto(sketch, *e, k < path.reversed.size() && path.reversed[k], out, steps);
+    return out;
 }
 
 } // namespace tg

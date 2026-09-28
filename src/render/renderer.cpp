@@ -1,6 +1,9 @@
 #include "render/renderer.h"
 
+#include <cstddef>
+
 #include <algorithm>
+#include <cmath>
 
 #include <epoxy/gl.h>
 
@@ -8,12 +11,21 @@
 
 namespace tg {
 
+namespace {
+// A chosen colour is a screen colour, and the shaders light in linear terms
+// and encode at the end: taken as it is, a mid blue came out pastel.
+Vec3 linearOf(Vec3 c) {
+    return {std::pow(c.x, 2.2), std::pow(c.y, 2.2), std::pow(c.z, 2.2)};
+}
+} // namespace
+
 bool Renderer::init(const std::string& dir) {
     const bool ok =
         surfaceShader_.load(dir + "/surface.vert", dir + "/surface.frag") &&
         lineShader_.load(dir + "/line.vert", dir + "/line.frag") &&
         gridShader_.load(dir + "/grid.vert", dir + "/grid.frag") &&
-        overlayShader_.load(dir + "/overlay.vert", dir + "/overlay.frag");
+        overlayShader_.load(dir + "/overlay.vert", dir + "/overlay.frag") &&
+        capShader_.load(dir + "/surface.vert", dir + "/cap.frag");
     if (!ok) {
         std::fprintf(stderr, "[renderer] shader initialisation failed (dir=%s)\n", dir.c_str());
         return false;
@@ -56,9 +68,63 @@ bool Renderer::init(const std::string& dir) {
     return true;
 }
 
+void Renderer::setStatic(int slot, uint64_t version, const std::vector<Vec3>& triangles, Vec4 colour) {
+    if (slot < 0 || slot >= kStaticSlots) return;
+    StaticBatch& b = statics_[slot];
+    if (b.version == version && b.vao) return;
+    b.version = version;
+    if (!b.vao) {
+        const GLsizei stride = sizeof(LineVert);
+        glGenVertexArrays(1, &b.vao);
+        glGenBuffers(1, &b.vbo);
+        glBindVertexArray(b.vao);
+        glBindBuffer(GL_ARRAY_BUFFER, b.vbo);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<void*>(0));
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<void*>(offsetof(LineVert, color)));
+        glBindVertexArray(0);
+    }
+    std::vector<LineVert> verts;
+    verts.reserve(triangles.size());
+    for (const Vec3& p : triangles) verts.push_back(makeVert(p, colour));
+    glBindBuffer(GL_ARRAY_BUFFER, b.vbo);
+    glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(verts.size() * sizeof(LineVert)), verts.data(),
+                 GL_STATIC_DRAW);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    b.count = static_cast<int>(verts.size());
+}
+
+void Renderer::flushStatics(const Camera& camera) {
+    bool any = false;
+    for (const StaticBatch& b : statics_) any = any || (b.show && b.count > 0);
+    if (any) {
+        overlayShader_.bind();
+        overlayShader_.set("uViewProj", camera.viewProjection());
+        overlayShader_.set("uClip", overlayClip_);
+        if (clipOverlays_) glEnable(GL_CLIP_DISTANCE0);
+        glDepthMask(GL_FALSE);
+        glDisable(GL_CULL_FACE);
+        for (const StaticBatch& b : statics_) {
+            if (!b.show || b.count == 0) continue;
+            glBindVertexArray(b.vao);
+            glDrawArrays(GL_TRIANGLES, 0, b.count);
+        }
+        glBindVertexArray(0);
+        glDepthMask(GL_TRUE);
+        glDisable(GL_CLIP_DISTANCE0);
+    }
+    for (StaticBatch& b : statics_) b.show = false;
+}
+
 void Renderer::shutdown() {
     // Order matters: every GL object must be released while the context is
     // still current, before Application destroys it.
+    for (StaticBatch& b : statics_) {
+        if (b.vbo) glDeleteBuffers(1, &b.vbo);
+        if (b.vao) glDeleteVertexArrays(1, &b.vao);
+        b = StaticBatch{};
+    }
     cache_.clear();
     triVerts_.clear();
     lineVerts_.clear();
@@ -66,6 +132,7 @@ void Renderer::shutdown() {
     lineShader_.destroy();
     gridShader_.destroy();
     overlayShader_.destroy();
+    capShader_.destroy();
     if (triVbo_) { glDeleteBuffers(1, &triVbo_); triVbo_ = 0; }
     if (triVao_) { glDeleteVertexArrays(1, &triVao_); triVao_ = 0; }
     if (lineVbo_) { glDeleteBuffers(1, &lineVbo_); lineVbo_ = 0; }
@@ -78,6 +145,12 @@ void Renderer::reloadShadersIfChanged() {
     lineShader_.reloadIfChanged();
     gridShader_.reloadIfChanged();
     overlayShader_.reloadIfChanged();
+    capShader_.reloadIfChanged();
+}
+
+Vec4 Renderer::clipPlane(const SectionCut& cut, Real slack) {
+    if (!cut.on) return {0.0, 0.0, 0.0, 1.0};
+    return {cut.normal.x, cut.normal.y, cut.normal.z, cut.offset + slack};
 }
 
 const GpuMesh& Renderer::syncObject(const SceneObject& obj) {
@@ -191,7 +264,7 @@ void Renderer::drawGrid(const Camera& camera, const ViewOptions& opts) {
     gridShader_.set("uSubdivide", opts.gridSubdivide);
     gridShader_.set("uAxisXColor", toVec3(palette::kGridAxisX));
     gridShader_.set("uAxisYColor", toVec3(palette::kGridAxisY));
-    gridShader_.set("uLineColor", Vec3{0.30f, 0.30f, 0.32f});
+    gridShader_.set("uLineColor", toVec3(palette::kGridLine));
     // Fade with zoom so the grid always dissolves near the horizon rather than
     // at a fixed world radius. The far end is kept fairly tight because at
     // grazing angles the ground point runs to thousands of millimetres, where
@@ -226,6 +299,8 @@ void Renderer::flushTriangles(const Camera& camera) {
 
     overlayShader_.bind();
     overlayShader_.set("uViewProj", camera.viewProjection());
+    overlayShader_.set("uClip", overlayClip_);
+    if (clipOverlays_) glEnable(GL_CLIP_DISTANCE0);
 
     // Tint without occluding: the highlight must not hide the geometry under it
     // or write depth that later overlay lines would fail against.
@@ -241,6 +316,7 @@ void Renderer::flushTriangles(const Camera& camera) {
     glBindVertexArray(0);
 
     glDepthMask(GL_TRUE);
+    glDisable(GL_CLIP_DISTANCE0);
     triVerts_.clear();
 }
 
@@ -251,7 +327,7 @@ void Renderer::render(const Scene& scene, const Camera& camera, const ViewOption
     glDisable(GL_SCISSOR_TEST);
     glViewport(0, 0, fbWidth, fbHeight);
     glClearColor(opts.background.x, opts.background.y, opts.background.z, 1.0f);
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
 
     if (!vp.valid()) return;
     glViewport(vp.x, vp.y, vp.w, vp.h);
@@ -274,6 +350,33 @@ void Renderer::render(const Scene& scene, const Camera& camera, const ViewOption
 
     const Mat4 viewProj = camera.viewProjection();
 
+    // A section view: everything past the plane is not drawn, and the inside
+    // of each part it cuts is filled in the plane (the cap pass below).
+    const SectionCut& cut = scene.section();
+    const Vec4 clip = clipPlane(cut);
+    // Which side of the plane an object's box is on: -1 wholly kept, +1
+    // wholly taken away, 0 cut.
+    auto sideOf = [&](const SceneObject& o) {
+        if (!cut.on) return -1;
+        const AABB b = o.worldBounds();
+        if (!b.valid()) return -1;
+        Real lo = 1e300, hi = -1e300;
+        for (int k = 0; k < 8; ++k) {
+            const Vec3 p{(k & 1) ? b.max.x : b.min.x, (k & 2) ? b.max.y : b.min.y, (k & 4) ? b.max.z : b.min.z};
+            const Real d = dot(cut.normal, p) - cut.offset;
+            lo = std::min(lo, d);
+            hi = std::max(hi, d);
+        }
+        return hi <= 0.0 ? -1 : lo > 0.0 ? 1 : 0;
+    };
+    if (cut.on) {
+        glEnable(GL_CLIP_DISTANCE0);
+        // Only the outside of each wall is shaded; the inside, where it shows
+        // through the cut, is the cap's.
+        glEnable(GL_CULL_FACE);
+        glCullFace(GL_BACK);
+    }
+
     // ---- Shaded surfaces --------------------------------------------------
     // Push fills a hair away from the viewer so the wireframe pass can win the
     // depth test on shared edges without a manual bias. Biasing the *lines*
@@ -287,6 +390,7 @@ void Renderer::render(const Scene& scene, const Camera& camera, const ViewOption
     surfaceShader_.set("uCameraPos", camera.eye());
     surfaceShader_.set("uBaseColor", opts.objectColor);
     surfaceShader_.set("uAccent", opts.accentColor);
+    surfaceShader_.set("uClip", clip);
 
     // Where two bodies have faces in one plane, the depth buffer cannot tell
     // them apart and draws a speckle of both. The body holding the selection
@@ -298,7 +402,7 @@ void Renderer::render(const Scene& scene, const Camera& camera, const ViewOption
             holding.push_back(e.object);
 
     for (const auto& obj : scene.objects()) {
-        if (!obj->visible) continue;
+        if (!obj->visible || sideOf(*obj) > 0) continue;
         const GpuMesh& gpu = syncObject(*obj);
         const Mat4 model = obj->modelMatrix();
         const bool selected = scene.isSelected(obj->id);
@@ -310,10 +414,82 @@ void Renderer::render(const Scene& scene, const Camera& camera, const ViewOption
         surfaceShader_.set("uModel", model);
         surfaceShader_.set("uNormalMat", normalMatrix(model));
         surfaceShader_.set("uSelected", selected ? 1.0f : 0.0f);
+        // Its own colour when it has one; the theme's grey when not.
+        surfaceShader_.set("uBaseColor", obj->coloured ? linearOf(obj->colour) : opts.objectColor);
         gpu.drawTriangles();
     }
 
     glDisable(GL_POLYGON_OFFSET_FILL);
+
+    // ---- Section caps -----------------------------------------------------
+    // The inside of each wall the plane cuts, drawn as the cut face in the
+    // plane: see shaders/cap.frag. Only for parts the plane goes through.
+    //
+    // In two steps a part. The cap is drawn at the plane, in front of the wall
+    // it comes from, so it would pass the depth test even where that wall is
+    // hidden -- looking down a hole the cut went past, the far side of the
+    // hole would be capped over. So first the inside of the walls is drawn
+    // where it really is, into the stencil only, which marks where it is the
+    // nearest thing; then the cap is drawn there and nowhere else.
+    if (cut.on) {
+        glEnable(GL_STENCIL_TEST);
+        glCullFace(GL_FRONT);
+        auto markInside = [&](const SceneObject& obj, const GpuMesh& gpu) {
+            surfaceShader_.bind();
+            surfaceShader_.set("uModel", obj.modelMatrix());
+            glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+            glDepthMask(GL_FALSE);
+            glDepthFunc(GL_LEQUAL);
+            // Pushed back as the outside was, so the two meet at the rim.
+            glEnable(GL_POLYGON_OFFSET_FILL);
+            glPolygonOffset(2.0f, 3.0f);
+            glStencilFunc(GL_ALWAYS, 1, 0xFF);
+            glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
+            gpu.drawTriangles();
+            glDisable(GL_POLYGON_OFFSET_FILL);
+            glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+            glDepthMask(GL_TRUE);
+            // Then only there, once a pixel, and the mark wiped as it goes.
+            glDepthFunc(GL_ALWAYS);
+            glStencilFunc(GL_EQUAL, 1, 0xFF);
+            glStencilOp(GL_KEEP, GL_KEEP, GL_ZERO);
+        };
+        capShader_.bind();
+        capShader_.set("uViewProj", viewProj);
+        capShader_.set("uInvViewProj", inverse(viewProj));
+        capShader_.set("uViewportPx", Vec4{static_cast<Real>(vp.x), static_cast<Real>(vp.y),
+                                           static_cast<Real>(vp.w), static_cast<Real>(vp.h)});
+        capShader_.set("uClip", clip);
+        capShader_.set("uCameraPos", camera.eye());
+        capShader_.set("uBaseColor", opts.objectColor);
+        capShader_.set("uAccent", opts.accentColor);
+        // Two directions in the plane, for the hatch.
+        const Vec3 n = cut.normal;
+        const Vec3 u = normalize(std::fabs(n.z) < 0.9 ? cross(n, Vec3{0.0, 0.0, 1.0}) : cross(n, Vec3{1.0, 0.0, 0.0}));
+        capShader_.set("uHatchU", u);
+        capShader_.set("uHatchV", cross(n, u));
+        capShader_.set("uHatchSpacing", std::max(opts.sectionHatch, Real(1e-3)));
+        int cutIndex = 0;
+        for (const auto& obj : scene.objects()) {
+            if (!obj->visible || sideOf(*obj) != 0) continue;
+            const GpuMesh& gpu = syncObject(*obj);
+            const Mat4 model = obj->modelMatrix();
+            markInside(*obj, gpu);
+            capShader_.bind();
+            capShader_.set("uModel", model);
+            capShader_.set("uNormalMat", normalMatrix(model));
+            capShader_.set("uSelected", scene.isSelected(obj->id) ? 1.0f : 0.0f);
+            capShader_.set("uBaseColor", obj->coloured ? linearOf(obj->colour) : opts.objectColor);
+            // Neighbours lean opposite ways, as on a drawing.
+            capShader_.set("uHatchSign", (cutIndex++ & 1) ? Real(-1.0) : Real(1.0));
+            gpu.drawTriangles();
+        }
+        glDepthFunc(GL_LEQUAL);
+        glDisable(GL_STENCIL_TEST);
+        glCullFace(GL_BACK);
+        if (!opts.backfaceCulling) glDisable(GL_CULL_FACE);
+        glDisable(GL_CLIP_DISTANCE0);
+    }
 
     // ---- Ground grid ------------------------------------------------------
     // After the surfaces so it blends against them, with depth writes off so
@@ -331,9 +507,11 @@ void Renderer::render(const Scene& scene, const Camera& camera, const ViewOption
         glDisable(GL_CULL_FACE);
         lineShader_.bind();
         lineShader_.set("uViewProj", viewProj);
+        lineShader_.set("uClip", clip);
+        if (cut.on) glEnable(GL_CLIP_DISTANCE0);
 
         for (const auto& obj : scene.objects()) {
-            if (!obj->visible) continue;
+            if (!obj->visible || sideOf(*obj) > 0) continue;
             const bool selected = scene.isSelected(obj->id);
             const GpuMesh& gpu = syncObject(*obj);
 
@@ -346,6 +524,7 @@ void Renderer::render(const Scene& scene, const Camera& camera, const ViewOption
             gpu.drawEdges();
         }
         glLineWidth(1.0f);
+        glDisable(GL_CLIP_DISTANCE0);
         if (opts.backfaceCulling) glEnable(GL_CULL_FACE);
     }
 
@@ -355,7 +534,12 @@ void Renderer::render(const Scene& scene, const Camera& camera, const ViewOption
         addBox(sel, {opts.accentColor.x, opts.accentColor.y, opts.accentColor.z, 0.45f});
     }
 
+    // Tints lie on the surfaces, so they are cut with them -- but not what is
+    // drawn in the plane itself, the section's own outline among it.
+    overlayClip_ = clipPlane(cut, 1e-3 * (1.0 + std::fabs(cut.offset)));
+    clipOverlays_ = cut.on;
     glDisable(GL_CULL_FACE);
+    flushStatics(camera);
     flushTriangles(camera);
     flushLines(camera);
 

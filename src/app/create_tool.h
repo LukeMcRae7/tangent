@@ -2,6 +2,7 @@
 
 #include "app/camera.h"
 #include "app/extrude_ops.h"
+#include "app/plane_pick.h"
 #include "app/plane_snap.h"
 #include "app/snap.h"
 #include "app/undo.h"
@@ -26,7 +27,6 @@ enum class CreateStage {
     Applied            // 6. Done, and adjustable from the panel until Done is pressed
 };
 
-enum class PlaneChoice { None, XY, XZ, YZ, Face };
 
 struct SavedCamera {
     Vec3 target{0.0f, 0.0f, 0.0f};
@@ -46,6 +46,20 @@ public:
     bool applied() const { return stage_ == CreateStage::Applied; }
     CreateStage stage() const { return stage_; }
     PrimitiveKind kind() const { return kind_; }
+
+    // Which of the three ways a shape is drawn. A box and a cylinder are an
+    // outline pushed out to a depth. A sphere, a cone and a torus are a centre
+    // and a radius, made there and then, with the rest of what they are asked
+    // for afterwards. A plane is a box's outline with no depth at all.
+    bool drawsCircle() const {
+        return kind_ == PrimitiveKind::Cylinder || kind_ == PrimitiveKind::Sphere ||
+               kind_ == PrimitiveKind::Cone || kind_ == PrimitiveKind::Torus;
+    }
+    bool extrudes() const { return kind_ == PrimitiveKind::Box || kind_ == PrimitiveKind::Cylinder; }
+
+    // The shape a sphere, cone, torus or plane was made with, and is made
+    // again with when the panel changes it.
+    const PrimitiveSpec& placedSpec() const { return placed_; }
 
     void start(PrimitiveKind kind);
     void cancel(Camera& camera);
@@ -183,6 +197,16 @@ private:
 
     // Plane definition
     PlaneChoice hoveredPlane_ = PlaneChoice::XY;
+    // Asks for the plane the way the sketch tool does. adoptPickedPlane takes
+    // what it chose as the plane hovered.
+    PlanePicker picker_;
+    void adoptPickedPlane();
+    // How far the plane stands off where it was put, and how far it leans:
+    // the same two numbers a sketch's plane has.
+    PlaneFrame planeBase_;
+    Real planeOffset_ = 0.0;
+    Real planeTilt_ = 0.0;
+    void applyPlaneShift();
     PlaneChoice selectedPlane_ = PlaneChoice::None;
     Vec3 planeOrigin_{0, 0, 0};
     Vec3 planeNormal_{0, 0, 1};
@@ -253,6 +277,17 @@ private:
     // Makes the extrusion as the tool now stands: what finishCreation does,
     // and what an adjustment does again.
     bool commitExtrusion(Scene& scene, UndoStack& undo);
+
+    // A shape that is not extruded: made from `placed_`, standing on the plane
+    // at the point drawn. What drawing it ends with, and what an adjustment
+    // does again.
+    PrimitiveSpec placed_;
+    PrimitiveSpec drawnSpec() const;     // what has been drawn, as a shape
+    Transform placedAt(const PrimitiveSpec& spec) const;
+    bool commitPlaced(Scene& scene, UndoStack& undo);
+    // Ends the drawing of a shape that is not extruded: made, and the panel
+    // left open on its parameters.
+    void finishPlaced(Scene& scene, Camera& camera, UndoStack& undo);
 
     // Extrusion depth (in mm)
     Real extrudeDepth_ = 20.0;

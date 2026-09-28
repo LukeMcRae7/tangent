@@ -3,6 +3,8 @@
 #include "scene/scene.h"
 #include "app/camera.h"
 #include "mesh/primitives.h"
+#include "geom/brep.h"
+#include "core/units.h"
 
 #include <cmath>
 #include <cstdio>
@@ -95,6 +97,135 @@ int main() {
         (void)far_;
         const RayHit hit = s.raycast(Ray{{0, 0, 200}, {0, 0, -1}});
         check(hit.object == near_, "the nearer of two boxes wins");
+    }
+
+    // ---- A selection stays on what was picked across an edit ----------------
+    // A hole drilled through the top renumbers the faces; the selected top
+    // face is found again by its name, not left on whatever has its number.
+    if (brep::available()) {
+        Scene s;
+        const ObjectId box = s.addPrimitive(PrimitiveKind::Box);   // 20 mm, centred
+        const SceneObject* o = s.find(box);
+        std::vector<FaceId> faces;
+        o->body.allFaces(faces);
+        FaceId top = kNoFace, side = kNoFace;
+        for (FaceId f : faces) {
+            const Vec3 n = o->body.faceNormal(f);
+            if (n.z > 0.9) top = f;
+            if (n.x > 0.9) side = f;
+        }
+        s.selectElement({box, ElementKind::Face, top});
+        s.selectElement({box, ElementKind::Face, side}, true);
+        Feature hole;
+        hole.kind = FeatureKind::Hole;
+        hole.uid = s.takeFeatureUid();
+        hole.axisPoint = {0, 0, 10};
+        hole.axisDir = {0, 0, -1};
+        hole.hole.diameter = 6.0;
+        hole.hole.through = true;
+        s.addFeature(box, hole, nullptr);
+        o = s.find(box);
+        bool topKept = false, sideKept = false;
+        for (const ElementRef& e : s.elementSelection()) {
+            const Vec3 n = o->body.faceNormal(e.index);
+            topKept = topKept || n.z > 0.9;
+            sideKept = sideKept || n.x > 0.9;
+        }
+        std::printf("[select] top %d side %d before; after:", top, side);
+        for (const ElementRef& e : s.elementSelection()) std::printf(" %d", e.index);
+        std::printf("\n");
+        check(s.elementSelection().size() == 2 && topKept && sideKept,
+              "selected faces are still the top and the side after a hole renumbers them");
+    }
+
+    // ---- Units: shown and typed ------------------------------------------------
+    {
+        Real mm = 0.0;
+        check(units::length(12.0) == "12.00 mm", "12 mm is shown as 12.00 mm");
+        check(units::parse("25.4", mm) && std::fabs(mm - 25.4) < 1e-12, "a bare number is in the unit shown");
+        check(units::parse("1in", mm) && std::fabs(mm - 25.4) < 1e-12, "1in is 25.4 mm");
+        check(units::parse("1.5 cm", mm) && std::fabs(mm - 15.0) < 1e-12, "1.5 cm is 15 mm");
+        check(units::parse("0.5\"", mm) && std::fabs(mm - 12.7) < 1e-12, "half an inch with a quote mark");
+        check(!units::parse("abc", mm) && !units::parse("3 furlongs", mm), "not a length is refused");
+        units::setCurrent(units::Length::Inch);
+        check(units::length(25.4) == "1.000 in", "an inch of millimetres is shown as 1.000 in");
+        check(units::parse("2", mm) && std::fabs(mm - 50.8) < 1e-12, "a bare number is inches when inches are shown");
+        check(units::length(-0.0001) == "0.000 in", "no minus zero");
+        units::setCurrent(units::Length::Centimetre);
+        check(units::volume(1000.0) == "1.000 cm\xC2\xB3", "a thousand cubic millimetres is one cubic centimetre");
+        units::setCurrent(units::Length::Millimetre);
+    }
+
+    // ---- Zooming toward the pointer ---------------------------------------
+    // What is under the pointer stays under it, in either projection.
+    for (int ortho = 0; ortho < 2; ++ortho) {
+        Camera cam;
+        cam.viewportW = 800;
+        cam.viewportH = 600;
+        cam.orthographic = ortho == 1;
+        cam.target = {0, 0, 0};
+        cam.distance = 100.0f;
+        const Vec3 p{12, -7, 0};
+        Vec2 before{}, after{};
+        cam.projectToPixel(p, before);
+        cam.dollyAt(3.0f, before);
+        cam.projectToPixel(p, after);
+        check(length(after - before) < 0.5f && cam.distance < 100.0f,
+              ortho ? "zoom in keeps the point under the pointer (ortho)"
+                    : "zoom in keeps the point under the pointer (perspective)");
+        cam.dollyAt(-5.0f, before);
+        cam.projectToPixel(p, after);
+        check(length(after - before) < 0.5f, "zoom out keeps it too");
+        // About a point off the target plane: it stays put as well.
+        const Vec3 q{-9, 14, 25};
+        cam.projectToPixel(q, before);
+        cam.dollyAbout(4.0f, q);
+        cam.projectToPixel(q, after);
+        check(length(after - before) < 0.5f, "zoom about a part keeps its middle where it is");
+    }
+
+    // ---- Picking under a section view --------------------------------------
+    // What the section takes away is not there to click; the cut face is, and
+    // stops the ray; and a ray that crosses the plane in air goes on to what
+    // it meets, however many walls are behind that.
+    {
+        Scene s;
+        const ObjectId a = s.addPrimitive(PrimitiveKind::Box, {}, Vec3{0, 0, 0});     // x -10..10
+        const ObjectId d = s.addPrimitive(PrimitiveKind::Box, {}, Vec3{-30, 0, 0});   // x -40..-20
+        SectionCut cut;
+        cut.on = true;
+        cut.normal = {1, 0, 0};
+        cut.offset = 0.0;                   // everything past x = 0 is taken away
+        s.setSection(cut);
+
+        RayHit hit = s.raycast(Ray{{0.0, 0, 100}, {0, 0, -1}});
+        check(hit.hit() && hit.object == a && std::fabs(hit.point.z - 10.0f) < 1e-3f,
+              "section: the kept half of the top is hit");
+        hit = s.raycast(Ray{{5.0, 0, 100}, {0, 0, -1}});
+        check(!hit.hit(), "section: the half taken away is not hit");
+
+        bool capped = false;
+        hit = s.raycast(Ray{{100, 0, 0}, {-1, 0, 0}}, &capped);
+        check(!hit.hit() && capped, "section: a ray into the cut stops at the cut face");
+        capped = true;
+        hit = s.raycast(Ray{{-100, 0, 0}, {1, 0, 0}}, &capped);
+        check(hit.hit() && hit.object == d && std::fabs(hit.point.x + 40.0f) < 1e-3f && !capped,
+              "section: from the kept side, the outside is hit as ever");
+
+        // Past the first box: the plane crossed in air, then a whole box.
+        cut.offset = -15.0;
+        s.setSection(cut);
+        hit = s.raycast(Ray{{100, 0, 0}, {-1, 0, 0}}, &capped);
+        check(hit.hit() && hit.object == d && std::fabs(hit.point.x + 20.0f) < 1e-3f && !capped,
+              "section: across the plane in air, the next wall is hit, not capped over");
+        check(s.raycastCoincident(Ray{{100, 0, 0}, {-1, 0, 0}}).size() == 1,
+              "section: the coincident pick agrees");
+
+        s.setSection(SectionCut{});
+        hit = s.raycast(Ray{{100, 0, 0}, {-1, 0, 0}});
+        check(hit.hit() && hit.object == a && std::fabs(hit.point.x - 10.0f) < 1e-3f,
+              "section off: the whole model is back");
+        std::printf("[section] picking honours the cut\n");
     }
 
     // ---- Selection --------------------------------------------------------

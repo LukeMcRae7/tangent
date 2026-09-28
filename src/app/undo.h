@@ -68,9 +68,77 @@ private:
     std::vector<std::unique_ptr<SceneObject>> objects_;
     std::vector<ObjectId> ids_;
     bool created_ = false;
+    // Groups and joints as they stood before the objects went: a joint to a
+    // deleted part goes with it, and comes back with it.
+    AssemblyState assemblyBefore_;
+    bool haveAssembly_ = false;
+};
+
+// A change to how parts relate -- grouping, a joint made, adjusted or taken
+// away -- as the whole of that state either side. It is small: names, ids and
+// a few frames, and the histories of any part a joint's removal wrote steps
+// into. Commands with the same non-empty `mergeKey` fold together, so dragging
+// a joint's value is one step, and so is making a joint and then adjusting it
+// in its panel.
+class AssemblyCommand : public Command {
+public:
+    AssemblyCommand(AssemblyState before, AssemblyState after, std::string what,
+                    std::string mergeKey = {})
+        : before_(std::move(before)), after_(std::move(after)), what_(std::move(what)),
+          mergeKey_(std::move(mergeKey)) {}
+
+    void undo(Scene& scene) override { restoreAssembly(scene, before_); }
+    void redo(Scene& scene) override { restoreAssembly(scene, after_); }
+    std::string label() const override { return what_; }
+    bool mergeWith(const Command& other) override;
+
+private:
+    AssemblyState before_, after_;
+    std::string what_;
+    std::string mergeKey_;
 };
 
 // Changing a primitive's parameters, re-evaluating the mesh either way.
+// A part's colour chosen, changed or taken off. A drag across the picker is
+// one step: it merges with the next change to the same part.
+class ColourCommand : public Command {
+public:
+    ColourCommand(ObjectId id, bool beforeOn, Vec3 before, bool afterOn, Vec3 after)
+        : id_(id), beforeOn_(beforeOn), afterOn_(afterOn), before_(before), after_(after) {}
+    void undo(Scene& scene) override { set(scene, beforeOn_, before_); }
+    void redo(Scene& scene) override { set(scene, afterOn_, after_); }
+    std::string label() const override { return "Colour"; }
+    bool mergeWith(const Command& other) override {
+        const auto* o = dynamic_cast<const ColourCommand*>(&other);
+        if (!o || o->id_ != id_) return false;
+        afterOn_ = o->afterOn_;
+        after_ = o->after_;
+        return true;
+    }
+
+private:
+    void set(Scene& scene, bool on, Vec3 c) {
+        if (SceneObject* o = scene.find(id_)) { o->coloured = on; o->colour = c; }
+    }
+    ObjectId id_;
+    bool beforeOn_, afterOn_;
+    Vec3 before_, after_;
+};
+
+// Measurements kept on the model, added or taken away: the list either side.
+class MeasuresCommand : public Command {
+public:
+    MeasuresCommand(std::vector<KeptMeasure> before, std::vector<KeptMeasure> after, std::string what)
+        : before_(std::move(before)), after_(std::move(after)), what_(std::move(what)) {}
+    void undo(Scene& scene) override { scene.measures() = before_; }
+    void redo(Scene& scene) override { scene.measures() = after_; }
+    std::string label() const override { return what_; }
+
+private:
+    std::vector<KeptMeasure> before_, after_;
+    std::string what_;
+};
+
 class ParameterCommand : public Command {
 public:
     ParameterCommand(ObjectId id, PrimitiveSpec before, PrimitiveSpec after)
@@ -169,6 +237,29 @@ private:
     ObjectId             id_;
     std::vector<Feature> before_, after_;
     std::string          what_;
+};
+
+// A change to an object's whole history, the steps after the rollback marker
+// as well as those before it: moving the marker, putting a step somewhere
+// else, re-pointing a failed step at what it should act on.
+class HistoryCommand : public Command {
+public:
+    struct State {
+        std::vector<Feature> features, ahead;
+    };
+    HistoryCommand(ObjectId id, State before, State after, std::string what)
+        : id_(id), before_(std::move(before)), after_(std::move(after)), what_(std::move(what)) {}
+    static State of(const SceneObject& o) { return {o.features, o.ahead}; }
+
+    void undo(Scene& scene) override { apply(scene, before_); }
+    void redo(Scene& scene) override { apply(scene, after_); }
+    std::string label() const override { return what_; }
+
+private:
+    void apply(Scene& scene, const State& s);
+    ObjectId id_;
+    State before_, after_;
+    std::string what_;
 };
 
 // Several commands that must move together. A boolean edits one object's chain

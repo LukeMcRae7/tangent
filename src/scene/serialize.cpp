@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstring>
 #include <fstream>
+#include <unordered_map>
 #include <vector>
 
 namespace tg {
@@ -222,9 +223,15 @@ void writeSketch(Writer& w, const Sketch& s) {
         w.f64(k.value);
         w.f64(k.value2);
     }
+    // v22: the projected entities, and the edge each follows.
+    uint32_t linked = 0;
+    for (const SketchEntity& e : s.entities) linked += e.source != 0;
+    w.u32(linked);
+    for (const SketchEntity& e : s.entities)
+        if (e.source != 0) { w.u32(e.id); w.u64(e.source); }
 }
 
-bool readSketch(Reader& r, Sketch& s) {
+bool readSketch(Reader& r, Sketch& s, uint32_t version) {
     s.plane.origin = r.vec3();
     s.plane.xAxis = r.vec3();
     s.plane.yAxis = r.vec3();
@@ -263,15 +270,29 @@ bool readSketch(Reader& r, Sketch& s) {
     for (SketchConstraint& k : s.constraints) {
         k.id = r.u32();
         const uint8_t rule = r.u8();
-        if (rule > static_cast<uint8_t>(SketchRule::Angle)) return false;
+        if (rule > static_cast<uint8_t>(SketchRule::Smooth)) return false;
         k.rule = static_cast<SketchRule>(rule);
         k.first = r.u32();
         k.second = r.u32();
         k.value = r.f64();
         k.value2 = r.f64();
     }
+    // v22: which entities were projected from a body edge, and from which.
+    if (version >= 22) {
+        const uint32_t linked = r.u32();
+        if (r.bad || !r.need(static_cast<size_t>(linked) * 12)) return false;
+        for (uint32_t i = 0; i < linked; ++i) {
+            const SketchId id = r.u32();
+            const uint64_t source = r.u64();
+            if (SketchEntity* e = s.entity(id)) e->source = source;
+        }
+    }
     return !r.bad;
 }
+
+// Set while a step is written for its fingerprint rather than for a file:
+// see featureKey().
+thread_local bool gBodiesByIdentity = false;
 
 void writeFeature(Writer& w, const Feature& f) {
     w.u32(static_cast<uint32_t>(f.kind));
@@ -290,7 +311,28 @@ void writeFeature(Writer& w, const Feature& f) {
     w.ids(f.verts);
     w.u32(static_cast<uint32_t>(f.offsets.size()));
     for (const Vec3& o : f.offsets) w.vec3(o);
-    if (f.bakedBody.isMesh()) {
+    if (gBodiesByIdentity) {
+        // For a fingerprint, not a file: which body it is, not all of it --
+        // encoding a whole baked shape on every edit would cost more than the
+        // re-run it saves. A body copied is the same shape underneath; a mesh
+        // is summed, since a copy of one is not the same object.
+        const Body& b = f.bakedBody;
+        w.u8(b.isMesh() ? 1 : 0);
+        if (b.isMesh()) {
+            const Mesh& m = b.mesh();
+            w.u64(m.verts.size());
+            w.u64(m.faces.size());
+            Vec3 sum{0, 0, 0};
+            for (const MeshVertex& v : m.verts) sum += v.position;
+            w.vec3(sum);
+        } else if (b.brepRef()) {
+            w.u64(reinterpret_cast<uintptr_t>(b.brepRef().get()));
+            w.u32(static_cast<uint32_t>(b.faceCount()));
+            const AABB box = b.bounds();
+            w.vec3(box.min);
+            w.vec3(box.max);
+        }
+    } else if (f.bakedBody.isMesh()) {
         w.u32(kBodyMesh);
         writeMesh(w, f.bakedBody.mesh());
     } else {
@@ -371,6 +413,23 @@ void writeFeature(Writer& w, const Feature& f) {
     w.f64(f.threadHeight);
     w.u8(f.threadExternal ? 1 : 0);
     w.i32(f.threadFastener);
+    // v20: the path a sweep follows, and the outlines a loft runs through.
+    w.u64(f.pathSketchUid);
+    w.u32(static_cast<uint32_t>(f.pathEntities.size()));
+    for (SketchId id : f.pathEntities) w.u32(id);
+    w.u32(static_cast<uint32_t>(f.loftKeys.size()));
+    for (size_t i = 0; i < f.loftKeys.size(); ++i) {
+        w.u64(i < f.loftSketchUids.size() ? f.loftSketchUids[i] : 0);
+        w.u32(f.loftKeys[i]);
+    }
+    w.u8(f.loftRuled ? 1 : 0);
+    // v21: a revolve about an axis of the world, and faces a loft runs through.
+    w.u8(f.revolveAxis3D ? 1 : 0);
+    w.u8(f.revolveReverse ? 1 : 0);
+    w.u32(static_cast<uint32_t>(f.loftFaceNames.size()));
+    for (ElementId id : f.loftFaceNames) w.u64(id);
+    // v23: what a person called the step.
+    w.text(f.label);
 }
 
 // `version` is the file's, not this build's: a project written before bodies
@@ -472,7 +531,7 @@ bool readFeature(Reader& r, Feature& f, uint32_t version) {
     }
     // Older files have no sketches in them.
     if (version >= 12) {
-        if (!readSketch(r, f.sketch)) return false;
+        if (!readSketch(r, f.sketch, version)) return false;
         f.sketchUid = r.u64();
         const SketchId first = r.u32();
         f.profileKeys.clear();
@@ -532,6 +591,29 @@ bool readFeature(Reader& r, Feature& f, uint32_t version) {
         f.threadFastener = r.i32();
         if (!(f.threadPitch > 0.0) || !(f.threadHeight > 0.0)) return false;
     }
+    // Before this there were no sweeps or lofts to read one for.
+    if (version >= 20) {
+        f.pathSketchUid = r.u64();
+        const uint32_t curves = r.u32();
+        if (curves > 1000000u) return false;
+        for (uint32_t i = 0; i < curves && !r.bad; ++i) f.pathEntities.push_back(r.u32());
+        const uint32_t outlines = r.u32();
+        if (outlines > 10000u) return false;
+        for (uint32_t i = 0; i < outlines && !r.bad; ++i) {
+            f.loftSketchUids.push_back(r.u64());
+            f.loftKeys.push_back(r.u32());
+        }
+        f.loftRuled = r.u8() != 0;
+    }
+    // Before this, everything those three built from was a sketch.
+    if (version >= 21) {
+        f.revolveAxis3D = r.u8() != 0;
+        f.revolveReverse = r.u8() != 0;
+        const uint32_t faces = r.u32();
+        if (faces > 10000u) return false;
+        for (uint32_t i = 0; i < faces && !r.bad; ++i) f.loftFaceNames.push_back(r.u64());
+    }
+    if (version >= 23) f.label = r.text();
     return !r.bad;
 }
 
@@ -561,7 +643,72 @@ ProjectResult saveProject(const Scene& scene, const std::string& path) {
 
         w.u32(static_cast<uint32_t>(obj->features.size()));
         for (const Feature& f : obj->features) writeFeature(w, f);
+        // v23: the steps after the rollback marker, which wait there.
+        w.u32(static_cast<uint32_t>(obj->ahead.size()));
+        for (const Feature& f : obj->ahead) writeFeature(w, f);
+        // v24: the group it is in.
+        w.u32(obj->group);
+        // v25: its colour, if one was chosen.
+        w.u8(obj->coloured ? 1 : 0);
+        w.vec3(obj->colour);
         ++res.objects;
+    }
+
+    // v24: the groups, and the joints between parts. Objects are named by the
+    // ids written above, which the reader maps to the ids it hands out.
+    const Assembly& as = scene.assembly();
+    w.u32(as.nextGroup);
+    w.u32(static_cast<uint32_t>(as.groups.size()));
+    for (const Group& g : as.groups) {
+        w.u32(g.id);
+        w.text(g.name);
+        w.u32(g.parent);
+        w.u8(g.expanded ? 1 : 0);
+    }
+    w.u32(as.nextJoint);
+    w.u32(static_cast<uint32_t>(as.joints.size()));
+    for (const Joint& j : as.joints) {
+        w.u32(j.id);
+        w.text(j.name);
+        w.u32(static_cast<uint32_t>(j.kind));
+        for (const JointSide* side : {&j.moving, &j.fixed}) {
+            w.u32(side->object);
+            w.u32(static_cast<uint32_t>(side->at));
+            w.u64(side->element);
+            w.u64(side->onFace);
+            w.vec3(side->frame.origin);
+            w.vec3(side->frame.x);
+            w.vec3(side->frame.z);
+        }
+        w.u8(j.flip ? 1 : 0);
+        w.f64(j.offset);
+        w.f64(j.angle);
+        w.f64(j.turn);
+        w.f64(j.travel);
+        w.f64(j.slideX);
+        w.f64(j.slideY);
+        w.u32(static_cast<uint32_t>(j.slideAxis));
+        w.u8(j.limited ? 1 : 0);
+        w.f64(j.lo);
+        w.f64(j.hi);
+        w.u8(j.reverse ? 1 : 0);          // v27
+        w.u8(j.asBuilt ? 1 : 0);
+        w.f64(j.built.q.x); w.f64(j.built.q.y); w.f64(j.built.q.z); w.f64(j.built.q.w);
+        w.vec3(j.built.t);
+    }
+
+    // v26: the measurements kept on the model, by the names of what they are
+    // taken between.
+    w.u32(static_cast<uint32_t>(scene.measures().size()));
+    for (const KeptMeasure& m : scene.measures()) {
+        w.u32(m.id);
+        w.u8(m.visible ? 1 : 0);
+        w.u32(static_cast<uint32_t>(m.count));
+        for (const KeptMeasure::End& e : m.ends) {
+            w.u32(e.object);
+            w.u32(static_cast<uint32_t>(e.kind));
+            w.u64(e.name);
+        }
     }
 
     std::ofstream out(path, std::ios::binary | std::ios::trunc);
@@ -615,9 +762,13 @@ ProjectResult loadProject(Scene& scene, const std::string& path) {
     const uint32_t count = r.u32();
     if (r.bad) { res.error = "truncated header"; return res; }
 
+    // Ids are handed out afresh; the joints written after the objects name
+    // them by the ids in the file, so the two are paired here.
+    std::unordered_map<uint32_t, ObjectId> idFromFile;
+    std::vector<ObjectId> toEvaluate;
+    std::vector<std::pair<ObjectId, GroupId>> groupOf;
     for (uint32_t i = 0; i < count; ++i) {
-        const uint32_t id = r.u32();
-        (void)id;   // ids are reassigned; nothing outside a file references them
+        const uint32_t fileId = r.u32();
         const std::string name = r.text();
 
         Transform t;
@@ -639,6 +790,23 @@ ProjectResult loadProject(Scene& scene, const std::string& path) {
             Feature f;
             if (!readFeature(r, f, version)) { res.error = "bad feature"; return res; }
             chain.push_back(std::move(f));
+        }
+        std::vector<Feature> ahead;
+        if (version >= 23) {
+            const uint32_t waiting = r.u32();
+            if (waiting > 100000u) { res.error = "bad feature count"; return res; }
+            for (uint32_t k = 0; k < waiting && !r.bad; ++k) {
+                Feature f;
+                if (!readFeature(r, f, version)) { res.error = "bad feature"; return res; }
+                ahead.push_back(std::move(f));
+            }
+        }
+        const GroupId inGroup = version >= 24 ? r.u32() : kNoGroup;
+        bool coloured = false;
+        Vec3 colour{0.74, 0.74, 0.75};
+        if (version >= 25) {
+            coloured = r.u8() != 0;
+            colour = r.vec3();
         }
         if (r.bad) { res.error = "truncated file"; return res; }
 
@@ -695,12 +863,118 @@ ProjectResult loadProject(Scene& scene, const std::string& path) {
         SceneObject* o = loaded.find(newId);
         o->name = name;
         o->visible = visible;
+        o->coloured = coloured;
+        o->colour = colour;
         o->features = std::move(chain);
+        o->ahead = std::move(ahead);
         loaded.setBasePlacement(newId, t);
-        // Re-runs the recipe. A chain that no longer evaluates leaves the
-        // object as its base primitive rather than failing the whole load.
-        loaded.reevaluate(newId);
+        // Its recipe is re-run below, with every other part's at once. A chain
+        // that no longer evaluates leaves the object as its base primitive
+        // rather than failing the whole load.
+        toEvaluate.push_back(newId);
+        idFromFile[fileId] = newId;
+        if (inGroup != kNoGroup) groupOf.emplace_back(newId, inGroup);
         ++res.objects;
+    }
+
+    // Every part's history, run side by side: parts do not depend on each
+    // other, and on a project of many long histories this is most of opening.
+    loaded.reevaluateMany(toEvaluate);
+
+    if (version >= 24) {
+        Assembly& as = loaded.assembly();
+        as.nextGroup = std::max<GroupId>(1, r.u32());
+        const uint32_t groups = r.u32();
+        if (r.bad || groups > 100000u) { res.error = "bad group count"; return res; }
+        for (uint32_t k = 0; k < groups && !r.bad; ++k) {
+            Group g;
+            g.id = r.u32();
+            g.name = r.text();
+            g.parent = r.u32();
+            g.expanded = r.u8() != 0;
+            if (g.id == kNoGroup) { res.error = "bad group"; return res; }
+            as.nextGroup = std::max(as.nextGroup, g.id + 1);
+            as.groups.push_back(std::move(g));
+        }
+        as.nextJoint = std::max<uint32_t>(1, r.u32());
+        const uint32_t joints = r.u32();
+        if (r.bad || joints > 100000u) { res.error = "bad joint count"; return res; }
+        for (uint32_t k = 0; k < joints && !r.bad; ++k) {
+            Joint j;
+            j.id = r.u32();
+            j.name = r.text();
+            const uint32_t kind = r.u32();
+            if (kind > static_cast<uint32_t>(kLastJointKind)) { res.error = "bad joint"; return res; }
+            j.kind = static_cast<JointKind>(kind);
+            bool known = true;
+            for (JointSide* side : {&j.moving, &j.fixed}) {
+                const uint32_t fileObject = r.u32();
+                const uint32_t at = r.u32();
+                if (at > static_cast<uint32_t>(JointAt::Vertex)) { res.error = "bad joint"; return res; }
+                side->at = static_cast<JointAt>(at);
+                side->element = r.u64();
+                side->onFace = r.u64();
+                side->frame.origin = r.vec3();
+                side->frame.x = r.vec3();
+                side->frame.z = r.vec3();
+                auto it = idFromFile.find(fileObject);
+                known = known && it != idFromFile.end();
+                side->object = it == idFromFile.end() ? kNoObject : it->second;
+            }
+            j.flip = r.u8() != 0;
+            j.offset = r.f64();
+            j.angle = r.f64();
+            j.turn = r.f64();
+            j.travel = r.f64();
+            j.slideX = r.f64();
+            j.slideY = r.f64();
+            const uint32_t axis = r.u32();
+            j.slideAxis = axis <= static_cast<uint32_t>(SlideAxis::Y) ? static_cast<SlideAxis>(axis) : SlideAxis::Z;
+            j.limited = r.u8() != 0;
+            j.lo = r.f64();
+            j.hi = r.f64();
+            // Before v27 the motion counted the way the axis ran, which is
+            // what false keeps.
+            if (version >= 27) {
+                j.reverse = r.u8() != 0;
+                j.asBuilt = r.u8() != 0;
+                j.built.q.x = r.f64(); j.built.q.y = r.f64(); j.built.q.z = r.f64(); j.built.q.w = r.f64();
+                j.built.t = r.vec3();
+            }
+            as.nextJoint = std::max(as.nextJoint, j.id + 1);
+            // A joint to a part the file does not have is dropped rather than
+            // left pointing at whatever gets that number next.
+            if (known) as.joints.push_back(std::move(j));
+        }
+        if (r.bad) { res.error = "truncated file"; return res; }
+        for (const auto& [id, g] : groupOf)
+            if (SceneObject* o = loaded.find(id); o && as.group(g)) o->group = g;
+        pruneEmptyGroups(loaded);
+        solveAssembly(loaded);
+    }
+
+    if (version >= 26) {
+        const uint32_t n = r.u32();
+        if (r.bad || n > 100000u) { res.error = "bad measurement count"; return res; }
+        for (uint32_t k = 0; k < n && !r.bad; ++k) {
+            KeptMeasure m;
+            m.id = loaded.takeMeasureId();
+            (void)r.u32();                 // the id it had; a new one is handed out
+            m.visible = r.u8() != 0;
+            m.count = static_cast<int>(std::min<uint32_t>(r.u32(), 2u));
+            bool known = true;
+            for (KeptMeasure::End& e : m.ends) {
+                const uint32_t fileObject = r.u32();
+                e.kind = static_cast<ElementKind>(std::min<uint32_t>(r.u32(), 3u));
+                e.name = r.u64();
+                if (e.kind == ElementKind::None) continue;
+                auto it = idFromFile.find(fileObject);
+                known = known && it != idFromFile.end();
+                e.object = it == idFromFile.end() ? kNoObject : it->second;
+            }
+            if (known && m.count > 0) loaded.measures().push_back(m);
+        }
+        if (r.bad) { res.error = "truncated file"; return res; }
     }
 
     scene = std::move(loaded);
@@ -709,6 +983,16 @@ ProjectResult loadProject(Scene& scene, const std::string& path) {
 }
 
 // ---------------------------------------------------------------------------
+uint64_t featureKey(const Feature& f) {
+    gBodiesByIdentity = true;
+    Writer w;
+    writeFeature(w, f);
+    gBodiesByIdentity = false;
+    uint64_t h = 1469598103934665603ULL;   // FNV-1a
+    for (uint8_t b : w.buf) { h ^= b; h *= 1099511628211ULL; }
+    return h;
+}
+
 std::string encodeFeatures(const std::vector<Feature>& features) {
     Writer w;
     w.u32(kProjectVersion);

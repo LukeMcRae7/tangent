@@ -159,18 +159,134 @@ wall keeps the size it was drawn where it crosses the plane you name -- the
 bottom, the top or half way -- and the panel says how far the far end has come
 in, in millimetres, because that is the number that decides whether it prints.
 
-**A sketch extrudes or revolves.** Having picked the regions, Extrude pushes
-them along the plane's normal and Revolve turns them about an axis lying in it
--- one of the sketch's own, or any line of the drawing, clicked. A turn takes
-an angle up to the whole way round, joins, cuts or stands as a new part like an
-extrusion does, and stays a step in the history with its angle and its axis: a
-handle turned from its half-section, or a groove run round a shaft. A profile
-that crosses its axis is refused rather than turned through itself.
+**A sketch is drawn, finished, and then built from.** Sketch (Shift+S) asks for
+a plane the way a new shape does -- a face of a body, an origin plane, a plane
+through three corners, or one square to an edge at its nearer end -- and both
+the sketch and the shape tool then let the plane stand off by a distance and
+lean about its own horizontal. Lines, rectangles, circles and arcs are drawn
+with the constraints the drawing implies; the pen (B) draws curves -- click for
+a corner, press and drag for a smooth point, whose handles stay mirrored after,
+and click the first point to close the shape. Project (P) brings an edge of a
+body, or a face's whole outline, onto the plane, fixed where it is; projected
+from the part the sketch is in, it follows that edge when the part changes.
+Enter, or Finish, keeps the sketch -- it builds nothing -- and leaves it
+selected.
+
+A sketch is then a thing of its own: click one in the view or its row in the
+outliner and a bar of what can be done with it opens over the view, and the
+inspector says what it is. Edit opens it again (so does a double-click);
+Extrude asks for its regions and a depth; Revolve, Sweep and Loft start with
+its regions as their profile; Hide and Delete do what they say, and Delete
+refuses while something is built from it.
+
+**Revolve, sweep and loft, from sketches or from the part itself.** Each has a
+button beside Sketch on the bar and an entry in the Create menu, and opens a
+panel with a short list of things to point at, filled in order: Revolve takes a
+profile and an axis, Sweep a profile and a path, Loft two or more outlines in
+the order the solid runs through them. The row the next click fills is lit, the
+pointer carries a line saying what it is for, and the solid it will make is
+shown see-through as soon as there is enough to make it -- so a wrong axis or a
+path running the wrong way is seen before Finish, not after.
+
+A profile or an outline is a region of a sketch or a flat face of a body. An
+axis is a line of a sketch, a straight edge, or X, Y or Z, with Reverse for
+which way a part turn goes. A path is sketch curves -- one click takes the whole
+run it is joined to -- or edges of a body, clicked one by one, and need not lie
+in a plane: a bar bent round the rim of a can is the rim's edge. A sweep is held
+square to its path and mitred at corners, and starts from whichever end is
+nearer its profile; a loft's walls are smooth or straight. Faces and edges
+selected before the command starts are taken as what they can be.
+
+Whatever it was built from, it is one step in the part's history. Faces and
+edges are named there, so they are found again when the steps before them
+change; sketches are brought in before the step -- one that stood on its own in
+the outliner moved, one in another part copied. With a sketch selected, the
+panel opens with its regions picked. A sketch's plane can stand off the plane
+or face it was put on by any distance, which is how the next outline of a loft
+is drawn above the first.
+
+**The history can be gone back into.** Every part keeps the steps that made
+it, in order, in the inspector. The orange marker under them is where the model
+stands: drag it up onto a step, or right-click a step for Roll back to here or
+Insert before this, and the steps after it wait, dimmed, while the view shows
+the part as it was there. Whatever is done then goes in at the marker; Step on
+and To end run the waiting steps again on top of it, each finding the faces
+and edges it names on the part as it now is -- push a cube's top up under a
+rounded corner and the round rounds the taller edge. A step dragged to another
+place runs from there, refused if it would come before the sketch it is built
+from. Double-click a step to name it: "Bolt circle" reads better than what it
+does, which stays in the tooltip. A step that no longer builds is marked with
+what went wrong, and its Fix rolls back to just before it: select the faces or
+edges it should act on, click Use the selected faces, and it and everything
+after it run again.
+
+### Assemblies
+
+**Groups.** Ctrl+G puts the selection in a group, and Ctrl+Shift+G takes it
+apart. Groups nest, and the outliner shows them as a tree above the loose
+bodies: click a group's row to select everything in it, drag any row onto a
+group to put it in, or onto the space below the lists to take it out. A group
+places nothing -- every body keeps its place in its own history -- but it is
+what a joint moves.
+
+**Joints.** J, then point at a face, an edge or a corner of the part that
+moves, then at the part it goes on. Each pick's frame is drawn under the
+pointer before it is clicked -- a flat face's outward normal, a round face's
+or a circular edge's axis, a straight edge's own line -- and while the second
+is chosen the moving part is shown see-through where it would land. Faces go
+face to face, a pin's rim goes on a hole's rim, and two straight edges make a
+hinge that comes out closed rather than inside the box or upside down on it.
+The panel then offers Rigid, Revolute, Slider and Planar; Flip and a quarter
+turn; an offset and an angle; and the motion itself as a bar to drag, with
+limits and Play to swing it through them. A joint names the geometry it stands
+on, so when the hole moves or the socket gets taller the pin follows.
+
+The part picked first moves, with everything in its group; a part joined to a
+part follows it wherever it goes, and a joint that would close a loop is
+refused with the reason. A part a joint places is moved by its joint, not by G
+or the inspector, which say so. Deleting a joint, or the part it hangs from,
+leaves the part where it was, as a move in its own history.
+
+**Clearance.** The question for printed parts is not whether two solids
+intersect but whether there is enough between them everywhere to come off the
+printer apart. Clearance measures the nearest two surfaces come, pair by pair,
+triangle to triangle on meshes finer than a tenth of the gap asked for, and
+paints where the gap is too small in amber and where parts run into each other
+in red; parts that only touch are listed as touching and not painted. The gap
+asked for is 0.2 mm to start, with 0.1 to 0.5 a click away. Through a joint's
+motion it measures the whole swing -- a lid against the wall behind it -- and
+shows the moving part where it came closest. It runs on a worker and keeps
+measuring while parts move, so a hinge dragged in its own panel shows as it goes
+whether it clears.
+
+**Exploded view.** The parts pulled apart for instructions: along their joints
+-- a pin straight out of its hole, a lid up off its box, and what is joined to
+it further again -- and the rest out from the middle, with dashed trails back
+to where each goes. It is a view: nothing about the parts changes, and anything
+that edits or exports them puts them back first.
+
+Groups and joints are saved with the project.
+
+### Section view
+
+The model cut by a plane you slide, to see inside a part or how one part sits in
+another -- Section on the Inspect group, or V. The plane is Top, Front or Right
+through the origin, or a flat face of the model clicked in the view; the side
+nearer the eye goes first, and Flip keeps the other. Slide it by dragging the
+arrow in the view, dragging or typing into the panel's bar. The cut is filled and
+hatched the way a drawing hatches a section, each part the opposite way to the
+next, so where parts meet in the cut you can tell which is which.
+
+It is a view: nothing about any part changes, and nothing is saved. It stays on
+while you work -- measure a wall, pick an edge inside -- and clicks do not reach
+what it has taken away. Its panel steps aside for any other operation and comes
+back after; Done puts the panel away and leaves the model cut, Remove puts it
+back whole.
 
 ### The interface
 
 One dark surface with the model lit in the middle of it. Along the top, the
-tools in four groups -- File, Create, Modify, Inspect -- each a row of pictures
+tools in five groups -- File, Create, Modify, Assemble, Inspect -- each a row of pictures
 with its name under it; the name opens the group's full menu, a list of
 commands and their keys, each explaining itself on hover. The outliner down the
 left lists the bodies, sketches and meshes there are, with an eye to hide each;
@@ -224,22 +340,29 @@ The icons are [Tabler Icons](https://tabler.io/icons), bundled as
 |-------|--------|
 | MMB drag | Orbit |
 | Shift + MMB | Pan |
-| Wheel | Zoom |
-| Click | Select the edge, face or vertex under the cursor |
+| Wheel | Zoom straight in and out of the part in hand; with nothing selected, toward the pointer |
+| Click | Select the edge, face or vertex under the cursor: what a click would take is lit as the pointer passes over it |
 | Ctrl + click | Select the whole object (as clicking its outliner row) |
 | Shift + click | Extend either selection |
+| Drag | Box select: to the right, what is wholly inside; to the left, whatever it touches. Shift adds |
+| Filter (bottom left of the view) | Any, faces, edges, corners or whole parts: what a click and a box take |
 | E | Extrude selected faces, then drag to set the height (Shift + E starts it as a cut) |
-| J / D / I / N | *(while extruding)* join, cut, intersect or a new body — until one is picked the drag decides: out joins, in cuts |
-| F | Fillet the selected edges |
-| H | Hole — point at the face it goes into and click; the size is chosen in the dialog |
-| Ctrl + B | Bevel all edges of the active object |
+| J / D / I / N | *(while extruding)* join, cut, intersect or a new body; until one is picked, the drag decides (out joins, in cuts) |
+| F | Fillet the selected edges, the edges around the selected faces, or every edge of a selected body |
+| H | Hole: point at the face it goes into and click; the size is chosen in the dialog |
 | Ctrl + Shift + U / D / I | Combine, set to join / cut / intersect: the first selected body is the target, the rest are tools |
-| D | Measure — one entity for its own size, two for the distance between |
+| J | Joint: point at the part that moves, then the part it goes on |
+| F | *(adjusting a joint)* flip it over on its axis |
+| Ctrl + G / Ctrl + Shift + G | Group the selection / take it out of its group |
+| D | Measure: one entity for its own size, two for the distance between; Keep leaves it on the model, reading the part as it changes |
+| Ctrl + K | Find any command by name, with its key |
+| Ctrl + , | Preferences: units, theme, orbit, snapping, printer, autosave |
+| V | Section view: cut the model with a plane you slide; again for its panel, or to put the model back whole |
 | Numpad 1 / 3 / 7 | Front / Right / Top (Ctrl for opposite) |
 | Numpad 4 / 6 / 8 / 2 | Orbit in 15° steps |
 | Numpad 5 | Perspective / orthographic |
 | Numpad . / Home | Frame selection / frame all |
-| G / R / S | Move / rotate / scale — the object, or the selected faces/edges/vertices. An object's move, turn or scale is a step in its history |
+| G / R / S | Move / rotate / scale: the object, or the selected faces/edges/vertices. An object's move, turn or scale is a step in its history |
 | X / Y / Z | *(during a transform)* constrain to an axis |
 | Shift + X/Y/Z | *(during a transform)* constrain to a plane |
 | type a number | *(during a transform)* exact value |

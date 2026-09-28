@@ -56,6 +56,8 @@ enum class FeatureKind {
     DeleteFace,  // named faces taken off, the gap closed behind them
     Offset,      // every face moved along its own normal: the whole body grows
     Thread,      // a helical groove cut on a named round face
+    SweepProfile,   // a region of a sketch carried along a path drawn in another
+    LoftProfile,    // a solid through the outlines of regions of several sketches
 
     // New kinds go on the end and nowhere else. The value is what is written
     // to a file, so inserting one in the middle renumbers every kind after it
@@ -66,9 +68,17 @@ enum class FeatureKind {
 // here rather than in the loader so that adding a kind above is one edit and
 // not two: a kind the loader does not know about is refused as a corrupt file,
 // and that refusal is silent about why.
-inline constexpr FeatureKind kLastFeatureKind = FeatureKind::Thread;
+inline constexpr FeatureKind kLastFeatureKind = FeatureKind::LoftProfile;
 
 const char* featureKindName(FeatureKind k);
+
+struct Feature;
+// A fingerprint of everything a step is -- two steps with the same key build
+// the same thing from the same input -- so a history re-run can start at the
+// first step that changed instead of at the root. Baked bodies count by which
+// body they are, not by their contents. Defined with the file format, which
+// already writes every field of a step.
+uint64_t featureKey(const Feature& f);
 
 // What a feature acts on, expressed so that it still means the same thing after
 // the steps before it change.
@@ -268,6 +278,10 @@ struct Feature {
     // them. Several regions are one step, swept together and combined with the
     // body once: an imported drawing is hundreds of regions, and a step each
     // was hundreds of booleans.
+    // What a person called this step, if anything: shown in the history in
+    // place of what it does, which stays in the tooltip.
+    std::string label;
+
     ElementId sketchUid = 0;
     std::vector<SketchId> profileKeys;
 
@@ -279,6 +293,34 @@ struct Feature {
     Vec2 revolveAxisAt{0, 0};
     Vec2 revolveAxisDir{0, 1};
     Real revolveAngle = 2.0 * kPi;
+
+    // SweepProfile: the path the regions are carried along -- curves of an
+    // earlier sketch, joined end to end. Named by the sketch's own ids, so a
+    // dimension that moves the path moves the sweep, and the path is still the
+    // path.
+    ElementId pathSketchUid = 0;
+    std::vector<SketchId> pathEntities;
+
+    // LoftProfile: the outlines after the first, in order, each one region of
+    // an earlier sketch named by its key. The first is sketchUid's, the one
+    // region in profileKeys. `loftRuled` joins them with straight walls.
+    std::vector<ElementId> loftSketchUids;
+    std::vector<SketchId> loftKeys;
+    bool loftRuled = false;
+
+    // Revolve, sweep and loft may build from the part itself as well as from
+    // sketches. With no sketchUid, the profile is `faces`: flat faces of the
+    // body as it stands before this step. A sweep with no pathSketchUid follows
+    // `edges`. A revolve with `edges` turns about that one straight edge; with
+    // `revolveAxis3D` about axisPoint and axisDir, in the part's frame (one of
+    // the world's axes, picked on the panel); otherwise about revolveAxisAt and
+    // revolveAxisDir in its sketch. A loft outline whose loftSketchUids entry
+    // is 0 is the face named in the same place of loftFaceNames.
+    bool revolveAxis3D = false;
+    // Turns the other way round the axis: an edge picked as an axis has no
+    // direction of its own, so which way a part turn goes is chosen.
+    bool revolveReverse = false;
+    std::vector<ElementId> loftFaceNames;
 
     // Hole: what is cut, and what it was chosen for. The face it goes into is
     // in `faces` and where it goes in is `axisPoint` and `axisDir`, so that a
@@ -355,6 +397,15 @@ struct Feature {
 // only if nothing at all could be produced.
 bool evaluateFeatures(std::vector<Feature>& features, Body& out);
 
+// Where evaluation time goes, by kind of step: accumulated as steps run, for
+// the performance scenes to read and reset.
+struct ChainProfile {
+    double ms[64] = {};
+    int    count[64] = {};
+    void reset() { *this = ChainProfile{}; }
+};
+ChainProfile& chainProfile();
+
 // Whether a step places the object rather than shaping it.
 inline bool isPlacement(FeatureKind k) { return k == FeatureKind::Move || k == FeatureKind::Rotate; }
 
@@ -368,5 +419,36 @@ inline bool isPlacement(FeatureKind k) { return k == FeatureKind::Move || k == F
 // supply the requested starting point.
 bool evaluateFrom(std::vector<Feature>& features, size_t from,
                   std::vector<Body>& cache, Body& out);
+
+// Where a push / pull of some faces goes in a history.
+//
+// Not on the end. Moving a face is a change to the part's shape, and what was
+// built on that face afterwards -- a fillet on its edge, a shell behind it --
+// has to be built on the face where it now is, not left standing where the
+// face used to be. So the move goes back up the history as far as the face
+// goes unchanged, and everything after it is built again on top of it: the
+// fillet follows the face because it is made again on the moved one.
+//
+// It stops at the step that put the face where it is. A push / pull or an
+// extrude of exactly these faces is that step, and it is changed rather than
+// added to (`adjust`): pulling the top of a boss makes the boss taller, and
+// pushing a face twice leaves one step. It also stops where the face does not
+// yet exist, where it faced another way, and at a step that would not carry
+// the move with it -- a baked body, a pattern's copies, a scale.
+//
+// `delta` is how far the faces go, signed as the step would be. `cache` is the
+// body after each step, as SceneObject::featureCache holds it; if it does not
+// cover the history the move goes on the end, as it always used to.
+struct FaceMovePlace {
+    size_t at = 0;        // the step to change, or where the new one goes
+    bool   adjust = false;
+};
+FaceMovePlace placeFaceMove(const std::vector<Feature>& features, const std::vector<Body>& cache,
+                            const ElementRefs& faces, Real delta, bool alongAxis, Vec3 axisDir);
+
+// The history with `move` -- a push / pull step -- made at `where`: inserted,
+// or folded into the step there. A step folded back to nothing is removed.
+std::vector<Feature> withFaceMove(std::vector<Feature> features, FaceMovePlace where,
+                                  Feature move);
 
 } // namespace tg

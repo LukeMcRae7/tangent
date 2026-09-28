@@ -1,4 +1,5 @@
 #include "app/plane_snap.h"
+#include "core/units.h"
 
 #include <algorithm>
 #include <cmath>
@@ -74,9 +75,10 @@ const char* refName(SnapKind k) {
     }
 }
 
+// A grid step, in the unit shown, without trailing zeros: "10 mm", "0.5 in".
 std::string millimetres(Real v) {
     char buf[32];
-    std::snprintf(buf, sizeof buf, "%g", static_cast<double>(v));
+    std::snprintf(buf, sizeof buf, "%g %s", static_cast<double>(units::toShown(v)), units::suffix());
     return buf;
 }
 
@@ -101,12 +103,12 @@ std::string describeSnap(const PlaneSnap& snap) {
         // honest one to name: a point on a 100mm line and a 10mm line is on a
         // 10mm grid.
         case SnapKind::GridPoint:
-            return "On the grid, " + millimetres(std::min(snap.stepU, snap.stepV)) + " mm";
+            return "On the grid, " + millimetres(std::min(snap.stepU, snap.stepV));
 
         // Only one axis is on a drawn line; the other is merely stepping along
         // the finest, which is smaller and is not what happened.
         case SnapKind::GridLine:
-            return "On a grid line, " + millimetres(std::max(snap.stepU, snap.stepV)) + " mm";
+            return "On a grid line, " + millimetres(std::max(snap.stepU, snap.stepV));
 
         case SnapKind::None:
             break;

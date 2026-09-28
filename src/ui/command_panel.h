@@ -118,19 +118,19 @@ int commandChoices(const char* label, const Choice* choices, int count, int acti
 // narrow, and a row of screw sizes is not.
 void commandNextPill(const char* label, float gap = 4.0f);
 
-// What the operation would say if asked: what it does, what the keys are, what
-// it is for. It is not drawn in the panel -- it goes behind the ? in the
-// panel's top right corner and comes out on hover. Several calls stack up into
-// one tooltip, in the order they were made.
+// What the operation would say if asked: what it does, in one or two
+// sentences. The keys are not for here; they are in the key hints (below). It
+// is not drawn in the panel: it goes behind the ? in the panel's top right
+// corner and comes out on hover. Several calls stack up into one tooltip, in
+// the order they were made, so a panel makes one, or two short ones.
 void commandHint(const char* text);
 
 // Says the operation has already been applied and the panel is now adjusting
-// it rather than building it. Two words; the rest goes behind the ?.
+// it rather than building it. Two words.
 void commandApplied(const char* what);
 
 // The other answer: it was asked for and the kernel would not. The reason is
-// said in the panel that asked -- it is the one thing the user has to read --
-// and what to do about it goes behind the ?.
+// said in the panel that asked: it is the one thing the user has to read.
 void commandRefused(const char* why);
 
 // The commit and the cancel. Returns 1 for commit, -1 for cancel, 0 for
@@ -141,5 +141,20 @@ int commandFooter(const char* commitLabel, bool commitEnabled = true,
 
 // Width of the label column, so callers can line other things up with it.
 float commandLabelWidth();
+
+// ---- Key hints ---------------------------------------------------------------
+// The keys and buttons that do something right now, drawn as caps in the
+// view's bottom right corner, the way Plasticity reminds you of them: the ?
+// says what an operation is, and this says what your hands can do in it.
+//
+// `keys` is words separated by spaces, each drawn as a cap: "X Y Z" is three
+// caps, any of them. "+" between two means together ("Shift + MMB") and "/"
+// means either ("RMB / Esc"). LMB, RMB and MMB draw a mouse with that button
+// lit; Wheel draws one with the wheel lit.
+void keyHint(const char* keys, const char* what);
+void clearKeyHints();
+// Draws what was gathered, its bottom right corner at (`right`, `bottom`), and
+// clears it for the next frame. Returns how tall it was.
+float drawKeyHints(ImDrawList* dl, float right, float bottom);
 
 } // namespace tg::ui

@@ -83,7 +83,6 @@ struct UiActions {
     bool mirror = false;
     bool reduceMesh = false;
     bool inset = false;
-    bool bevel = false;
     bool split = false;
     bool fillet = false;
     bool shell = false;
@@ -92,6 +91,11 @@ struct UiActions {
     bool deleteFace = false;
     bool offset = false;
     bool thread = false;
+    // Revolve, sweep and loft: a solid from an outline and an axis, a path, or
+    // more outlines, picked in the view.
+    bool revolve = false;
+    bool sweep = false;
+    bool loft = false;
 
     // The modal transforms, from the bar or a menu.
     bool moveObject = false;
@@ -106,13 +110,69 @@ struct UiActions {
     ObjectId  editSketchObject = kNoObject;
     ElementId editSketchUid = 0;
 
+    // The selected sketch's own actions, from its bar or the inspector:
+    // extruded (the sketch tool at choosing its regions) or deleted. Edit is
+    // editSketchObject above; revolve, sweep and loft are the flags above,
+    // which take the selected sketch as their profile.
+    bool extrudeSketch = false;
+    bool deleteSketch = false;
+
     bool      booleanRequested = false;
     BooleanOp booleanOp = BooleanOp::Difference;
 
     // Set when the timeline changed a feature: the chain as it was, so the
     // edit can be re-evaluated and recorded.
+    // The history's own edits, beyond a step changed in place: the rollback
+    // marker moved so `historyAt` steps run; a step moved from `historyAt` to
+    // `historyTo`; or the step at `historyAt`, just after the marker, pointed
+    // at the faces or edges now selected, and the marker taken to the end.
+    // Indices count the whole history, the steps after the marker too.
+    enum class HistoryEdit { None, RollTo, Move, UseFaces, UseEdges };
+    HistoryEdit historyEdit = HistoryEdit::None;
+    ObjectId    historyObject = kNoObject;
+    size_t      historyAt = 0;
+    size_t      historyTo = 0;
+
     ObjectId             featuresEdited = kNoObject;
     std::vector<Feature> featuresBefore;
+
+    // ---- Assemblies ------------------------------------------------------------
+    // A group's row: every body in it selected, the way a body's row selects
+    // the body. Shift or Ctrl adds.
+    GroupId pickGroup = kNoGroup;
+    bool    pickGroupAdditive = false;
+    // Ctrl+G and Ctrl+Shift+G, and the menu: the selection into a new group,
+    // or out of the one it is in.
+    bool groupSelected = false;
+    bool ungroupSelected = false;
+    // A row dragged onto a group's row, or onto the empty space below the
+    // lists to take it out of every group.
+    bool         moveNodeRequested = false;
+    OutlinerNode moveNode;
+    GroupId      moveInto = kNoGroup;
+    // Joining parts: a new joint, one opened from its row, or one taken away.
+    bool     joint = false;
+    uint32_t editJoint = 0;
+    uint32_t deleteJoint = 0;
+    // Inspecting an assembly: the gaps between parts, and the parts pulled
+    // apart along their joints.
+    bool clearance = false;
+    bool explode = false;
+    // The section view: on, its panel back, or off -- see Application::toggleSection.
+    bool section = false;
+    // Files and settings.
+    bool        openPreferences = false;
+    std::string openRecent;             // a path from the recent files
+    bool        clearRecent = false;
+    // A part's colour chosen (colourOn) or taken off; `colourDragging` while
+    // the picker is being dragged, so the drag is one step to undo.
+    // A measurement kept, or one taken off the model.
+    bool        keepMeasure = false;
+    uint32_t    deleteMeasure = 0;
+    ObjectId    colourObject = kNoObject;
+    bool        colourOn = false;
+    Vec3        colourValue{};
+    bool        colourDragging = false;
 };
 
 struct UiStats {
@@ -152,6 +212,10 @@ struct UiContext {
 
     // The file, for the title.
     std::string  projectName;
+    std::string  projectPath;      // empty until saved
+    std::vector<std::string> recentFiles;   // most recent first
+    // What each kept measurement reads now, by its id, for the outliner.
+    std::vector<std::pair<uint32_t, std::string>> measureLabels;
     bool         dirty = false;
 
     // Live measurement, shown while the measure tool is active.
@@ -167,6 +231,19 @@ struct UiContext {
     UiStats      stats;
     UiActions    actions;
     FrameState   frame;
+    // Some operation has the view: the selected sketch's bar stands aside.
+    bool         toolBusy = false;
+    // How many closed regions the selected sketch has, worked out once per
+    // shape of it rather than on every frame the inspector is drawn. -1: not
+    // known, and the inspector works it out itself.
+    int          sketchRegions = -1;
+    // The joint whose panel is open, lit in the outliner; 0 when none is.
+    uint32_t     activeJoint = 0;
+    // Clearance and exploded view are open: the bar's buttons show it.
+    bool         clearanceOpen = false;
+    bool         explodeOpen = false;
+    // The model is drawn cut: the bar's button shows it.
+    bool         sectionOn = false;
 };
 
 // The logo, from assets. Without it the bar shows the wordmark in text.
@@ -185,6 +262,11 @@ void drawInspector(UiContext& ctx);
 void drawViewportOverlays(UiContext& ctx, float x, float y, float w, float h);
 
 void drawMeasurePanel(UiContext& ctx);
+
+// The selected sketch's actions, floating at the top of the viewport: edit
+// it, or build from it -- extrude, revolve, sweep, loft -- or hide or delete
+// it. Nothing when no sketch is selected or an operation is running.
+void drawSketchBar(UiContext& ctx, float x, float y, float w);
 
 // Body of the add-object menu, shared by the bar and the Shift+A popup.
 void drawAddMenuItems(UiContext& ctx);

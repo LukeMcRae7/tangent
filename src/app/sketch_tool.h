@@ -29,6 +29,7 @@
 #include "app/camera.h"
 #include "app/create_tool.h"
 #include "app/extrude_ops.h"
+#include "app/plane_pick.h"
 #include "app/plane_snap.h"
 #include "app/undo.h"
 #include "render/renderer.h"
@@ -45,17 +46,14 @@
 namespace tg {
 
 // Applied: built, and the panel adjusts what was built until Done.
-enum class SketchStage { None, SelectPlane, Draw, Regions, Depth, Turn, Applied };
-
-// What the chosen regions become: pushed along the plane's normal, or turned
-// about an axis lying in it. The two share everything but the solid they make
-// -- the regions, the bodies reached, the operation, the step in the history --
-// so they are one path with this to say which.
-enum class SketchBuild { Extrude, Revolve };
+enum class SketchStage { None, SelectPlane, Draw, Regions, Depth, Applied };
 
 // Select comes first because it is what editing a sketch that already exists is
 // mostly made of: taking hold of something and moving it.
-enum class SketchMode { Select, Line, Rectangle, Circle, Arc, Dimension };
+// Curve is the pen: Bezier curves anchor to anchor, a press-and-drag pulling
+// smooth handles out. Project brings a body's edge, or a face's edges, onto the
+// plane. New modes go on the end: tests and demos name them by value.
+enum class SketchMode { Select, Line, Rectangle, Circle, Arc, Dimension, Curve, Project };
 
 const char* sketchModeName(SketchMode mode);
 
@@ -138,7 +136,27 @@ public:
 
     // Ends a chain of lines, or abandons a half-drawn shape.
     void clearPending();
-    bool pending() const { return !clicks_.empty(); }
+    bool pending() const { return !clicks_.empty() || !pen_.empty(); }
+
+    // ---- The pen ------------------------------------------------------------
+    //
+    // A press places an anchor. Let go where it was pressed and the anchor is a
+    // corner; drag away first and it is smooth, its handles pulled out after
+    // the pointer and mirrored about it -- and kept mirrored afterwards by a
+    // Smooth rule, so dragging one handle later swings the other. Each anchor
+    // after the first joins the one before with a cubic Bezier. Pressing on
+    // the first anchor closes the shape; Enter or Esc ends an open one.
+    bool penDown(Vec2 uv);
+    void penDrag(Vec2 uv);
+    void penUp();
+    size_t penAnchors() const { return pen_.size(); }
+
+    // ---- Projecting ------------------------------------------------------------
+    // Brings the edge, or every edge of the face, `element` of `object` onto
+    // the plane as fixed geometry. Projected from the part the sketch is in,
+    // it follows the edge when the part changes. False, with an error, when
+    // nothing of it lands on the plane.
+    bool projectElement(const Scene& scene, ObjectId object, bool face, Index element);
 
     // ---- Dragging -----------------------------------------------------------
     //
@@ -197,25 +215,27 @@ public:
     void setDepth(Real depth) { depth_ = depth; }
     Real depth() const { return depth_; }
 
-    // ---- Turning ------------------------------------------------------------
-    // From regions to the axis and the angle. False, with an error, when the
-    // chosen regions have nothing to turn about or straddle the axis.
-    bool beginTurn();
-    SketchBuild build() const { return build_; }
-    void setBuild(SketchBuild b) { build_ = b; }
+    // ---- Building from a sketch that is already kept ---------------------------
+    // Opens `sketchUid` of `object` at choosing its regions -- the filled ones
+    // picked -- in the view as it stands: what a selected sketch's Extrude
+    // does. Revolve, sweep and loft are the ProfileTool's, from the same
+    // selection. False, with an error, when there is no such sketch or nothing
+    // in it closes.
+    bool startExtrude(const Scene& scene, ObjectId object, ElementId sketchUid);
+    // The sketch the last Finish kept -- and left selected.
+    Scene::SketchRef lastKept() const { return {keptObject_, keptUid_}; }
 
-    // The axis, in the sketch's own coordinates: a point on it and a direction
-    // along it. `axisLine` is the sketch line it was taken from, or
-    // kNoSketchId for one of the sketch's own axes.
-    Vec2 turnAxisAt() const { return axisAt_; }
-    Vec2 turnAxisDir() const { return axisDir_; }
-    SketchId turnAxisLine() const { return axisLine_; }
-    void setTurnAxis(Vec2 at, Vec2 dir, SketchId fromLine = kNoSketchId);
-    // Takes the axis from a line of the drawing. False if that is not a line.
-    bool setTurnAxisLine(SketchId entity);
-
-    Real turnAngle() const { return angle_; }
-    void setTurnAngle(Real radians) { angle_ = radians; }
+    // ---- Where the plane is ------------------------------------------------
+    // How far the sketch's plane stands off the plane or face it was put on,
+    // along its normal: how a second outline for a loft is drawn above the
+    // first. The drawing moves with it.
+    Real planeOffset() const { return planeOffset_; }
+    void setPlaneOffset(Real offset);
+    // Turned about the plane's own horizontal, through its origin: an angled
+    // plane. Within a quarter turn either way.
+    Real planeTilt() const { return planeTilt_; }
+    void setPlaneTilt(Real radians);
+    PlanePicker& planePicker() { return picker_; }
 
     // What the regions do to the bodies they reach. Until one is picked the
     // depth decides -- see ExtrudeChoice -- and op() says what it decided.
@@ -277,7 +297,7 @@ private:
     SketchMode  mode_  = SketchMode::Line;
 
     PlaneFrame plane_;
-    PlaneChoice hoveredChoice_ = PlaneChoice::XY;
+
     ObjectId faceObject_ = kNoObject;
     ObjectId editObject_ = kNoObject;
     ElementId editUid_ = 0;
@@ -315,6 +335,25 @@ private:
     Real fixedValue_[2] = {0, 0};
     SketchId activeDim_ = kNoSketchId;
 
+    // The pen's path: each anchor's point, where its outgoing handle is to go,
+    // whether it is smooth, and the curve that came into it. pulling_ is the
+    // press on the anchor just placed, whose handles follow the pointer.
+    struct PenAnchor {
+        SketchId point = kNoSketchId;
+        Vec2 out{0, 0};
+        bool smooth = false;
+        SketchId curveIn = kNoSketchId;
+    };
+    std::vector<PenAnchor> pen_;
+    bool pulling_ = false;
+    Sketch pullBefore_;
+    void endPen();
+
+    // Project mode: the edge or face of a body under the pointer.
+    ObjectId projObject_ = kNoObject;
+    bool projFace_ = false;
+    Index projElement_ = kInvalid;
+
     // A drag in progress: the solver it is running on, what is held, and the
     // sketch as it was when the drag started -- one drag is one step back.
     std::unique_ptr<SketchSolver> drag_;
@@ -327,14 +366,19 @@ private:
     bool dragMoved_ = false;
 
     std::vector<SketchId> chosen_;
-    SketchBuild build_ = SketchBuild::Extrude;
-    // The axis a turn goes about, and how far round. The sketch's vertical
-    // axis to start with, which is the one a profile drawn to the right of the
-    // origin turns about.
-    Vec2 axisAt_{0, 0};
-    Vec2 axisDir_{0, 1};
-    SketchId axisLine_ = kNoSketchId;
-    Real angle_ = 2.0 * kPi;
+    // The sketch the last Finish kept.
+    ObjectId keptObject_ = kNoObject;
+    ElementId keptUid_ = 0;
+
+    // The plane the sketch was put on, and how far it stands off it and how far
+    // it is tilted about its own horizontal. planeTyping_ is which of those two
+    // is being typed into: 1 the offset, 2 the tilt.
+    PlaneFrame planeBaseFrame_;
+    Real planeTilt_ = 0.0;
+    PlanePicker picker_;
+    Real planeOffset_ = 0.0;
+    int planeTyping_ = 0;
+    void applyPlaneShift();
     Real depth_ = 10.0;
     Real depthBase_ = 10.0;
     bool depthTyped_ = false;
@@ -350,17 +394,11 @@ private:
     // face it was drawn on. kNoObject for a sketch on a plane of its own.
     ObjectId owner() const { return editObject_ != kNoObject ? editObject_ : faceObject_; }
 
-    // The chosen regions swept to the depth, or turned about the axis, in the
+    // The chosen regions swept to the depth, in the
     // world.
     Body sweptRegions(std::string* why) const;
 
-    // Whether what is chosen stays on one side of the axis as it stands.
-    bool axisClears() const;
-
-    // What the reach is told the sweep's depth is: the depth itself, or -- for
-    // a turn, which has none -- simply a positive one, since all the depth
-    // decides there is which side of a body the solid grows on.
-    Real reachDepth() const { return build_ == SketchBuild::Revolve ? Real(1) : depth_; }
+    Real reachDepth() const { return depth_; }
     bool commitExtrusion(Scene& scene, UndoStack& undo);
 
     bool escapeArmed_ = false;

@@ -387,6 +387,8 @@ static void test3mf() {
     s.find(flipped)->transform.scale = {-1.0, 1.0, 1.0};
     s.reevaluate(flipped);
 
+    s.find(ball)->coloured = true;
+    s.find(ball)->colour = {1.0, 0.5, 0.0};
     const std::string path = tmp("parts.3mf");
     ThreeMfOptions opt;
     opt.deviationMm = 0.01;
@@ -408,6 +410,8 @@ static void test3mf() {
           "the relationship points at the model");
     const std::string& xml = parts["3D/3dmodel.model"];
     check(xml.find("unit=\"millimeter\"") != std::string::npos, "in millimetres");
+    check(xml.find("displaycolor=\"#FF8000\"") != std::string::npos && xml.find("pid=\"100000\" pindex=\"0\"") != std::string::npos,
+          "the coloured part carries its colour, and only it");
 
     const std::vector<ReadObject> objects = parseModel(xml);
     check(objects.size() == 4, "four objects in the model");
@@ -661,6 +665,16 @@ int main() {
         const AABB boundsBefore = s.find(id)->localBounds;
         const size_t chainBefore = s.find(id)->features.size();
 
+        s.find(id)->coloured = true;
+        s.find(id)->colour = {0.25, 0.5, 0.75};
+        {
+            // A measurement kept on its first face.
+            KeptMeasure km;
+            km.id = s.takeMeasureId();
+            km.count = 1;
+            km.ends[0] = {id, ElementKind::Face, s.find(id)->body.faceName(0)};
+            s.measures().push_back(km);
+        }
         const std::string path = tmp("project.tangent");
         const ProjectResult saved = saveProject(s, path);
         check(saved.ok, "save succeeds: " + saved.error);
@@ -672,6 +686,9 @@ int main() {
 
         const SceneObject* o = loaded.objects().front().get();
         check(o->name == "Bracket", "name survived");
+        check(o->coloured && near(o->colour.x, 0.25) && near(o->colour.z, 0.75), "its colour survived");
+        check(loaded.measures().size() == 1 && loaded.resolve(loaded.measures()[0].ends[0]).valid(),
+              "the kept measurement survived, and still finds its face");
         check(near(o->transform.position.x, 5.0) && near(o->transform.position.z, 7.0),
               "transform survived");
         check(o->features.size() == chainBefore, "the whole chain survived");

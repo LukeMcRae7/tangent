@@ -3,9 +3,12 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 
 int main(int argc, char** argv) {
     tg::Application app;
+    int perfScene = 0, perfSize = 0;
+    bool perfRound = false;
 
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--native-frame") == 0) {
@@ -94,8 +97,26 @@ int main(int argc, char** argv) {
             int step = 1;
             if (i + 1 < argc && argv[i + 1][0] != '-') step = std::atoi(argv[++i]);
             app.setSvgDemo(file, step);
+        } else if (std::strcmp(argv[i], "--pen-demo") == 0 && i + 1 < argc) {
+            app.setPenDemo(std::atoi(argv[++i]));
+        } else if (std::strcmp(argv[i], "--project-demo") == 0 && i + 1 < argc) {
+            app.setProjectDemo(std::atoi(argv[++i]));
+        } else if (std::strcmp(argv[i], "--perf-scene") == 0 && i + 1 < argc) {
+            perfScene = std::atoi(argv[++i]);
+        } else if (std::strcmp(argv[i], "--perf-size") == 0 && i + 1 < argc) {
+            perfSize = std::atoi(argv[++i]);
+        } else if (std::strcmp(argv[i], "--perf-round") == 0) {
+            perfRound = true;
+        } else if (std::strcmp(argv[i], "--timeline-demo") == 0 && i + 1 < argc) {
+            app.setTimelineDemo(std::atoi(argv[++i]));
+        } else if (std::strcmp(argv[i], "--plane-demo") == 0 && i + 1 < argc) {
+            app.setPlaneDemo(std::atoi(argv[++i]));
         } else if (std::strcmp(argv[i], "--sketch-demo") == 0 && i + 1 < argc) {
             app.setSketchDemo(std::atoi(argv[++i]));
+        } else if (std::strcmp(argv[i], "--sweep-demo") == 0 && i + 1 < argc) {
+            app.setSweepDemo(std::atoi(argv[++i]));
+        } else if (std::strcmp(argv[i], "--loft-demo") == 0 && i + 1 < argc) {
+            app.setLoftDemo(std::atoi(argv[++i]));
         } else if (std::strcmp(argv[i], "--revolve-demo") == 0 && i + 1 < argc) {
             app.setRevolveDemo(std::atoi(argv[++i]));
         } else if (std::strcmp(argv[i], "--hole-demo") == 0 && i + 1 < argc) {
@@ -106,6 +127,26 @@ int main(int argc, char** argv) {
             app.setDeleteFaceDemo(std::atoi(argv[++i]));
         } else if (std::strcmp(argv[i], "--offset-demo") == 0 && i + 1 < argc) {
             app.setOffsetDemo(static_cast<float>(std::atof(argv[++i])));
+        } else if (std::strcmp(argv[i], "--assembly-demo") == 0 && i + 1 < argc) {
+            app.setAssemblyDemo(std::atoi(argv[++i]));
+        } else if (std::strcmp(argv[i], "--screenshot-frame") == 0 && i + 1 < argc) {
+            app.setScreenshotFrame(std::atoi(argv[++i]));
+        } else if (std::strcmp(argv[i], "--palette") == 0 && i + 1 < argc) {
+            app.setPaletteDemo(argv[++i]);
+        } else if (std::strcmp(argv[i], "--select-demo") == 0 && i + 1 < argc) {
+            app.setSelectDemo(std::atoi(argv[++i]));
+        } else if (std::strcmp(argv[i], "--crash-test") == 0) {
+            app.setCrashTest();
+        } else if (std::strcmp(argv[i], "--offer-recovery") == 0) {
+            app.setOfferRecovery();
+        } else if (std::strcmp(argv[i], "--light") == 0) {
+            app.setLightTheme();
+        } else if (std::strcmp(argv[i], "--units") == 0 && i + 1 < argc) {
+            const std::string u = argv[++i];
+            app.setUnits(u == "in" ? tg::units::Length::Inch : u == "cm" ? tg::units::Length::Centimetre
+                                                              : tg::units::Length::Millimetre);
+        } else if (std::strcmp(argv[i], "--section-demo") == 0 && i + 1 < argc) {
+            app.setSectionDemo(std::atoi(argv[++i]));
         } else if (std::strcmp(argv[i], "--thread-demo") == 0 && i + 1 < argc) {
             app.setThreadDemo(std::atoi(argv[++i]));
         } else if (std::strcmp(argv[i], "--snap-demo") == 0 && i + 1 < argc) {
@@ -122,6 +163,14 @@ int main(int argc, char** argv) {
             app.setShellDemo(static_cast<float>(std::atof(argv[++i])));
         } else if (std::strcmp(argv[i], "--measure-demo") == 0) {
             app.setMeasureDemo();
+        } else if (std::strcmp(argv[i], "--place-demo") == 0 && i + 1 < argc) {
+            // sphere, cone, torus or plane: drawn through the create tool and
+            // left open on its panel.
+            const char* k = argv[++i];
+            app.setPlaceDemo(std::strcmp(k, "sphere") == 0 ? 2 : std::strcmp(k, "cone") == 0 ? 3
+                             : std::strcmp(k, "torus") == 0 ? 4 : 5);
+        } else if (std::strcmp(argv[i], "--push-fillet-demo") == 0 && i + 1 < argc) {
+            app.setPushFilletDemo(static_cast<float>(std::atof(argv[++i])));
         } else if (std::strcmp(argv[i], "--auto-extrude") == 0 && i + 1 < argc) {
             app.setAutoExtrude(static_cast<float>(std::atof(argv[++i])));
         } else if (std::strcmp(argv[i], "--help") == 0) {
@@ -137,6 +186,7 @@ int main(int argc, char** argv) {
         }
     }
 
+    if (perfScene > 0) app.setPerfScene(perfScene, perfSize, perfRound);
     if (!app.init()) {
         app.shutdown();
         return 1;

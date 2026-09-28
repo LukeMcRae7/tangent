@@ -9,6 +9,7 @@
 // Run twice by ctest: once as the platform chooses (fork, on Linux), and once
 // with TANGENT_ISOLATION=worker, which is the path Windows takes -- the work
 // written down, handed to tangent_trial, and the answer read back.
+#include "app/crash.h"
 #include "geom/kernel_guard.h"
 #include "geom/operations.h"
 #include "scene/scene.h"
@@ -17,6 +18,7 @@
 
 #include <chrono>
 #include <cstdio>
+#include <filesystem>
 #include <string>
 #include <thread>
 
@@ -45,6 +47,14 @@ static Attempt waitFor(AsyncTrial& trial) {
 int main() {
     std::printf("isolation: %s\n", nameOf(isolation()));
     const bool isolated = childIsolationAvailable();
+
+    // The application's crash handler, as it is installed there: a trial that
+    // crashes in a forked child is the trial's parent's to read, and must not
+    // be written up as a crash of the application.
+    namespace fs = std::filesystem;
+    const fs::path crashDir = fs::temp_directory_path() / ("tangent_guard_crashes_" +
+                        std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    crash::install(crashDir.string(), "test", nullptr, nullptr);
 
     std::printf("--- what a guarded call reports ---\n");
     {
@@ -219,5 +229,12 @@ int main() {
     }
 
     std::printf("\n%s (%d failures)\n", failures ? "FAILED" : "ALL PASS", failures);
+    {
+        size_t reports = 0;
+        std::error_code ec;
+        for (const auto& e : fs::directory_iterator(crashDir, ec)) { (void)e; ++reports; }
+        check(reports == 0, "a trial that crashed left no crash report of the application");
+        fs::remove_all(crashDir, ec);
+    }
     return failures ? 1 : 0;
 }
