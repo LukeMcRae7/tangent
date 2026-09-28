@@ -1,19 +1,26 @@
-# Two configurations, because the project supports two and a change that breaks
-# one of them currently gets found by hand or not at all.
+# Build, test and package on every push; publish a release for a v* tag.
 #
-#   kernel   -- the real thing: OpenCASCADE linked, 30 tests, every demo mode
-#   no-kernel -- brep_stub.cpp instead, 29 tests; meshes only, modelling refused
-#
-# The demo sweep runs headless. Every --*-demo flag drives a real gesture through
-# the real code and reports the geometry it produced, so a sweep that renders
-# cleanly is a wider check than the unit tests alone.
+#   linux     Ubuntu 24.04. SDL3 and OpenCASCADE are built from source into
+#             /opt/deps (24.04 has no SDL3 and an older OpenCASCADE than the
+#             one tangent is written against), cached between runs. Unit
+#             tests, the headless demo sweep, then an AppImage, which is
+#             itself smoke-tested.
+#   no-kernel The same, built without OpenCASCADE: meshes only.
+#   windows   MSYS2 UCRT64, whose packages include SDL3 and OpenCASCADE.
+#             Unit tests, then a portable zip with every DLL beside the .exe.
+#   release   Tags only: both packages attached to a GitHub release.
 name: build
 
 on:
   push:
     branches: ["**"]
+    tags: ["v*"]
   pull_request:
   workflow_dispatch:
+
+env:
+  SDL_TAG: release-3.4.16
+  OCCT_TAG: V7_9_3
 
 jobs:
   linux:
@@ -25,25 +32,49 @@ jobs:
         kernel: [true, false]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            cmake ninja-build g++ pkg-config \
-            libsdl3-dev libepoxy-dev zlib1g-dev \
-            libgl1-mesa-dev libglu1-mesa-dev \
-            xvfb imagemagick
+            cmake ninja-build g++ pkg-config libepoxy-dev zlib1g-dev \
+            libgl1-mesa-dev libegl1-mesa-dev libgl1-mesa-dri libglu1-mesa-dev \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev \
+            libxfixes-dev libxtst-dev libwayland-dev libxkbcommon-dev wayland-protocols \
+            libdecor-0-dev libdrm-dev libgbm-dev libdbus-1-dev libudev-dev \
+            xvfb imagemagick file
 
-      - name: Install OpenCASCADE
-        if: matrix.kernel
-        run: sudo apt-get install -y --no-install-recommends libocct-*-dev occt-misc
+      - name: Restore SDL3 and OpenCASCADE
+        id: deps
+        uses: actions/cache@v4
+        with:
+          path: /opt/deps
+          key: deps-ubuntu24-${{ env.SDL_TAG }}-${{ env.OCCT_TAG }}-v1
+
+      - name: Build SDL3 and OpenCASCADE
+        if: steps.deps.outputs.cache-hit != 'true'
+        run: |
+          sudo mkdir -p /opt/deps && sudo chown "$USER" /opt/deps
+          git clone --depth 1 -b "$SDL_TAG" https://github.com/libsdl-org/SDL /tmp/SDL
+          cmake -S /tmp/SDL -B /tmp/SDL/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/opt/deps -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF
+          cmake --build /tmp/SDL/build && cmake --install /tmp/SDL/build
+          # Only what tangent links: the modelling and data exchange modules.
+          git clone --depth 1 -b "$OCCT_TAG" https://github.com/Open-Cascade-SAS/OCCT /tmp/OCCT
+          cmake -S /tmp/OCCT -B /tmp/OCCT/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/opt/deps \
+            -DBUILD_MODULE_Visualization=OFF -DBUILD_MODULE_ApplicationFramework=OFF \
+            -DBUILD_MODULE_Draw=OFF -DBUILD_MODULE_DETools=OFF -DBUILD_DOC_Overview=OFF \
+            -DUSE_FREETYPE=OFF -DUSE_TK=OFF -DUSE_TCL=OFF -DUSE_OPENGL=OFF -DUSE_XLIB=OFF
+          cmake --build /tmp/OCCT/build && cmake --install /tmp/OCCT/build
 
       - name: Configure
         run: >
           cmake -S . -B build -G Ninja
           -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_PREFIX_PATH=/opt/deps
+          -DCMAKE_BUILD_RPATH=/opt/deps/lib
           -DTANGENT_BREP=${{ matrix.kernel && 'ON' || 'OFF' }}
 
       - name: Build
@@ -58,27 +89,85 @@ jobs:
         if: matrix.kernel
         run: xvfb-run -a ./.github/sweep.sh
 
+      - name: Package
+        if: matrix.kernel
+        run: packaging/package-linux.sh "${GITHUB_REF_NAME#v}" /opt/deps
+
+      # The AppImage on its own, with /opt/deps out of reach: every library it
+      # needs has to be inside it.
+      - name: Smoke-test the AppImage
+        if: matrix.kernel
+        run: |
+          sudo mv /opt/deps /opt/deps.hidden
+          img=$(ls tangent-*.AppImage)
+          out=$(APPIMAGE_EXTRACT_AND_RUN=1 xvfb-run -a ./"$img" --step-demo /tmp/smoke.step --smoke-test 2>&1) || true
+          sudo mv /opt/deps.hidden /opt/deps
+          echo "$out" | tail -20
+          echo "$out" | grep -q "rendered cleanly"
+
+      - uses: actions/upload-artifact@v4
+        if: matrix.kernel
+        with:
+          name: linux
+          path: tangent-*.AppImage
+          if-no-files-found: error
+
   windows:
     name: windows / kernel
     runs-on: windows-2022
+    defaults:
+      run:
+        shell: msys2 {0}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: lukka/run-vcpkg@v11
+      - uses: msys2/setup-msys2@v2
         with:
-          vcpkgGitCommitId: '120deac3062162151622ca4860575a33844ba10b'
+          msystem: UCRT64
+          update: true
+          install: >-
+            git p7zip
+          pacboy: >-
+            gcc:p cmake:p ninja:p pkgconf:p
+            sdl3:p libepoxy:p zlib:p opencascade:p
 
       - name: Configure
-        shell: bash
-        run: >
-          cmake -S . -B build
-          -DCMAKE_BUILD_TYPE=Release
-          -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 
       - name: Build
-        run: cmake --build build --config Release -j
+        run: cmake --build build -j$(nproc)
 
       # Windows has no fork isolation, so a kernel fault that Linux survives is
       # fatal here. Running the tests is how that stops being a surprise.
       - name: Test
-        run: ctest --test-dir build -C Release --output-on-failure
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Package
+        run: packaging/package-windows.sh "${GITHUB_REF_NAME#v}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/*.zip
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [linux, windows]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: packages
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: tangent ${{ github.ref_name }}
+          body_path: packaging/release-notes.md
+          files: packages/*
+          fail_on_unmatched_files: true

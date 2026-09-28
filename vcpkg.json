@@ -1,6 +1,6 @@
 {
   "name": "tangent",
-  "version-string": "0.1.0",
+  "version-string": "1.0.0",
   "description": "Dependencies for the Windows build. Inert on Linux, where these come from the system package manager.",
   "builtin-baseline": "3723ec118c8354290925feb58d021a9205a3e772",
   "dependencies": [

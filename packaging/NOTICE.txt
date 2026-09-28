@@ -1,0 +1,22 @@
+tangent
+Copyright (C) 2026 Luke McRae
+
+tangent is free software under the GNU General Public License, version 3
+(LICENSE, beside this file). Its source is at
+https://github.com/LukeMcRae7/tangent
+
+This build includes the following projects, each under its own licence:
+
+  OpenCASCADE     geometry kernel             LGPL-2.1 with exception
+  planegcs        sketch solver, FreeCAD      LGPL-2.0 or later
+  Eigen           linear algebra              MPL-2.0
+  SDL3            windows and input           zlib
+  Dear ImGui      interface                   MIT
+  libepoxy        OpenGL loading              MIT
+  zlib            compression                 zlib
+  Space Grotesk   typeface                    OFL-1.1  (assets/fonts/OFL.txt)
+  Tabler Icons    icons                       MIT      (assets/fonts/tabler-icons-LICENSE.txt)
+
+The Windows build also carries the MinGW-w64 runtime and the libraries
+OpenCASCADE depends on, as packaged by MSYS2 (https://www.msys2.org); their
+licences are in licenses/.

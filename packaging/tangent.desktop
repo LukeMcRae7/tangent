@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=tangent
+Comment=Exact 3D modelling for printing
+Exec=tangent
+Icon=tangent
+Categories=Graphics;3DGraphics;Engineering;
+Terminal=false

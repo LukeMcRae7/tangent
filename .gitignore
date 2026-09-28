@@ -6,3 +6,9 @@ tangent.ini
 *.o
 compile_commands.json
 .claude/
+
+# Packaging output
+/AppDir/
+/dist/
+/.packaging-tools/
+*.AppImage
