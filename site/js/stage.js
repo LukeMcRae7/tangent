@@ -74,6 +74,33 @@ function partMaterial(colour, uniforms) {
   return m;
 }
 
+// A white texture whose alpha is alpha(u, v), both 0..1. Written as pixels
+// rather than drawn as a canvas gradient: Safari dithers canvas gradients with
+// noise in each colour, and at alphas this faint the upload magnifies that
+// noise into bright coloured specks across the floor.
+function alphaTexture(w, h, alpha) {
+  const data = new Uint8Array(w * h * 4);
+  for (let j = 0; j < h; j++) for (let i = 0; i < w; i++) {
+    const k = (j * w + i) * 4;
+    data[k] = data[k + 1] = data[k + 2] = 255;
+    data[k + 3] = Math.round(255 * clamp01(alpha((i + 0.5) / w, (j + 0.5) / h)));
+  }
+  const t = new THREE.DataTexture(data, w, h);
+  t.magFilter = THREE.LinearFilter;
+  t.minFilter = THREE.LinearMipmapLinearFilter;
+  t.generateMipmaps = true;
+  t.needsUpdate = true;
+  return t;
+}
+// Linear between [position, value] stops, as a canvas gradient would be.
+const ramp = stops => x => {
+  for (let i = 1; i < stops.length; i++) {
+    const [x0, a] = stops[i - 1], [x1, b] = stops[i];
+    if (x <= x1) return a + (b - a) * clamp01((x - x0) / (x1 - x0));
+  }
+  return stops[stops.length - 1][1];
+};
+
 // ── The floor: a shadow, a pool of light, and the line tangent to it ────
 function buildFloor(y, brand) {
   const floor = new THREE.Group();
@@ -90,16 +117,10 @@ function buildFloor(y, brand) {
   floor.add(shadow);
 
   // A pool of light under the part, so it stands on something.
-  const c = document.createElement('canvas');
-  c.width = c.height = 256;
-  const g = c.getContext('2d');
-  const grad = g.createRadialGradient(128, 128, 0, 128, 128, 128);
-  grad.addColorStop(0, 'rgba(255,255,255,0.16)');
-  grad.addColorStop(0.45, 'rgba(255,255,255,0.05)');
-  grad.addColorStop(1, 'rgba(255,255,255,0)');
-  g.fillStyle = grad; g.fillRect(0, 0, 256, 256);
+  const poolAlpha = ramp([[0, 0.16], [0.45, 0.05], [1, 0]]);
+  const poolMap = alphaTexture(256, 256, (u, v) => poolAlpha(2 * Math.hypot(u - 0.5, v - 0.5)));
   const pool = new THREE.Mesh(new THREE.PlaneGeometry(260, 260), new THREE.MeshBasicMaterial({
-    map: new THREE.CanvasTexture(c), transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+    map: poolMap, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
   }));
   pool.rotation.x = -Math.PI / 2;
   pool.position.y = 0.02;
@@ -115,18 +136,11 @@ function buildFloor(y, brand) {
   // at a single point: the name, said quietly. It fades out at both ends
   // rather than running off the edge of the page.
   const R = 62;
-  const fade = document.createElement('canvas');
-  fade.width = 512; fade.height = 1;
-  const f = fade.getContext('2d');
-  const along = f.createLinearGradient(0, 0, 512, 0);
-  along.addColorStop(0, 'rgba(255,255,255,0)');
-  along.addColorStop(0.5, 'rgba(255,255,255,1)');
-  along.addColorStop(1, 'rgba(255,255,255,0)');
-  f.fillStyle = along; f.fillRect(0, 0, 512, 1);
+  const fade = alphaTexture(512, 1, ramp([[0, 0], [0.5, 1], [1, 0]]));
   const theta = 28 * DEG;
   const P = new THREE.Vector3(Math.cos(theta) * R, 0, Math.sin(theta) * R);
   const line = flat(new THREE.PlaneGeometry(420, 0.45), new THREE.MeshBasicMaterial({
-    color: brand, map: new THREE.CanvasTexture(fade), transparent: true, opacity: 0.4, depthWrite: false,
+    color: brand, map: fade, transparent: true, opacity: 0.4, depthWrite: false,
   }), 0.08);
   line.position.x = P.x; line.position.z = P.z;
   line.rotation.z = Math.atan2(-Math.cos(theta), -Math.sin(theta));   // along (-sin, 0, cos) once laid flat
