@@ -57,5 +57,21 @@ if (!stage) {
   stage.classList.add('ready');
 } else {
   import('./stage.js').then(m => m.start(stage, config))
-    .catch(err => { console.warn('stage:', err); stage.classList.add('no-webgl'); });
+    .catch(err => { console.warn('stage:', err); stage.classList.add('no-webgl'); fadeWithPage(stage); });
+}
+
+// Without WebGL the still stands in for the part, and leaves the page where
+// the part would: fading out as the rest of the bench comes up, on the same
+// curve stage.js uses, so the sections below stand on plain ground.
+function fadeWithPage(el) {
+  const more = document.querySelector('.more');
+  if (!more) return;
+  const smooth = x => { x = Math.min(1, Math.max(0, x)); return x * x * (3 - 2 * x); };
+  const fade = () => {
+    const top = more.getBoundingClientRect().top;
+    el.style.opacity = smooth((top - innerHeight * 0.3) / (innerHeight * 0.45));
+  };
+  addEventListener('scroll', fade, { passive: true });
+  addEventListener('resize', fade);
+  fade();
 }

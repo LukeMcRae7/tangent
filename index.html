@@ -8,7 +8,7 @@
   <meta name="theme-color" content="#0E0E0F">
   <meta property="og:title" content="tangent">
   <meta property="og:description" content="Exact 3D modelling for printing.">
-  <meta property="og:image" content="site/model/poster.png">
+  <meta property="og:image" content="https://lukemcrae.com/tangent/site/model/poster.png">
   <link rel="icon" href="assets/icon.svg?v=dev" type="image/svg+xml">
   <link rel="apple-touch-icon" href="assets/icon.png?v=dev">
 
@@ -33,7 +33,13 @@
 <!-- The part, drawn behind everything. It sits beside the hero, then beside
      the features as they scroll past, then fades out. See site/js/stage.js. -->
 <div class="stage" id="stage" aria-hidden="true">
-  <img class="stage-poster" src="site/model/poster.png?v=dev" alt="">
+  <!-- What stands in for the part without WebGL: stills of the same scene,
+       framed for a wide and a narrow screen. -->
+  <picture>
+    <source media="(max-width: 760px)" srcset="site/model/poster-narrow.webp?v=dev" type="image/webp">
+    <source srcset="site/model/poster.webp?v=dev" type="image/webp">
+    <img class="stage-poster" src="site/model/poster.png?v=dev" alt="">
+  </picture>
 </div>
 <svg class="callouts" id="callouts" aria-hidden="true"></svg>
 
